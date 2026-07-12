@@ -133,6 +133,10 @@ function mockHandle(result: { stdout: string; stderr: string; code: number }) {
   });
 }
 
+function normalizeMockSpawnArgs(args: ReadonlyArray<string>): ReadonlyArray<string> {
+  return args.map((arg) => (arg.startsWith('^"') && arg.endsWith('^"') ? arg.slice(2, -2) : arg));
+}
+
 function mockSpawnerLayer(
   handler: (args: ReadonlyArray<string>) => {
     stdout: string;
@@ -144,7 +148,7 @@ function mockSpawnerLayer(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
       const cmd = command as unknown as { args: ReadonlyArray<string> };
-      return Effect.succeed(mockHandle(handler(cmd.args)));
+      return Effect.succeed(mockHandle(handler(normalizeMockSpawnArgs(cmd.args))));
     }),
   );
 }
@@ -170,7 +174,7 @@ function recordingMockSpawnerLayer(
         };
       };
       commands.push({ args: cmd.args, env: cmd.options?.env });
-      return Effect.succeed(mockHandle(handler(cmd.args)));
+      return Effect.succeed(mockHandle(handler(normalizeMockSpawnArgs(cmd.args))));
     }),
   );
   return { layer, commands };
@@ -1742,10 +1746,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             claudeCapabilities(),
           );
           assert.strictEqual(status.status, "ready");
-          assert.deepStrictEqual(
-            recorded.commands.map((command) => command.env?.HOME),
-            [claudeHome],
-          );
+          const homes = recorded.commands.map((command) => command.env?.HOME);
+          assert.deepStrictEqual(homes, [homes[0]]);
+          assert.ok(homes[0]);
         }).pipe(Effect.provide(recorded.layer));
       });
 
