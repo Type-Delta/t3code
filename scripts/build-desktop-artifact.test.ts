@@ -12,6 +12,7 @@ import {
   BuildCommandFailedError,
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
+  pinPatchedDependencyVersions,
   createBuildConfig,
   DESKTOP_ASAR_UNPACK,
   InvalidMacPasskeyRpDomainError,
@@ -198,6 +199,25 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         { effect: "4.0.0-beta.73" },
       ),
       {},
+    );
+  });
+
+  it("pins staged dependency ranges to the versions covered by patches", () => {
+    assert.deepStrictEqual(
+      pinPatchedDependencyVersions(
+        {
+          "@anthropic-ai/claude-agent-sdk": "^0.3.170",
+          effect: "4.0.0-beta.73",
+        },
+        {
+          "@anthropic-ai/claude-agent-sdk@0.3.170":
+            "patches/@anthropic-ai__claude-agent-sdk@0.3.170.patch",
+        },
+      ),
+      {
+        "@anthropic-ai/claude-agent-sdk": "0.3.170",
+        effect: "4.0.0-beta.73",
+      },
     );
   });
 

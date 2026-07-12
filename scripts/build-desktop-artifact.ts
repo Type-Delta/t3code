@@ -933,9 +933,35 @@ export function createStagePatchedDependencies(
   );
 }
 
+export function pinPatchedDependencyVersions(
+  dependencies: Record<string, string>,
+  patchedDependencies: Record<string, string>,
+): Record<string, string> {
+  // The staged production workspace intentionally has no lockfile. Pin patched packages here so
+  // a semver range cannot resolve past the version addressed by its patch.
+  const patchedVersions = new Map(
+    Object.keys(patchedDependencies).map((patchKey) => [
+      getPatchedDependencyPackageName(patchKey),
+      getPatchedDependencyVersion(patchKey),
+    ]),
+  );
+
+  return Object.fromEntries(
+    Object.entries(dependencies).map(([dependencyName, dependencySpec]) => [
+      dependencyName,
+      patchedVersions.get(dependencyName) ?? dependencySpec,
+    ]),
+  );
+}
+
 function getPatchedDependencyPackageName(patchKey: string): string {
   const versionSeparator = patchKey.lastIndexOf("@");
   return versionSeparator > 0 ? patchKey.slice(0, versionSeparator) : patchKey;
+}
+
+function getPatchedDependencyVersion(patchKey: string): string {
+  const versionSeparator = patchKey.lastIndexOf("@");
+  return versionSeparator > 0 ? patchKey.slice(versionSeparator + 1) : patchKey;
 }
 
 const AzureTrustedSigningOptionsConfig = Config.all({
@@ -1717,26 +1743,29 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     yield* fs.writeFileString(macEntitlementsPath, renderMacPasskeyEntitlements(macPasskeySigning));
   }
 
-  const stageDependencies = {
-    ...resolvedServerDependencies,
-    ...resolvedDesktopRuntimeDependencies,
-    ...resolveFffNativeDependencies(
-      options.platform,
-      options.arch,
-      serverPackageJson.dependencies["@ff-labs/fff-node"],
-    ),
-    // Windows artifacts also bundle the same-architecture WSL Linux backend, which loads the
-    // fff native binary through ffi-rs. The platform fff binary above is the
-    // host's (win32), so promote the matching Linux fff binaries too; without
-    // them file-finding in WSL fails to load its Linux native package.
-    ...(options.platform === "win"
-      ? resolveFffNativeDependencies(
-          "linux",
-          options.arch,
-          serverPackageJson.dependencies["@ff-labs/fff-node"],
-        )
-      : {}),
-  };
+  const stageDependencies = pinPatchedDependencyVersions(
+    {
+      ...resolvedServerDependencies,
+      ...resolvedDesktopRuntimeDependencies,
+      ...resolveFffNativeDependencies(
+        options.platform,
+        options.arch,
+        serverPackageJson.dependencies["@ff-labs/fff-node"],
+      ),
+      // Windows artifacts also bundle the same-architecture WSL Linux backend, which loads the
+      // fff native binary through ffi-rs. The platform fff binary above is the
+      // host's (win32), so promote the matching Linux fff binaries too; without
+      // them file-finding in WSL fails to load its Linux native package.
+      ...(options.platform === "win"
+        ? resolveFffNativeDependencies(
+            "linux",
+            options.arch,
+            serverPackageJson.dependencies["@ff-labs/fff-node"],
+          )
+        : {}),
+    },
+    workspacePatchedDependencies,
+  );
   const stagePatchedDependencies = createStagePatchedDependencies(
     workspacePatchedDependencies,
     stageDependencies,
