@@ -10,13 +10,14 @@ Claude Code installed through npm exposes a Windows command shim such as `claude
 
 The fork patches `@anthropic-ai/claude-agent-sdk@0.3.170` to use its bundled native Windows `claude.exe` when the configured executable is a non-native command path. Explicit native `.exe` paths remain supported.
 
-The desktop artifact builder also pins patched dependencies to the exact versions named by their patch entries when creating the lockfile-free staged production workspace. Without this, the SDK caret range can resolve a newer release and pnpm fails with `ERR_PNPM_UNUSED_PATCH` before packaging.
+The server pins the SDK to `0.3.170`, and the desktop artifact builder also pins patched dependencies to the exact versions named by their patch entries when creating the lockfile-free staged production workspace. Without these safeguards, the SDK range can resolve a newer unpatched release (for example `0.3.195`) and pnpm either fails with `ERR_PNPM_UNUSED_PATCH` or produces an installer without the fork fix.
 
 **Files modified:**
 
 - `patches/@anthropic-ai__claude-agent-sdk@0.3.170.patch`
 - `pnpm-workspace.yaml`
 - `pnpm-lock.yaml`
+- `apps/server/package.json`
 - `apps/server/src/provider/Layers/ProviderRegistry.test.ts`
 - `scripts/build-desktop-artifact.ts`
 - `scripts/build-desktop-artifact.test.ts`

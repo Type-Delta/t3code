@@ -426,7 +426,7 @@ importers:
   apps/server:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
-        specifier: ^0.3.170
+        specifier: 0.3.170
         version: 0.3.170(patch_hash=b41a4a035c379354e109664aafb3b57ece8a5d85fe9aa8497731d810cdf0cdce)(@anthropic-ai/sdk@0.93.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
       '@effect/platform-bun':
         specifier: 4.0.0-beta.78
