@@ -110,6 +110,7 @@ import {
   type TurnDiffSummary,
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
+import { useOpenInPreferredEditor } from "../editorPreferences";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { isCommandPaletteOpen } from "../commandPaletteContext";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
@@ -2122,6 +2123,15 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const availableEditors = useAtomValue(primaryServerAvailableEditorsAtom);
+  const openInPreferredEditor = useOpenInPreferredEditor(
+    activeThread?.environmentId ?? null,
+    availableEditors,
+  );
+  const openActiveProjectInEditor = useCallback(() => {
+    const cwd = gitCwd ?? activeProject?.workspaceRoot;
+    if (!cwd) return;
+    void openInPreferredEditor(cwd);
+  }, [activeProject?.workspaceRoot, gitCwd, openInPreferredEditor]);
   // Prefer an instance-id match so a custom Codex instance (e.g.
   // `codex_personal`) surfaces its own status/message in the banner rather
   // than the default Codex's. Falls back to first-match-by-kind when no
@@ -5101,6 +5111,11 @@ function ChatViewContent(props: ChatViewProps) {
                 contentInsetEndAdjustment={composerOverlayHeight}
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
+                emptyState={{
+                  projectName: activeProject?.title ?? null,
+                  machineName: activeEnvironment?.label ?? "This device",
+                  onOpenProject: activeProject ? openActiveProjectInEditor : null,
+                }}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}

@@ -40,4 +40,24 @@ Provider authentication is determined by the Claude Agent SDK initialization res
 - Server build passes.
 - Windows x64 NSIS packaging passes and bundles Claude Code native binaries.
 
+### DL002 — Show project workspace name when starting a new thread
+
+An empty thread now identifies the current workspace before prompting for a message. When the thread has an active project, the title reads `In <project-name>` and the project name opens the current project/worktree in the preferred editor, using the same preferred-editor resolution as the existing Open control. When no project is active, the title reads `On <machine-name>` using the current environment label.
+
+The workspace name title is intentionally large enough to be immediately scannable (32px), while the existing “Send a message to start the conversation.” copy remains a muted subtitle. The project link uses the app's established information-link color so it remains consistent with other hyperlinks.
+
+**Files modified:**
+
+- `apps/web/src/components/ChatView.tsx`
+- `apps/web/src/components/chat/MessagesTimeline.tsx`
+- `apps/web/src/components/chat/MessagesTimeline.test.tsx`
+- `docs/PRODUCT.md`
+- `docs/DESIGN.md`
+
+**Validation:**
+
+- `vp test apps/web/src/components/chat/MessagesTimeline.test.tsx` passes.
+- `vp check` passes with existing repository warnings only.
+- `vp run typecheck` passes with existing repository suggestions only.
+
 Last updated: 2026-07-14

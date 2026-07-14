@@ -179,6 +179,11 @@ interface MessagesTimelineProps {
   contentInsetEndAdjustment: number;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
+  emptyState: {
+    projectName: string | null;
+    machineName: string;
+    onOpenProject: (() => void) | null;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +217,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   contentInsetEndAdjustment,
   onIsAtEndChange,
   onManualNavigation,
+  emptyState,
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
@@ -256,7 +262,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       const list = listRef.current;
       const currentScroll = list?.getState?.().scroll;
       if (list && typeof currentScroll === "number") {
-        list.scrollToOffset({ offset: currentScroll + delta, animated: false });
+        list.scrollToOffset({
+          offset: currentScroll + delta,
+          animated: false,
+        });
       }
     },
     [listRef],
@@ -343,7 +352,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       row.kind === "message" ? row.message.id : null,
     );
     return config
-      ? { ...config, onReady: handleAnchorReady, onSizeChanged: handleAnchorSizeChanged }
+      ? {
+          ...config,
+          onReady: handleAnchorReady,
+          onSizeChanged: handleAnchorSizeChanged,
+        }
       : undefined;
   }, [anchorMessageId, handleAnchorReady, handleAnchorSizeChanged, rows]);
 
@@ -460,9 +473,28 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   if (rows.length === 0 && !isWorking) {
     return (
       <div className="flex h-full items-center justify-center">
-        <p className="text-sm text-muted-foreground/30">
-          Send a message to start the conversation.
-        </p>
+        <div className="flex flex-col items-center gap-2 text-center">
+          <p className="text-[2rem] leading-tight font-medium text-foreground/80">
+            {emptyState.projectName ? (
+              <>
+                In{" "}
+                <button
+                  type="button"
+                  className="cursor-pointer rounded-sm text-info-foreground underline decoration-current/35 underline-offset-4 transition-colors hover:text-info-foreground/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
+                  aria-label={`Open ${emptyState.projectName} in the preferred editor`}
+                  onClick={emptyState.onOpenProject ?? undefined}
+                >
+                  {emptyState.projectName}
+                </button>
+              </>
+            ) : (
+              <>On {emptyState.machineName}</>
+            )}
+          </p>
+          <p className="text-sm text-muted-foreground/45">
+            Send a message to start the conversation.
+          </p>
+        </div>
       </div>
     );
   }
@@ -719,7 +751,9 @@ function TimelineMinimap({
           onMouseDown={(event) => {
             event.preventDefault();
           }}
-          style={{ height: resolveTimelineMinimapHeightStyle(items.length) }}
+          style={{
+            height: resolveTimelineMinimapHeightStyle(items.length),
+          }}
           type="button"
         >
           <div className="absolute top-0 left-3 h-full w-px bg-border/15" />
