@@ -3,14 +3,17 @@ import {
   type ModelCapabilities,
   type ModelSelection,
   ProviderDriverKind,
+  type ServerProviderDiagnostics,
   type ServerProviderModel,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
+import * as NodeModule from "node:module";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   createModelCapabilities,
@@ -20,6 +23,8 @@ import {
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { compareSemverVersions } from "@t3tools/shared/semver";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import {
   query as claudeQuery,
   type SlashCommand as ClaudeSlashCommand,
@@ -30,7 +35,9 @@ import {
   buildBooleanOptionDescriptor,
   buildSelectOptionDescriptor,
   buildServerProvider,
+  type CommandResult,
   DEFAULT_TIMEOUT_MS,
+  extractAuthBoolean,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -495,6 +502,26 @@ type ClaudeCapabilitiesProbe = {
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 };
 
+type ClaudeCapabilitiesProbeOutcome = {
+  readonly status: "succeeded" | "timed-out" | "failed" | "not-run";
+  readonly capabilities?: ClaudeCapabilitiesProbe;
+  readonly errorType?: string;
+};
+
+type ClaudeCommandInvocation = {
+  readonly result: CommandResult;
+  readonly resolvedExecutable: string;
+  readonly shell: boolean;
+};
+
+type ParsedClaudeAuthStatus = {
+  readonly authenticated: boolean | undefined;
+  readonly authMethod: string | undefined;
+  readonly email: string | undefined;
+  readonly subscriptionType: string | undefined;
+  readonly outputFormat: "json" | "text" | "empty";
+};
+
 function parseClaudeInitializationCommands(
   commands: ReadonlyArray<ClaudeSlashCommand> | undefined,
 ): ReadonlyArray<ServerProviderSlashCommand> {
@@ -567,6 +594,87 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
   });
 }
 
+const decodeUnknownJson = decodeJsonResult(Schema.Unknown);
+
+function findClaudeStringField(value: unknown, keys: ReadonlySet<string>): string | undefined {
+  if (globalThis.Array.isArray(value)) {
+    for (const entry of value) {
+      const nested = findClaudeStringField(entry, keys);
+      if (nested) return nested;
+    }
+    return undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  for (const candidate of Object.values(record)) {
+    const nested = findClaudeStringField(candidate, keys);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+function parseClaudeAuthStatus(result: CommandResult): ParsedClaudeAuthStatus {
+  const output = result.stdout.trim();
+  if (!output) {
+    return {
+      authenticated: undefined,
+      authMethod: undefined,
+      email: undefined,
+      subscriptionType: undefined,
+      outputFormat: "empty",
+    };
+  }
+
+  const parsed = decodeUnknownJson(output);
+  if (Result.isFailure(parsed)) {
+    return {
+      authenticated: result.code === 0 ? true : undefined,
+      authMethod: undefined,
+      email: undefined,
+      subscriptionType: undefined,
+      outputFormat: "text",
+    };
+  }
+
+  return {
+    authenticated: extractAuthBoolean(parsed.success),
+    authMethod: findClaudeStringField(parsed.success, new Set(["authMethod", "auth_method"])),
+    email: findClaudeStringField(parsed.success, new Set(["email"])),
+    subscriptionType: findClaudeStringField(
+      parsed.success,
+      new Set(["subscriptionType", "subscription_type", "plan", "tier"]),
+    ),
+    outputFormat: "json",
+  };
+}
+
+function diagnosticErrorType(error: unknown): string {
+  if (error && typeof error === "object") {
+    const tag = "_tag" in error ? error._tag : undefined;
+    if (typeof tag === "string" && tag.length > 0) return tag;
+  }
+  if (error instanceof Error && error.name.length > 0) return error.name;
+  return typeof error;
+}
+
+function resolveClaudeSdkNativeExecutable(platform: NodeJS.Platform): string | undefined {
+  if (platform !== "win32") return undefined;
+  try {
+    return NodeModule.createRequire(import.meta.url).resolve(
+      "@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe",
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Probe account information by spawning a lightweight Claude Agent SDK
  * session and reading the initialization result.
@@ -629,8 +737,19 @@ const probeClaudeCapabilities = (
     Effect.timeoutOption(CAPABILITIES_PROBE_TIMEOUT_MS),
     Effect.result,
     Effect.map((result) => {
-      if (Result.isFailure(result)) return undefined;
-      return Option.isSome(result.success) ? result.success.value : undefined;
+      if (Result.isFailure(result)) {
+        return {
+          status: "failed",
+          errorType: diagnosticErrorType(result.failure),
+        } satisfies ClaudeCapabilitiesProbeOutcome;
+      }
+      if (Option.isNone(result.success)) {
+        return { status: "timed-out" } satisfies ClaudeCapabilitiesProbeOutcome;
+      }
+      return {
+        status: "succeeded",
+        capabilities: result.success.value,
+      } satisfies ClaudeCapabilitiesProbeOutcome;
     }),
   );
 };
@@ -648,14 +767,19 @@ const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
     env: claudeEnvironment,
     shell: spawnCommand.shell,
   });
-  return yield* spawnAndCollect(claudeSettings.binaryPath, command);
+  const result = yield* spawnAndCollect(claudeSettings.binaryPath, command);
+  return {
+    result,
+    resolvedExecutable: spawnCommand.command,
+    shell: spawnCommand.shell,
+  } satisfies ClaudeCommandInvocation;
 });
 
 export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(function* (
   claudeSettings: ClaudeSettings,
   resolveCapabilities?: (
     claudeSettings: ClaudeSettings,
-  ) => Effect.Effect<ClaudeCapabilitiesProbe | undefined>,
+  ) => Effect.Effect<ClaudeCapabilitiesProbeOutcome>,
   environment?: NodeJS.ProcessEnv,
 ): Effect.fn.Return<
   ServerProviderDraft,
@@ -663,6 +787,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   ChildProcessSpawner.ChildProcessSpawner | Path.Path
 > {
   const resolvedEnvironment = environment ?? process.env;
+  const platform = yield* HostProcessPlatform;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const allModels = providerModelsFromSettings(
     BUILT_IN_MODELS,
@@ -670,6 +795,16 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     claudeSettings.customModels,
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
+  const sdkNativeExecutable = resolveClaudeSdkNativeExecutable(platform);
+  const baseDiagnostics = {
+    configuredExecutable: claudeSettings.binaryPath,
+    platform,
+    sdkExecutablePolicy:
+      platform === "win32" && !claudeSettings.binaryPath.toLowerCase().endsWith(".exe")
+        ? "bundled-native-fallback"
+        : "configured-executable",
+    sdkNativeExecutable: sdkNativeExecutable ?? "unavailable",
+  } satisfies ServerProviderDiagnostics;
 
   if (!claudeSettings.enabled) {
     return buildServerProvider({
@@ -682,6 +817,12 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         version: null,
         status: "warning",
         auth: { status: "unknown" },
+        diagnostics: {
+          ...baseDiagnostics,
+          versionProbeStatus: "not-run",
+          authProbeStatus: "not-run",
+          initializationProbeStatus: "not-run",
+        },
         message: "Claude is disabled in T3 Code settings.",
       },
     });
@@ -708,6 +849,13 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         version: null,
         status: "error",
         auth: { status: "unknown" },
+        diagnostics: {
+          ...baseDiagnostics,
+          versionProbeStatus: "failed",
+          versionProbeErrorType: diagnosticErrorType(error),
+          authProbeStatus: "not-run",
+          initializationProbeStatus: "not-run",
+        },
         message: isCommandMissingCause(error)
           ? "Claude Agent CLI (`claude`) is not installed or not on PATH."
           : "Failed to execute Claude Agent CLI health check.",
@@ -726,13 +874,20 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         version: null,
         status: "error",
         auth: { status: "unknown" },
+        diagnostics: {
+          ...baseDiagnostics,
+          versionProbeStatus: "timed-out",
+          authProbeStatus: "not-run",
+          initializationProbeStatus: "not-run",
+        },
         message:
           "Claude Agent CLI is installed but failed to run. Timed out while running command.",
       },
     });
   }
 
-  const version = versionProbe.success.value;
+  const versionInvocation = versionProbe.success.value;
+  const version = versionInvocation.result;
   const parsedVersion = parseGenericCliVersion(`${version.stdout}\n${version.stderr}`);
   if (version.code !== 0) {
     yield* Effect.logWarning("Claude Agent CLI version probe exited with a non-zero status.", {
@@ -750,6 +905,17 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         version: parsedVersion,
         status: "error",
         auth: { status: "unknown" },
+        diagnostics: {
+          ...baseDiagnostics,
+          versionProbeStatus: "completed",
+          versionResolvedExecutable: versionInvocation.resolvedExecutable,
+          versionShell: versionInvocation.shell,
+          versionExitCode: version.code,
+          versionStdoutLength: version.stdout.length,
+          versionStderrLength: version.stderr.length,
+          authProbeStatus: "not-run",
+          initializationProbeStatus: "not-run",
+        },
         message: "Claude Agent CLI is installed but failed to run.",
       },
     });
@@ -769,33 +935,83 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         ? formatClaudeOpus48UpgradeMessage(parsedVersion)
         : formatClaudeOpus47UpgradeMessage(parsedVersion);
 
-  const capabilities = resolveCapabilities
-    ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
-    : undefined;
+  const capabilitiesProbe: Effect.Effect<ClaudeCapabilitiesProbeOutcome> = resolveCapabilities
+    ? resolveCapabilities(claudeSettings)
+    : Effect.succeed({ status: "not-run" });
+  const [authProbe, capabilitiesOutcome] = yield* Effect.all(
+    [
+      runClaudeCommand(claudeSettings, ["auth", "status"], resolvedEnvironment).pipe(
+        Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
+        Effect.result,
+      ),
+      capabilitiesProbe,
+    ],
+    { concurrency: "unbounded" },
+  );
+
+  const capabilities = capabilitiesOutcome.capabilities;
   const slashCommands = capabilities?.slashCommands ?? [];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
-  if (!capabilities) {
-    return buildServerProvider({
-      presentation: CLAUDE_PRESENTATION,
-      enabled: claudeSettings.enabled,
-      checkedAt,
-      models,
-      slashCommands: dedupedSlashCommands,
-      probe: {
-        installed: true,
-        version: parsedVersion,
-        status: "warning",
-        auth: { status: "unknown" },
-        message: "Could not verify Claude authentication status from initialization result.",
-      },
-    });
+  let parsedAuthStatus: ParsedClaudeAuthStatus | undefined;
+  let authInvocation: ClaudeCommandInvocation | undefined;
+  let authProbeStatus: "completed" | "timed-out" | "failed";
+  let authProbeErrorType: string | undefined;
+  if (Result.isFailure(authProbe)) {
+    authProbeStatus = "failed";
+    authProbeErrorType = diagnosticErrorType(authProbe.failure);
+  } else if (Option.isNone(authProbe.success)) {
+    authProbeStatus = "timed-out";
+  } else {
+    authProbeStatus = "completed";
+    authInvocation = authProbe.success.value;
+    parsedAuthStatus = parseClaudeAuthStatus(authInvocation.result);
   }
 
+  const diagnostics = {
+    ...baseDiagnostics,
+    versionProbeStatus: "completed",
+    versionResolvedExecutable: versionInvocation.resolvedExecutable,
+    versionShell: versionInvocation.shell,
+    versionExitCode: version.code,
+    versionStdoutLength: version.stdout.length,
+    versionStderrLength: version.stderr.length,
+    authProbeStatus,
+    authProbeErrorType: authProbeErrorType ?? null,
+    authResolvedExecutable: authInvocation?.resolvedExecutable ?? null,
+    authShell: authInvocation?.shell ?? null,
+    authExitCode: authInvocation?.result.code ?? null,
+    authStdoutLength: authInvocation?.result.stdout.length ?? 0,
+    authStderrLength: authInvocation?.result.stderr.length ?? 0,
+    authOutputFormat: parsedAuthStatus?.outputFormat ?? null,
+    authAuthenticated: parsedAuthStatus?.authenticated ?? null,
+    initializationProbeStatus: capabilitiesOutcome.status,
+    initializationProbeErrorType: capabilitiesOutcome.errorType ?? null,
+    initializationAccountPresent: capabilities !== undefined,
+    initializationEmailPresent: capabilities?.email !== undefined,
+    initializationSubscriptionPresent: capabilities?.subscriptionType !== undefined,
+    initializationTokenSourcePresent: capabilities?.tokenSource !== undefined,
+    initializationSlashCommandCount: capabilities?.slashCommands.length ?? 0,
+  } satisfies ServerProviderDiagnostics;
+
+  const authenticated =
+    parsedAuthStatus?.authenticated ?? (capabilities !== undefined ? true : undefined);
+  const subscriptionType = parsedAuthStatus?.subscriptionType ?? capabilities?.subscriptionType;
+  const authMethod = parsedAuthStatus?.authMethod ?? capabilities?.tokenSource;
+  const email = parsedAuthStatus?.email ?? capabilities?.email;
+
   const authMetadata = claudeAuthMetadata({
-    subscriptionType: capabilities.subscriptionType,
-    authMethod: capabilities.tokenSource,
+    subscriptionType,
+    authMethod,
   });
+  const status = authenticated === true ? "ready" : authenticated === false ? "error" : "warning";
+  const message =
+    authenticated === false
+      ? "Claude is not authenticated. Run `claude auth login` and try again."
+      : authenticated === undefined
+        ? "Could not verify Claude authentication status from CLI or initialization result."
+        : versionUpgradeMessage;
+
   return buildServerProvider({
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
@@ -805,13 +1021,19 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     probe: {
       installed: true,
       version: parsedVersion,
-      status: "ready",
+      status,
       auth: {
-        status: "authenticated",
-        ...(capabilities.email ? { email: capabilities.email } : {}),
-        ...(authMetadata ? authMetadata : {}),
+        status:
+          authenticated === true
+            ? "authenticated"
+            : authenticated === false
+              ? "unauthenticated"
+              : "unknown",
+        ...(email ? { email } : {}),
+        ...(authenticated === true && authMetadata ? authMetadata : {}),
       },
-      ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),
+      diagnostics,
+      ...(message ? { message } : {}),
     },
   });
 });

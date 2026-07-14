@@ -18,6 +18,14 @@ import { getRouter } from "./router";
 import { syncDocumentWindowControlsOverlayClass } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 
+console.info("[t3code/startup] Web application started", {
+  version: import.meta.env.APP_VERSION,
+  commit: import.meta.env.APP_BUILD_COMMIT,
+  dirty: import.meta.env.APP_BUILD_DIRTY === "true",
+  builtAt: import.meta.env.APP_BUILD_AT,
+  runtime: isElectron ? "desktop" : "browser",
+});
+
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
 

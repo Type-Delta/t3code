@@ -106,16 +106,18 @@ type TestClaudeCapabilities = {
 function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
   return () =>
     Effect.succeed({
-      email: undefined,
-      subscriptionType: undefined,
-      tokenSource: undefined,
-      slashCommands: [],
-      ...overrides,
+      status: "succeeded" as const,
+      capabilities: {
+        email: undefined,
+        subscriptionType: undefined,
+        tokenSource: undefined,
+        slashCommands: [],
+        ...overrides,
+      },
     });
 }
 
-const noClaudeCapabilities = () =>
-  Effect.sync(() => undefined as TestClaudeCapabilities | undefined);
+const noClaudeCapabilities = () => Effect.succeed({ status: "timed-out" as const });
 
 function mockHandle(result: { stdout: string; stderr: string; code: number }) {
   return ChildProcessSpawner.makeHandle({
@@ -1669,6 +1671,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             mockSpawnerLayer((args) => {
               const joined = args.join(" ");
               if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              if (joined === "auth status") {
+                return { stdout: '{"loggedIn":true}\n', stderr: "", code: 0 };
+              }
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),
@@ -1691,6 +1696,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             mockSpawnerLayer((args) => {
               const joined = args.join(" ");
               if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              if (joined === "auth status") {
+                return { stdout: '{"loggedIn":true}\n', stderr: "", code: 0 };
+              }
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),
@@ -1747,7 +1755,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           );
           assert.strictEqual(status.status, "ready");
           const homes = recorded.commands.map((command) => command.env?.HOME);
-          assert.deepStrictEqual(homes, [homes[0]]);
+          assert.strictEqual(homes.length, 2);
+          assert.ok(homes.every((home) => home === homes[0]));
           assert.ok(homes[0]);
         }).pipe(Effect.provide(recorded.layer));
       });
@@ -1905,19 +1914,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         );
       });
 
-      it.effect("returns warning when the Claude initialization result is unavailable", () =>
+      it.effect("uses claude auth status when the initialization result is unavailable", () =>
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(
             defaultClaudeSettings,
             noClaudeCapabilities,
           );
-          assert.strictEqual(status.status, "warning");
+          assert.strictEqual(status.status, "ready");
           assert.strictEqual(status.installed, true);
-          assert.strictEqual(status.auth.status, "unknown");
-          assert.strictEqual(
-            status.message,
-            "Could not verify Claude authentication status from initialization result.",
-          );
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.diagnostics?.authAuthenticated, true);
+          assert.strictEqual(status.diagnostics?.initializationProbeStatus, "timed-out");
         }).pipe(
           Effect.provide(
             mockSpawnerLayer((args) => {
@@ -1925,10 +1932,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
               if (joined === "auth status")
                 return {
-                  stdout: '{"loggedIn":false}\n',
+                  stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
                   stderr: "",
-                  code: 1,
+                  code: 0,
                 };
+              throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect("reports unauthenticated from claude auth status", () =>
+        Effect.gen(function* () {
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            noClaudeCapabilities,
+          );
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.auth.status, "unauthenticated");
+          assert.strictEqual(
+            status.message,
+            "Claude is not authenticated. Run `claude auth login` and try again.",
+          );
+          assert.strictEqual(status.diagnostics?.authAuthenticated, false);
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              const joined = args.join(" ");
+              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+              if (joined === "auth status") {
+                return { stdout: '{"loggedIn":false}\n', stderr: "", code: 1 };
+              }
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),

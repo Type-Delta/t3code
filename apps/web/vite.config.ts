@@ -1,4 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - Vite configuration resolves build metadata synchronously.
 import tailwindcss from "@tailwindcss/vite";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeURL from "node:url";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 import babel from "@rolldown/plugin-babel";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -23,6 +26,29 @@ const configuredRelayTracingDataset = repoEnv.VITE_RELAY_OTLP_TRACES_DATASET?.tr
 const configuredRelayTracingToken = repoEnv.VITE_RELAY_OTLP_TRACES_TOKEN?.trim() || "";
 const configuredHostedAppChannel = process.env.VITE_HOSTED_APP_CHANNEL?.trim() || "";
 const configuredAppVersion = process.env.APP_VERSION?.trim() || pkg.version;
+const repoRoot = NodeURL.fileURLToPath(new URL("../..", import.meta.url));
+
+function readGitOutput(args: ReadonlyArray<string>): string | undefined {
+  try {
+    const output = NodeChildProcess.execFileSync("git", args, {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return output || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const configuredBuildCommit =
+  process.env.T3CODE_BUILD_COMMIT?.trim() ||
+  readGitOutput(["rev-parse", "--short=12", "HEAD"]) ||
+  "unknown";
+const configuredBuildDirty =
+  process.env.T3CODE_BUILD_DIRTY?.trim() ||
+  (readGitOutput(["status", "--porcelain", "--untracked-files=no"]) ? "true" : "false");
+const configuredBuildAt = process.env.T3CODE_BUILD_AT?.trim() || new Date().toISOString();
 const configuredHostedAppUrl = (() => {
   const explicitHostedAppUrl = process.env.VITE_HOSTED_APP_URL?.trim();
   if (explicitHostedAppUrl) {
@@ -129,6 +155,9 @@ export default defineConfig(() => {
       "import.meta.env.VITE_HOSTED_APP_URL": JSON.stringify(configuredHostedAppUrl ?? ""),
       "import.meta.env.VITE_HOSTED_APP_CHANNEL": JSON.stringify(configuredHostedAppChannel),
       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
+      "import.meta.env.APP_BUILD_COMMIT": JSON.stringify(configuredBuildCommit),
+      "import.meta.env.APP_BUILD_DIRTY": JSON.stringify(configuredBuildDirty),
+      "import.meta.env.APP_BUILD_AT": JSON.stringify(configuredBuildAt),
     },
     resolve: {
       tsconfigPaths: true,

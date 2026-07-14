@@ -45,6 +45,7 @@ import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   primaryServerConfigAtom,
   primaryServerConfigEventAtom,
+  primaryServerProvidersAtom,
   primaryServerWelcomeAtom,
 } from "../state/server";
 import { readProject, setActiveEnvironmentId, useActiveEnvironmentId } from "../state/entities";
@@ -127,6 +128,7 @@ function RootRouteView() {
     <ToastProvider>
       <AnchoredToastProvider>
         <DocumentTitleSync />
+        <ProviderDiagnosticsConsole />
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
         <RelayClientInstallDialog />
         <ConnectOnboardingDialog />
@@ -139,6 +141,32 @@ function RootRouteView() {
       </AnchoredToastProvider>
     </ToastProvider>
   );
+}
+
+function ProviderDiagnosticsConsole() {
+  const providers = useAtomValue(primaryServerProvidersAtom);
+  const lastCheckedAtByInstance = useRef(new Map<string, string>());
+
+  useEffect(() => {
+    for (const provider of providers) {
+      if (provider.driver !== "claudeAgent") continue;
+      if (lastCheckedAtByInstance.current.get(provider.instanceId) === provider.checkedAt) continue;
+
+      lastCheckedAtByInstance.current.set(provider.instanceId, provider.checkedAt);
+      console.info("[t3code/claude-provider] Provider status", {
+        instanceId: provider.instanceId,
+        checkedAt: provider.checkedAt,
+        status: provider.status,
+        installed: provider.installed,
+        version: provider.version,
+        auth: provider.auth,
+        message: provider.message ?? null,
+        diagnostics: provider.diagnostics ?? null,
+      });
+    }
+  }, [providers]);
+
+  return null;
 }
 
 function DocumentTitleSync() {

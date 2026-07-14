@@ -58,6 +58,17 @@ export const ServerProviderAuth = Schema.Struct({
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 
+/**
+ * Sanitized, provider-specific probe metadata intended for local diagnostics.
+ * Values are deliberately restricted to primitives so raw command output,
+ * environment variables, and credentials cannot enter provider snapshots.
+ */
+export const ServerProviderDiagnostics = Schema.Record(
+  TrimmedNonEmptyString,
+  Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null]),
+);
+export type ServerProviderDiagnostics = typeof ServerProviderDiagnostics.Type;
+
 export const ServerProviderModel = Schema.Struct({
   slug: TrimmedNonEmptyString,
   name: TrimmedNonEmptyString,
@@ -171,6 +182,7 @@ export const ServerProvider = Schema.Struct({
   version: Schema.NullOr(TrimmedNonEmptyString),
   status: ServerProviderState,
   auth: ServerProviderAuth,
+  diagnostics: Schema.optionalKey(ServerProviderDiagnostics),
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
   // Optional for back-compat: every legacy producer omits this field and
