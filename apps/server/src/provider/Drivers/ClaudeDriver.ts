@@ -53,7 +53,12 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
-import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
+import {
+  makeClaudeCapabilitiesCacheKey,
+  makeClaudeContinuationGroupKey,
+  resolveClaudeHomePath,
+} from "./ClaudeHome.ts";
+import { fetchClaudeSubscriptionUsage } from "../subscriptionUsage.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -133,6 +138,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         env: processEnv,
       });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
+      const resolvedClaudeHome = yield* resolveClaudeHomePath(effectiveConfig);
       const stampIdentity = withInstanceIdentity({
         instanceId,
         displayName,
@@ -184,6 +190,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
           }).pipe(
             Effect.provideService(HttpClient.HttpClient, httpClient),
+            Effect.flatMap((enrichedSnapshot) =>
+              enrichedSnapshot.auth.status === "authenticated"
+                ? Effect.promise(() => fetchClaudeSubscriptionUsage(resolvedClaudeHome)).pipe(
+                    Effect.map((usage) =>
+                      usage ? { ...enrichedSnapshot, usage } : enrichedSnapshot,
+                    ),
+                  )
+                : Effect.succeed(enrichedSnapshot),
+            ),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
         refreshInterval: SNAPSHOT_REFRESH_INTERVAL,

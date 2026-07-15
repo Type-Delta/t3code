@@ -57,6 +57,8 @@ import {
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
+import { expandHomePath } from "../../pathExpansion.ts";
+import { fetchCodexSubscriptionUsage } from "../subscriptionUsage.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -148,6 +150,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
       });
+      // Mirror the probe's CODEX_HOME resolution: explicit homePath first,
+      // then the instance environment, else the fetcher's ~/.codex default.
+      const codexUsageHome =
+        effectiveConfig.homePath.trim().length > 0
+          ? expandHomePath(effectiveConfig.homePath.trim())
+          : processEnv["CODEX_HOME"]?.trim() || undefined;
 
       // `makeCodexAdapter` and `makeCodexTextGeneration` have `never` error
       // channels at construction time — their failure modes are all on the
@@ -184,6 +192,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
           }).pipe(
             Effect.provideService(HttpClient.HttpClient, httpClient),
+            Effect.flatMap((enrichedSnapshot) =>
+              enrichedSnapshot.auth.status === "authenticated"
+                ? Effect.promise(() => fetchCodexSubscriptionUsage(codexUsageHome)).pipe(
+                    Effect.map((usage) =>
+                      usage ? { ...enrichedSnapshot, usage } : enrichedSnapshot,
+                    ),
+                  )
+                : Effect.succeed(enrichedSnapshot),
+            ),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
         refreshInterval: SNAPSHOT_REFRESH_INTERVAL,

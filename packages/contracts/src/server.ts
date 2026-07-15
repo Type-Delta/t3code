@@ -155,6 +155,20 @@ export const ServerProviderUpdateStatus = Schema.Literals([
 ]);
 export type ServerProviderUpdateStatus = typeof ServerProviderUpdateStatus.Type;
 
+/** One subscription rate-limit window. `usedPercent` is 0–100. */
+export const ServerProviderUsageWindow = Schema.Struct({
+  usedPercent: Schema.Number,
+  resetsAt: Schema.NullOr(IsoDateTime),
+});
+export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;
+
+/** Subscription usage snapshot (session = 5h window, weekly = 7d window). */
+export const ServerProviderUsage = Schema.Struct({
+  session: Schema.NullOr(ServerProviderUsageWindow),
+  weekly: Schema.NullOr(ServerProviderUsageWindow),
+});
+export type ServerProviderUsage = typeof ServerProviderUsage.Type;
+
 export const ServerProviderUpdateState = Schema.Struct({
   status: ServerProviderUpdateStatus,
   startedAt: Schema.NullOr(IsoDateTime),
@@ -201,6 +215,9 @@ export const ServerProvider = Schema.Struct({
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
+  // Best-effort subscription usage; only populated for drivers whose
+  // OAuth credentials expose a usage endpoint (Claude, Codex).
+  usage: Schema.optionalKey(ServerProviderUsage),
 });
 export type ServerProvider = typeof ServerProvider.Type;
 
