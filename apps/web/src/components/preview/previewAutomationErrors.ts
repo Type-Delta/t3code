@@ -56,6 +56,27 @@ export class PreviewAutomationNavigationTimeoutError extends Schema.TaggedErrorC
   }
 }
 
+export class PreviewAutomationNavigationFailedError extends Schema.TaggedErrorClass<PreviewAutomationNavigationFailedError>()(
+  "PreviewAutomationNavigationFailedError",
+  {
+    requestId: TrimmedNonEmptyString,
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    tabId: PreviewTabId,
+    url: Schema.String,
+    code: Schema.Int,
+    description: Schema.String,
+  },
+) {
+  get responseTag() {
+    return "PreviewAutomationExecutionError" as const;
+  }
+
+  override get message(): string {
+    return `Preview navigation for request ${this.requestId} failed with ${this.description} (${this.code}) in tab ${this.tabId}.`;
+  }
+}
+
 export class PreviewAutomationViewportTimeoutError extends Schema.TaggedErrorClass<PreviewAutomationViewportTimeoutError>()(
   "PreviewAutomationViewportTimeoutError",
   {
@@ -208,6 +229,7 @@ export class PreviewAutomationOperationError extends Schema.TaggedErrorClass<Pre
 export const PreviewAutomationHostError = Schema.Union([
   PreviewAutomationOverlayTimeoutError,
   PreviewAutomationNavigationTimeoutError,
+  PreviewAutomationNavigationFailedError,
   PreviewAutomationViewportTimeoutError,
   PreviewAutomationTargetUnavailableError,
   PreviewAutomationRecordingNotActiveError,

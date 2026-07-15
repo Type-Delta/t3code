@@ -45,13 +45,18 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { previewBridge } from "./previewBridge";
 import {
   PreviewAutomationNavigationTimeoutError,
+  PreviewAutomationNavigationFailedError,
   PreviewAutomationOperationError,
   PreviewAutomationOverlayTimeoutError,
   PreviewAutomationRecordingNotActiveError,
   PreviewAutomationTargetUnavailableError,
   PreviewAutomationViewportTimeoutError,
 } from "./previewAutomationErrors";
-import { previewAutomationOpenNeedsOverlay } from "./previewAutomationOpenReadiness";
+import {
+  previewAutomationNavigationFailure,
+  previewAutomationOpenNeedsNavigationReadiness,
+  previewAutomationOpenNeedsOverlay,
+} from "./previewAutomationOpenReadiness";
 import { createPreviewAutomationRequestConsumerAtom } from "./previewAutomationRequestConsumer";
 import { createPreviewAutomationClientId } from "./previewAutomationClientId";
 import {
@@ -95,6 +100,21 @@ const waitForNavigationReadiness = async (
   if (!previewBridge || targetReadiness === "none") return;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
+    const state = readThreadPreviewState(threadRef);
+    const snapshot =
+      state.sessions[tabId] ?? (state.snapshot?.tabId === tabId ? state.snapshot : undefined);
+    const failure = previewAutomationNavigationFailure(snapshot?.navStatus);
+    if (failure) {
+      throw new PreviewAutomationNavigationFailedError({
+        requestId,
+        environmentId: threadRef.environmentId,
+        threadId: threadRef.threadId,
+        tabId,
+        url: failure.url,
+        code: failure.code,
+        description: failure.description,
+      });
+    }
     if (targetReadiness === "domContentLoaded") {
       const readyState = await previewBridge.automation.evaluate(tabId, {
         expression: "document.readyState",
@@ -381,12 +401,14 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
                 request.timeoutMs,
               );
             }
-            if (reusedExistingTab && input.url && previewBridge) {
-              const resolution = resolveBrowserNavigationTarget(environmentId, {
-                kind: "url",
-                url: input.url,
-              });
-              await previewBridge.navigate(activeTabId, resolution.resolvedUrl);
+            if (previewAutomationOpenNeedsNavigationReadiness(input) && previewBridge) {
+              if (reusedExistingTab) {
+                const resolution = resolveBrowserNavigationTarget(environmentId, {
+                  kind: "url",
+                  url: input.url,
+                });
+                await previewBridge.navigate(activeTabId, resolution.resolvedUrl);
+              }
               await waitForNavigationReadiness(
                 threadRef,
                 request.requestId,

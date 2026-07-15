@@ -302,11 +302,13 @@ interface BrowserControlSession {
   readonly webContentsId: number;
   readonly semaphore: Semaphore.Semaphore;
   readonly scope: Scope.Closeable;
+  readonly isDetached: () => boolean;
   readonly onMessage: (
     event: Electron.Event,
     method: string,
     params: Record<string, unknown>,
   ) => void;
+  readonly onDetach: (event: Electron.Event, reason: string) => void;
 }
 
 interface BrowserDiagnostics {
@@ -679,17 +681,25 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   const detachControlSession = Effect.fn("PreviewManager.detachControlSession")(function* (
     webContentsId: number,
+    expected?: BrowserControlSession,
   ) {
-    const control = yield* SynchronizedRef.modify(controlSessionsRef, (sessions) => [
-      sessions.get(webContentsId),
-      replaceMap(sessions, (copy) => {
+    const detached = yield* SynchronizedRef.modifyEffect(controlSessionsRef, (sessions) => {
+      const control = sessions.get(webContentsId);
+      if (!control || (expected !== undefined && control !== expected)) {
+        return Effect.succeed([false, sessions] as const);
+      }
+      const next = replaceMap(sessions, (copy) => {
         copy.delete(webContentsId);
-      }),
-    ]);
-    if (control) {
-      yield* Scope.close(control.scope, Exit.void).pipe(Effect.ignore);
-      return;
-    }
+      });
+      // Keep the session-map lock until the old debugger scope is closed. If a
+      // replacement attached in between removal and cleanup, the old
+      // finalizer could detach the replacement's debugger.
+      return Scope.close(control.scope, Exit.void).pipe(
+        Effect.ignore,
+        Effect.as([true, next] as const),
+      );
+    });
+    if (detached) return;
     yield* Ref.update(diagnosticsRef, (diagnostics) =>
       replaceMap(diagnostics, (copy) => {
         copy.delete(webContentsId);
@@ -709,7 +719,9 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         PreviewManagerError
       > => {
         const existing = sessions.get(wc.id);
-        if (existing) return Effect.succeed([existing, sessions] as const);
+        if (existing && !existing.isDetached()) {
+          return Effect.succeed([existing, sessions] as const);
+        }
         if (wc.isDevToolsOpened()) {
           return Effect.fail(
             new PreviewAutomationDevToolsOpenError({
@@ -727,6 +739,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         const createControlSession = Effect.fn("PreviewManager.createControlSession")(function* () {
           const semaphore = yield* Semaphore.make(1);
           const scope = yield* Scope.fork(parentScope, "sequential");
+          let detached = false;
           const handleDebuggerMessage = Effect.fn("PreviewManager.handleDebuggerMessage")(
             function* (method: string, params: Record<string, unknown>) {
               if (method === "Page.screencastFrame") {
@@ -771,6 +784,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           const onMessage: BrowserControlSession["onMessage"] = (_event, method, params) => {
             runFork(handleDebuggerMessage(method, params));
           };
+          let control: BrowserControlSession;
+          const onDetach: BrowserControlSession["onDetach"] = () => {
+            // Electron can detach the CDP debugger independently (for example
+            // when DevTools is opened). Mark the cached session stale
+            // synchronously so the next request creates a fresh attachment.
+            detached = true;
+            runFork(detachControlSession(wc.id, control));
+          };
           yield* Scope.addFinalizer(
             scope,
             Effect.all(
@@ -782,17 +803,20 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
                 ),
                 attempt({ operation: "detachControlSession", webContentsId: wc.id }, () => {
                   wc.debugger.off("message", onMessage);
+                  wc.debugger.off("detach", onDetach);
                   if (wc.debugger.isAttached()) wc.debugger.detach();
                 }).pipe(Effect.ignore),
               ],
               { discard: true },
             ),
           );
-          const control: BrowserControlSession = {
+          control = {
             webContentsId: wc.id,
             semaphore,
             scope,
+            isDetached: () => detached,
             onMessage,
+            onDetach,
           };
           const initialize = Effect.fn("PreviewManager.initializeControlSession")(function* () {
             yield* Ref.update(diagnosticsRef, (diagnostics) =>
@@ -806,6 +830,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             );
             yield* attempt({ operation: "attachDebuggerListeners", webContentsId: wc.id }, () => {
               wc.debugger.on("message", onMessage);
+              wc.debugger.on("detach", onDetach);
               wc.debugger.attach("1.3");
             });
             yield* Effect.all(

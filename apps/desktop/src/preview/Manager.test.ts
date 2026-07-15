@@ -1015,6 +1015,66 @@ describe("PreviewManager", () => {
       }),
     ),
   );
+
+  effectIt.effect("reattaches browser control after Electron detaches the debugger", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let attached = false;
+        let onDebuggerDetach: ((event: unknown, reason: string) => void) | undefined;
+        const attach = vi.fn(() => {
+          attached = true;
+        });
+        const sendCommand = vi.fn(async (method: string) =>
+          method === "Runtime.evaluate" ? { result: { value: "ready" } } : undefined,
+        );
+        fromId.mockReturnValue({
+          id: 42,
+          isDestroyed: () => false,
+          getType: () => "webview",
+          getURL: () => "https://example.com",
+          getTitle: () => "Example",
+          isLoading: () => false,
+          isDevToolsOpened: () => false,
+          getZoomFactor: () => 1,
+          setZoomFactor: vi.fn(),
+          on: vi.fn(),
+          off: vi.fn(),
+          ipc: { on: vi.fn(), off: vi.fn() },
+          send: webviewSend,
+          navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+          setWindowOpenHandler: vi.fn(),
+          debugger: {
+            isAttached: () => attached,
+            attach,
+            detach: vi.fn(() => {
+              attached = false;
+            }),
+            sendCommand,
+            on: vi.fn((event: string, listener: typeof onDebuggerDetach) => {
+              if (event === "detach") onDebuggerDetach = listener;
+            }),
+            off: vi.fn(),
+          },
+        } as never);
+
+        yield* manager.createTab("tab_detach");
+        yield* manager.registerWebview("tab_detach", 42);
+        expect(
+          yield* manager.automationEvaluate("tab_detach", { expression: "document.title" }),
+        ).toBe("ready");
+        expect(attach).toHaveBeenCalledOnce();
+
+        attached = false;
+        onDebuggerDetach?.({}, "target closed");
+        yield* Effect.yieldNow;
+
+        expect(
+          yield* manager.automationEvaluate("tab_detach", { expression: "document.title" }),
+        ).toBe("ready");
+        expect(attach).toHaveBeenCalledTimes(2);
+      }),
+    ),
+  );
 });
 
 describe("PreviewOperationError", () => {

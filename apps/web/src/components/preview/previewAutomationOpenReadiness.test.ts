@@ -1,7 +1,11 @@
 import type { PreviewAutomationOpenInput, PreviewSessionSnapshot } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { previewAutomationOpenNeedsOverlay } from "./previewAutomationOpenReadiness";
+import {
+  previewAutomationNavigationFailure,
+  previewAutomationOpenNeedsNavigationReadiness,
+  previewAutomationOpenNeedsOverlay,
+} from "./previewAutomationOpenReadiness";
 
 const snapshot = (navStatus: PreviewSessionSnapshot["navStatus"]): PreviewSessionSnapshot => ({
   threadId: "thread-1",
@@ -23,12 +27,9 @@ describe("preview automation open readiness", () => {
   });
 
   it("waits when an empty tab is immediately given a URL", () => {
-    expect(
-      previewAutomationOpenNeedsOverlay(
-        { url: "https://example.com" } as PreviewAutomationOpenInput,
-        snapshot({ _tag: "Idle" }),
-      ),
-    ).toBe(true);
+    const input = { url: "https://example.com" } as PreviewAutomationOpenInput;
+    expect(previewAutomationOpenNeedsOverlay(input, snapshot({ _tag: "Idle" }))).toBe(true);
+    expect(previewAutomationOpenNeedsNavigationReadiness(input)).toBe(true);
   });
 
   it("waits for existing tabs that already have rendered content", () => {
@@ -42,5 +43,24 @@ describe("preview automation open readiness", () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it("recognizes a committed navigation failure", () => {
+    const failure = {
+      _tag: "LoadFailed" as const,
+      url: "https://example.invalid/",
+      title: "example.invalid",
+      code: -105,
+      description: "ERR_NAME_NOT_RESOLVED",
+    };
+
+    expect(previewAutomationNavigationFailure(failure)).toEqual(failure);
+    expect(
+      previewAutomationNavigationFailure({
+        _tag: "Success",
+        url: "https://example.com/",
+        title: "Example",
+      }),
+    ).toBeNull();
   });
 });

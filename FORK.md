@@ -117,3 +117,31 @@ Both start full in the foreground color (white in the dark theme) and turn yello
 - Pre-existing `ProviderRegistry.test.ts` failure ("re-probes when settings change the codex binaryPath") is unrelated; it fails identically without these changes.
 
 **Last updated:** 2026-07-15
+
+### DL004 — Recover collaborative preview automation and verify navigation failures
+
+Collaborative preview browser-control sessions now invalidate their cached Chrome DevTools
+Protocol attachment when Electron reports a debugger detach. The next automation request creates a
+fresh session, preventing one failed snapshot or external debugger interruption from poisoning later
+operations across the preview client.
+
+URL-bearing `preview_open` requests now wait for navigation readiness on newly created tabs as well
+as reused tabs. A committed `LoadFailed` state (including Chromium DNS failures) is returned as an
+automation execution failure instead of a successful loaded status.
+
+**Files modified:**
+
+- `apps/desktop/src/preview/Manager.ts`
+- `apps/desktop/src/preview/Manager.test.ts`
+- `apps/web/src/components/preview/PreviewAutomationHosts.tsx`
+- `apps/web/src/components/preview/previewAutomationErrors.ts`
+- `apps/web/src/components/preview/previewAutomationOpenReadiness.ts`
+- `apps/web/src/components/preview/previewAutomationOpenReadiness.test.ts`
+
+**Validation:**
+
+- `vp test apps/desktop/src/preview/Manager.test.ts apps/web/src/components/preview/previewAutomationOpenReadiness.test.ts` passes (23 tests).
+- `vp check` passes with pre-existing repository warnings only.
+- `vp run typecheck` passes with pre-existing repository suggestions only.
+
+**Last updated:** 2026-07-15
