@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeFS from "node:fs";
 import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -11,6 +13,8 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
+
+const resolveNativePath = (filePath: string) => NodeFS.realpathSync.native(filePath);
 
 const ProjectLayer = WorkspaceFileSystem.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
@@ -104,8 +108,8 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const error = yield* workspaceFileSystem
           .readFile({ cwd, relativePath: "linked-secret.txt" })
           .pipe(Effect.flip);
-        const resolvedWorkspaceRoot = yield* fileSystem.realPath(cwd);
-        const resolvedPath = yield* fileSystem.realPath(path.join(outsideDir, "secret.txt"));
+        const resolvedWorkspaceRoot = resolveNativePath(cwd);
+        const resolvedPath = resolveNativePath(path.join(outsideDir, "secret.txt"));
 
         expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
         expect(error).toMatchObject({
@@ -129,7 +133,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const error = yield* workspaceFileSystem
           .readFile({ cwd, relativePath: "src" })
           .pipe(Effect.flip);
-        const resolvedPath = yield* fileSystem.realPath(path.join(cwd, "src"));
+        const resolvedPath = resolveNativePath(path.join(cwd, "src"));
 
         expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathNotFileError);
         expect(error).toMatchObject({
@@ -153,7 +157,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const error = yield* workspaceFileSystem
           .readFile({ cwd, relativePath: "asset.bin" })
           .pipe(Effect.flip);
-        const resolvedPath = yield* fileSystem.realPath(absolutePath);
+        const resolvedPath = resolveNativePath(absolutePath);
 
         expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceBinaryFileError);
         expect(error).toMatchObject({

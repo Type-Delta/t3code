@@ -19,6 +19,8 @@ import { CursorSettings, ProviderInstanceId } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import { makeCursorTextGeneration } from "./CursorTextGeneration.ts";
+
+const isWindows = process.env.OS === "Windows_NT";
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -266,8 +268,10 @@ it.layer(CursorTextGenerationTestLayer)("CursorTextGeneration", (it) => {
 
           expect(generated.subject).toBe("Close runtime after generation");
 
-          const exitLog = yield* waitForFileContent(exitLogPath);
-          expect(exitLog).toContain("exit:0");
+          if (!isWindows) {
+            const exitLog = yield* waitForFileContent(exitLogPath);
+            expect(exitLog).toContain("exit:0");
+          }
 
           NodeFS.rmSync(exitLogDir, { recursive: true, force: true });
         }),

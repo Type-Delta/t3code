@@ -112,8 +112,13 @@ export const createOxlintRuleHarness = (
     );
     yield* fs.writeFileString(sourcePath, source);
 
+    const shell = process.env.OS === "Windows_NT";
+    const command = shell ? `${oxlintBin}.cmd` : oxlintBin;
     const output = yield* spawnAndCollectOutput(
-      ChildProcess.make(oxlintBin, ["--config", configPath, sourcePath], { cwd: repoRoot }),
+      ChildProcess.make(command, ["--config", configPath, sourcePath], {
+        cwd: repoRoot,
+        shell,
+      }),
     );
 
     if (output.exitCode !== 0) {

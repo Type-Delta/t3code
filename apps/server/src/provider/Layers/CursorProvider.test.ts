@@ -32,6 +32,8 @@ const runNode = <A, E>(
   >,
 ): Promise<A> => Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
 
+const isWindows = process.env.OS === "Windows_NT";
+
 const resolveMockAgentPath = Effect.fn("resolveMockAgentPath")(function* () {
   const path = yield* Path.Path;
   return yield* path.fromFileUrl(new URL("../../../scripts/acp-mock-agent.ts", import.meta.url));
@@ -508,6 +510,7 @@ describe("discoverCursorModelsViaAcp", () => {
       }),
     );
 
+    if (isWindows) return;
     const exitLog = await runNode(waitForFileContent(exitLogPath));
     expect(exitLog).toContain("SIGTERM");
   });

@@ -145,3 +145,50 @@ automation execution failure instead of a successful loaded status.
 - `vp run typecheck` passes with pre-existing repository suggestions only.
 
 **Last updated:** 2026-07-15
+
+### DL005 - Run cross-platform CLI fixtures and assertions on Windows
+
+The shared spawn resolver now reads a fixture's shebang instead of relying on its extension. On Windows, shell-backed fixtures are launched through Git for Windows `sh.exe`, while Node-backed fixtures are launched with the current Node executable. This keeps the Cursor and Grok ACP adapter, provider-discovery, and text-generation tests active rather than skipping them. Windows process termination is validated by awaiting the child shutdown; POSIX-only `SIGTERM` handler assertions remain conditional.
+
+Windows test expectations now use the host path semantics where appropriate, including command shims, temporary directories, Git's long-path canonicalization, and cloudflared's `.exe` filename. The orchestration ingestion suite uses a 20-second polling deadline on Windows (2 seconds elsewhere) to accommodate slower filesystem and scheduler behavior. POSIX-only FIFO and long-filename behavior are skipped only on Windows.
+
+Checkpoint file-content assertions normalize Git's Windows CRLF checkout conversion. Git for Windows 2.54 canonicalizes worktree paths differently from Node's non-native realpath (including 8.3 names and casing), so GitManager now uses native realpath and case-folds Windows paths before comparing worktrees. This prevents the main checkout from being mistaken for a separate PR worktree. Git PR-selector tests that create and push temporary repositories use a 60-second Windows-only deadline to accommodate slower Windows filesystem and Git process startup.
+
+**Files modified:**
+
+- `apps/server/src/provider/Layers/CursorAdapter.test.ts`
+- `apps/server/src/provider/Layers/CursorProvider.test.ts`
+- `apps/server/src/provider/Layers/GrokAdapter.test.ts`
+- `apps/server/src/provider/Layers/GrokProvider.test.ts`
+- `apps/server/src/textGeneration/CursorTextGeneration.test.ts`
+- `apps/server/src/textGeneration/GrokTextGeneration.test.ts`
+- `packages/shared/src/shell.ts`
+- `packages/shared/src/relayClient.test.ts`
+- `packages/shared/src/logging.test.ts`
+- `packages/tailscale/src/tailscale.test.ts`
+- `apps/server/src/bootstrap.test.ts`
+- `apps/server/src/cli/config.test.ts`
+- `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`
+- `apps/server/src/orchestration/Layers/CheckpointReactor.test.ts`
+- `apps/server/src/git/GitManager.test.ts`
+- `apps/server/src/git/GitManager.ts`
+- `apps/server/src/project/ProjectFaviconResolver.test.ts`
+- `apps/server/src/project/RepositoryIdentityResolver.test.ts`
+- `apps/server/src/sourceControl/SourceControlRepositoryService.test.ts`
+- `apps/server/src/workspace/WorkspaceFileSystem.test.ts`
+- `apps/desktop/src/app/DesktopAppIdentity.test.ts`
+- `apps/desktop/src/app/DesktopConnectionCatalogStore.test.ts`
+- `apps/desktop/src/app/DesktopEnvironment.test.ts`
+- `apps/desktop/src/settings/DesktopSavedEnvironments.test.ts`
+- `oxlint-plugin-t3code/test/utils.ts`
+
+**Validation:**
+
+- `vp check` passes with 22 existing warnings.
+- `vp run typecheck` passes with existing repository suggestions only.
+- Targeted Cursor and Grok ACP test slices pass (101 tests).
+- `ProviderRuntimeIngestion.test.ts` passes on Windows (39 tests).
+- `CheckpointReactor.test.ts` passes on Windows (13 tests); the Windows Git PR-selector slice passes with its Windows-only timeout allowance.
+- Windows-specific desktop, bootstrap, relay-client, workspace, Tailscale, and oxlint test slices pass.
+
+**Last updated:** 2026-07-15

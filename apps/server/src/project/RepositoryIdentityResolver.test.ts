@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeFS from "node:fs";
 import { expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -11,7 +13,8 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 
 const normalizePathSeparators = (value: string) => value.replaceAll("\\", "/");
-const normalizeResolvedPath = (value: string) => normalizePathSeparators(value);
+const normalizeResolvedPath = (value: string) =>
+  normalizePathSeparators(NodeFS.realpathSync.native(value));
 
 const git = (cwd: string, args: ReadonlyArray<string>) =>
   Effect.gen(function* () {

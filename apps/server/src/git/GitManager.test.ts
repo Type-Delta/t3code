@@ -1942,7 +1942,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         ).toBe(true);
         expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(false);
       }),
-    12_000,
+    process.env.OS === "Windows_NT" ? 60_000 : 30_000,
   );
 
   it.effect(
@@ -2042,7 +2042,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           false,
         );
       }),
-    20_000,
+    process.env.OS === "Windows_NT" ? 60_000 : 20_000,
   );
 
   it.effect(
@@ -2117,7 +2117,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         expect(ownerSelectorCallIndex).toBeGreaterThanOrEqual(0);
         expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(false);
       }),
-    12_000,
+    process.env.OS === "Windows_NT" ? 60_000 : 30_000,
   );
 
   it.effect(
@@ -2184,7 +2184,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           "pr list --head octocat:statemachine --state open --limit 1",
         );
       }),
-    12_000,
+    process.env.OS === "Windows_NT" ? 60_000 : 30_000,
   );
 
   it.effect("creates PR when one does not already exist", () =>

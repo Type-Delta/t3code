@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
 import * as Arr from "effect/Array";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
@@ -36,6 +38,7 @@ import {
   sanitizeBranchFragment,
   sanitizeFeatureBranchName,
 } from "@t3tools/shared/git";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   getChangeRequestTerminologyForKind,
   type ChangeRequestTerminology,
@@ -722,10 +725,18 @@ export const make = Effect.gen(function* () {
     );
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const hostPlatform = yield* HostProcessPlatform;
 
   const tempDir = process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? "/tmp";
   const canonicalizeExistingPath = (value: string) =>
-    fileSystem.realPath(value).pipe(Effect.orElseSucceed(() => value));
+    Effect.sync(() => {
+      try {
+        const resolved = NodeFS.realpathSync.native(value);
+        return hostPlatform === "win32" ? resolved.toLowerCase() : resolved;
+      } catch {
+        return value;
+      }
+    });
   const normalizeStatusCacheKey = canonicalizeExistingPath;
   const nonRepositoryStatusDetails = {
     isRepo: false,

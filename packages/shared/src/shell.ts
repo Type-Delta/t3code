@@ -17,6 +17,22 @@ const SHELL_ENV_NAME_PATTERN = /^[A-Z0-9_]+$/;
 const WINDOWS_PATH_DELIMITER = ";";
 const POSIX_PATH_DELIMITER = ":";
 const WINDOWS_SHELL_CANDIDATES = ["pwsh.exe", "powershell.exe"] as const;
+const GIT_FOR_WINDOWS_SH_RELATIVE_PATH = ["Git", "bin", "sh.exe"] as const;
+
+type ScriptInterpreter = "node" | "shell";
+
+function readScriptInterpreter(filePath: string): ScriptInterpreter | undefined {
+  try {
+    const shebang = NodeFS.readFileSync(filePath, "utf8").split(/\r?\n/u, 1)[0]?.slice(2).trim();
+    if (!shebang) return undefined;
+
+    if (/(?:^|\/)node(?:\s|$)/u.test(shebang)) return "node";
+    if (/(?:^|\/)(?:sh|bash|dash)(?:\s|$)/u.test(shebang)) return "shell";
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 type ExecFileSyncLike = (
   file: string,
@@ -587,6 +603,17 @@ export const resolveSpawnCommand = Effect.fn("shell.resolveSpawnCommand")(functi
   const resolveExecutable = yield* SpawnExecutableResolution;
   const resolvedCommand = resolveExecutable(command, platform, env) ?? command;
   const extension = NodePath.win32.extname(resolvedCommand).toLowerCase();
+  const scriptInterpreter = readScriptInterpreter(resolvedCommand);
+  if (scriptInterpreter === "node") {
+    return { command: process.execPath, args: [resolvedCommand, ...args], shell: false };
+  }
+  if (extension === ".sh" || scriptInterpreter === "shell") {
+    const programFiles = env.ProgramFiles?.trim() || "C:\\Program Files";
+    const gitSh = NodePath.win32.join(programFiles, ...GIT_FOR_WINDOWS_SH_RELATIVE_PATH);
+    if (NodeFS.existsSync(gitSh)) {
+      return { command: gitSh, args: [resolvedCommand, ...args], shell: false };
+    }
+  }
   if (extension !== ".cmd" && extension !== ".bat") {
     return { command: resolvedCommand, args: [...args], shell: false };
   }

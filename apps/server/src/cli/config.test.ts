@@ -1,6 +1,8 @@
 import * as NodeOS from "node:os";
 
+// @effect-diagnostics nodeBuiltinImport:off
 import { assert, expect, it } from "@effect/vitest";
+import * as NodeFS from "node:fs";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -52,8 +54,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-", suffix: ".ndjson" });
     const encoded = yield* encodeDesktopBootstrap(payload);
     yield* fs.writeFileString(filePath, `${encoded}\n`);
-    const { fd } = yield* fs.open(filePath, { flag: "r" });
-    return fd;
+    // readBootstrapEnvelope owns the direct stream fd and closes it asynchronously.
+    return NodeFS.openSync(filePath, "r");
   });
 
   it.effect("falls back to effect/config values when flags are omitted", () =>
@@ -259,13 +261,14 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
 
   it.effect("uses bootstrap envelope values as fallbacks when flags and env are absent", () =>
     Effect.gen(function* () {
-      const { join } = yield* Path.Path;
-      const baseDir = "/tmp/t3-bootstrap-home";
+      const { join, resolve } = yield* Path.Path;
+      const bootstrapHome = "/tmp/t3-bootstrap-home";
+      const baseDir = resolve(bootstrapHome);
       const fd = yield* openBootstrapFd(
         makeDesktopBootstrap({
           port: 4888,
           host: "127.0.0.2",
-          t3Home: baseDir,
+          t3Home: bootstrapHome,
           noBrowser: true,
           desktopBootstrapToken: "desktop-token",
           tailscaleServeEnabled: false,

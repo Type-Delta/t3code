@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import { EnvironmentId, type PersistedSavedEnvironmentRecord } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -403,7 +405,7 @@ describe("DesktopSavedEnvironments", () => {
       const baseDir = yield* baseFileSystem.makeTempDirectoryScoped({
         prefix: "t3-desktop-saved-environments-test-",
       });
-      const registryPath = `${baseDir}/userdata/saved-environments.json`;
+      const registryPath = NodePath.join(baseDir, "userdata", "saved-environments.json");
       const permissionError = PlatformError.systemError({
         _tag: "PermissionDenied",
         module: "FileSystem",
@@ -439,7 +441,7 @@ describe("DesktopSavedEnvironments", () => {
         _tag: "PermissionDenied",
         module: "FileSystem",
         method: "makeDirectory",
-        pathOrDescriptor: `${baseDir}/userdata`,
+        pathOrDescriptor: NodePath.join(baseDir, "userdata"),
       });
       const fileSystemLayer = Layer.succeed(
         FileSystem.FileSystem,
@@ -455,11 +457,12 @@ describe("DesktopSavedEnvironments", () => {
       const error = yield* savedEnvironments.setRegistry([savedRegistryRecord]).pipe(Effect.flip);
       assert.instanceOf(error, DesktopSavedEnvironments.DesktopSavedEnvironmentsWriteError);
       assert.equal(error.operation, "create-directory");
-      assert.equal(error.path, `${baseDir}/userdata`);
+      const userDataPath = NodePath.join(baseDir, "userdata");
+      assert.equal(error.path, userDataPath);
       assert.strictEqual(error.cause, permissionError);
       assert.equal(
         error.message,
-        `Desktop saved-environment write failed during create-directory at ${baseDir}/userdata.`,
+        `Desktop saved-environment write failed during create-directory at ${userDataPath}.`,
       );
       assert.notEqual(error.message, permissionError.message);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),

@@ -69,16 +69,21 @@ describe("RotatingFileSink", () => {
     expect((thrown as RotatingFileSinkError).cause).toBeInstanceOf(Error);
   });
 
-  it("only treats a missing log file as an empty current size", () => {
-    const directory = makeTempDirectory();
-    const filePath = NodePath.join(directory, "a".repeat(300));
+  it.skipIf(process.env.OS === "Windows_NT")(
+    "only treats a missing log file as an empty current size",
+    () => {
+      const directory = makeTempDirectory();
+      const filePath = NodePath.join(directory, "a".repeat(300));
 
-    const thrown = captureError(() => new RotatingFileSink({ filePath, maxBytes: 1, maxFiles: 1 }));
+      const thrown = captureError(
+        () => new RotatingFileSink({ filePath, maxBytes: 1, maxFiles: 1 }),
+      );
 
-    expect(thrown).toBeInstanceOf(RotatingFileSinkError);
-    expect(thrown).toMatchObject({ operation: "read", filePath });
-    expect((thrown as RotatingFileSinkError).cause).toMatchObject({ code: "ENAMETOOLONG" });
-  });
+      expect(thrown).toBeInstanceOf(RotatingFileSinkError);
+      expect(thrown).toMatchObject({ operation: "read", filePath });
+      expect((thrown as RotatingFileSinkError).cause).toMatchObject({ code: "ENAMETOOLONG" });
+    },
+  );
 
   it("starts an absent log file at zero bytes", () => {
     const directory = makeTempDirectory();

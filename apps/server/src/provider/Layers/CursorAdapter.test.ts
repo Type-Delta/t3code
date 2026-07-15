@@ -29,6 +29,8 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { makeCursorAdapter } from "./CursorAdapter.ts";
+
+const isWindows = process.env.OS === "Windows_NT";
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* CursorAdapter`.
@@ -353,6 +355,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
 
       yield* adapter.stopSession(threadId);
 
+      if (isWindows) return;
       const exitLog = yield* Effect.promise(() => waitForFileContent(exitLogPath));
       assert.include(exitLog, "SIGTERM");
     }),
@@ -405,6 +408,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
 
         yield* adapter.stopSession(threadId);
 
+        if (isWindows) return;
         const exitLog = yield* Effect.promise(() => waitForFileContent(exitLogPath));
         assert.equal(exitLog.match(/SIGTERM/g)?.length ?? 0, 2);
       }),
