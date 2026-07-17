@@ -277,3 +277,18 @@ GC, startup scavenging, retention grace periods, and diagnostics complete the ro
   ordering; its final pass reported no findings.
 
 **Last updated:** 2026-07-17
+
+### DL007 - Reduce TimelineMinimap hitbox
+
+Reduced the TimelineMinimap hitbox from w-18 to w-5 because the larger hitbox was interfering with text selection in the chat area.
+The minimap behavior remains unchanged.
+
+**Files modified:**
+
+- `apps/web/src/components/chat/MessagesTimeline.tsx`
+
+**Validation:**
+
+- (none; style change only)
+
+**Last updated:** 2026-07-17
