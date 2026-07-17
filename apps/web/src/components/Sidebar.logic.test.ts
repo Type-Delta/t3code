@@ -14,7 +14,10 @@ import {
   resolveProjectStatusIndicator,
   resolveSidebarNewThreadSeedContext,
   resolveSidebarNewThreadEnvMode,
+  resolveSidebarSplitViewThreadState,
   resolveSidebarStageBadgeLabel,
+  resolveSidebarThreadNavigation,
+  resolveSplitViewDetachNavigationTarget,
   resolveThreadRowClassName,
   resolveThreadStatusPill,
   shouldClearThreadSelectionOnMouseDown,
@@ -238,6 +241,79 @@ describe("isTrailingDoubleClick", () => {
 
   it("ignores further clicks of a triple-click", () => {
     expect(isTrailingDoubleClick(3)).toBe(true);
+  });
+});
+
+describe("split-view sidebar logic", () => {
+  it("distinguishes displayed panes from the active pane", () => {
+    expect(
+      resolveSidebarSplitViewThreadState({
+        isSplitViewActive: true,
+        paneThreadKeys: ["thread-a", "thread-b"],
+        activeThreadKey: "thread-b",
+        threadKey: "thread-a",
+      }),
+    ).toEqual({ isDisplayedPane: true, isActivePane: false });
+    expect(
+      resolveSidebarSplitViewThreadState({
+        isSplitViewActive: true,
+        paneThreadKeys: ["thread-a", "thread-b"],
+        activeThreadKey: "thread-b",
+        threadKey: "thread-b",
+      }),
+    ).toEqual({ isDisplayedPane: true, isActivePane: true });
+  });
+
+  it("only treats panes as displayed while split view is active", () => {
+    expect(
+      resolveSidebarSplitViewThreadState({
+        isSplitViewActive: false,
+        paneThreadKeys: ["thread-a"],
+        activeThreadKey: "thread-a",
+        threadKey: "thread-a",
+      }),
+    ).toEqual({ isDisplayedPane: false, isActivePane: false });
+  });
+
+  it("replace-navigates when activating a displayed pane and otherwise exits split view", () => {
+    expect(
+      resolveSidebarThreadNavigation({
+        isSplitViewActive: true,
+        paneThreadKeys: ["thread-a", "thread-b"],
+        threadKey: "thread-b",
+      }),
+    ).toEqual({ activatePane: true, clearSplit: false, replace: true });
+    expect(
+      resolveSidebarThreadNavigation({
+        isSplitViewActive: true,
+        paneThreadKeys: ["thread-a", "thread-b"],
+        threadKey: "thread-c",
+      }),
+    ).toEqual({ activatePane: false, clearSplit: true, replace: false });
+  });
+
+  it("navigates from an active detached pane to the store fallback", () => {
+    expect(
+      resolveSplitViewDetachNavigationTarget({
+        wasActive: true,
+        detachFallback: "thread-a",
+        activePane: "thread-b",
+      }),
+    ).toBe("thread-a");
+    expect(
+      resolveSplitViewDetachNavigationTarget({
+        wasActive: true,
+        detachFallback: null,
+        activePane: "thread-b",
+      }),
+    ).toBe("thread-b");
+    expect(
+      resolveSplitViewDetachNavigationTarget({
+        wasActive: false,
+        detachFallback: "thread-a",
+        activePane: "thread-b",
+      }),
+    ).toBeNull();
   });
 });
 
@@ -688,6 +764,26 @@ describe("resolveThreadRowClassName", () => {
     const className = resolveThreadRowClassName({ isActive: true, isSelected: false });
     expect(className).toContain("bg-accent/85");
     expect(className).toContain("hover:bg-accent");
+  });
+
+  it("uses a subdued accent palette for a non-active split pane", () => {
+    const className = resolveThreadRowClassName({
+      isActive: false,
+      isSelected: false,
+      isSplitPane: true,
+    });
+    expect(className).toContain("bg-accent/50");
+    expect(className).not.toContain("bg-accent/85");
+  });
+
+  it("keeps bulk selection styling ahead of split-pane styling", () => {
+    const className = resolveThreadRowClassName({
+      isActive: false,
+      isSelected: true,
+      isSplitPane: true,
+    });
+    expect(className).toContain("bg-primary/15");
+    expect(className).not.toContain("bg-accent/50");
   });
 });
 

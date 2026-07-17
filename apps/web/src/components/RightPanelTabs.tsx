@@ -29,6 +29,10 @@ interface RightPanelTabsProps {
   mode: PreviewPanelMode;
   maximized?: boolean;
   layoutControls?: ReactNode;
+  sourceThread: {
+    key: string;
+    title: string;
+  };
   surfaces: readonly RightPanelSurface[];
   activeSurfaceId: string | null;
   pendingSurfaceIds: ReadonlySet<string>;
@@ -380,6 +384,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                 <div
                   key={surface.id}
                   data-active-tab={active}
+                  data-source-thread-key={props.sourceThread.key}
                   onMouseDown={handleTabMouseDown}
                   onAuxClick={(event) => handleTabAuxClick(event, surface)}
                   onContextMenu={(event) => void handleTabContextMenu(event, surface)}
@@ -396,6 +401,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                         <button
                           type="button"
                           className="flex min-w-0 flex-1 items-center gap-1.5"
+                          aria-label={`${title}. Thread: ${props.sourceThread.title}`}
                           onClick={() => props.onActivate(surface)}
                         >
                           <SurfaceIcon
@@ -407,7 +413,12 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                         </button>
                       }
                     />
-                    <TooltipPopup>{title}</TooltipPopup>
+                    <TooltipPopup className="flex flex-col gap-0.5">
+                      <span>{title}</span>
+                      <span className="text-muted-foreground">
+                        Thread: {props.sourceThread.title}
+                      </span>
+                    </TooltipPopup>
                   </Tooltip>
                   <button
                     type="button"

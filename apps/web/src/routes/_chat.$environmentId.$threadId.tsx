@@ -6,6 +6,8 @@ import { threadHasStarted } from "../components/ChatView.logic";
 import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
 import { resolveThreadRouteRef } from "../threadRoutes";
 import { SidebarInset } from "~/components/ui/sidebar";
+import { SplitThreadWorkspace } from "../components/SplitThreadWorkspace";
+import { selectIsSplitViewActive, useSplitViewStore } from "../splitViewStore";
 import { useEnvironmentThreadRefs, useThreadDetail, useThreadShell } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
@@ -15,6 +17,7 @@ function ChatThreadRouteView() {
   const threadRef = Route.useParams({
     select: (params) => resolveThreadRouteRef(params),
   });
+  const splitViewActive = useSplitViewStore(selectIsSplitViewActive);
   const shell = useEnvironmentQuery(
     threadRef === null ? null : environmentShell.stateAtom(threadRef.environmentId),
   );
@@ -59,6 +62,10 @@ function ChatThreadRouteView() {
 
   if (!threadRef || !bootstrapComplete || !routeThreadExists) {
     return null;
+  }
+
+  if (splitViewActive) {
+    return <SplitThreadWorkspace currentRouteRef={threadRef} />;
   }
 
   return (

@@ -2,6 +2,7 @@ import {
   parseScopedThreadKey,
   scopeProjectRef,
   scopeThreadRef,
+  scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
@@ -19,7 +20,9 @@ import { vcsEnvironment } from "../state/vcs";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
 import { readLocalApi } from "../localApi";
+import { useRightPanelStore } from "../rightPanelStore";
 import { readEnvironmentThreadRefs, readProject, readThreadShell } from "../state/entities";
+import { selectActiveSplitPane, useSplitViewStore } from "../splitViewStore";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
@@ -115,6 +118,7 @@ export function useThreadActions() {
       if (archiveResult._tag === "Failure") {
         return archiveResult;
       }
+      useSplitViewStore.getState().removeThread(threadRef);
 
       if (shouldNavigateToDraft) {
         const navigationResult = await settlePromise(() =>
@@ -158,6 +162,8 @@ export function useThreadActions() {
         });
         if (result._tag === "Success") {
           refreshArchivedThreadsForEnvironment(target.environmentId);
+          useSplitViewStore.getState().removeThread(target);
+          useRightPanelStore.getState().removeThread(target);
         }
         return result;
       }
@@ -227,6 +233,8 @@ export function useThreadActions() {
       const shouldNavigateToFallback =
         currentRouteThreadRef?.threadId === threadRef.threadId &&
         currentRouteThreadRef.environmentId === threadRef.environmentId;
+      const wasActiveSplitPane =
+        useSplitViewStore.getState().activeThreadKey === scopedThreadKey(threadRef);
       const fallbackThreadId = getFallbackThreadIdAfterDelete({
         threads,
         deletedThreadId: threadRef.threadId,
@@ -247,32 +255,31 @@ export function useThreadActions() {
         threadRef,
       );
       clearTerminalUiState(threadRef);
+      const splitFallback = useSplitViewStore.getState().removeThread(threadRef);
+      const activeSplitFallback = selectActiveSplitPane(useSplitViewStore.getState());
+      useRightPanelStore.getState().removeThread(threadRef);
 
       if (shouldNavigateToFallback) {
-        if (fallbackThreadId) {
-          const fallbackThread = readThreadShell(
-            scopeThreadRef(threadRef.environmentId, fallbackThreadId),
+        const preferredFallback = wasActiveSplitPane
+          ? (splitFallback ?? activeSplitFallback)
+          : null;
+        const fallbackThread =
+          (preferredFallback && readThreadShell(preferredFallback)) ??
+          (fallbackThreadId
+            ? readThreadShell(scopeThreadRef(threadRef.environmentId, fallbackThreadId))
+            : null);
+        if (fallbackThread) {
+          const navigationResult = await settlePromise(() =>
+            router.navigate({
+              to: "/$environmentId/$threadId",
+              params: buildThreadRouteParams(
+                scopeThreadRef(fallbackThread.environmentId, fallbackThread.id),
+              ),
+              replace: true,
+            }),
           );
-          if (fallbackThread) {
-            const navigationResult = await settlePromise(() =>
-              router.navigate({
-                to: "/$environmentId/$threadId",
-                params: buildThreadRouteParams(
-                  scopeThreadRef(fallbackThread.environmentId, fallbackThread.id),
-                ),
-                replace: true,
-              }),
-            );
-            if (navigationResult._tag === "Failure") {
-              return navigationResult;
-            }
-          } else {
-            const navigationResult = await settlePromise(() =>
-              router.navigate({ to: "/", replace: true }),
-            );
-            if (navigationResult._tag === "Failure") {
-              return navigationResult;
-            }
+          if (navigationResult._tag === "Failure") {
+            return navigationResult;
           }
         } else {
           const navigationResult = await settlePromise(() =>

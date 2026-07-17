@@ -1,3 +1,4 @@
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import ChatView from "../components/ChatView";
@@ -8,6 +9,8 @@ import {
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { SidebarInset } from "../components/ui/sidebar";
+import { SplitThreadWorkspace } from "../components/SplitThreadWorkspace";
+import { selectIsSplitViewActive, useSplitViewStore } from "../splitViewStore";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useThread, useThreadRefs } from "../state/entities";
 
@@ -15,7 +18,11 @@ function DraftChatThreadRouteView() {
   const navigate = useNavigate();
   const { draftId: rawDraftId } = Route.useParams();
   const draftId = DraftId.make(rawDraftId);
+  const splitViewActive = useSplitViewStore(selectIsSplitViewActive);
   const draftSession = useComposerDraftStore((store) => store.getDraftSession(draftId));
+  const draftThreadRef = draftSession
+    ? scopeThreadRef(draftSession.environmentId, draftSession.threadId)
+    : null;
   const threadRefs = useThreadRefs();
   const inferredThreadRef = draftSession
     ? (threadRefs.find(
@@ -54,7 +61,7 @@ function DraftChatThreadRouteView() {
     void navigate({ to: "/", replace: true });
   }, [canonicalThreadRef, draftSession, navigate]);
 
-  if (canonicalThreadRef) {
+  if (canonicalThreadRef && !splitViewActive) {
     return (
       <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
         <ChatView
@@ -68,6 +75,16 @@ function DraftChatThreadRouteView() {
 
   if (!draftSession) {
     return null;
+  }
+
+  if (splitViewActive) {
+    return (
+      <SplitThreadWorkspace
+        currentRouteRef={
+          canonicalThreadRef ?? serverThreadRef ?? inferredThreadRef ?? draftThreadRef
+        }
+      />
+    );
   }
 
   return (

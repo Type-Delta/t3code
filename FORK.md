@@ -292,3 +292,45 @@ The minimap behavior remains unchanged.
 - (none; style change only)
 
 **Last updated:** 2026-07-17
+
+### DL008 — Add multi-thread split view
+
+Threads can now be opened from the sidebar context menu in a split workspace with up to four simultaneously visible panes. The split uses an equal CSS grid without an additional layout dependency: two, three, and four panes stay in one full-height row with explicit two-, three-, and four-column classes and one-pixel vertical gaps; the active pane keeps its focus outline. Pane additions, removals, and column changes animate visually through AutoAnimate (180ms ease-out) on the pane grid. The animation controller is destroyed when the workspace unmounts, while store mutations, routing, pane cleanup, focus, and portal behavior remain synchronous. Clicking or focusing a pane makes it active, updates the canonical thread URL without adding browser-history noise, and moves the shared top toolbar to that thread. Normal navigation to a thread outside the displayed set exits split view.
+
+The right panel remains outside the pane grid and follows the active thread while retaining each thread's existing panel surfaces independently. Right-panel tab tooltips and accessible labels identify the source thread. The sidebar highlights every displayed thread, gives the active pane stronger emphasis, keeps split threads visible through collapsed or truncated project lists, and offers **Detach from split view** without deleting the thread or clearing its composer, terminal, preview, or panel state.
+
+Split membership is intentionally transient and separate from sidebar bulk selection. Draft promotion, new-draft navigation, archive, deletion, and stale-thread reconciliation update or exit the workspace safely. Global keyboard, preview-action, and composer-handle ownership is limited to the active pane so mounting several chat views does not duplicate app-wide behavior.
+
+**Files modified:**
+
+- `apps/web/src/splitViewStore.ts`
+- `apps/web/src/splitViewStore.test.ts`
+- `apps/web/src/components/SplitThreadWorkspace.tsx`
+- `apps/web/src/components/SplitThreadWorkspace.test.tsx`
+- `apps/web/src/components/ChatView.tsx`
+- `apps/web/src/components/Sidebar.tsx`
+- `apps/web/src/components/Sidebar.logic.ts`
+- `apps/web/src/components/Sidebar.logic.test.ts`
+- `apps/web/src/components/RightPanelTabs.tsx`
+- `apps/web/src/components/RightPanelTabs.test.tsx`
+- `apps/web/src/composerHandleContext.ts`
+- `apps/web/src/hooks/useThreadActions.ts`
+- `apps/web/src/routes/_chat.$environmentId.$threadId.tsx`
+- `apps/web/src/routes/_chat.draft.$draftId.tsx`
+
+**Validation:**
+
+- `pnpm --filter @t3tools/web test` passes: 151 files and 1,307 tests.
+- `pnpm --filter @t3tools/web typecheck` passes.
+- `vp test apps/web/src/components/SplitThreadWorkspace.test.tsx` passes (1 test).
+- `vp check` passes with 23 existing warnings and no errors.
+- `git diff --check` passes.
+- Electron runtime verification confirms native context-menu opening and detaching, full-height two-column rendering, active-pane URL and toolbar-title changes, sidebar highlighting, and a single right panel outside the grid with source-thread tab attribution.
+- Runtime DOM observation confirms one full-height grid row and running 180ms animations for direct-child insertion and removal.
+- Store tests cover scoped identity, activation, deterministic detach fallback, reconciliation, the four-pane cap, and rejection of a fifth pane.
+
+**Change Log:**
+
+- **2026-07-17** — Changed three- and four-pane layouts from a 2×2 grid to full-height vertical columns, added pane transition animation with unmount cleanup, and closed pane-owned pull-request dialogs when their pane becomes inactive.
+
+**Last updated:** 2026-07-17

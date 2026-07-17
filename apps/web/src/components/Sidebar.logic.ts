@@ -177,6 +177,58 @@ export function isTrailingDoubleClick(detail: number): boolean {
   return detail > 1;
 }
 
+export function resolveSidebarSplitViewThreadState(input: {
+  isSplitViewActive: boolean;
+  paneThreadKeys: readonly string[];
+  activeThreadKey: string | null;
+  threadKey: string;
+}): {
+  isDisplayedPane: boolean;
+  isActivePane: boolean;
+} {
+  const isDisplayedPane = input.isSplitViewActive && input.paneThreadKeys.includes(input.threadKey);
+  return {
+    isDisplayedPane,
+    isActivePane: isDisplayedPane && input.activeThreadKey === input.threadKey,
+  };
+}
+
+export function resolveSidebarThreadNavigation(input: {
+  isSplitViewActive: boolean;
+  paneThreadKeys: readonly string[];
+  threadKey: string;
+}): {
+  activatePane: boolean;
+  clearSplit: boolean;
+  replace: boolean;
+} {
+  const isDisplayedPane = input.isSplitViewActive && input.paneThreadKeys.includes(input.threadKey);
+  if (isDisplayedPane) {
+    return {
+      activatePane: true,
+      clearSplit: false,
+      replace: true,
+    };
+  }
+
+  return {
+    activatePane: false,
+    clearSplit: input.isSplitViewActive,
+    replace: false,
+  };
+}
+
+export function resolveSplitViewDetachNavigationTarget<TThreadRef>(input: {
+  wasActive: boolean;
+  detachFallback: TThreadRef | null;
+  activePane: TThreadRef | null;
+}): TThreadRef | null {
+  if (!input.wasActive) {
+    return null;
+  }
+  return input.detachFallback ?? input.activePane;
+}
+
 export function resolveSidebarNewThreadEnvMode(input: {
   requestedEnvMode?: SidebarNewThreadEnvMode;
   defaultEnvMode: SidebarNewThreadEnvMode;
@@ -329,6 +381,7 @@ export function isContextMenuPointerDown(input: {
 export function resolveThreadRowClassName(input: {
   isActive: boolean;
   isSelected: boolean;
+  isSplitPane?: boolean;
 }): string {
   const baseClassName =
     "h-6 w-full translate-x-0 cursor-pointer justify-start px-2 text-left select-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring sm:h-7";
@@ -351,6 +404,13 @@ export function resolveThreadRowClassName(input: {
     return cn(
       baseClassName,
       "bg-accent/85 text-foreground font-medium hover:bg-accent hover:text-foreground dark:bg-accent/55 dark:hover:bg-accent/70",
+    );
+  }
+
+  if (input.isSplitPane) {
+    return cn(
+      baseClassName,
+      "bg-accent/50 text-foreground hover:bg-accent/65 hover:text-foreground dark:bg-accent/35 dark:hover:bg-accent/50",
     );
   }
 
