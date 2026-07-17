@@ -23,7 +23,7 @@ Document changes that diverge from the main t3code repository. Each entry follow
 **Last updated:** <YYYY-MM-DD>
 ```
 
-If changes were later introduced to any entry, the entry should be updated and includes a brief summary of the change.
+If changes were later introduced to any entry, the entry should be updated (body, files modified, validation and last updated should reflect current state of change and not the original state when the entry was created) and includes a brief summary of the change in the change log.
 Change log can be omitted if the entry has not been updated since its creation.
 
 ### DL001 — Fix Claude Code authentication and session startup on Windows
@@ -116,7 +116,11 @@ Both start full in the foreground color (white in the dark theme) and turn yello
 - Typecheck and lint pass for contracts, server, and web.
 - Pre-existing `ProviderRegistry.test.ts` failure ("re-probes when settings change the codex binaryPath") is unrelated; it fails identically without these changes.
 
-**Last updated:** 2026-07-15
+**Change Log:**
+
+- **2026-07-17** — Replaced chat title-bar ring tooltips with `ContextWindowMeter`-style popovers showing remaining percentage, quota bar, and reset time. Settings-page tooltips remain unchanged.
+
+**Last updated:** 2026-07-17
 
 ### DL004 — Recover collaborative preview automation and verify navigation failures
 
