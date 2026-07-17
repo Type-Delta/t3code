@@ -49,6 +49,7 @@ import {
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { VcsDriverRegistry } from "../../vcs/VcsDriverRegistry.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
@@ -209,6 +210,7 @@ const make = Effect.gen(function* () {
   const checkpointNavigationOperations = yield* CheckpointNavigationRepository;
   const checkpointIdentities = yield* CheckpointRepositoryIdentityResolver;
   const mutationCoordinator = yield* WorkspaceMutationCoordinator;
+  const vcsRegistry = yield* VcsDriverRegistry;
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -793,7 +795,36 @@ const make = Effect.gen(function* () {
       projects: project ? [project] : [],
     });
     if (!cwd) return false;
-    const identity = yield* checkpointIdentities.resolve(cwd);
+    const gitRepository = yield* vcsRegistry.detect({ cwd, requestedKind: "git" }).pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+        return Effect.logWarning(
+          "checkpoint repository detection failed; provider turn will continue",
+          {
+            threadId,
+            cwd,
+            cause: Cause.pretty(cause),
+          },
+        ).pipe(Effect.as(null));
+      }),
+    );
+    if (!gitRepository) return false;
+    const identityOption = yield* checkpointIdentities.resolve(cwd).pipe(
+      Effect.map(Option.some),
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+        return Effect.logWarning(
+          "checkpoint identity resolution failed; provider turn will continue",
+          {
+            threadId,
+            cwd,
+            cause: Cause.pretty(cause),
+          },
+        ).pipe(Effect.as(Option.none()));
+      }),
+    );
+    if (Option.isNone(identityOption)) return false;
+    const identity = identityOption.value;
     let prepared = yield* mutationCoordinator.prepareProviderMutation(
       threadId,
       identity.worktreeKey,

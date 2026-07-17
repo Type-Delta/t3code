@@ -21,6 +21,7 @@ import {
   ProjectId,
   ThreadId,
   TurnId,
+  VcsProcessExitError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -72,11 +73,20 @@ import {
   type WorkspaceMutationCoordinatorShape,
 } from "../../checkpointing/WorkspaceMutationCoordinator.ts";
 import { CheckpointNavigationRepository } from "../../persistence/Services/CheckpointNavigation.ts";
+import { VcsDriverRegistry } from "../../vcs/VcsDriverRegistry.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+const checkpointVcsError = (operation: string) =>
+  new VcsProcessExitError({
+    operation,
+    command: "git rev-parse",
+    cwd: "/tmp/provider-project",
+    exitCode: 128,
+    detail: "checkpoint VCS failure",
+  });
 
 const deriveServerPathsSync = (baseDir: string, devUrl: URL | undefined) =>
   Effect.runSync(deriveServerPaths(baseDir, devUrl).pipe(Effect.provide(NodeServices.layer)));
@@ -163,6 +173,9 @@ describe("ProviderCommandReactor", () => {
     readonly abandonForwardHistory?: boolean;
     readonly unresolvedNavigation?: boolean;
     readonly autoCompleteTurns?: boolean;
+    readonly gitManaged?: boolean;
+    readonly vcsDetectionFailure?: boolean;
+    readonly checkpointIdentityFailure?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -318,6 +331,17 @@ describe("ProviderCommandReactor", () => {
           : {}),
       },
     ];
+    const resolveCheckpointIdentity = vi.fn((cwd: string) =>
+      input?.checkpointIdentityFailure === true
+        ? Effect.fail(checkpointVcsError("CheckpointRepositoryIdentity.worktree"))
+        : Effect.succeed({
+            repositoryKey: "provider-command-repository",
+            worktreeKey: `provider-command-worktree:${cwd}`,
+            commonDir: cwd,
+            worktreeRoot: cwd,
+            objectFormat: "sha1" as const,
+          }),
+    );
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
@@ -419,14 +443,15 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(
         Layer.succeed(CheckpointRepositoryIdentityResolver, {
-          resolve: (cwd) =>
-            Effect.succeed({
-              repositoryKey: "provider-command-repository",
-              worktreeKey: `provider-command-worktree:${cwd}`,
-              commonDir: cwd,
-              worktreeRoot: cwd,
-              objectFormat: "sha1",
-            }),
+          resolve: resolveCheckpointIdentity,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.mock(VcsDriverRegistry)({
+          detect: () =>
+            input?.vcsDetectionFailure === true
+              ? Effect.fail(checkpointVcsError("GitVcsDriver.detectRepository"))
+              : Effect.succeed(input?.gitManaged === false ? null : ({ kind: "git" } as never)),
         }),
       ),
       Layer.provideMerge(WorkspaceMutationCoordinatorLive),
@@ -490,6 +515,7 @@ describe("ProviderCommandReactor", () => {
       stateDir,
       drain,
       mutationCoordinator,
+      resolveCheckpointIdentity,
     };
   }
 
@@ -567,6 +593,59 @@ describe("ProviderCommandReactor", () => {
     await Effect.runPromise(Deferred.succeed(releaseRestore, undefined));
     expect(Exit.isSuccess(await Effect.runPromise(Fiber.await(restoreFiber)))).toBe(true);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+  });
+
+  it("starts provider turns without checkpointing outside a Git worktree", async () => {
+    const harness = await createHarness({ gitManaged: false });
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-non-git"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-non-git"),
+        role: "user",
+        text: "start outside git",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.resolveCheckpointIdentity).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "VCS detection fails",
+      options: { vcsDetectionFailure: true },
+      expectedIdentityCalls: 0,
+    },
+    {
+      label: "checkpoint identity resolution fails",
+      options: { checkpointIdentityFailure: true },
+      expectedIdentityCalls: 1,
+    },
+  ])("starts provider turns when $label", async ({ options, expectedIdentityCalls }) => {
+    const harness = await createHarness(options);
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-checkpoint-failure"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-checkpoint-failure"),
+        role: "user",
+        text: "continue without checkpointing",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.resolveCheckpointIdentity).toHaveBeenCalledTimes(expectedIdentityCalls);
   });
 
   it("waits briefly for the previous provider mutation to release", async () => {

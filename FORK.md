@@ -206,6 +206,9 @@ paths and sanitized environments, never write objects, refs, indexes, reflogs, o
 project repository, and serialize maintenance against capture/import/restore operations. Capture
 and atomic restore cover tracked and untracked non-ignored files, deletions, binaries, executable
 bits, linked worktrees, symlinks, Windows path canonicalization, and `core.symlinks=false` checkouts.
+Provider turn dispatch first performs non-throwing VCS detection: workspaces outside a Git worktree
+skip checkpoint identity and mutation setup, while detection or identity failures disable
+checkpointing for that turn without blocking the conversation.
 
 Rollback-only and unsupported providers expose an explicit filesystem-only fallback for `/undo` and
 message rewind. The client first confirms that workspace files will be restored while chat history
@@ -261,6 +264,8 @@ GC, startup scavenging, retention grace periods, and diagnostics complete the ro
 - The exact-turn workspace-mutation regression matrix passes 3 files and 58 tests, including
   restore/turn worker deadlock, stale terminal ownership, terminal-before-bind, interruption cleanup,
   and bounded prior-turn release waiting.
+- Provider command coverage verifies that a turn starts outside a Git worktree without invoking
+  checkpoint identity resolution.
 - Sidecar characterization passes 18/18, including unborn repositories, submodules, and concurrent
   linked-worktree captures.
 - Real orchestration integration passes: 11 tests, with 1 provider-capability-gated test skipped.
