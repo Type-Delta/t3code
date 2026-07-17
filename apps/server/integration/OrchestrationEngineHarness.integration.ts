@@ -29,9 +29,14 @@ import { OrchestrationEventStoreLive } from "../src/persistence/Layers/Orchestra
 import { ProjectionCheckpointRepositoryLive } from "../src/persistence/Layers/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../src/persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../src/persistence/Layers/ProviderSessionRuntime.ts";
+import { CheckpointCaptureJobRepositoryLive } from "../src/persistence/Layers/CheckpointCaptureJobs.ts";
+import { CheckpointTimelineRepositoryLive } from "../src/persistence/Layers/CheckpointTimeline.ts";
+import { CheckpointNavigationRepositoryLive } from "../src/persistence/Layers/CheckpointNavigation.ts";
+import { CheckpointRetentionRepositoryLive } from "../src/persistence/Layers/CheckpointRetention.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import { ProjectionCheckpointRepository } from "../src/persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepository } from "../src/persistence/Services/ProjectionPendingApprovals.ts";
+import { CheckpointTimelineRepository } from "../src/persistence/Services/CheckpointTimeline.ts";
 import { makeAdapterRegistryMock } from "../src/provider/testUtils/providerAdapterRegistryMock.ts";
 import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
 import { makeProviderRegistryLayer } from "../src/provider/testUtils/providerRegistryMock.ts";
@@ -46,6 +51,16 @@ import {
 import { ProviderService } from "../src/provider/Services/ProviderService.ts";
 import { AnalyticsService } from "../src/telemetry/Services/AnalyticsService.ts";
 import { CheckpointReactorLive } from "../src/orchestration/Layers/CheckpointReactor.ts";
+import { CheckpointNavigationReactorLive } from "../src/orchestration/Layers/CheckpointNavigationReactor.ts";
+import { CheckpointNavigationReactor } from "../src/orchestration/Services/CheckpointNavigationReactor.ts";
+import * as CheckpointRepositoryIdentity from "../src/checkpointing/CheckpointRepositoryIdentity.ts";
+import { WorkspaceMutationCoordinatorLive } from "../src/checkpointing/WorkspaceMutationCoordinator.ts";
+import {
+  CheckpointNavigationServiceLive,
+  CheckpointNavigationWorkspaceLive,
+} from "../src/checkpointing/CheckpointNavigationService.ts";
+import * as SidecarCheckpointRepository from "../src/checkpointing/SidecarCheckpointRepository.ts";
+import { ProviderConversationNavigationLive } from "../src/provider/Layers/ProviderConversationNavigation.ts";
 import * as RepositoryIdentityResolver from "../src/project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "../src/orchestration/Layers/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "../src/orchestration/Layers/ProjectionPipeline.ts";
@@ -181,6 +196,7 @@ export interface OrchestrationIntegrationHarness {
   readonly providerService: ProviderService["Service"];
   readonly checkpointStore: CheckpointStore.CheckpointStore["Service"];
   readonly checkpointRepository: ProjectionCheckpointRepository["Service"];
+  readonly checkpointTimelineRepository: CheckpointTimelineRepository["Service"];
   readonly pendingApprovalRepository: ProjectionPendingApprovalRepository["Service"];
   readonly waitForThread: (
     threadId: string,
@@ -296,6 +312,13 @@ export const makeOrchestrationIntegrationHarness = (
     const providerRegistryLayer = makeProviderRegistryLayer();
 
     const checkpointStoreLayer = CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer));
+    const checkpointDurableLayer = Layer.mergeAll(
+      CheckpointCaptureJobRepositoryLive,
+      CheckpointTimelineRepositoryLive,
+      CheckpointNavigationRepositoryLive,
+      CheckpointRetentionRepositoryLive,
+    );
+    const mutationCoordinatorLayer = WorkspaceMutationCoordinatorLive;
     const projectionSnapshotQueryLayer = OrchestrationProjectionSnapshotQueryLive;
     const runtimeServicesLayer = Layer.mergeAll(
       projectionSnapshotQueryLayer,
@@ -322,8 +345,31 @@ export const makeOrchestrationIntegrationHarness = (
       generateBranchName: () => Effect.succeed({ branch: "update" }),
       generateThreadTitle: () => Effect.succeed({ title: "New thread" }),
     } as unknown as TextGenerationShape);
+    const providerConversationNavigationLayer = ProviderConversationNavigationLive.pipe(
+      Layer.provideMerge(providerLayer),
+    );
+    const checkpointNavigationWorkspaceLayer = CheckpointNavigationWorkspaceLive.pipe(
+      Layer.provideMerge(checkpointStoreLayer),
+      Layer.provideMerge(SidecarCheckpointRepository.layer),
+      Layer.provideMerge(CheckpointRepositoryIdentity.layer),
+    );
+    const checkpointNavigationServiceLayer = CheckpointNavigationServiceLive.pipe(
+      Layer.provideMerge(checkpointNavigationWorkspaceLayer),
+      Layer.provideMerge(providerConversationNavigationLayer),
+      Layer.provideMerge(mutationCoordinatorLayer),
+      Layer.provideMerge(checkpointDurableLayer),
+      Layer.provideMerge(runtimeServicesLayer),
+      Layer.provideMerge(CheckpointRepositoryIdentity.layer),
+      Layer.provideMerge(checkpointStoreLayer),
+    );
+    const checkpointNavigationReactorLayer = CheckpointNavigationReactorLive.pipe(
+      Layer.provideMerge(checkpointNavigationServiceLayer),
+      Layer.provideMerge(runtimeServicesLayer),
+    );
     const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
+      Layer.provideMerge(checkpointNavigationServiceLayer),
+      Layer.provideMerge(CheckpointNavigationRepositoryLive),
       Layer.provideMerge(gitWorkflowLayer),
       Layer.provideMerge(textGenerationLayer),
       Layer.provideMerge(serverSettingsLayer),
@@ -355,6 +401,9 @@ export const makeOrchestrationIntegrationHarness = (
       ),
       Layer.provideMerge(WorkspacePaths.layer),
       Layer.provideMerge(VcsProcess.layer),
+      Layer.provideMerge(checkpointDurableLayer),
+      Layer.provideMerge(CheckpointRepositoryIdentity.layer),
+      Layer.provideMerge(mutationCoordinatorLayer),
     );
     const orchestrationReactorLayer = OrchestrationReactorLive.pipe(
       Layer.provideMerge(runtimeIngestionLayer),
@@ -376,11 +425,13 @@ export const makeOrchestrationIntegrationHarness = (
     const layer = Layer.empty.pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(orchestrationReactorLayer),
+      Layer.provideMerge(checkpointNavigationReactorLayer),
       Layer.provideMerge(providerRegistryLayer),
       Layer.provide(persistenceLayer),
       Layer.provideMerge(RepositoryIdentityResolver.layer),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
+      Layer.provideMerge(VcsProcess.layer),
       Layer.provideMerge(NodeServices.layer),
     );
 
@@ -390,6 +441,10 @@ export const makeOrchestrationIntegrationHarness = (
     ).pipe(Effect.orDie);
     const reactor = yield* tryRuntimePromise("load OrchestrationReactor service", () =>
       runtime.runPromise(Effect.service(OrchestrationReactor)),
+    ).pipe(Effect.orDie);
+    const checkpointNavigationReactor = yield* tryRuntimePromise(
+      "load CheckpointNavigationReactor service",
+      () => runtime.runPromise(Effect.service(CheckpointNavigationReactor)),
     ).pipe(Effect.orDie);
     const snapshotQuery = yield* tryRuntimePromise("load ProjectionSnapshotQuery service", () =>
       runtime.runPromise(Effect.service(ProjectionSnapshotQuery)),
@@ -404,6 +459,10 @@ export const makeOrchestrationIntegrationHarness = (
       "load ProjectionCheckpointRepository service",
       () => runtime.runPromise(Effect.service(ProjectionCheckpointRepository)),
     ).pipe(Effect.orDie);
+    const checkpointTimelineRepository = yield* tryRuntimePromise(
+      "load CheckpointTimelineRepository service",
+      () => runtime.runPromise(Effect.service(CheckpointTimelineRepository)),
+    ).pipe(Effect.orDie);
     const pendingApprovalRepository = yield* tryRuntimePromise(
       "load ProjectionPendingApprovalRepository service",
       () => runtime.runPromise(Effect.service(ProjectionPendingApprovalRepository)),
@@ -415,6 +474,9 @@ export const makeOrchestrationIntegrationHarness = (
     const scope = yield* Scope.make("sequential");
     yield* tryRuntimePromise("start OrchestrationReactor", () =>
       runtime.runPromise(reactor.start().pipe(Scope.provide(scope))),
+    ).pipe(Effect.orDie);
+    yield* tryRuntimePromise("start CheckpointNavigationReactor", () =>
+      runtime.runPromise(checkpointNavigationReactor.start().pipe(Scope.provide(scope))),
     ).pipe(Effect.orDie);
     const receiptHistory = yield* Ref.make<ReadonlyArray<OrchestrationRuntimeReceipt>>([]);
     yield* Stream.runForEach(runtimeReceiptBus.streamEventsForTest, (receipt) =>
@@ -550,6 +612,7 @@ export const makeOrchestrationIntegrationHarness = (
       providerService,
       checkpointStore,
       checkpointRepository,
+      checkpointTimelineRepository,
       pendingApprovalRepository,
       waitForThread,
       waitForDomainEvent,

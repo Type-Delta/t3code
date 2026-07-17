@@ -262,7 +262,9 @@ const make = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const writeSemaphore = yield* Semaphore.make(1);
   const cacheKey = "settings" as const;
-  const changesPubSub = yield* PubSub.unbounded<ServerSettings>();
+  // Settings are state, not transient events. Replay the latest update so a
+  // watcher starting concurrently with an atomic write cannot miss it.
+  const changesPubSub = yield* PubSub.unbounded<ServerSettings>({ replay: 1 });
   const startedRef = yield* Ref.make(false);
   const startedDeferred = yield* Deferred.make<void, ServerSettingsError>();
   const watcherScope = yield* Scope.make("sequential");

@@ -153,6 +153,17 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     );
   });
 
+  const refetchThreadDetail = Effect.fn("EnvironmentThreadState.refetchThreadDetail")(function* (
+    minimumSequence: number,
+  ) {
+    const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+    if (Option.isNone(prepared)) return;
+    const refreshed = yield* snapshotLoader.load(prepared.value, threadId);
+    if (Option.isNone(refreshed) || refreshed.value.snapshotSequence < minimumSequence) return;
+    yield* SubscriptionRef.set(lastSequence, refreshed.value.snapshotSequence);
+    yield* setThread(refreshed.value.thread);
+  });
+
   const applyItem = Effect.fn("EnvironmentThreadState.applyItem")(function* (
     item: OrchestrationThreadStreamItem,
   ) {
@@ -178,6 +189,15 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     const result = applyThreadDetailEvent(current.data.value, item.event);
     if (result.kind === "updated") {
       yield* setThread(result.thread);
+      if (
+        item.event.type === "thread.checkpoint-navigation-completed" ||
+        item.event.type === "thread.checkpoint-navigation-failed"
+      ) {
+        // Navigation changes message/checkpoint visibility atomically on the
+        // server. Refetch the detail projection instead of synthesizing that
+        // timeline from the compact completion event.
+        yield* refetchThreadDetail(item.event.sequence);
+      }
     } else if (result.kind === "deleted") {
       yield* setDeleted();
     }

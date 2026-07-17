@@ -12,6 +12,7 @@ import type {
   OrchestrationThreadActivity,
   TurnId,
 } from "@t3tools/contracts";
+import { DEFAULT_CHECKPOINT_NAVIGATION_STATE } from "@t3tools/contracts";
 
 export type ThreadDetailReducerResult =
   | { readonly kind: "updated"; readonly thread: OrchestrationThread }
@@ -442,14 +443,79 @@ export function applyThreadDetailEvent(
               ? null
               : {
                   turnId: latestCheckpoint.turnId,
-                  state: checkpointStatusToTurnState(
-                    latestCheckpoint.status as "ready" | "missing" | "error",
-                  ),
+                  state: checkpointStatusToTurnState(latestCheckpoint.status),
                   requestedAt: latestCheckpoint.completedAt,
                   startedAt: latestCheckpoint.completedAt,
                   completedAt: latestCheckpoint.completedAt,
                   assistantMessageId: latestCheckpoint.assistantMessageId ?? null,
                 },
+          updatedAt: event.occurredAt,
+        },
+      };
+    }
+
+    // Navigation completion changes which timeline segment is visible. Keep
+    // only transient availability state here; the synchronization layer
+    // refetches the authoritative thread detail instead of rebuilding a
+    // checkpoint timeline from event payloads.
+    case "thread.checkpoint-navigation-requested":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          checkpointNavigation: {
+            ...(thread.checkpointNavigation ?? DEFAULT_CHECKPOINT_NAVIGATION_STATE),
+            canUndo: false,
+            canRedo: false,
+            isNavigating: true,
+            reason: "Checkpoint navigation is already in progress.",
+          },
+          updatedAt: event.occurredAt,
+        },
+      };
+
+    case "thread.checkpoint-navigation-completed":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          checkpointNavigation: {
+            ...(thread.checkpointNavigation ?? DEFAULT_CHECKPOINT_NAVIGATION_STATE),
+            isNavigating: false,
+            cursorVersion: event.payload.cursorVersion,
+            reason: null,
+          },
+          updatedAt: event.occurredAt,
+        },
+      };
+
+    case "thread.checkpoint-navigation-failed":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          checkpointNavigation: {
+            ...(thread.checkpointNavigation ?? DEFAULT_CHECKPOINT_NAVIGATION_STATE),
+            isNavigating: false,
+            reason: "Checkpoint navigation failed.",
+          },
+          updatedAt: event.occurredAt,
+        },
+      };
+
+    case "thread.checkpoint-forward-history-abandoned": {
+      const navigation = thread.checkpointNavigation ?? DEFAULT_CHECKPOINT_NAVIGATION_STATE;
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          checkpointNavigation: {
+            ...navigation,
+            canRedo: false,
+            cursorVersion: event.payload.cursorVersion,
+            forwardTipOrdinal: navigation.currentOrdinal,
+            reason: navigation.canUndo ? null : navigation.reason,
+          },
           updatedAt: event.occurredAt,
         },
       };
@@ -507,7 +573,7 @@ function settledTurnStateForSessionStatus(
 }
 
 function checkpointStatusToTurnState(
-  status: "ready" | "missing" | "error",
+  status: OrchestrationCheckpointSummary["status"],
 ): OrchestrationLatestTurn["state"] {
   switch (status) {
     case "ready":
@@ -515,6 +581,8 @@ function checkpointStatusToTurnState(
     case "error":
       return "error";
     case "missing":
+    case "pending":
+    case "contended":
       return "completed";
   }
 }

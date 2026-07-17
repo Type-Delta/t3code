@@ -484,7 +484,7 @@ describe("orchestration projector", () => {
     expect(message?.updatedAt).toBe(completeAt);
   });
 
-  it("prunes reverted turn messages from in-memory thread snapshot", async () => {
+  it("retains forward rows when decoding a legacy reverted event", async () => {
     const createdAt = "2026-02-23T10:00:00.000Z";
     const model = createEmptyReadModel(createdAt);
 
@@ -690,16 +690,21 @@ describe("orchestration projector", () => {
       [
         { role: "user", text: "First edit" },
         { role: "assistant", text: "Updated README to v2.\n" },
+        { role: "user", text: "Second edit" },
+        { role: "assistant", text: "Updated README to v3.\n" },
       ],
     );
     expect(
       thread?.activities.map((activity) => ({ id: activity.id, turnId: activity.turnId })),
-    ).toEqual([{ id: "activity-1", turnId: "turn-1" }]);
-    expect(thread?.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount)).toEqual([1]);
-    expect(thread?.latestTurn?.turnId).toBe("turn-1");
+    ).toEqual([
+      { id: "activity-1", turnId: "turn-1" },
+      { id: "activity-2", turnId: "turn-2" },
+    ]);
+    expect(thread?.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount)).toEqual([1, 2]);
+    expect(thread?.latestTurn?.turnId).toBe("turn-2");
   });
 
-  it("does not fallback-retain messages tied to removed turn IDs", async () => {
+  it("retains turn-linked messages for cursor-aware projection queries", async () => {
     const createdAt = "2026-02-26T12:00:00.000Z";
     const model = createEmptyReadModel(createdAt);
 
@@ -849,7 +854,11 @@ describe("orchestration projector", () => {
         role: message.role,
         turnId: message.turnId,
       })),
-    ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
+    ).toEqual([
+      { id: "assistant-keep", role: "assistant", turnId: "turn-1" },
+      { id: "user-remove", role: "user", turnId: "turn-2" },
+      { id: "assistant-remove", role: "assistant", turnId: "turn-2" },
+    ]);
   });
 
   it("caps message and checkpoint retention for long-lived threads", async () => {

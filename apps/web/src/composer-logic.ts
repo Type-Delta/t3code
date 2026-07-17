@@ -1,8 +1,80 @@
+import type { OrchestrationCheckpointNavigationState } from "@t3tools/contracts";
+
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
 
 export type ComposerTriggerKind = "path" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default";
+export type ComposerSlashCommand = "model" | "plan" | "default" | "undo" | "redo";
+export type CheckpointNavigationCommand = "undo" | "redo" | "jump";
+
+export function checkpointNavigationConfirmationMessage(input: {
+  command: CheckpointNavigationCommand;
+  capability: OrchestrationCheckpointNavigationState["capability"];
+  turnCount?: number;
+}): string | null {
+  if (input.command === "redo") {
+    return null;
+  }
+  if (input.capability !== "branching") {
+    const target =
+      input.command === "jump"
+        ? `checkpoint ${input.turnCount ?? "selected"}`
+        : "the previous checkpoint";
+    return [
+      `Restore workspace files from ${target}?`,
+      "Only workspace files will be restored. Chat history will NOT be reverted.",
+      "The provider may still remember the later conversation and changes.",
+    ].join("\n");
+  }
+  if (input.command === "jump") {
+    return [
+      `Revert this thread to checkpoint ${input.turnCount}?`,
+      "Newer messages and turn diffs will be hidden until you redo them.",
+    ].join("\n");
+  }
+  return null;
+}
+
+export function resolveCheckpointNavigationDisabledReason(input: {
+  command: CheckpointNavigationCommand;
+  threadCreated: boolean;
+  reconnectLabel: string | null;
+  busy: boolean;
+  locallyNavigating: boolean;
+  navigation: OrchestrationCheckpointNavigationState | undefined;
+}): string | null {
+  if (!input.threadCreated) {
+    return "Checkpoint navigation is available after the thread is created.";
+  }
+  if (input.reconnectLabel !== null) {
+    return `Reconnect ${input.reconnectLabel} before using /${input.command}.`;
+  }
+  if (input.navigation?.isNavigating || input.locallyNavigating) {
+    return "Checkpoint navigation is already in progress.";
+  }
+  if (input.busy) {
+    return "Interrupt the current turn before navigating checkpoints.";
+  }
+  if (!input.navigation) {
+    return "Checkpoint navigation availability has not loaded yet.";
+  }
+  if (input.navigation.latestCheckpointBlockingStatus === "pending") {
+    return "The latest checkpoint is still pending.";
+  }
+  if (input.navigation.latestCheckpointBlockingStatus === "contended") {
+    return "The latest checkpoint could not be captured because the workspace changed.";
+  }
+  if (input.command === "redo" && input.navigation.capability !== "branching") {
+    return "This provider cannot preserve conversation branches for redo.";
+  }
+  if (
+    input.command !== "jump" &&
+    !(input.command === "undo" ? input.navigation.canUndo : input.navigation.canRedo)
+  ) {
+    return `No ready checkpoint is available to ${input.command}.`;
+  }
+  return null;
+}
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
@@ -258,13 +330,15 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
 export function parseStandaloneComposerSlashCommand(
   text: string,
 ): Exclude<ComposerSlashCommand, "model"> | null {
-  const match = /^\/(plan|default)\s*$/i.exec(text.trim());
+  const match = /^\/(plan|default|undo|redo)\s*$/i.exec(text.trim());
   if (!match) {
     return null;
   }
   const command = match[1]?.toLowerCase();
   if (command === "plan") return "plan";
-  return "default";
+  if (command === "default") return "default";
+  if (command === "undo") return "undo";
+  return "redo";
 }
 
 export function replaceTextRange(

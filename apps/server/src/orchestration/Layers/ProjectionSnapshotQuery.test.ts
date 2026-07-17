@@ -437,8 +437,319 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const threadDetail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-1"));
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
-        assert.deepEqual(threadDetail.value, snapshot.threads[0]);
+        const { checkpointNavigation, ...detailWithoutNavigation } = threadDetail.value;
+        assert.deepEqual(detailWithoutNavigation, snapshot.threads[0]);
+        assert.deepEqual(checkpointNavigation, {
+          capability: "unsupported",
+          canUndo: false,
+          canRedo: false,
+          isNavigating: false,
+          latestCheckpointBlockingStatus: null,
+          reason: "The thread is busy with an active turn or provider request.",
+          cursorVersion: 0,
+          currentOrdinal: null,
+          forwardTipOrdinal: null,
+        });
       }
+    }),
+  );
+
+  it.effect("projects cursor visibility across lineage, navigation, and incomplete captures", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM thread_checkpoint_cursors`;
+      yield* sql`DELETE FROM thread_checkpoint_generations`;
+      yield* sql`DELETE FROM thread_checkpoint_entries`;
+      yield* sql`DELETE FROM checkpoint_snapshots`;
+      yield* sql`DELETE FROM checkpoint_repositories`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          'project-lineage', 'Lineage project', '/tmp/lineage', NULL,
+          '[]', '2026-07-16T00:00:00.000Z', '2026-07-16T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, branch, worktree_path, latest_turn_id,
+          pending_approval_count, pending_user_input_count, has_actionable_proposed_plan,
+          created_at, updated_at, deleted_at
+        ) VALUES (
+          'thread-lineage', 'project-lineage', 'Lineage thread',
+          '{"provider":"codex","model":"gpt-5-codex"}', 'full-access',
+          'default', NULL, NULL, 'turn-7', 0, 0, 0,
+          '2026-07-16T00:00:00.000Z', '2026-07-16T00:00:07.000Z', NULL
+        )
+      `;
+
+      const turns = [
+        { ordinal: 1, state: "completed", checkpointStatus: "ready" },
+        { ordinal: 2, state: "completed", checkpointStatus: "ready" },
+        { ordinal: 3, state: "completed", checkpointStatus: "ready" },
+        { ordinal: 4, state: "completed", checkpointStatus: "ready" },
+        { ordinal: 5, state: "running", checkpointStatus: null },
+        { ordinal: 6, state: "completed", checkpointStatus: "contended" },
+        { ordinal: 7, state: "error", checkpointStatus: "error" },
+      ] as const;
+      for (const turn of turns) {
+        const turnId = `turn-${turn.ordinal}`;
+        const messageId = `message-${turn.ordinal}`;
+        const occurredAt = `2026-07-16T00:00:0${turn.ordinal}.000Z`;
+        yield* sql`
+          INSERT INTO projection_thread_messages (
+            message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+          ) VALUES (
+            ${messageId}, 'thread-lineage', ${turnId}, 'assistant', ${turnId}, 0,
+            ${occurredAt}, ${occurredAt}
+          )
+        `;
+        yield* sql`
+          INSERT INTO projection_turns (
+            thread_id, turn_id, pending_message_id, assistant_message_id, state,
+            requested_at, started_at, completed_at, checkpoint_turn_count,
+            checkpoint_ref, checkpoint_status, checkpoint_files_json
+          ) VALUES (
+            'thread-lineage', ${turnId}, NULL, ${messageId}, ${turn.state},
+            ${occurredAt}, ${occurredAt},
+            ${turn.state === "running" ? null : occurredAt},
+            ${turn.checkpointStatus === null ? null : turn.ordinal},
+            ${turn.checkpointStatus === null ? null : `checkpoint-${turn.ordinal}`},
+            ${turn.checkpointStatus}, '[]'
+          )
+        `;
+      }
+
+      yield* sql`
+        INSERT INTO checkpoint_repositories (
+          repository_key, common_dir_fingerprint, object_format, sidecar_relative_path,
+          created_at, last_used_at
+        ) VALUES (
+          'repository-lineage', 'repository-lineage', 'sha1', 'repositories/lineage.git',
+          '2026-07-16T00:00:00.000Z', '2026-07-16T00:00:00.000Z'
+        )
+      `;
+      for (const ordinal of [1, 2, 3, 4, 6, 7]) {
+        const state = ordinal === 6 ? "contended" : ordinal === 7 ? "error" : "ready";
+        yield* sql`
+          INSERT INTO checkpoint_snapshots (
+            snapshot_id, repository_key, worktree_key, commit_oid, tree_oid,
+            kind, state, created_at, ready_at
+          ) VALUES (
+            ${`snapshot-${ordinal}`}, 'repository-lineage', 'worktree-lineage',
+            ${state === "ready" ? `commit-${ordinal}` : null},
+            ${state === "ready" ? `tree-${ordinal}` : null},
+            'turn', ${state}, '2026-07-16T00:00:00.000Z',
+            ${state === "ready" ? "2026-07-16T00:00:00.000Z" : null}
+          )
+        `;
+        yield* sql`
+          INSERT INTO thread_checkpoint_entries (
+            entry_id, thread_id, timeline_generation, ordinal, turn_id, provider_turn_id,
+            snapshot_id, provider_binding_json, provider_cursor_json, assistant_message_id,
+            completed_at, state, created_at
+          ) VALUES (
+            ${`entry-${ordinal}`}, 'thread-lineage', 0, ${ordinal}, ${`turn-${ordinal}`},
+            ${`provider-turn-${ordinal}`}, ${`snapshot-${ordinal}`}, '{}', '{}',
+            ${`message-${ordinal}`}, '2026-07-16T00:00:00.000Z', ${state},
+            '2026-07-16T00:00:00.000Z'
+          )
+        `;
+      }
+      yield* sql`
+        INSERT INTO thread_checkpoint_generations (
+          thread_id, generation, parent_generation, forked_from_entry_id, state, created_at
+        ) VALUES (
+          'thread-lineage', 0, NULL, NULL, 'active', '2026-07-16T00:00:00.000Z'
+        )
+      `;
+      yield* sql`
+        INSERT INTO thread_checkpoint_cursors (
+          thread_id, active_generation, current_entry_id, current_ordinal,
+          forward_tip_entry_id, forward_tip_ordinal, navigation_version, updated_at
+        ) VALUES (
+          'thread-lineage', 0, 'entry-2', 2, 'entry-4', 4, 0,
+          '2026-07-16T00:00:00.000Z'
+        )
+      `;
+
+      const readVisibleTurnIds = Effect.fn("readVisibleTurnIds")(function* () {
+        const detail = yield* snapshotQuery.getThreadDetailById(ThreadId.make("thread-lineage"));
+        assert.equal(detail._tag, "Some");
+        return detail._tag === "Some"
+          ? detail.value.messages
+              .flatMap((message) => (message.turnId === null ? [] : [message.turnId]))
+              .toSorted()
+          : [];
+      });
+
+      assert.deepEqual(yield* readVisibleTurnIds(), [
+        "turn-1",
+        "turn-2",
+        "turn-5",
+        "turn-6",
+        "turn-7",
+      ]);
+
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+        ) VALUES (
+          'message-pending', 'thread-lineage', NULL, 'user', 'pending request', 0,
+          '2026-07-16T00:00:08.000Z', '2026-07-16T00:00:08.000Z'
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id, turn_id, pending_message_id, assistant_message_id, state,
+          requested_at, started_at, completed_at, checkpoint_turn_count,
+          checkpoint_ref, checkpoint_status, checkpoint_files_json
+        ) VALUES (
+          'thread-lineage', NULL, 'message-pending', NULL, 'pending',
+          '2026-07-16T00:00:08.000Z', NULL, NULL, NULL, NULL, NULL, '[]'
+        )
+      `;
+      const detailWithPendingMessage = yield* snapshotQuery.getThreadDetailById(
+        ThreadId.make("thread-lineage"),
+      );
+      assert.equal(detailWithPendingMessage._tag, "Some");
+      assert.equal(
+        detailWithPendingMessage._tag === "Some"
+          ? detailWithPendingMessage.value.messages.some(
+              (message) => message.id === "message-pending" && message.turnId === null,
+            )
+          : false,
+        true,
+      );
+      const snapshotThread = (yield* snapshotQuery.getSnapshot()).threads.find(
+        (thread) => thread.id === "thread-lineage",
+      );
+      assert.deepEqual(
+        snapshotThread?.messages.map((message) => message.id),
+        ["message-1", "message-2", "message-5", "message-6", "message-7", "message-pending"],
+      );
+      assert.deepEqual(
+        snapshotThread?.checkpoints.map((checkpoint) => checkpoint.turnId),
+        ["turn-1", "turn-2", "turn-6", "turn-7"],
+      );
+
+      yield* sql`
+        UPDATE thread_checkpoint_cursors
+        SET current_entry_id = 'entry-1', current_ordinal = 1
+        WHERE thread_id = 'thread-lineage'
+      `;
+      assert.deepEqual(yield* readVisibleTurnIds(), ["turn-1", "turn-5", "turn-6", "turn-7"]);
+
+      yield* sql`
+        UPDATE thread_checkpoint_cursors
+        SET current_entry_id = 'entry-3', current_ordinal = 3
+        WHERE thread_id = 'thread-lineage'
+      `;
+      assert.deepEqual(yield* readVisibleTurnIds(), [
+        "turn-1",
+        "turn-2",
+        "turn-3",
+        "turn-5",
+        "turn-6",
+        "turn-7",
+      ]);
+
+      yield* sql`
+        UPDATE thread_checkpoint_generations
+        SET state = 'abandoned'
+        WHERE thread_id = 'thread-lineage' AND generation = 0
+      `;
+      yield* sql`
+        INSERT INTO thread_checkpoint_generations (
+          thread_id, generation, parent_generation, forked_from_entry_id, state, created_at
+        ) VALUES (
+          'thread-lineage', 1, 0, 'entry-2', 'active', '2026-07-16T00:01:00.000Z'
+        )
+      `;
+      yield* sql`
+        UPDATE thread_checkpoint_cursors
+        SET active_generation = 1, current_entry_id = 'entry-2', current_ordinal = 2,
+            forward_tip_entry_id = 'entry-2', forward_tip_ordinal = 2
+        WHERE thread_id = 'thread-lineage'
+      `;
+      assert.deepEqual(yield* readVisibleTurnIds(), [
+        "turn-1",
+        "turn-2",
+        "turn-5",
+        "turn-6",
+        "turn-7",
+      ]);
+
+      // The projector clears the abandoned turn's checkpoint locator before
+      // reusing its ordinal on the new active generation.
+      yield* sql`
+        UPDATE projection_turns
+        SET checkpoint_turn_count = NULL, checkpoint_ref = NULL,
+            checkpoint_status = NULL, checkpoint_files_json = '[]'
+        WHERE thread_id = 'thread-lineage' AND turn_id = 'turn-3'
+      `;
+      yield* sql`
+        INSERT INTO checkpoint_snapshots (
+          snapshot_id, repository_key, worktree_key, commit_oid, tree_oid,
+          kind, state, created_at, ready_at
+        ) VALUES (
+          'snapshot-8', 'repository-lineage', 'worktree-lineage', 'commit-8', 'tree-8',
+          'turn', 'ready', '2026-07-16T00:02:00.000Z', '2026-07-16T00:02:00.000Z'
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+        ) VALUES (
+          'message-8', 'thread-lineage', 'turn-8', 'assistant', 'turn-8', 0,
+          '2026-07-16T00:02:00.000Z', '2026-07-16T00:02:00.000Z'
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id, turn_id, pending_message_id, assistant_message_id, state,
+          requested_at, started_at, completed_at, checkpoint_turn_count,
+          checkpoint_ref, checkpoint_status, checkpoint_files_json
+        ) VALUES (
+          'thread-lineage', 'turn-8', NULL, 'message-8', 'completed',
+          '2026-07-16T00:02:00.000Z', '2026-07-16T00:02:00.000Z',
+          '2026-07-16T00:02:00.000Z', 3, 'checkpoint-8', 'ready', '[]'
+        )
+      `;
+      yield* sql`
+        INSERT INTO thread_checkpoint_entries (
+          entry_id, thread_id, timeline_generation, ordinal, turn_id, provider_turn_id,
+          snapshot_id, provider_binding_json, provider_cursor_json, assistant_message_id,
+          completed_at, state, created_at
+        ) VALUES (
+          'entry-8', 'thread-lineage', 1, 3, 'turn-8', 'provider-turn-8',
+          'snapshot-8', '{}', '{}', 'message-8', '2026-07-16T00:02:00.000Z',
+          'ready', '2026-07-16T00:02:00.000Z'
+        )
+      `;
+      yield* sql`
+        UPDATE thread_checkpoint_cursors
+        SET current_entry_id = 'entry-8', current_ordinal = 3,
+            forward_tip_entry_id = 'entry-8', forward_tip_ordinal = 3
+        WHERE thread_id = 'thread-lineage'
+      `;
+      assert.deepEqual(yield* readVisibleTurnIds(), [
+        "turn-1",
+        "turn-2",
+        "turn-5",
+        "turn-6",
+        "turn-7",
+        "turn-8",
+      ]);
     }),
   );
 

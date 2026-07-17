@@ -24,12 +24,40 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
+export type ProviderConversationNavigationMode = "branching" | "rollback-only" | "unsupported";
+
+/**
+ * Provider-neutral checkpoint input. The binding payload is intentionally
+ * opaque outside the provider adapter; adapters must version and validate
+ * every payload they produce before using it.
+ */
+export interface ProviderConversationCheckpoint {
+  readonly binding: unknown;
+  readonly targetTurnId: string | null;
+}
+
+export interface ProviderAdapterConversationNavigationShape<TError> {
+  readonly prepareCursor: (
+    threadId: ThreadId,
+    checkpoint: ProviderConversationCheckpoint,
+  ) => Effect.Effect<unknown, TError>;
+  readonly activateCursor: (threadId: ThreadId, cursor: unknown) => Effect.Effect<unknown, TError>;
+  readonly restoreBinding: (threadId: ThreadId, binding: unknown) => Effect.Effect<void, TError>;
+  readonly disposeCursor: (threadId: ThreadId, cursor: unknown) => Effect.Effect<void, TError>;
+}
 
 export interface ProviderAdapterCapabilities {
   /**
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /**
+   * `branching` is the only mode that can safely support redo. A
+   * `rollback-only` adapter may remain available to the legacy irreversible
+   * rewind path, while `unsupported` means no provider-native rewind is
+   * currently proven.
+   */
+  readonly conversationNavigation?: ProviderConversationNavigationMode;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -48,6 +76,8 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly provider: ProviderDriverKind;
   readonly capabilities: ProviderAdapterCapabilities;
+  /** Present only when `capabilities.conversationNavigation === "branching"`. */
+  readonly conversationNavigation?: ProviderAdapterConversationNavigationShape<TError>;
 
   /**
    * Start a provider-backed session.

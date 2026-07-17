@@ -199,11 +199,53 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       }),
   );
 
+  const prepareCursor = vi.fn(
+    (
+      threadId: ThreadId,
+      checkpoint: { readonly binding: unknown; readonly targetTurnId: string | null },
+    ) =>
+      Effect.succeed({
+        schemaVersion: 1,
+        provider: String(provider),
+        kind: "cursor",
+        nativeThreadId: `fork-${String(threadId)}`,
+        source: checkpoint.binding,
+        targetTurnId: checkpoint.targetTurnId,
+      }),
+  );
+  const activateCursor = vi.fn((threadId: ThreadId, cursor: unknown) =>
+    Effect.sync(() => {
+      const session = sessions.get(threadId)!;
+      const prior = session.resumeCursor;
+      sessions.set(threadId, { ...session, resumeCursor: cursor });
+      return prior;
+    }),
+  );
+  const restoreBinding = vi.fn((threadId: ThreadId, binding: unknown) =>
+    Effect.sync(() => {
+      const session = sessions.get(threadId)!;
+      sessions.set(threadId, { ...session, resumeCursor: binding });
+    }),
+  );
+  const disposeCursor = vi.fn((_threadId: ThreadId, _cursor: unknown) => Effect.void);
+  const supportsBranching = provider === CODEX_DRIVER;
+
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      conversationNavigation: supportsBranching ? "branching" : "unsupported",
     },
+    ...(supportsBranching
+      ? {
+          conversationNavigation: {
+            prepareCursor,
+            activateCursor,
+            restoreBinding,
+            disposeCursor,
+          },
+        }
+      : {}),
     startSession,
     sendTurn,
     interruptTurn,
@@ -249,6 +291,10 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     hasSession,
     readThread,
     rollbackThread,
+    prepareCursor,
+    activateCursor,
+    restoreBinding,
+    disposeCursor,
     stopAll,
   };
 }
@@ -841,6 +887,64 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("persists Codex cursor activation and restores the forward binding", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const navigation = provider.conversationNavigation;
+      assert.ok(navigation);
+      const threadId = asThreadId("thread-navigation");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(yield* navigation.getCapability(threadId), "branching");
+      const forward = yield* navigation.getBinding(threadId);
+      const cursor = yield* navigation.prepareCursor(threadId, {
+        binding: forward,
+        targetTurnId: "turn-1",
+      });
+      const prior = yield* navigation.activateCursor(threadId, cursor);
+      assert.deepEqual(prior, forward);
+
+      const active = yield* navigation.getBinding(threadId);
+      assert.deepEqual(active.payload, cursor.payload);
+      const activeDirectoryBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(activeDirectoryBinding.status, "running");
+      assert.equal(
+        typeof activeDirectoryBinding.runtimePayload === "object" &&
+          activeDirectoryBinding.runtimePayload !== null &&
+          "activeTurnId" in activeDirectoryBinding.runtimePayload
+          ? activeDirectoryBinding.runtimePayload.activeTurnId
+          : undefined,
+        null,
+      );
+      assert.equal(
+        (yield* provider.listSessions()).find((session) => session.threadId === threadId)?.status,
+        "ready",
+      );
+      yield* navigation.restoreBinding(threadId, prior);
+      const restored = yield* navigation.getBinding(threadId);
+      assert.deepEqual(restored, forward);
+      const restoredDirectoryBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(
+        typeof restoredDirectoryBinding.runtimePayload === "object" &&
+          restoredDirectoryBinding.runtimePayload !== null &&
+          "activeTurnId" in restoredDirectoryBinding.runtimePayload
+          ? restoredDirectoryBinding.runtimePayload.activeTurnId
+          : undefined,
+        null,
+      );
+      yield* navigation.disposeCursor(cursor);
+      assert.equal(routing.codex.disposeCursor.mock.calls.length, 1);
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

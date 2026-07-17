@@ -1445,7 +1445,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        conversationNavigation: "unsupported",
+      },
       startSession,
       sendTurn,
       interruptTurn,

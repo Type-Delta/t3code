@@ -56,6 +56,8 @@ import {
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
+  type CodexConversationBinding,
+  type CodexConversationCursor,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
@@ -68,7 +70,51 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 
+const CodexConversationBindingPayloadSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  provider: Schema.Literal("codex"),
+  kind: Schema.Literal("binding"),
+  nativeThreadId: Schema.String,
+});
+const CodexConversationCursorPayloadSchema = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  provider: Schema.Literal("codex"),
+  kind: Schema.Literal("cursor"),
+  nativeThreadId: Schema.String,
+  sourceNativeThreadId: Schema.String,
+  targetTurnId: Schema.NullOr(Schema.String),
+});
+const isCodexConversationBindingPayload = Schema.is(CodexConversationBindingPayloadSchema);
+const isCodexConversationCursorPayload = Schema.is(CodexConversationCursorPayloadSchema);
+
 const PROVIDER = ProviderDriverKind.make("codex");
+
+function toCodexBindingPayload(binding: CodexConversationBinding) {
+  return {
+    schemaVersion: 1 as const,
+    provider: "codex" as const,
+    kind: "binding" as const,
+    nativeThreadId: binding.nativeThreadId,
+  };
+}
+
+function toCodexCursorPayload(cursor: CodexConversationCursor) {
+  return {
+    schemaVersion: 1 as const,
+    provider: "codex" as const,
+    kind: "cursor" as const,
+    nativeThreadId: cursor.nativeThreadId,
+    sourceNativeThreadId: cursor.sourceNativeThreadId,
+    targetTurnId: cursor.targetTurnId,
+  };
+}
+
+function readCodexNativeThreadId(payload: unknown): string | undefined {
+  if (isCodexResumeCursorSchema(payload)) return payload.threadId;
+  if (isCodexConversationBindingPayload(payload)) return payload.nativeThreadId;
+  if (isCodexConversationCursorPayload(payload)) return payload.nativeThreadId;
+  return undefined;
+}
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -1386,6 +1432,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
+        const resumeNativeThreadId = readCodexNativeThreadId(input.resumeCursor);
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
@@ -1394,9 +1441,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           binaryPath: codexConfig.binaryPath,
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
-          ...(isCodexResumeCursorSchema(input.resumeCursor)
-            ? { resumeCursor: input.resumeCursor }
-            : {}),
+          ...(resumeNativeThreadId ? { resumeCursor: { threadId: resumeNativeThreadId } } : {}),
           runtimeMode: input.runtimeMode,
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
@@ -1613,6 +1658,94 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   };
 
+  const conversationNavigation: NonNullable<CodexAdapterShape["conversationNavigation"]> = {
+    prepareCursor: (threadId, checkpoint) => {
+      const sourceNativeThreadId = readCodexNativeThreadId(checkpoint.binding);
+      if (!sourceNativeThreadId) {
+        return Effect.fail(
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "prepareCursor",
+            issue: "checkpoint binding is not a recognized Codex conversation payload",
+          }),
+        );
+      }
+      return requireSession(threadId).pipe(
+        Effect.flatMap((session) =>
+          session.runtime.prepareConversationCursor({
+            sourceNativeThreadId,
+            targetTurnId: checkpoint.targetTurnId,
+          }),
+        ),
+        Effect.map(toCodexCursorPayload),
+        Effect.mapError((cause) =>
+          cause._tag === "ProviderAdapterSessionNotFoundError"
+            ? cause
+            : mapCodexRuntimeError(threadId, "thread/fork", cause),
+        ),
+      );
+    },
+    activateCursor: (threadId, cursor) => {
+      if (!isCodexConversationCursorPayload(cursor)) {
+        return Effect.fail(
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "activateCursor",
+            issue: "cursor is not a recognized Codex prepared cursor payload",
+          }),
+        );
+      }
+      return requireSession(threadId).pipe(
+        Effect.flatMap((session) => session.runtime.activateConversationCursor(cursor)),
+        Effect.map(toCodexBindingPayload),
+        Effect.mapError((cause) =>
+          cause._tag === "ProviderAdapterSessionNotFoundError"
+            ? cause
+            : mapCodexRuntimeError(threadId, "thread/read", cause),
+        ),
+      );
+    },
+    restoreBinding: (threadId, binding) => {
+      const nativeThreadId = readCodexNativeThreadId(binding);
+      if (!nativeThreadId) {
+        return Effect.fail(
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "restoreBinding",
+            issue: "binding is not a recognized Codex conversation payload",
+          }),
+        );
+      }
+      return requireSession(threadId).pipe(
+        Effect.flatMap((session) => session.runtime.restoreConversationBinding({ nativeThreadId })),
+        Effect.mapError((cause) =>
+          cause._tag === "ProviderAdapterSessionNotFoundError"
+            ? cause
+            : mapCodexRuntimeError(threadId, "thread/read", cause),
+        ),
+      );
+    },
+    disposeCursor: (threadId, cursor) => {
+      if (!isCodexConversationCursorPayload(cursor)) {
+        return Effect.fail(
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "disposeCursor",
+            issue: "cursor is not a recognized Codex prepared cursor payload",
+          }),
+        );
+      }
+      return requireSession(threadId).pipe(
+        Effect.flatMap((session) => session.runtime.disposeConversationCursor(cursor)),
+        Effect.mapError((cause) =>
+          cause._tag === "ProviderAdapterSessionNotFoundError"
+            ? cause
+            : mapCodexRuntimeError(threadId, "thread/delete", cause),
+        ),
+      );
+    },
+  };
+
   const respondToRequest: CodexAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) => session.runtime.respondToRequest(requestId, decision)),
@@ -1694,12 +1827,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      conversationNavigation: "branching",
     },
     startSession,
     sendTurn,
     interruptTurn,
     readThread,
     rollbackThread,
+    conversationNavigation,
     respondToRequest,
     respondToUserInput,
     stopSession,

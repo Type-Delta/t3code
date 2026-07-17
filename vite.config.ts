@@ -1,5 +1,6 @@
 import "vite-plus/test/config";
 import { defineConfig } from "vite-plus";
+import * as NodeProcess from "node:process";
 import * as NodeURL from "node:url";
 
 export default defineConfig({
@@ -17,8 +18,12 @@ export default defineConfig({
       "**/dist-electron/**",
       "**/.{idea,git,cache,output,temp}/**",
     ],
-    hookTimeout: 60_000,
-    testTimeout: 60_000,
+    // Root `vp test` does not load package-level Vite configs. Bound Windows
+    // concurrency here too so Git/sqlite/worktree suites do not starve each
+    // other and trip otherwise-correct per-test polling deadlines.
+    ...(NodeProcess.platform === "win32" ? { maxWorkers: 2 } : {}),
+    hookTimeout: NodeProcess.platform === "win32" ? 180_000 : 60_000,
+    testTimeout: NodeProcess.platform === "win32" ? 180_000 : 60_000,
   },
   staged: {
     // Formatter only for now — no lint or typecheck on commit.

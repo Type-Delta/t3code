@@ -1031,7 +1031,7 @@ describe("ProviderRuntimeIngestion", () => {
             proposedPlan.id === "plan:thread-plan:turn:turn-plan-source" &&
             proposedPlan.implementedAt === null,
         ),
-      2_000,
+      THREAD_STATE_TIMEOUT_MS,
       sourceThreadId,
     );
     const sourcePlan = sourceThreadWithPlan.proposedPlans.find(
@@ -1071,7 +1071,7 @@ describe("ProviderRuntimeIngestion", () => {
           (proposedPlan: ProviderRuntimeTestProposedPlan) =>
             proposedPlan.id === sourcePlan.id && proposedPlan.implementedAt === null,
         ),
-      2_000,
+      THREAD_STATE_TIMEOUT_MS,
       sourceThreadId,
     );
     expect(
@@ -1099,7 +1099,7 @@ describe("ProviderRuntimeIngestion", () => {
             proposedPlan.implementedAt !== null &&
             proposedPlan.implementationThreadId === targetThreadId,
         ),
-      2_000,
+      THREAD_STATE_TIMEOUT_MS,
       sourceThreadId,
     );
     expect(
@@ -1176,7 +1176,7 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (thread) =>
         thread.session?.status === "running" && thread.session?.activeTurnId === activeTurnId,
-      2_000,
+      THREAD_STATE_TIMEOUT_MS,
       targetThreadId,
     );
 
@@ -1200,7 +1200,7 @@ describe("ProviderRuntimeIngestion", () => {
             proposedPlan.id === "plan:thread-plan:turn:turn-plan-source" &&
             proposedPlan.implementedAt === null,
         ),
-      2_000,
+      THREAD_STATE_TIMEOUT_MS,
       sourceThreadId,
     );
     const sourcePlan = sourceThreadWithPlan.proposedPlans.find(
@@ -1294,7 +1294,7 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (thread) =>
         thread.session?.status === "running" && thread.session?.activeTurnId === oldTurnId,
-      2_000,
+      THREAD_STATE_TIMEOUT_MS,
       threadId,
     );
 
@@ -1340,7 +1340,7 @@ describe("ProviderRuntimeIngestion", () => {
       harness.readModel,
       (thread) =>
         thread.session?.status === "running" && thread.session?.activeTurnId === newTurnId,
-      2_000,
+      THREAD_STATE_TIMEOUT_MS,
       threadId,
     );
     expect(threadAfterSteer.session?.activeTurnId).toBe(newTurnId);
@@ -1448,7 +1448,7 @@ describe("ProviderRuntimeIngestion", () => {
             proposedPlan.id === "plan:thread-plan:turn:turn-plan-source" &&
             proposedPlan.implementedAt === null,
         ),
-      2_000,
+      THREAD_STATE_TIMEOUT_MS,
       sourceThreadId,
     );
     const sourcePlan = sourceThreadWithPlan.proposedPlans.find(

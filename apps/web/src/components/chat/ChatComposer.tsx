@@ -528,6 +528,7 @@ export interface ChatComposerProps {
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
+  checkpointNavigationDisabledReason: (command: "undo" | "redo") => string | null;
   togglePlanSidebar: () => void;
 
   focusComposer: () => void;
@@ -602,6 +603,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     toggleInteractionMode,
     handleRuntimeModeChange,
     handleInteractionModeChange,
+    checkpointNavigationDisabledReason,
     togglePlanSidebar,
     focusComposer,
     scheduleComposerFocus,
@@ -971,17 +973,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: "/default",
           description: "Switch this thread back to normal build mode",
         },
+        {
+          id: "slash:undo",
+          type: "slash-command",
+          command: "undo",
+          label: "/undo",
+          description: "Restore the previous ready checkpoint",
+          disabledReason: checkpointNavigationDisabledReason("undo"),
+        },
+        {
+          id: "slash:redo",
+          type: "slash-command",
+          command: "redo",
+          label: "/redo",
+          description: "Restore the next checkpoint after an undo",
+          disabledReason: checkpointNavigationDisabledReason("redo"),
+        },
       ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
-      const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? []).map(
-        (command) => ({
+      const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? [])
+        .filter(
+          (command) =>
+            !["model", "plan", "default", "undo", "redo"].includes(command.name.toLowerCase()),
+        )
+        .map((command) => ({
           id: `provider-slash-command:${selectedProvider}:${command.name}`,
           type: "provider-slash-command" as const,
           provider: selectedProvider,
           command,
           label: `/${command.name}`,
           description: command.description ?? command.input?.hint ?? "Run provider command",
-        }),
-      );
+        }));
       const query = composerTrigger.query.trim().toLowerCase();
       const slashCommandItems = [...builtInSlashCommandItems, ...providerSlashCommandItems];
       if (!query) {
@@ -1005,7 +1026,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       );
     }
     return [];
-  }, [composerTrigger, selectedProvider, selectedProviderStatus, workspaceEntries.entries]);
+  }, [
+    checkpointNavigationDisabledReason,
+    composerTrigger,
+    selectedProvider,
+    selectedProviderStatus,
+    workspaceEntries.entries,
+  ]);
 
   const composerMenuOpen = Boolean(composerTrigger);
   const composerMenuSearchKey = composerTrigger
@@ -1554,6 +1581,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       const { snapshot, trigger } = resolveActiveComposerTrigger();
       if (!trigger) return;
+      if (item.type === "slash-command" && item.disabledReason) return;
       if (item.type === "path") {
         const replacement = `${serializeComposerFileLink(item.path)} `;
         const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
@@ -1581,6 +1609,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           if (applied) {
             setComposerHighlightedItemId(null);
             setIsComposerModelPickerOpen(true);
+          }
+          return;
+        }
+        if (item.command === "undo" || item.command === "redo") {
+          const replacement = `/${item.command} `;
+          const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
+            snapshot.value,
+            trigger.rangeEnd,
+            replacement,
+          );
+          const applied = applyPromptReplacement(
+            trigger.rangeStart,
+            replacementRangeEnd,
+            replacement,
+            { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
+          );
+          if (applied) {
+            setComposerHighlightedItemId(null);
           }
           return;
         }

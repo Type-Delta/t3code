@@ -51,6 +51,16 @@ export interface ProjectionFullThreadDiffContext {
   readonly toCheckpointRef: CheckpointRef | null;
 }
 
+export interface ProjectionCheckpointNavigationContext {
+  readonly threadId: ThreadId;
+  readonly workspaceCwd: string;
+  readonly sessionStatus: OrchestrationThread["session"] extends infer _
+    ? "idle" | "starting" | "running" | "ready" | "interrupted" | "stopped" | "error" | null
+    : never;
+  readonly hasPendingApprovals: boolean;
+  readonly hasPendingUserInput: boolean;
+}
+
 /**
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
@@ -135,6 +145,14 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadCheckpointContext: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<ProjectionThreadCheckpointContext>, ProjectionRepositoryError>;
+
+  /** Narrow validation context for a serialized checkpoint navigation. */
+  readonly getCheckpointNavigationContext?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
+    Option.Option<ProjectionCheckpointNavigationContext>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Read only the narrow context needed to compute a full-thread diff from

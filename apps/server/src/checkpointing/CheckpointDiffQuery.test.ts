@@ -55,7 +55,9 @@ describe("CheckpointDiffQuery.layer", () => {
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
+        allocateCheckpointRef: () => Effect.die("unused"),
         captureCheckpoint: () => Effect.void,
+        captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
         diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd, ignoreWhitespace }) =>
@@ -163,7 +165,9 @@ describe("CheckpointDiffQuery.layer", () => {
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
+        allocateCheckpointRef: () => Effect.die("unused"),
         captureCheckpoint: () => Effect.void,
+        captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
         diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd, ignoreWhitespace }) =>
@@ -251,7 +255,9 @@ describe("CheckpointDiffQuery.layer", () => {
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
+        allocateCheckpointRef: () => Effect.die("unused"),
         captureCheckpoint: () => Effect.void,
+        captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
         diffCheckpoints: ({ ignoreWhitespace }) =>
@@ -319,7 +325,9 @@ describe("CheckpointDiffQuery.layer", () => {
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
+        allocateCheckpointRef: () => Effect.die("unused"),
         captureCheckpoint: () => Effect.void,
+        captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () =>
           Effect.sync(() => {
             hasCheckpointRefCallCount += 1;
@@ -376,7 +384,9 @@ describe("CheckpointDiffQuery.layer", () => {
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
+        allocateCheckpointRef: () => Effect.die("unused"),
         captureCheckpoint: () => Effect.void,
+        captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
         diffCheckpoints: () => Effect.succeed(""),

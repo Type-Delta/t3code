@@ -26,11 +26,11 @@ import * as Schema from "effect/Schema";
 import type { TestTurnResponse } from "./TestProviderAdapter.integration.ts";
 import {
   gitRefExists,
-  gitShowFileAtRef,
   makeOrchestrationIntegrationHarness,
   type OrchestrationIntegrationHarness,
 } from "./OrchestrationEngineHarness.integration.ts";
 import { checkpointRefForThreadTurn } from "../src/checkpointing/Utils.ts";
+import { checkpointSnapshotIdFor } from "../src/orchestration/Layers/CheckpointReactor.ts";
 import type {
   CheckpointDiffFinalizedReceipt,
   TurnProcessingQuiescedReceipt,
@@ -186,6 +186,10 @@ it.live("runs a single turn end-to-end and persists checkpoint state in sqlite +
   withHarness((harness) =>
     Effect.gen(function* () {
       yield* seedProjectAndThread(harness);
+      const baselineReceipt = yield* harness.waitForReceipt(
+        (receipt) =>
+          receipt.type === "checkpoint.baseline.captured" && receipt.threadId === THREAD_ID,
+      );
 
       const turnResponse: TestTurnResponse = {
         events: [
@@ -256,12 +260,31 @@ it.live("runs a single turn end-to-end and persists checkpoint state in sqlite +
       assert.equal(checkpointRows[0]?.status, "ready");
       assert.deepEqual(checkpointRows[0]?.files, []);
 
-      const ref0 = checkpointRefForThreadTurn(THREAD_ID, 0);
-      const ref1 = checkpointRefForThreadTurn(THREAD_ID, 1);
-      assert.equal(gitRefExists(harness.workspaceDir, ref0), true);
-      assert.equal(gitRefExists(harness.workspaceDir, ref1), true);
-      assert.equal(gitShowFileAtRef(harness.workspaceDir, ref0, "README.md"), "v1\n");
-      assert.equal(gitShowFileAtRef(harness.workspaceDir, ref1, "README.md"), "v1\n");
+      if (baselineReceipt.type !== "checkpoint.baseline.captured") {
+        throw new Error("Expected checkpoint.baseline.captured receipt.");
+      }
+      assert.equal(
+        gitRefExists(harness.workspaceDir, String(baselineReceipt.checkpointRef)),
+        false,
+      );
+      assert.equal(
+        gitRefExists(harness.workspaceDir, String(finalizedReceipt.checkpointRef)),
+        false,
+      );
+      assert.equal(
+        yield* harness.checkpointStore.hasCheckpointRef({
+          cwd: harness.workspaceDir,
+          checkpointRef: baselineReceipt.checkpointRef,
+        }),
+        true,
+      );
+      assert.equal(
+        yield* harness.checkpointStore.hasCheckpointRef({
+          cwd: harness.workspaceDir,
+          checkpointRef: finalizedReceipt.checkpointRef,
+        }),
+        true,
+      );
     }),
   ),
 );
@@ -365,6 +388,10 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
       yield* seedProjectAndThread(harness);
+      yield* harness.waitForReceipt(
+        (receipt) =>
+          receipt.type === "checkpoint.baseline.captured" && receipt.threadId === THREAD_ID,
+      );
 
       yield* harness.adapterHarness!.queueTurnResponseForNextSession({
         events: [
@@ -419,7 +446,7 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
         messageId: "msg-user-multi-1",
         text: "Make first edit",
       });
-      yield* harness.waitForReceipt(
+      const firstReceipt = yield* harness.waitForReceipt(
         (receipt): receipt is CheckpointDiffFinalizedReceipt =>
           receipt.type === "checkpoint.diff.finalized" &&
           receipt.threadId === THREAD_ID &&
@@ -508,8 +535,11 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
 
       const incrementalDiff = yield* harness.checkpointStore.diffCheckpoints({
         cwd: harness.workspaceDir,
-        fromCheckpointRef: checkpointRefForThreadTurn(THREAD_ID, 1),
-        toCheckpointRef: checkpointRefForThreadTurn(THREAD_ID, 2),
+        fromCheckpointRef:
+          firstReceipt.type === "checkpoint.diff.finalized"
+            ? firstReceipt.checkpointRef
+            : checkpointRefForThreadTurn(THREAD_ID, 1),
+        toCheckpointRef: secondReceipt.checkpointRef,
         fallbackFromToHead: false,
         ignoreWhitespace: false,
       });
@@ -517,29 +547,17 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
 
       const fullDiff = yield* harness.checkpointStore.diffCheckpoints({
         cwd: harness.workspaceDir,
-        fromCheckpointRef: checkpointRefForThreadTurn(THREAD_ID, 0),
-        toCheckpointRef: checkpointRefForThreadTurn(THREAD_ID, 2),
+        fromCheckpointRef: yield* harness.checkpointStore.allocateCheckpointRef({
+          cwd: harness.workspaceDir,
+          snapshotId: checkpointSnapshotIdFor(THREAD_ID, 0, 0),
+        }),
+        toCheckpointRef: secondReceipt.checkpointRef,
         fallbackFromToHead: false,
         ignoreWhitespace: false,
       });
       assert.equal(fullDiff.includes("README.md"), true);
 
-      assert.equal(
-        gitShowFileAtRef(
-          harness.workspaceDir,
-          checkpointRefForThreadTurn(THREAD_ID, 1),
-          "README.md",
-        ),
-        "v2\n",
-      );
-      assert.equal(
-        gitShowFileAtRef(
-          harness.workspaceDir,
-          checkpointRefForThreadTurn(THREAD_ID, 2),
-          "README.md",
-        ),
-        "v3\n",
-      );
+      assert.equal(gitRefExists(harness.workspaceDir, String(secondReceipt.checkpointRef)), false);
     }),
   ),
 );
@@ -625,7 +643,7 @@ it.live("tracks approval requests and resolves pending approvals on user respons
   ),
 );
 
-it.live("records failed turn runtime state and checkpoint status as error", () =>
+it.live("records failed turn runtime state while retaining a ready filesystem checkpoint", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
       yield* seedProjectAndThread(harness);
@@ -686,7 +704,7 @@ it.live("records failed turn runtime state and checkpoint status as error", () =
           entry.checkpoints.length === 1,
       );
       assert.equal(thread.session?.status, "error");
-      assert.equal(thread.checkpoints[0]?.status, "error");
+      assert.equal(thread.checkpoints[0]?.status, "ready");
 
       const checkpointRow = yield* harness.checkpointRepository.getByThreadAndTurnCount({
         threadId: THREAD_ID,
@@ -694,17 +712,24 @@ it.live("records failed turn runtime state and checkpoint status as error", () =
       });
       assert.equal(Option.isSome(checkpointRow), true);
       if (Option.isSome(checkpointRow)) {
-        assert.equal(checkpointRow.value.status, "error");
+        assert.equal(checkpointRow.value.status, "ready");
       }
       assert.equal(
         gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 1)),
+        false,
+      );
+      assert.equal(
+        yield* harness.checkpointStore.hasCheckpointRef({
+          cwd: harness.workspaceDir,
+          checkpointRef: thread.checkpoints[0]!.checkpointRef,
+        }),
         true,
       );
     }),
   ),
 );
 
-it.live("reverts to an earlier checkpoint and trims checkpoint projections + git refs", () =>
+it.live("jumps to an earlier checkpoint while retaining forward history and sidecar objects", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
       yield* seedProjectAndThread(harness);
@@ -822,7 +847,7 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         createdAt: "2026-02-24T10:05:00.900Z",
       });
 
-      yield* harness.waitForThread(
+      const beforeJump = yield* harness.waitForThread(
         THREAD_ID,
         (entry) =>
           entry.latestTurn?.turnId === "turn-2" &&
@@ -830,6 +855,9 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
           entry.activities.some((activity) => activity.turnId === "turn-2"),
         8000,
       );
+      const forwardCheckpointRef = beforeJump.checkpoints.find(
+        (checkpoint) => checkpoint.checkpointTurnCount === 2,
+      )!.checkpointRef;
 
       yield* harness.engine.dispatch({
         type: "thread.checkpoint.revert",
@@ -839,89 +867,111 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         createdAt: nowIso(),
       });
 
-      yield* harness.waitForDomainEvent((event) => event.type === "thread.reverted");
-      const revertedThread = yield* harness.waitForThread(
-        THREAD_ID,
-        (entry) =>
-          entry.checkpoints.length === 1 && entry.checkpoints[0]?.checkpointTurnCount === 1,
+      const navigationEvents = yield* harness.waitForDomainEvent(
+        (event) =>
+          event.type === "thread.checkpoint-navigation-completed" ||
+          event.type === "thread.checkpoint-navigation-failed",
       );
-      assert.equal(revertedThread.checkpoints[0]?.checkpointTurnCount, 1);
+      const navigationEvent = navigationEvents.find(
+        (event) =>
+          event.type === "thread.checkpoint-navigation-completed" ||
+          event.type === "thread.checkpoint-navigation-failed",
+      );
+      assert.equal(navigationEvent?.type, "thread.checkpoint-navigation-completed");
+      const cursor = yield* harness.checkpointTimelineRepository.getCursor({
+        threadId: THREAD_ID,
+      });
+      assert.equal(cursor._tag, "Some");
+      assert.equal(cursor._tag === "Some" ? cursor.value.currentOrdinal : null, 1);
+      const timelineEntries = yield* harness.checkpointTimelineRepository.listGenerationLineage({
+        threadId: THREAD_ID,
+        generation: cursor._tag === "Some" ? cursor.value.activeGeneration : 0,
+      });
       assert.deepEqual(
-        revertedThread.messages.map((message) => ({ role: message.role, text: message.text })),
+        timelineEntries.map((entry) => ({ ordinal: entry.ordinal, turnId: entry.turnId })),
+        [
+          { ordinal: 1, turnId: "turn-1" },
+          { ordinal: 2, turnId: "turn-2" },
+        ],
+      );
+      const jumpedThread = (yield* harness.snapshotQuery.getSnapshot()).threads.find(
+        (entry) => entry.id === THREAD_ID,
+      );
+      assert.isDefined(jumpedThread);
+      assert.deepEqual(
+        jumpedThread?.checkpoints.map((checkpoint) => checkpoint.checkpointTurnCount),
+        [1],
+      );
+      assert.deepEqual(
+        jumpedThread?.messages.map((message) => ({ role: message.role, text: message.text })),
         [
           { role: "user", text: "First edit" },
           { role: "assistant", text: "Updated README to v2.\n" },
         ],
       );
       assert.equal(
-        revertedThread.activities.some((activity) => activity.turnId === "turn-2"),
+        jumpedThread?.activities.some((activity) => activity.turnId === "turn-2"),
         false,
       );
       assert.equal(
-        revertedThread.activities.some(
+        jumpedThread?.activities.some(
           (activity) => activity.turnId === "turn-1" && activity.kind === "tool.started",
         ),
         true,
       );
       assert.equal(
-        revertedThread.activities.some(
+        jumpedThread?.activities.some(
           (activity) => activity.turnId === "turn-1" && activity.kind === "tool.completed",
         ),
         true,
       );
       assert.equal(
-        NodeFS.readFileSync(NodePath.join(harness.workspaceDir, "README.md"), "utf8"),
+        NodeFS.readFileSync(NodePath.join(harness.workspaceDir, "README.md"), "utf8").replaceAll(
+          "\r\n",
+          "\n",
+        ),
         "v2\n",
       );
       assert.equal(
-        gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
-        false,
+        yield* harness.checkpointStore.hasCheckpointRef({
+          cwd: harness.workspaceDir,
+          checkpointRef: forwardCheckpointRef,
+        }),
+        true,
       );
-      assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
+      assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), []);
 
       const checkpointRows = yield* harness.checkpointRepository.listByThreadId({
         threadId: THREAD_ID,
       });
-      assert.equal(checkpointRows.length, 1);
+      assert.equal(checkpointRows.length, 2);
     }),
   ),
 );
 
-it.live(
-  "appends checkpoint.revert.failed activity when revert is requested without an active session",
-  () =>
-    withHarness((harness) =>
-      Effect.gen(function* () {
-        yield* seedProjectAndThread(harness);
+it.live("fails legacy checkpoint jump safely when no provider binding exists", () =>
+  withHarness((harness) =>
+    Effect.gen(function* () {
+      yield* seedProjectAndThread(harness);
 
-        yield* harness.engine.dispatch({
-          type: "thread.checkpoint.revert",
-          commandId: CommandId.make("cmd-checkpoint-revert-no-session"),
-          threadId: THREAD_ID,
-          turnCount: 0,
-          createdAt: nowIso(),
-        });
+      yield* harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make("cmd-checkpoint-revert-no-session"),
+        threadId: THREAD_ID,
+        turnCount: 0,
+        createdAt: nowIso(),
+      });
 
-        const thread = yield* harness.waitForThread(THREAD_ID, (entry) =>
-          entry.activities.some(
-            (activity) =>
-              activity.kind === "checkpoint.revert.failed" &&
-              typeof activity.payload === "object" &&
-              activity.payload !== null,
-          ),
-        );
-        const failureActivity = thread.activities.find(
-          (activity) => activity.kind === "checkpoint.revert.failed",
-        );
-        assert.equal(failureActivity !== undefined, true);
-        assert.equal(
-          String(
-            (failureActivity?.payload as { readonly detail?: string } | undefined)?.detail,
-          ).includes("No active provider session"),
-          true,
-        );
-      }),
-    ),
+      const events = yield* harness.waitForDomainEvent(
+        (event) => event.type === "thread.checkpoint-navigation-failed",
+      );
+      const failure = events.find((event) => event.type === "thread.checkpoint-navigation-failed");
+      assert.equal(failure?.type, "thread.checkpoint-navigation-failed");
+      if (failure?.type === "thread.checkpoint-navigation-failed") {
+        assert.equal(failure.payload.code, "provider-capability-failed");
+      }
+    }),
+  ),
 );
 
 it.live("starts a claudeAgent session on first turn when provider is requested", () =>
@@ -1292,150 +1342,161 @@ it.live("forwards thread.turn.interrupt to claudeAgent provider sessions", () =>
   ),
 );
 
-it.live("reverts claudeAgent turns and rolls back provider conversation state", () =>
-  withHarness(
-    (harness) =>
-      Effect.gen(function* () {
-        yield* seedProjectAndThread(harness);
+it.live(
+  "requires confirmation before claudeAgent files-only navigation",
+  () =>
+    withHarness(
+      (harness) =>
+        Effect.gen(function* () {
+          yield* seedProjectAndThread(harness);
 
-        yield* harness.adapterHarness!.queueTurnResponseForNextSession({
-          events: [
-            {
-              type: "turn.started",
-              ...runtimeBase(
-                "evt-claude-revert-1",
-                "2026-02-24T10:14:00.000Z",
-                CLAUDE_AGENT_PROVIDER,
-              ),
-              threadId: THREAD_ID,
-              turnId: FIXTURE_TURN_ID,
+          yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+            events: [
+              {
+                type: "turn.started",
+                ...runtimeBase(
+                  "evt-claude-revert-1",
+                  "2026-02-24T10:14:00.000Z",
+                  CLAUDE_AGENT_PROVIDER,
+                ),
+                threadId: THREAD_ID,
+                turnId: FIXTURE_TURN_ID,
+              },
+              {
+                type: "message.delta",
+                ...runtimeBase(
+                  "evt-claude-revert-2",
+                  "2026-02-24T10:14:00.050Z",
+                  CLAUDE_AGENT_PROVIDER,
+                ),
+                threadId: THREAD_ID,
+                turnId: FIXTURE_TURN_ID,
+                delta: "README -> v2\n",
+              },
+              {
+                type: "turn.completed",
+                ...runtimeBase(
+                  "evt-claude-revert-3",
+                  "2026-02-24T10:14:00.100Z",
+                  CLAUDE_AGENT_PROVIDER,
+                ),
+                threadId: THREAD_ID,
+                turnId: FIXTURE_TURN_ID,
+                status: "completed",
+              },
+            ],
+            mutateWorkspace: ({ cwd }) =>
+              Effect.sync(() => {
+                NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v2\n", "utf8");
+              }),
+          });
+
+          yield* startTurn({
+            harness,
+            commandId: "cmd-turn-start-claude-revert-1",
+            messageId: "msg-user-claude-revert-1",
+            text: "First Claude edit",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: "claude-sonnet-4-6",
             },
-            {
-              type: "message.delta",
-              ...runtimeBase(
-                "evt-claude-revert-2",
-                "2026-02-24T10:14:00.050Z",
-                CLAUDE_AGENT_PROVIDER,
-              ),
-              threadId: THREAD_ID,
-              turnId: FIXTURE_TURN_ID,
-              delta: "README -> v2\n",
-            },
-            {
-              type: "turn.completed",
-              ...runtimeBase(
-                "evt-claude-revert-3",
-                "2026-02-24T10:14:00.100Z",
-                CLAUDE_AGENT_PROVIDER,
-              ),
-              threadId: THREAD_ID,
-              turnId: FIXTURE_TURN_ID,
-              status: "completed",
-            },
-          ],
-          mutateWorkspace: ({ cwd }) =>
-            Effect.sync(() => {
-              NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v2\n", "utf8");
-            }),
-        });
+          });
 
-        yield* startTurn({
-          harness,
-          commandId: "cmd-turn-start-claude-revert-1",
-          messageId: "msg-user-claude-revert-1",
-          text: "First Claude edit",
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("claudeAgent"),
-            model: "claude-sonnet-4-6",
-          },
-        });
+          yield* harness.waitForThread(
+            THREAD_ID,
+            (entry) =>
+              entry.latestTurn?.turnId === "turn-1" && entry.session?.threadId === "thread-1",
+          );
 
-        yield* harness.waitForThread(
-          THREAD_ID,
-          (entry) =>
-            entry.latestTurn?.turnId === "turn-1" && entry.session?.threadId === "thread-1",
-        );
+          yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+            events: [
+              {
+                type: "turn.started",
+                ...runtimeBase(
+                  "evt-claude-revert-4",
+                  "2026-02-24T10:14:01.000Z",
+                  CLAUDE_AGENT_PROVIDER,
+                ),
+                threadId: THREAD_ID,
+                turnId: FIXTURE_TURN_ID,
+              },
+              {
+                type: "message.delta",
+                ...runtimeBase(
+                  "evt-claude-revert-5",
+                  "2026-02-24T10:14:01.050Z",
+                  CLAUDE_AGENT_PROVIDER,
+                ),
+                threadId: THREAD_ID,
+                turnId: FIXTURE_TURN_ID,
+                delta: "README -> v3\n",
+              },
+              {
+                type: "turn.completed",
+                ...runtimeBase(
+                  "evt-claude-revert-6",
+                  "2026-02-24T10:14:01.100Z",
+                  CLAUDE_AGENT_PROVIDER,
+                ),
+                threadId: THREAD_ID,
+                turnId: FIXTURE_TURN_ID,
+                status: "completed",
+              },
+            ],
+            mutateWorkspace: ({ cwd }) =>
+              Effect.sync(() => {
+                NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v3\n", "utf8");
+              }),
+          });
 
-        yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
-          events: [
-            {
-              type: "turn.started",
-              ...runtimeBase(
-                "evt-claude-revert-4",
-                "2026-02-24T10:14:01.000Z",
-                CLAUDE_AGENT_PROVIDER,
-              ),
-              threadId: THREAD_ID,
-              turnId: FIXTURE_TURN_ID,
-            },
-            {
-              type: "message.delta",
-              ...runtimeBase(
-                "evt-claude-revert-5",
-                "2026-02-24T10:14:01.050Z",
-                CLAUDE_AGENT_PROVIDER,
-              ),
-              threadId: THREAD_ID,
-              turnId: FIXTURE_TURN_ID,
-              delta: "README -> v3\n",
-            },
-            {
-              type: "turn.completed",
-              ...runtimeBase(
-                "evt-claude-revert-6",
-                "2026-02-24T10:14:01.100Z",
-                CLAUDE_AGENT_PROVIDER,
-              ),
-              threadId: THREAD_ID,
-              turnId: FIXTURE_TURN_ID,
-              status: "completed",
-            },
-          ],
-          mutateWorkspace: ({ cwd }) =>
-            Effect.sync(() => {
-              NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v3\n", "utf8");
-            }),
-        });
+          yield* startTurn({
+            harness,
+            commandId: "cmd-turn-start-claude-revert-2",
+            messageId: "msg-user-claude-revert-2",
+            text: "Second Claude edit",
+          });
 
-        yield* startTurn({
-          harness,
-          commandId: "cmd-turn-start-claude-revert-2",
-          messageId: "msg-user-claude-revert-2",
-          text: "Second Claude edit",
-        });
+          yield* harness.waitForThread(
+            THREAD_ID,
+            (entry) =>
+              entry.latestTurn?.turnId === "turn-2" &&
+              entry.checkpoints.length === 2 &&
+              entry.session?.providerName === "claudeAgent",
+          );
 
-        yield* harness.waitForThread(
-          THREAD_ID,
-          (entry) =>
-            entry.latestTurn?.turnId === "turn-2" &&
-            entry.checkpoints.length === 2 &&
-            entry.session?.providerName === "claudeAgent",
-        );
+          yield* harness.engine.dispatch({
+            type: "thread.checkpoint.revert",
+            commandId: CommandId.make("cmd-checkpoint-revert-claude"),
+            threadId: THREAD_ID,
+            turnCount: 1,
+            createdAt: nowIso(),
+          });
 
-        yield* harness.engine.dispatch({
-          type: "thread.checkpoint.revert",
-          commandId: CommandId.make("cmd-checkpoint-revert-claude"),
-          threadId: THREAD_ID,
-          turnCount: 1,
-          createdAt: nowIso(),
-        });
-
-        const revertedThread = yield* harness.waitForThread(
-          THREAD_ID,
-          (entry) =>
-            entry.checkpoints.length === 1 && entry.checkpoints[0]?.checkpointTurnCount === 1,
-        );
-        assert.equal(revertedThread.checkpoints[0]?.checkpointTurnCount, 1);
-        assert.equal(
-          gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 1)),
-          true,
-        );
-        assert.equal(
-          gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
-          false,
-        );
-        assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
-      }),
-    CLAUDE_AGENT_PROVIDER,
-  ),
+          const events = yield* harness.waitForDomainEvent(
+            (event) => event.type === "thread.checkpoint-navigation-failed",
+          );
+          const failure = events.find(
+            (event) => event.type === "thread.checkpoint-navigation-failed",
+          );
+          assert.equal(failure?.type, "thread.checkpoint-navigation-failed");
+          if (failure?.type === "thread.checkpoint-navigation-failed") {
+            assert.equal(failure.payload.code, "files-only-confirmation-required");
+          }
+          const unchangedThread = yield* harness.waitForThread(
+            THREAD_ID,
+            (entry) => entry.checkpoints.length === 2,
+          );
+          assert.equal(unchangedThread.checkpoints.length, 2);
+          assert.equal(
+            NodeFS.readFileSync(
+              NodePath.join(harness.workspaceDir, "README.md"),
+              "utf8",
+            ).replaceAll("\r\n", "\n"),
+            "v3\n",
+          );
+          assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), []);
+        }),
+      CLAUDE_AGENT_PROVIDER,
+    ),
+  300_000,
 );

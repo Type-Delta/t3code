@@ -128,7 +128,7 @@ const SettingsWatcherLive = Layer.effectDiscard(
             ),
           ),
       ),
-      Effect.forkScoped,
+      Effect.forkScoped({ startImmediately: true }),
     );
   }),
 );

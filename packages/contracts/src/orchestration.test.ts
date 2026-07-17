@@ -15,8 +15,10 @@ import {
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
   OrchestrationSession,
+  OrchestrationThread,
   ProjectCreateCommand,
   ThreadMetaUpdatedPayload,
+  ThreadCheckpointNavigationRequestedPayload,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
   ThreadTurnDiff,
@@ -37,6 +39,10 @@ const decodeThreadTurnStartRequestedPayload = Schema.decodeUnknownEffect(
 const decodeOrchestrationLatestTurn = Schema.decodeUnknownEffect(OrchestrationLatestTurn);
 const decodeOrchestrationProposedPlan = Schema.decodeUnknownEffect(OrchestrationProposedPlan);
 const decodeOrchestrationSession = Schema.decodeUnknownEffect(OrchestrationSession);
+const decodeOrchestrationThread = Schema.decodeUnknownEffect(OrchestrationThread);
+const decodeCheckpointNavigationRequestedPayload = Schema.decodeUnknownEffect(
+  ThreadCheckpointNavigationRequestedPayload,
+);
 const encodeThreadCreatedPayload = Schema.encodeEffect(ThreadCreatedPayload);
 
 function getOptionValue(
@@ -342,6 +348,116 @@ it.effect("decodes thread archive and unarchive commands", () =>
     assert.strictEqual(archive.type, "thread.archive");
     assert.strictEqual(unarchive.type, "thread.unarchive");
   }),
+);
+
+it.effect("decodes checkpoint undo, redo, jump, and legacy revert commands", () =>
+  Effect.gen(function* () {
+    const common = {
+      commandId: "checkpoint-command",
+      threadId: "thread-1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+    const undo = yield* decodeOrchestrationCommand({
+      ...common,
+      type: "thread.checkpoint.undo",
+      filesOnlyConfirmed: true,
+    });
+    const redo = yield* decodeOrchestrationCommand({
+      ...common,
+      type: "thread.checkpoint.redo",
+    });
+    const jump = yield* decodeOrchestrationCommand({
+      ...common,
+      type: "thread.checkpoint.jump",
+      turnCount: 2,
+      filesOnlyConfirmed: true,
+    });
+    const revert = yield* decodeOrchestrationCommand({
+      ...common,
+      type: "thread.checkpoint.revert",
+      turnCount: 2,
+    });
+
+    assert.strictEqual(undo.type, "thread.checkpoint.undo");
+    if (undo.type === "thread.checkpoint.undo") {
+      assert.strictEqual(undo.filesOnlyConfirmed, true);
+    }
+    assert.strictEqual(redo.type, "thread.checkpoint.redo");
+    assert.strictEqual(jump.type, "thread.checkpoint.jump");
+    if (jump.type === "thread.checkpoint.jump") {
+      assert.strictEqual(jump.filesOnlyConfirmed, true);
+    }
+    assert.strictEqual(revert.type, "thread.checkpoint.revert");
+  }),
+);
+
+it.effect(
+  "keeps persisted checkpoint navigation requests compatible with confirmation metadata",
+  () =>
+    Effect.gen(function* () {
+      const legacy = yield* decodeCheckpointNavigationRequestedPayload({
+        threadId: "thread-1",
+        kind: "undo",
+        targetTurnCount: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const confirmed = yield* decodeCheckpointNavigationRequestedPayload({
+        threadId: "thread-1",
+        kind: "jump",
+        targetTurnCount: 1,
+        filesOnlyConfirmed: true,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      assert.strictEqual(legacy.filesOnlyConfirmed, undefined);
+      assert.strictEqual(confirmed.filesOnlyConfirmed, true);
+    }),
+);
+
+it.effect(
+  "decodes optional checkpoint navigation state without breaking legacy thread details",
+  () =>
+    Effect.gen(function* () {
+      const base = {
+        id: "thread-1",
+        projectId: "project-1",
+        title: "Thread",
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        latestTurn: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        archivedAt: null,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+        session: null,
+      };
+      const legacy = yield* decodeOrchestrationThread(base);
+      const projected = yield* decodeOrchestrationThread({
+        ...base,
+        checkpointNavigation: {
+          capability: "branching",
+          canUndo: true,
+          canRedo: false,
+          isNavigating: false,
+          latestCheckpointBlockingStatus: null,
+          reason: null,
+          cursorVersion: 3,
+          currentOrdinal: 2,
+          forwardTipOrdinal: 2,
+        },
+      });
+
+      assert.strictEqual(legacy.checkpointNavigation, undefined);
+      assert.strictEqual(projected.checkpointNavigation?.capability, "branching");
+      assert.strictEqual(projected.checkpointNavigation?.cursorVersion, 3);
+    }),
 );
 
 it.effect("decodes thread archived and unarchived events", () =>

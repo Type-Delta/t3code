@@ -208,6 +208,7 @@ describe("ProcessDiagnostics", () => {
       const diagnostics = yield* Effect.service(ProcessDiagnostics.ProcessDiagnostics).pipe(
         Effect.flatMap((pd) => pd.read),
         Effect.provide(layer),
+        Effect.provideService(HostProcessPlatform, "linux"),
       );
 
       expect(diagnostics.processes.map((process) => process.pid)).toEqual([4242]);

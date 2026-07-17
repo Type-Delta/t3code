@@ -253,6 +253,29 @@ const deleted = (): OrchestrationThreadStreamItem => ({
   },
 });
 
+const navigationCompleted = (sequence: number): OrchestrationThreadStreamItem => ({
+  kind: "event",
+  event: {
+    eventId: EventId.make("event-navigation-completed"),
+    sequence,
+    occurredAt: "2026-04-01T02:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.checkpoint-navigation-completed",
+    payload: {
+      threadId: THREAD_ID,
+      operationId: "operation-1",
+      kind: "undo",
+      targetEntryId: "entry-1",
+      cursorVersion: 2,
+    },
+  },
+});
+
 describe("EnvironmentThreads", () => {
   it.effect("publishes cached data immediately from a warm cache", () =>
     Effect.gen(function* () {
@@ -283,6 +306,42 @@ describe("EnvironmentThreads", () => {
       // full snapshot over HTTP.
       expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE);
       expect(yield* Ref.get(harness.loaderCalls)).toBe(0);
+    }),
+  );
+
+  it.effect("refetches authoritative thread detail after checkpoint navigation", () =>
+    Effect.gen(function* () {
+      const refetchedThread: OrchestrationThread = {
+        ...BASE_THREAD,
+        title: "Refetched after undo",
+        checkpointNavigation: {
+          capability: "branching",
+          canUndo: false,
+          canRedo: true,
+          isNavigating: false,
+          latestCheckpointBlockingStatus: null,
+          reason: null,
+          cursorVersion: 2,
+          currentOrdinal: 1,
+          forwardTipOrdinal: 2,
+        },
+      };
+      const harness = yield* makeHarness({
+        cached: BASE_THREAD,
+        httpSnapshot: Option.some({ snapshotSequence: 8, thread: refetchedThread }),
+      });
+
+      yield* Queue.offer(harness.inputs, navigationCompleted(8));
+      const state = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          value.status === "live" &&
+          Option.isSome(value.data) &&
+          value.data.value.title === "Refetched after undo",
+      );
+
+      expect(Option.getOrThrow(state.data).checkpointNavigation?.canRedo).toBe(true);
+      expect(yield* Ref.get(harness.loaderCalls)).toBe(1);
     }),
   );
 

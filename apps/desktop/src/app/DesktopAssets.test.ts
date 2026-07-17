@@ -25,7 +25,11 @@ describe("DesktopAssets", () => {
   it.effect("preserves the failed asset candidate and filesystem cause", () =>
     Effect.gen(function* () {
       const fileName = "custom.bin";
-      const candidatePath = "/repo/apps/desktop/resources/custom.bin";
+      const environment = yield* DesktopEnvironment.DesktopEnvironment.pipe(
+        Effect.provide(environmentLayer),
+      );
+      const candidatePath = environment.resolveResourcePathCandidates(fileName)[0];
+      assert.isDefined(candidatePath);
       const cause = PlatformError.systemError({
         _tag: "PermissionDenied",
         module: "FileSystem",

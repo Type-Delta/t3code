@@ -678,6 +678,117 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 
+  describe("checkpoint navigation", () => {
+    const navigationState = {
+      capability: "branching" as const,
+      canUndo: true,
+      canRedo: true,
+      isNavigating: false,
+      latestCheckpointBlockingStatus: null,
+      reason: null,
+      cursorVersion: 2,
+      currentOrdinal: 1,
+      forwardTipOrdinal: 2,
+    };
+
+    it("tracks transient navigation without rewriting the timeline", () => {
+      const thread = { ...baseThread, checkpointNavigation: navigationState };
+      const result = applyThreadDetailEvent(thread, {
+        ...baseEventFields,
+        sequence: 15,
+        occurredAt: "2026-04-01T13:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.checkpoint-navigation-requested",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          kind: "undo",
+          targetTurnCount: null,
+          createdAt: "2026-04-01T13:00:00.000Z",
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.checkpoints).toBe(thread.checkpoints);
+        expect(result.thread.checkpointNavigation).toMatchObject({
+          canUndo: false,
+          canRedo: false,
+          isNavigating: true,
+        });
+      }
+    });
+
+    it("clears requested state on a no-op completion without moving the cached cursor", () => {
+      const navigatingThread = {
+        ...baseThread,
+        checkpointNavigation: {
+          ...navigationState,
+          canUndo: false,
+          canRedo: false,
+          isNavigating: true,
+          reason: "Checkpoint navigation is already in progress.",
+        },
+      };
+      const result = applyThreadDetailEvent(navigatingThread, {
+        ...baseEventFields,
+        sequence: 16,
+        occurredAt: "2026-04-01T13:01:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.checkpoint-navigation-completed",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          operationId: "request-navigation-noop",
+          kind: "undo",
+          targetEntryId: "entry-1",
+          cursorVersion: 2,
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.checkpointNavigation).toMatchObject({
+          isNavigating: false,
+          cursorVersion: 2,
+          currentOrdinal: 1,
+          forwardTipOrdinal: 2,
+          reason: null,
+        });
+      }
+    });
+
+    it("clears redo immediately when a new turn abandons forward history", () => {
+      const result = applyThreadDetailEvent(
+        { ...baseThread, checkpointNavigation: navigationState },
+        {
+          ...baseEventFields,
+          sequence: 16,
+          occurredAt: "2026-04-01T14:00:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.checkpoint-forward-history-abandoned",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            abandonedGeneration: 0,
+            activeGeneration: 1,
+            cursorVersion: 3,
+          },
+        },
+      );
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.checkpointNavigation).toMatchObject({
+          canRedo: false,
+          cursorVersion: 3,
+          currentOrdinal: 1,
+          forwardTipOrdinal: 1,
+        });
+      }
+    });
+  });
+
   describe("no-op events", () => {
     it("returns unchanged for approval-response-requested", () => {
       const result = applyThreadDetailEvent(baseThread, {

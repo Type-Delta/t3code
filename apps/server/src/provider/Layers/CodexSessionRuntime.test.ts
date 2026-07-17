@@ -17,6 +17,7 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   openCodexThread,
+  prepareCodexConversationCursor,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
@@ -340,6 +341,74 @@ describe("openCodexThread", () => {
 
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
+    }),
+  );
+});
+
+describe("prepareCodexConversationCursor", () => {
+  it.effect("forks before rollback and preserves the source as a forward binding", () =>
+    Effect.gen(function* () {
+      type Method = "thread/read" | "thread/fork" | "thread/rollback" | "thread/delete";
+      const calls: Array<{ method: Method; threadId: string; numTurns?: number }> = [];
+      const threads = new Map<string, Array<string>>([
+        ["source-thread", ["turn-1", "turn-2", "turn-3"]],
+      ]);
+      const client = {
+        request: <M extends Method>(method: M, payload: CodexRpc.ClientRequestParamsByMethod[M]) =>
+          Effect.sync(() => {
+            const params = payload as { readonly threadId: string; readonly numTurns?: number };
+            calls.push({
+              method,
+              threadId: params.threadId,
+              ...(params.numTurns ? { numTurns: params.numTurns } : {}),
+            });
+            let response: unknown;
+            switch (method) {
+              case "thread/read":
+                response = {
+                  thread: {
+                    id: params.threadId,
+                    turns: (threads.get(params.threadId) ?? []).map((id) => ({ id, items: [] })),
+                  },
+                };
+                break;
+              case "thread/fork":
+                threads.set("fork-thread", [...(threads.get(params.threadId) ?? [])]);
+                response = { thread: { id: "fork-thread", turns: [] } };
+                break;
+              case "thread/rollback": {
+                const turns = threads.get(params.threadId) ?? [];
+                threads.set(params.threadId, turns.slice(0, -params.numTurns!));
+                response = { thread: { id: params.threadId, turns: [] } };
+                break;
+              }
+              case "thread/delete":
+                threads.delete(params.threadId);
+                response = {};
+                break;
+            }
+            return response as CodexRpc.ClientRequestResponsesByMethod[M];
+          }),
+      };
+
+      const cursor = yield* prepareCodexConversationCursor({
+        client,
+        sourceNativeThreadId: "source-thread",
+        targetTurnId: "turn-1",
+      });
+
+      NodeAssert.deepStrictEqual(calls, [
+        { method: "thread/read", threadId: "source-thread" },
+        { method: "thread/fork", threadId: "source-thread" },
+        { method: "thread/rollback", threadId: "fork-thread", numTurns: 2 },
+      ]);
+      NodeAssert.deepStrictEqual(threads.get("source-thread"), ["turn-1", "turn-2", "turn-3"]);
+      NodeAssert.deepStrictEqual(threads.get("fork-thread"), ["turn-1"]);
+      NodeAssert.deepStrictEqual(cursor, {
+        nativeThreadId: "fork-thread",
+        sourceNativeThreadId: "source-thread",
+        targetTurnId: "turn-1",
+      });
     }),
   );
 });

@@ -43,6 +43,9 @@ export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
 export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond">;
 export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
 export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert">;
+export type JumpThreadCheckpointInput = CommandInput<"thread.checkpoint.jump">;
+export type UndoThreadCheckpointInput = CommandInput<"thread.checkpoint.undo">;
+export type RedoThreadCheckpointInput = CommandInput<"thread.checkpoint.redo">;
 export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
 
 type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
@@ -242,6 +245,42 @@ export const revertThreadCheckpoint: (input: RevertThreadCheckpointInput) => Com
       createdAt: metadata.createdAt,
     });
   });
+
+export const jumpThreadCheckpoint: (input: JumpThreadCheckpointInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.jumpThreadCheckpoint",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.checkpoint.jump",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const undoThreadCheckpoint: (input: UndoThreadCheckpointInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.undoThreadCheckpoint",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.checkpoint.undo",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const redoThreadCheckpoint: (input: RedoThreadCheckpointInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.redoThreadCheckpoint",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  return yield* dispatch({
+    ...input,
+    type: "thread.checkpoint.redo",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
 
 export const stopThreadSession: (input: StopThreadSessionInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.stopThreadSession",

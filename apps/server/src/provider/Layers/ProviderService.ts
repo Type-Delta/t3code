@@ -68,6 +68,9 @@ export interface ProviderServiceLiveOptions {
 
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
   ProviderService.ProviderService["Service"][Name];
+type ProviderConversationNavigationMethod<
+  Name extends keyof ProviderService.ProviderConversationNavigationShape,
+> = ProviderService.ProviderConversationNavigationShape[Name];
 
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
@@ -967,6 +970,203 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
+  const getConversationNavigationCapability: ProviderConversationNavigationMethod<"getCapability"> =
+    Effect.fn("getConversationNavigationCapability")(function* (threadId) {
+      const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      if (!binding) {
+        return yield* toValidationError(
+          "ProviderService.getConversationNavigationCapability",
+          `Cannot route thread '${threadId}' because no persisted provider binding exists.`,
+        );
+      }
+      const instanceId = yield* requireBindingInstanceId(
+        "ProviderService.getConversationNavigationCapability",
+        binding,
+      );
+      const adapter = yield* registry.getByInstance(instanceId);
+      return adapter.capabilities.conversationNavigation ?? "unsupported";
+    });
+
+  const getConversationBinding: ProviderConversationNavigationMethod<"getBinding"> = Effect.fn(
+    "getConversationBinding",
+  )(function* (threadId) {
+    const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+    if (!binding || binding.resumeCursor === null || binding.resumeCursor === undefined) {
+      return yield* toValidationError(
+        "ProviderService.getConversationBinding",
+        `Thread '${threadId}' has no persisted provider conversation binding.`,
+      );
+    }
+    const providerInstanceId = yield* requireBindingInstanceId(
+      "ProviderService.getConversationBinding",
+      binding,
+    );
+    return {
+      schemaVersion: 1,
+      threadId,
+      provider: binding.provider,
+      providerInstanceId,
+      payload: binding.resumeCursor,
+    } satisfies ProviderService.ProviderConversationBinding;
+  });
+
+  const resolveConversationNavigation = Effect.fn("resolveConversationNavigation")(
+    function* (input: {
+      readonly operation: string;
+      readonly threadId: ThreadId;
+      readonly provider: ProviderDriverKind;
+      readonly providerInstanceId: ProviderInstanceId;
+    }) {
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: input.operation,
+        allowRecovery: true,
+      });
+      if (
+        routed.instanceId !== input.providerInstanceId ||
+        routed.adapter.provider !== input.provider
+      ) {
+        return yield* toValidationError(
+          input.operation,
+          `Conversation payload belongs to '${input.providerInstanceId}' (${input.provider}), but thread '${input.threadId}' is bound to '${routed.instanceId}' (${routed.adapter.provider}).`,
+        );
+      }
+      if (
+        routed.adapter.capabilities.conversationNavigation !== "branching" ||
+        routed.adapter.conversationNavigation === undefined
+      ) {
+        return yield* toValidationError(
+          input.operation,
+          `Provider '${routed.adapter.provider}' does not support non-destructive conversation branching.`,
+        );
+      }
+      return {
+        ...routed,
+        navigation: routed.adapter.conversationNavigation,
+      } as const;
+    },
+  );
+
+  const prepareCursor: ProviderConversationNavigationMethod<"prepareCursor"> = Effect.fn(
+    "prepareCursor",
+  )(function* (threadId, checkpoint) {
+    if (checkpoint.binding.threadId !== threadId) {
+      return yield* toValidationError(
+        "ProviderService.prepareCursor",
+        `Checkpoint binding belongs to thread '${checkpoint.binding.threadId}', not '${threadId}'.`,
+      );
+    }
+    const routed = yield* resolveConversationNavigation({
+      operation: "ProviderService.prepareCursor",
+      threadId,
+      provider: checkpoint.binding.provider,
+      providerInstanceId: checkpoint.binding.providerInstanceId,
+    });
+    const payload = yield* routed.navigation.prepareCursor(threadId, {
+      binding: checkpoint.binding.payload,
+      targetTurnId: checkpoint.targetTurnId,
+    });
+    return {
+      schemaVersion: 1,
+      threadId,
+      provider: routed.adapter.provider,
+      providerInstanceId: routed.instanceId,
+      payload,
+    } satisfies ProviderService.ProviderConversationCursor;
+  });
+
+  const activateCursor: ProviderConversationNavigationMethod<"activateCursor"> = Effect.fn(
+    "activateCursor",
+  )(function* (threadId, cursor) {
+    if (cursor.threadId !== threadId) {
+      return yield* toValidationError(
+        "ProviderService.activateCursor",
+        `Prepared cursor belongs to thread '${cursor.threadId}', not '${threadId}'.`,
+      );
+    }
+    const routed = yield* resolveConversationNavigation({
+      operation: "ProviderService.activateCursor",
+      threadId,
+      provider: cursor.provider,
+      providerInstanceId: cursor.providerInstanceId,
+    });
+    const priorPayload = yield* routed.navigation.activateCursor(threadId, cursor.payload);
+    yield* directory
+      .upsert({
+        threadId,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        status: "running",
+        resumeCursor: cursor.payload,
+        runtimePayload: {
+          activeTurnId: null,
+          lastRuntimeEvent: "provider.conversation.cursor-activated",
+          lastRuntimeEventAt: yield* nowIso,
+        },
+      })
+      .pipe(
+        Effect.tapError(() =>
+          routed.navigation.restoreBinding(threadId, priorPayload).pipe(Effect.ignore),
+        ),
+      );
+    return {
+      schemaVersion: 1,
+      threadId,
+      provider: routed.adapter.provider,
+      providerInstanceId: routed.instanceId,
+      payload: priorPayload,
+    } satisfies ProviderService.ProviderConversationBinding;
+  });
+
+  const restoreBinding: ProviderConversationNavigationMethod<"restoreBinding"> = Effect.fn(
+    "restoreBinding",
+  )(function* (threadId, binding) {
+    if (binding.threadId !== threadId) {
+      return yield* toValidationError(
+        "ProviderService.restoreBinding",
+        `Provider binding belongs to thread '${binding.threadId}', not '${threadId}'.`,
+      );
+    }
+    const current = yield* getConversationBinding(threadId);
+    const routed = yield* resolveConversationNavigation({
+      operation: "ProviderService.restoreBinding",
+      threadId,
+      provider: binding.provider,
+      providerInstanceId: binding.providerInstanceId,
+    });
+    yield* routed.navigation.restoreBinding(threadId, binding.payload);
+    yield* directory
+      .upsert({
+        threadId,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        status: "running",
+        resumeCursor: binding.payload,
+        runtimePayload: {
+          activeTurnId: null,
+          lastRuntimeEvent: "provider.conversation.binding-restored",
+          lastRuntimeEventAt: yield* nowIso,
+        },
+      })
+      .pipe(
+        Effect.tapError(() =>
+          routed.navigation.restoreBinding(threadId, current.payload).pipe(Effect.ignore),
+        ),
+      );
+  });
+
+  const disposeCursor: ProviderConversationNavigationMethod<"disposeCursor"> = Effect.fn(
+    "disposeCursor",
+  )(function* (cursor) {
+    const routed = yield* resolveConversationNavigation({
+      operation: "ProviderService.disposeCursor",
+      threadId: cursor.threadId,
+      provider: cursor.provider,
+      providerInstanceId: cursor.providerInstanceId,
+    });
+    yield* routed.navigation.disposeCursor(cursor.threadId, cursor.payload);
+  });
+
   const rollbackConversation: ProviderServiceMethod<"rollbackConversation"> = Effect.fn(
     "rollbackConversation",
   )(function* (rawInput) {
@@ -1079,6 +1279,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,
+    conversationNavigation: {
+      getCapability: getConversationNavigationCapability,
+      getBinding: getConversationBinding,
+      prepareCursor,
+      activateCursor,
+      restoreBinding,
+      disposeCursor,
+    },
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

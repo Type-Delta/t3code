@@ -43,6 +43,8 @@ import {
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
+  type CodexConversationBinding,
+  type CodexConversationCursor,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
 import { makeCodexAdapter } from "./CodexAdapter.ts";
@@ -61,6 +63,7 @@ const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
   private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
   private readonly now = "2026-01-01T00:00:00.000Z";
+  public activeNativeThreadId = "provider-thread-forward";
 
   public readonly startImpl = vi.fn(() =>
     Promise.resolve({
@@ -103,6 +106,37 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
+  public readonly prepareConversationCursorImpl = vi.fn(
+    (input: {
+      readonly sourceNativeThreadId: string;
+      readonly targetTurnId: string | null;
+    }): Promise<CodexConversationCursor> =>
+      Promise.resolve({
+        nativeThreadId: "provider-thread-fork",
+        sourceNativeThreadId: input.sourceNativeThreadId,
+        targetTurnId: input.targetTurnId,
+      }),
+  );
+
+  public readonly activateConversationCursorImpl = vi.fn(
+    (cursor: CodexConversationCursor): Promise<CodexConversationBinding> => {
+      const prior = this.activeNativeThreadId;
+      this.activeNativeThreadId = cursor.nativeThreadId;
+      return Promise.resolve({ nativeThreadId: prior });
+    },
+  );
+
+  public readonly restoreConversationBindingImpl = vi.fn(
+    (binding: CodexConversationBinding): Promise<void> => {
+      this.activeNativeThreadId = binding.nativeThreadId;
+      return Promise.resolve(undefined);
+    },
+  );
+
+  public readonly disposeConversationCursorImpl = vi.fn(
+    (_cursor: CodexConversationCursor): Promise<void> => Promise.resolve(undefined),
+  );
+
   public readonly respondToRequestImpl = vi.fn(
     (_requestId: ApprovalRequestId, _decision: ProviderApprovalDecision): Promise<void> =>
       Promise.resolve(undefined),
@@ -139,6 +173,25 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   rollbackThread(numTurns: number) {
     return Effect.promise(() => this.rollbackThreadImpl(numTurns));
+  }
+
+  prepareConversationCursor(input: {
+    readonly sourceNativeThreadId: string;
+    readonly targetTurnId: string | null;
+  }) {
+    return Effect.promise(() => this.prepareConversationCursorImpl(input));
+  }
+
+  activateConversationCursor(cursor: CodexConversationCursor) {
+    return Effect.promise(() => this.activateConversationCursorImpl(cursor));
+  }
+
+  restoreConversationBinding(binding: CodexConversationBinding) {
+    return Effect.promise(() => this.restoreConversationBindingImpl(binding));
+  }
+
+  disposeConversationCursor(cursor: CodexConversationCursor) {
+    return Effect.promise(() => this.disposeConversationCursorImpl(cursor));
   }
 
   respondToRequest(requestId: ApprovalRequestId, decision: ProviderApprovalDecision) {
@@ -284,6 +337,82 @@ validationLayer("CodexAdapterLive validation", (it) => {
         serviceTier: "priority",
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
+      });
+    }),
+  );
+
+  it.effect("prepares, activates, restores, and disposes versioned conversation payloads", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-navigation");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = validationRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const navigation = adapter.conversationNavigation;
+      NodeAssert.ok(navigation);
+
+      const cursor = yield* navigation.prepareCursor(threadId, {
+        binding: { threadId: "provider-thread-forward" },
+        targetTurnId: "turn-1",
+      });
+      NodeAssert.deepStrictEqual(runtime.prepareConversationCursorImpl.mock.calls[0]?.[0], {
+        sourceNativeThreadId: "provider-thread-forward",
+        targetTurnId: "turn-1",
+      });
+      NodeAssert.deepStrictEqual(cursor, {
+        schemaVersion: 1,
+        provider: "codex",
+        kind: "cursor",
+        nativeThreadId: "provider-thread-fork",
+        sourceNativeThreadId: "provider-thread-forward",
+        targetTurnId: "turn-1",
+      });
+
+      const prior = yield* navigation.activateCursor(threadId, cursor);
+      NodeAssert.deepStrictEqual(prior, {
+        schemaVersion: 1,
+        provider: "codex",
+        kind: "binding",
+        nativeThreadId: "provider-thread-forward",
+      });
+      NodeAssert.equal(runtime.activeNativeThreadId, "provider-thread-fork");
+      yield* navigation.restoreBinding(threadId, prior);
+      NodeAssert.equal(runtime.activeNativeThreadId, "provider-thread-forward");
+      yield* navigation.disposeCursor(threadId, cursor);
+      NodeAssert.equal(runtime.activateConversationCursorImpl.mock.calls.length, 1);
+      NodeAssert.deepStrictEqual(runtime.restoreConversationBindingImpl.mock.calls[0]?.[0], {
+        nativeThreadId: "provider-thread-forward",
+      });
+      NodeAssert.equal(runtime.disposeConversationCursorImpl.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("resumes a prepared fork payload after the adapter runtime is restarted", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-restart-navigation");
+      const cursor = {
+        schemaVersion: 1 as const,
+        provider: "codex" as const,
+        kind: "cursor" as const,
+        nativeThreadId: "provider-thread-fork-restart",
+        sourceNativeThreadId: "provider-thread-forward",
+        targetTurnId: "turn-1",
+      };
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: cursor,
+      });
+
+      NodeAssert.deepStrictEqual(validationRuntimeFactory.lastRuntime?.options.resumeCursor, {
+        threadId: "provider-thread-fork-restart",
       });
     }),
   );

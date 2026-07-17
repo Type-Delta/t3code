@@ -288,7 +288,13 @@ export const OrchestrationCheckpointFile = Schema.Struct({
 });
 export type OrchestrationCheckpointFile = typeof OrchestrationCheckpointFile.Type;
 
-export const OrchestrationCheckpointStatus = Schema.Literals(["ready", "missing", "error"]);
+export const OrchestrationCheckpointStatus = Schema.Literals([
+  "ready",
+  "pending",
+  "contended",
+  "missing",
+  "error",
+]);
 export type OrchestrationCheckpointStatus = typeof OrchestrationCheckpointStatus.Type;
 
 export const OrchestrationCheckpointSummary = Schema.Struct({
@@ -301,6 +307,52 @@ export const OrchestrationCheckpointSummary = Schema.Struct({
   completedAt: IsoDateTime,
 });
 export type OrchestrationCheckpointSummary = typeof OrchestrationCheckpointSummary.Type;
+
+export const CheckpointNavigationCapability = Schema.Literals([
+  "branching",
+  "rollback-only",
+  "unsupported",
+]);
+export type CheckpointNavigationCapability = typeof CheckpointNavigationCapability.Type;
+
+export const CheckpointNavigationBlockingStatus = Schema.Literals([
+  "pending",
+  "contended",
+  "error",
+]);
+export type CheckpointNavigationBlockingStatus = typeof CheckpointNavigationBlockingStatus.Type;
+
+/**
+ * Compact, server-projected checkpoint navigation state. The field is
+ * optional on `OrchestrationThread` so cached snapshots from older servers
+ * remain valid; clients should use `DEFAULT_CHECKPOINT_NAVIGATION_STATE` when
+ * it is absent.
+ */
+export const OrchestrationCheckpointNavigationState = Schema.Struct({
+  capability: CheckpointNavigationCapability,
+  canUndo: Schema.Boolean,
+  canRedo: Schema.Boolean,
+  isNavigating: Schema.Boolean,
+  latestCheckpointBlockingStatus: Schema.NullOr(CheckpointNavigationBlockingStatus),
+  reason: Schema.NullOr(TrimmedNonEmptyString),
+  cursorVersion: NonNegativeInt,
+  currentOrdinal: Schema.NullOr(NonNegativeInt),
+  forwardTipOrdinal: Schema.NullOr(NonNegativeInt),
+});
+export type OrchestrationCheckpointNavigationState =
+  typeof OrchestrationCheckpointNavigationState.Type;
+
+export const DEFAULT_CHECKPOINT_NAVIGATION_STATE = {
+  capability: "unsupported",
+  canUndo: false,
+  canRedo: false,
+  isNavigating: false,
+  latestCheckpointBlockingStatus: null,
+  reason: "Checkpoint navigation is unavailable.",
+  cursorVersion: 0,
+  currentOrdinal: null,
+  forwardTipOrdinal: null,
+} as const satisfies OrchestrationCheckpointNavigationState;
 
 export const OrchestrationThreadActivityTone = Schema.Literals([
   "info",
@@ -363,6 +415,7 @@ export const OrchestrationThread = Schema.Struct({
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
+  checkpointNavigation: Schema.optionalKey(OrchestrationCheckpointNavigationState),
   session: Schema.NullOr(OrchestrationSession),
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
@@ -672,6 +725,35 @@ const ThreadCheckpointRevertCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/**
+ * Legacy clients dispatch `thread.checkpoint.revert`. New clients use jump so
+ * all checkpoint navigation goes through the same server-side saga while the
+ * legacy command remains decodable for persisted events and older clients.
+ */
+const ThreadCheckpointJumpCommand = Schema.Struct({
+  type: Schema.Literal("thread.checkpoint.jump"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  turnCount: NonNegativeInt,
+  filesOnlyConfirmed: Schema.optionalKey(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
+const ThreadCheckpointUndoCommand = Schema.Struct({
+  type: Schema.Literal("thread.checkpoint.undo"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  filesOnlyConfirmed: Schema.optionalKey(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
+const ThreadCheckpointRedoCommand = Schema.Struct({
+  type: Schema.Literal("thread.checkpoint.redo"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
@@ -695,6 +777,9 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
+  ThreadCheckpointJumpCommand,
+  ThreadCheckpointUndoCommand,
+  ThreadCheckpointRedoCommand,
   ThreadSessionStopCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
@@ -716,6 +801,9 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
+  ThreadCheckpointJumpCommand,
+  ThreadCheckpointUndoCommand,
+  ThreadCheckpointRedoCommand,
   ThreadSessionStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
@@ -785,6 +873,37 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadCheckpointNavigationCompleteCommand = Schema.Struct({
+  type: Schema.Literal("thread.checkpoint.navigation.complete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  operationId: TrimmedNonEmptyString,
+  kind: Schema.Literals(["undo", "redo", "jump"]),
+  targetEntryId: Schema.NullOr(TrimmedNonEmptyString),
+  cursorVersion: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+
+const ThreadCheckpointNavigationFailCommand = Schema.Struct({
+  type: Schema.Literal("thread.checkpoint.navigation.fail"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  operationId: Schema.NullOr(TrimmedNonEmptyString),
+  kind: Schema.Literals(["undo", "redo", "jump"]),
+  code: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
+const ThreadCheckpointForwardHistoryAbandonCommand = Schema.Struct({
+  type: Schema.Literal("thread.checkpoint.forward-history.abandon"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  abandonedGeneration: NonNegativeInt,
+  activeGeneration: NonNegativeInt,
+  cursorVersion: NonNegativeInt,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -793,6 +912,9 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
+  ThreadCheckpointNavigationCompleteCommand,
+  ThreadCheckpointNavigationFailCommand,
+  ThreadCheckpointForwardHistoryAbandonCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -819,6 +941,10 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.approval-response-requested",
   "thread.user-input-response-requested",
   "thread.checkpoint-revert-requested",
+  "thread.checkpoint-navigation-requested",
+  "thread.checkpoint-navigation-completed",
+  "thread.checkpoint-navigation-failed",
+  "thread.checkpoint-forward-history-abandoned",
   "thread.reverted",
   "thread.session-stop-requested",
   "thread.session-set",
@@ -963,6 +1089,36 @@ export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const ThreadCheckpointNavigationRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  kind: Schema.Literals(["undo", "redo", "jump"]),
+  targetTurnCount: Schema.NullOr(NonNegativeInt),
+  filesOnlyConfirmed: Schema.optionalKey(Schema.Boolean),
+  createdAt: IsoDateTime,
+});
+
+export const ThreadCheckpointNavigationCompletedPayload = Schema.Struct({
+  threadId: ThreadId,
+  operationId: TrimmedNonEmptyString,
+  kind: Schema.Literals(["undo", "redo", "jump"]),
+  targetEntryId: Schema.NullOr(TrimmedNonEmptyString),
+  cursorVersion: NonNegativeInt,
+});
+
+export const ThreadCheckpointNavigationFailedPayload = Schema.Struct({
+  threadId: ThreadId,
+  operationId: Schema.NullOr(TrimmedNonEmptyString),
+  kind: Schema.Literals(["undo", "redo", "jump"]),
+  code: TrimmedNonEmptyString,
+});
+
+export const ThreadCheckpointForwardHistoryAbandonedPayload = Schema.Struct({
+  threadId: ThreadId,
+  abandonedGeneration: NonNegativeInt,
+  activeGeneration: NonNegativeInt,
+  cursorVersion: NonNegativeInt,
+});
+
 export const ThreadRevertedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
@@ -1100,6 +1256,26 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.checkpoint-revert-requested"),
     payload: ThreadCheckpointRevertRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.checkpoint-navigation-requested"),
+    payload: ThreadCheckpointNavigationRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.checkpoint-navigation-completed"),
+    payload: ThreadCheckpointNavigationCompletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.checkpoint-navigation-failed"),
+    payload: ThreadCheckpointNavigationFailedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.checkpoint-forward-history-abandoned"),
+    payload: ThreadCheckpointForwardHistoryAbandonedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

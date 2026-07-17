@@ -14,6 +14,7 @@
 import type {
   ProviderInterruptTurnInput,
   ProviderInstanceId,
+  ProviderDriverKind,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
   ProviderRuntimeEvent,
@@ -30,7 +31,55 @@ import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
+import type { ProviderConversationNavigationMode } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
+
+/** Versioned, JSON-serializable envelopes. Their `payload` remains adapter-opaque. */
+export interface ProviderConversationBinding {
+  readonly schemaVersion: 1;
+  readonly threadId: ThreadId;
+  readonly provider: ProviderDriverKind;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly payload: unknown;
+}
+
+export interface ProviderConversationCursor {
+  readonly schemaVersion: 1;
+  readonly threadId: ThreadId;
+  readonly provider: ProviderDriverKind;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly payload: unknown;
+}
+
+export interface ProviderConversationCheckpoint {
+  readonly binding: ProviderConversationBinding;
+  /** Native provider turn id, not a T3 projection ordinal. */
+  readonly targetTurnId: string | null;
+}
+
+export interface ProviderConversationNavigationShape {
+  readonly getCapability: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProviderConversationNavigationMode, ProviderServiceError>;
+  readonly getBinding: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProviderConversationBinding, ProviderServiceError>;
+  readonly prepareCursor: (
+    threadId: ThreadId,
+    checkpoint: ProviderConversationCheckpoint,
+  ) => Effect.Effect<ProviderConversationCursor, ProviderServiceError>;
+  readonly activateCursor: (
+    threadId: ThreadId,
+    cursor: ProviderConversationCursor,
+  ) => Effect.Effect<ProviderConversationBinding, ProviderServiceError>;
+  readonly restoreBinding: (
+    threadId: ThreadId,
+    binding: ProviderConversationBinding,
+  ) => Effect.Effect<void, ProviderServiceError>;
+  readonly disposeCursor: (
+    cursor: ProviderConversationCursor,
+  ) => Effect.Effect<void, ProviderServiceError>;
+}
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
@@ -104,6 +153,9 @@ export interface ProviderServiceShape {
     readonly threadId: ThreadId;
     readonly numTurns: number;
   }) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Internal capability; absent only in narrow legacy/test service doubles. */
+  readonly conversationNavigation?: ProviderConversationNavigationShape;
 
   /**
    * Canonical provider runtime event stream.

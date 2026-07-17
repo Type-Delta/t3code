@@ -35,6 +35,7 @@ export type ComposerCommandItem =
       command: ComposerSlashCommand;
       label: string;
       description: string;
+      disabledReason?: string | null;
     }
   | {
       id: string;
@@ -208,6 +209,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
 }) {
   const skillSourceLabel =
     props.item.type === "skill" ? formatProviderSkillInstallSource(props.item.skill) : null;
+  const disabledReason = props.item.type === "slash-command" ? props.item.disabledReason : null;
 
   return (
     <CommandItem
@@ -215,6 +217,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       data-composer-item-id={props.item.id}
       className={cn(
         "cursor-pointer select-none gap-2 hover:bg-transparent hover:text-inherit data-highlighted:bg-transparent data-highlighted:text-inherit",
+        disabledReason && "cursor-not-allowed opacity-50",
         props.isActive && "bg-accent! text-accent-foreground!",
       )}
       onMouseMove={() => {
@@ -224,6 +227,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
         event.preventDefault();
       }}
       onClick={() => {
+        if (disabledReason) return;
         props.onSelect(props.item);
       }}
     >
@@ -250,7 +254,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       <span className="flex min-w-0 flex-1 items-center gap-2">
         <span className="shrink-0">{props.item.label}</span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground/70 text-xs">
-          {props.item.description}
+          {disabledReason ?? props.item.description}
         </span>
       </span>
       {skillSourceLabel ? (

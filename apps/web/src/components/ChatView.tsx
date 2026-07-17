@@ -68,8 +68,10 @@ import { isElectron } from "../env";
 import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import {
+  checkpointNavigationConfirmationMessage,
   collapseExpandedComposerCursor,
   parseStandaloneComposerSlashCommand,
+  resolveCheckpointNavigationDisabledReason,
 } from "../composer-logic";
 import {
   derivePendingApprovals,
@@ -1022,7 +1024,13 @@ function ChatViewContent(props: ChatViewProps) {
   const respondToThreadUserInput = useAtomCommand(threadEnvironment.respondToUserInput, {
     reportFailure: false,
   });
-  const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
+  const jumpThreadCheckpoint = useAtomCommand(threadEnvironment.jumpCheckpoint, {
+    reportFailure: false,
+  });
+  const undoThreadCheckpoint = useAtomCommand(threadEnvironment.undoCheckpoint, {
+    reportFailure: false,
+  });
+  const redoThreadCheckpoint = useAtomCommand(threadEnvironment.redoCheckpoint, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -3826,47 +3834,97 @@ function ChatViewContent(props: ChatViewProps) {
     composerRef,
   ]);
 
-  const onRevertToTurnCount = useCallback(
-    async (turnCount: number) => {
-      const localApi = readLocalApi();
-      if (!localApi || !activeThread || isRevertingCheckpoint) return;
+  const checkpointNavigationDisabledReason = useCallback(
+    (command: "undo" | "redo" | "jump"): string | null =>
+      resolveCheckpointNavigationDisabledReason({
+        command,
+        threadCreated: isServerThread && activeThread !== null,
+        reconnectLabel:
+          activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel
+            ? activeEnvironmentUnavailableLabel
+            : null,
+        busy: phase === "running" || isSendBusy || isConnecting,
+        locallyNavigating: isRevertingCheckpoint,
+        navigation: activeThread?.checkpointNavigation,
+      }),
+    [
+      activeEnvironmentUnavailable,
+      activeEnvironmentUnavailableLabel,
+      activeThread,
+      isConnecting,
+      isRevertingCheckpoint,
+      isSendBusy,
+      isServerThread,
+      phase,
+    ],
+  );
+
+  const onCheckpointNavigation = useCallback(
+    async (command: "undo" | "redo" | "jump", turnCount?: number) => {
+      if (!activeThread || isRevertingCheckpoint) return;
 
       if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
         setThreadError(
           activeThread.id,
-          `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
+          `Reconnect ${activeEnvironmentUnavailableLabel} before navigating checkpoints.`,
         );
         return;
       }
       if (phase === "running" || isSendBusy || isConnecting) {
-        setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
+        setThreadError(
+          activeThread.id,
+          "Interrupt the current turn before navigating checkpoints.",
+        );
         return;
       }
-      const confirmed = await localApi.dialogs.confirm(
-        [
-          `Revert this thread to checkpoint ${turnCount}?`,
-          "This will discard newer messages and turn diffs in this thread.",
-          "This action cannot be undone.",
-        ].join("\n"),
-      );
-      if (!confirmed) {
+      const disabledReason = checkpointNavigationDisabledReason(command);
+      if (disabledReason) {
+        setThreadError(activeThread.id, disabledReason);
         return;
+      }
+      if (command === "jump" && turnCount === undefined) {
+        return;
+      }
+      const navigationCapability = activeThread.checkpointNavigation?.capability;
+      if (!navigationCapability) {
+        setThreadError(activeThread.id, "Checkpoint navigation availability has not loaded yet.");
+        return;
+      }
+      const confirmationMessage = checkpointNavigationConfirmationMessage({
+        command,
+        capability: navigationCapability,
+        ...(turnCount === undefined ? {} : { turnCount }),
+      });
+      if (confirmationMessage !== null) {
+        const localApi = readLocalApi();
+        if (!localApi) return;
+        const confirmed = await localApi.dialogs.confirm(confirmationMessage);
+        if (!confirmed) {
+          return;
+        }
       }
 
       setIsRevertingCheckpoint(true);
       setThreadError(activeThread.id, null);
-      const result = await revertThreadCheckpoint({
-        environmentId,
-        input: {
-          threadId: activeThread.id,
-          turnCount,
-        },
-      });
+      const filesOnlyConfirmed =
+        navigationCapability === "branching" ? {} : { filesOnlyConfirmed: true };
+      const result =
+        command === "undo"
+          ? await undoThreadCheckpoint({
+              environmentId,
+              input: { threadId: activeThread.id, ...filesOnlyConfirmed },
+            })
+          : command === "redo"
+            ? await redoThreadCheckpoint({ environmentId, input: { threadId: activeThread.id } })
+            : await jumpThreadCheckpoint({
+                environmentId,
+                input: { threadId: activeThread.id, turnCount: turnCount!, ...filesOnlyConfirmed },
+              });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         setThreadError(
           activeThread.id,
-          error instanceof Error ? error.message : "Failed to revert thread state.",
+          error instanceof Error ? error.message : "Failed to navigate thread checkpoints.",
         );
       }
       setIsRevertingCheckpoint(false);
@@ -3879,10 +3937,18 @@ function ChatViewContent(props: ChatViewProps) {
       isConnecting,
       isRevertingCheckpoint,
       isSendBusy,
+      jumpThreadCheckpoint,
       phase,
-      revertThreadCheckpoint,
+      checkpointNavigationDisabledReason,
+      redoThreadCheckpoint,
       setThreadError,
+      undoThreadCheckpoint,
     ],
+  );
+
+  const onRevertToTurnCount = useCallback(
+    async (turnCount: number) => onCheckpointNavigation("jump", turnCount),
+    [onCheckpointNavigation],
   );
 
   const onSend = async (e?: { preventDefault: () => void }) => {
@@ -3951,7 +4017,11 @@ function ChatViewContent(props: ChatViewProps) {
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     if (standaloneSlashCommand) {
-      handleInteractionModeChange(standaloneSlashCommand);
+      if (standaloneSlashCommand === "undo" || standaloneSlashCommand === "redo") {
+        await onCheckpointNavigation(standaloneSlashCommand);
+      } else {
+        handleInteractionModeChange(standaloneSlashCommand);
+      }
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
@@ -5222,6 +5292,7 @@ function ChatViewContent(props: ChatViewProps) {
                       toggleInteractionMode={toggleInteractionMode}
                       handleRuntimeModeChange={handleRuntimeModeChange}
                       handleInteractionModeChange={handleInteractionModeChange}
+                      checkpointNavigationDisabledReason={checkpointNavigationDisabledReason}
                       togglePlanSidebar={togglePlanSidebar}
                       focusComposer={focusComposer}
                       scheduleComposerFocus={scheduleComposerFocus}

@@ -549,9 +549,8 @@ export const ProviderRegistryLive = Layer.effect(
           const source = buildSnapshotSource(instance);
           yield* Stream.runForEach(source.streamChanges, (provider) =>
             correlateSnapshotWithSource(source, provider).pipe(Effect.flatMap(syncProvider)),
-          ).pipe(Effect.forkScoped);
+          ).pipe(Effect.forkScoped({ startImmediately: true }));
         }
-        yield* Effect.yieldNow;
 
         // Snapshot current state without starting a probe. Managed providers
         // launch their startup refresh independently, so this closes the

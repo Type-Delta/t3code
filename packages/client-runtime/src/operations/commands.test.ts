@@ -21,7 +21,14 @@ import {
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
-import { archiveThread, createProject, stopThreadSession } from "./commands.ts";
+import {
+  archiveThread,
+  createProject,
+  jumpThreadCheckpoint,
+  redoThreadCheckpoint,
+  stopThreadSession,
+  undoThreadCheckpoint,
+} from "./commands.ts";
 
 const TEST_CRYPTO_LAYER = Layer.succeed(
   Crypto.Crypto,
@@ -132,6 +139,41 @@ describe("environment commands", () => {
           threadId: "thread-1",
         },
       ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches checkpoint undo, redo, and jump commands", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+      const run = Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor);
+
+      yield* undoThreadCheckpoint({
+        commandId: CommandId.make("undo-command"),
+        threadId: ThreadId.make("thread-1"),
+        filesOnlyConfirmed: true,
+        createdAt: "2026-06-06T00:01:00.000Z",
+      }).pipe(run);
+      yield* redoThreadCheckpoint({
+        commandId: CommandId.make("redo-command"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: "2026-06-06T00:02:00.000Z",
+      }).pipe(run);
+      yield* jumpThreadCheckpoint({
+        commandId: CommandId.make("jump-command"),
+        threadId: ThreadId.make("thread-1"),
+        turnCount: 2,
+        filesOnlyConfirmed: true,
+        createdAt: "2026-06-06T00:03:00.000Z",
+      }).pipe(run);
+
+      expect(dispatched.map((command) => command.type)).toEqual([
+        "thread.checkpoint.undo",
+        "thread.checkpoint.redo",
+        "thread.checkpoint.jump",
+      ]);
+      expect(dispatched[0]).toMatchObject({ filesOnlyConfirmed: true });
+      expect(dispatched[2]).toMatchObject({ filesOnlyConfirmed: true });
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 });

@@ -27,6 +27,8 @@ export type StartupPresentation = typeof StartupPresentation.Type;
  */
 export interface ServerDerivedPaths {
   readonly stateDir: string;
+  /** Private Git object stores used for workspace checkpoints. */
+  readonly checkpointsDir: string;
   readonly dbPath: string;
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
@@ -95,12 +97,14 @@ export const deriveServerPaths = Effect.fn(function* (
   const { join } = yield* Path.Path;
   const stateDir = join(baseDir, devUrl !== undefined ? "dev" : "userdata");
   const dbPath = join(stateDir, "state.sqlite");
+  const checkpointsDir = join(stateDir, "checkpoints");
   const attachmentsDir = join(stateDir, "attachments");
   const logsDir = join(stateDir, "logs");
   const providerLogsDir = join(logsDir, "provider");
   const providerStatusCacheDir = join(baseDir, "caches");
   return {
     stateDir,
+    checkpointsDir,
     dbPath,
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     settingsPath: join(stateDir, "settings.json"),
@@ -127,6 +131,7 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
   yield* Effect.all(
     [
       fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
+      fs.makeDirectory(derivedPaths.checkpointsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),

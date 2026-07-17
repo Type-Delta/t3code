@@ -19,6 +19,10 @@ import {
   ThreadCreatedPayload,
   ThreadDeletedPayload,
   ThreadInteractionModeSetPayload,
+  ThreadCheckpointNavigationRequestedPayload,
+  ThreadCheckpointNavigationCompletedPayload,
+  ThreadCheckpointNavigationFailedPayload,
+  ThreadCheckpointForwardHistoryAbandonedPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadRuntimeModeSetPayload,
@@ -32,9 +36,10 @@ type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 
-function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
+function checkpointStatusToLatestTurnState(
+  status: "ready" | "pending" | "contended" | "missing" | "error",
+) {
   if (status === "error") return "error" as const;
-  if (status === "missing") return "interrupted" as const;
   return "completed" as const;
 }
 
@@ -77,87 +82,6 @@ function decodeForEvent<A>(
 ): Effect.Effect<A, OrchestrationProjectorDecodeError> {
   return Schema.decodeUnknownEffect(schema)(value).pipe(
     Effect.mapError(toProjectorDecodeError(`${eventType}:${field}`)),
-  );
-}
-
-function retainThreadMessagesAfterRevert(
-  messages: ReadonlyArray<OrchestrationMessage>,
-  retainedTurnIds: ReadonlySet<string>,
-  turnCount: number,
-): ReadonlyArray<OrchestrationMessage> {
-  const retainedMessageIds = new Set<string>();
-  for (const message of messages) {
-    if (message.role === "system") {
-      retainedMessageIds.add(message.id);
-      continue;
-    }
-    if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedUserCount = messages.filter(
-    (message) => message.role === "user" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingUserCount = Math.max(0, turnCount - retainedUserCount);
-  if (missingUserCount > 0) {
-    const fallbackUserMessages = messages
-      .filter(
-        (message) =>
-          message.role === "user" &&
-          !retainedMessageIds.has(message.id) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingUserCount);
-    for (const message of fallbackUserMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  const retainedAssistantCount = messages.filter(
-    (message) => message.role === "assistant" && retainedMessageIds.has(message.id),
-  ).length;
-  const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
-  if (missingAssistantCount > 0) {
-    const fallbackAssistantMessages = messages
-      .filter(
-        (message) =>
-          message.role === "assistant" &&
-          !retainedMessageIds.has(message.id) &&
-          (message.turnId === null || retainedTurnIds.has(message.turnId)),
-      )
-      .toSorted(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-      )
-      .slice(0, missingAssistantCount);
-    for (const message of fallbackAssistantMessages) {
-      retainedMessageIds.add(message.id);
-    }
-  }
-
-  return messages.filter((message) => retainedMessageIds.has(message.id));
-}
-
-function retainThreadActivitiesAfterRevert(
-  activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
-  retainedTurnIds: ReadonlySet<string>,
-): ReadonlyArray<OrchestrationThread["activities"][number]> {
-  return activities.filter(
-    (activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId),
-  );
-}
-
-function retainThreadProposedPlansAfterRevert(
-  proposedPlans: ReadonlyArray<OrchestrationThread["proposedPlans"][number]>,
-  retainedTurnIds: ReadonlySet<string>,
-): ReadonlyArray<OrchestrationThread["proposedPlans"][number]> {
-  return proposedPlans.filter(
-    (proposedPlan) => proposedPlan.turnId === null || retainedTurnIds.has(proposedPlan.turnId),
   );
 }
 
@@ -613,54 +537,42 @@ export function projectEvent(
 
     case "thread.reverted":
       return decodeForEvent(ThreadRevertedPayload, event.payload, event.type, "payload").pipe(
-        Effect.map((payload) => {
-          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
-          if (!thread) {
-            return nextBase;
-          }
-
-          const checkpoints = thread.checkpoints
-            .filter((entry) => entry.checkpointTurnCount <= payload.turnCount)
-            .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
-            .slice(-MAX_THREAD_CHECKPOINTS);
-          const retainedTurnIds = new Set(checkpoints.map((checkpoint) => checkpoint.turnId));
-          const messages = retainThreadMessagesAfterRevert(
-            thread.messages,
-            retainedTurnIds,
-            payload.turnCount,
-          ).slice(-MAX_THREAD_MESSAGES);
-          const proposedPlans = retainThreadProposedPlansAfterRevert(
-            thread.proposedPlans,
-            retainedTurnIds,
-          ).slice(-200);
-          const activities = retainThreadActivitiesAfterRevert(thread.activities, retainedTurnIds);
-
-          const latestCheckpoint = checkpoints.at(-1) ?? null;
-          const latestTurn =
-            latestCheckpoint === null
-              ? null
-              : {
-                  turnId: latestCheckpoint.turnId,
-                  state: checkpointStatusToLatestTurnState(latestCheckpoint.status),
-                  requestedAt: latestCheckpoint.completedAt,
-                  startedAt: latestCheckpoint.completedAt,
-                  completedAt: latestCheckpoint.completedAt,
-                  assistantMessageId: latestCheckpoint.assistantMessageId,
-                };
-
-          return {
-            ...nextBase,
-            threads: updateThread(nextBase.threads, payload.threadId, {
-              checkpoints,
-              messages,
-              proposedPlans,
-              activities,
-              latestTurn,
-              updatedAt: event.occurredAt,
-            }),
-          };
-        }),
+        // Legacy events remain decodable, but immutable forward projections
+        // are no longer removed. Visibility is controlled by the durable cursor.
+        Effect.as(nextBase),
       );
+
+    case "thread.checkpoint-navigation-requested":
+      return decodeForEvent(
+        ThreadCheckpointNavigationRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(Effect.as(nextBase));
+
+    case "thread.checkpoint-navigation-completed":
+      return decodeForEvent(
+        ThreadCheckpointNavigationCompletedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(Effect.as(nextBase));
+
+    case "thread.checkpoint-navigation-failed":
+      return decodeForEvent(
+        ThreadCheckpointNavigationFailedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(Effect.as(nextBase));
+
+    case "thread.checkpoint-forward-history-abandoned":
+      return decodeForEvent(
+        ThreadCheckpointForwardHistoryAbandonedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(Effect.as(nextBase));
 
     case "thread.activity-appended":
       return decodeForEvent(

@@ -23,10 +23,24 @@ import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
+import { ProviderConversationNavigationLive } from "./provider/Layers/ProviderConversationNavigation.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
+import * as SidecarCheckpointRepository from "./checkpointing/SidecarCheckpointRepository.ts";
+import * as CheckpointRepositoryIdentity from "./checkpointing/CheckpointRepositoryIdentity.ts";
+import {
+  CheckpointNavigationServiceLive,
+  CheckpointNavigationWorkspaceLive,
+} from "./checkpointing/CheckpointNavigationService.ts";
+import { CheckpointNavigationAvailabilityLive } from "./checkpointing/CheckpointNavigationAvailability.ts";
+import { WorkspaceMutationCoordinatorLive } from "./checkpointing/WorkspaceMutationCoordinator.ts";
+import { CheckpointMigrationLive } from "./checkpointing/CheckpointMigrationLive.ts";
+import { CheckpointMaintenanceLive } from "./checkpointing/CheckpointMaintenanceLive.ts";
+import * as CheckpointStartupMaintenance from "./checkpointing/CheckpointStartupMaintenance.ts";
+import * as CheckpointDiagnostics from "./checkpointing/CheckpointDiagnostics.ts";
+import * as CheckpointTimelineBackfill from "./checkpointing/CheckpointTimelineBackfill.ts";
 import * as AzureDevOpsCli from "./sourceControl/AzureDevOpsCli.ts";
 import * as BitbucketApi from "./sourceControl/BitbucketApi.ts";
 import * as GitHubCli from "./sourceControl/GitHubCli.ts";
@@ -48,6 +62,8 @@ import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
+import { CheckpointNavigationReactorLive } from "./orchestration/Layers/CheckpointNavigationReactor.ts";
+import { CheckpointNavigationReactor } from "./orchestration/Services/CheckpointNavigationReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
@@ -83,6 +99,11 @@ import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
+import { CheckpointCaptureJobRepositoryLive } from "./persistence/Layers/CheckpointCaptureJobs.ts";
+import { CheckpointTimelineRepositoryLive } from "./persistence/Layers/CheckpointTimeline.ts";
+import { CheckpointNavigationRepositoryLive } from "./persistence/Layers/CheckpointNavigation.ts";
+import { CheckpointRetentionRepositoryLive } from "./persistence/Layers/CheckpointRetention.ts";
+import { CheckpointLegacyMigrationRepositoryLive } from "./persistence/Layers/CheckpointLegacyMigrations.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -233,8 +254,101 @@ const VcsLayerLive = Layer.empty.pipe(
 );
 
 const CheckpointingLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(SidecarCheckpointRepository.layer),
   Layer.provideMerge(CheckpointDiffQuery.layer),
   Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
+);
+
+const CheckpointDurableRepositoriesLive = Layer.mergeAll(
+  CheckpointCaptureJobRepositoryLive,
+  CheckpointTimelineRepositoryLive,
+  CheckpointNavigationRepositoryLive,
+  CheckpointRetentionRepositoryLive,
+  CheckpointLegacyMigrationRepositoryLive,
+);
+
+const CheckpointProviderNavigationLayerLive = ProviderConversationNavigationLive;
+
+const CheckpointNavigationWorkspaceLayerLive = CheckpointNavigationWorkspaceLive.pipe(
+  Layer.provideMerge(CheckpointingLayerLive),
+);
+
+const CheckpointNavigationServiceLayerLive = CheckpointNavigationServiceLive.pipe(
+  Layer.provideMerge(CheckpointNavigationWorkspaceLayerLive),
+  Layer.provideMerge(CheckpointProviderNavigationLayerLive),
+  Layer.provideMerge(WorkspaceMutationCoordinatorLive),
+  Layer.provideMerge(CheckpointDurableRepositoriesLive),
+  Layer.provideMerge(CheckpointingLayerLive),
+);
+
+const CheckpointNavigationAvailabilityLayerLive = CheckpointNavigationAvailabilityLive.pipe(
+  Layer.provideMerge(CheckpointProviderNavigationLayerLive),
+  Layer.provideMerge(CheckpointDurableRepositoriesLive),
+);
+
+const CheckpointNavigationReactorLayerLive = CheckpointNavigationReactorLive.pipe(
+  Layer.provideMerge(CheckpointNavigationServiceLayerLive),
+);
+
+const CheckpointNavigationReactorRuntimeLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const reactor = yield* CheckpointNavigationReactor;
+    yield* Effect.forkScoped(reactor.start());
+  }),
+).pipe(Layer.provideMerge(CheckpointNavigationReactorLayerLive));
+
+const CheckpointMigrationLayerLive = CheckpointMigrationLive.pipe(
+  Layer.provideMerge(CheckpointDurableRepositoriesLive),
+  Layer.provideMerge(CheckpointingLayerLive),
+);
+
+const CheckpointMaintenanceLayerLive = CheckpointMaintenanceLive.pipe(
+  Layer.provideMerge(CheckpointDurableRepositoriesLive),
+  Layer.provideMerge(CheckpointingLayerLive),
+);
+
+const CheckpointStartupMaintenanceLayerLive = CheckpointStartupMaintenance.layer.pipe(
+  Layer.provideMerge(CheckpointMigrationLayerLive),
+  Layer.provideMerge(CheckpointMaintenanceLayerLive),
+);
+
+const CheckpointTimelineBackfillLayerLive = CheckpointTimelineBackfill.layer.pipe(
+  Layer.provideMerge(CheckpointProviderNavigationLayerLive),
+  Layer.provideMerge(CheckpointDurableRepositoriesLive),
+);
+
+const CheckpointStartupRuntimeLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const startup = yield* CheckpointStartupMaintenance.CheckpointStartupMaintenance;
+    const backfill = yield* CheckpointTimelineBackfill.CheckpointTimelineBackfill;
+    yield* Effect.forkScoped(
+      startup.runNow().pipe(
+        Effect.andThen(backfill.run()),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Checkpoint startup recovery pass failed", { cause }),
+        ),
+      ),
+    );
+  }),
+).pipe(
+  Layer.provideMerge(CheckpointStartupMaintenanceLayerLive),
+  Layer.provideMerge(CheckpointTimelineBackfillLayerLive),
+);
+
+const CheckpointRuntimeLayerLive = Layer.mergeAll(
+  CheckpointDurableRepositoriesLive,
+  CheckpointProviderNavigationLayerLive,
+  WorkspaceMutationCoordinatorLive,
+  CheckpointNavigationServiceLayerLive,
+  CheckpointNavigationAvailabilityLayerLive,
+  CheckpointNavigationReactorLayerLive,
+  CheckpointNavigationReactorRuntimeLive,
+  CheckpointMigrationLayerLive,
+  CheckpointMaintenanceLayerLive,
+  CheckpointStartupMaintenanceLayerLive,
+  CheckpointTimelineBackfillLayerLive,
+  CheckpointStartupRuntimeLive,
+  CheckpointDiagnostics.layer,
 );
 
 const PortScannerLayerLive = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
@@ -279,14 +393,20 @@ const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
   ),
 );
 
-const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
+const ProviderOrchestrationLayerLive = OrchestrationLayerLive.pipe(
+  Layer.provideMerge(CheckpointNavigationAvailabilityLayerLive),
   Layer.provideMerge(ProviderLayerLive),
-  Layer.provideMerge(OrchestrationLayerLive),
 );
 
-const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
+  Layer.provideMerge(ProviderOrchestrationLayerLive),
+);
+
+const RuntimeCoreBaseLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(CheckpointingLayerLive),
+  Layer.provideMerge(CheckpointRuntimeLayerLive),
+  Layer.provideMerge(CheckpointRepositoryIdentity.layer),
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
@@ -313,6 +433,9 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // no longer transitively provides it. Exposing it at the runtime level
   // keeps a single Live for all opencode consumers.
   Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
+);
+
+const RuntimeCoreDependenciesLive = RuntimeCoreBaseLive.pipe(
   Layer.provideMerge(ServerSettings.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(WorkspaceLayerLive),
   Layer.provideMerge(ProjectFaviconResolverLayerLive),

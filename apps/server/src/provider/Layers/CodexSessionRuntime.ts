@@ -131,6 +131,16 @@ export interface CodexThreadSnapshot {
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
 }
 
+export interface CodexConversationCursor {
+  readonly nativeThreadId: string;
+  readonly sourceNativeThreadId: string;
+  readonly targetTurnId: string | null;
+}
+
+export interface CodexConversationBinding {
+  readonly nativeThreadId: string;
+}
+
 export interface CodexSessionRuntimeShape {
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
@@ -142,6 +152,20 @@ export interface CodexSessionRuntimeShape {
   readonly rollbackThread: (
     numTurns: number,
   ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
+  /** Fork the source first, then trim only the fork to the requested turn. */
+  readonly prepareConversationCursor: (input: {
+    readonly sourceNativeThreadId: string;
+    readonly targetTurnId: string | null;
+  }) => Effect.Effect<CodexConversationCursor, CodexSessionRuntimeError>;
+  readonly activateConversationCursor: (
+    cursor: CodexConversationCursor,
+  ) => Effect.Effect<CodexConversationBinding, CodexSessionRuntimeError>;
+  readonly restoreConversationBinding: (
+    binding: CodexConversationBinding,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly disposeConversationCursor: (
+    cursor: CodexConversationCursor,
+  ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly respondToRequest: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -159,7 +183,21 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
-  | CodexSessionRuntimeThreadIdMissingError;
+  | CodexSessionRuntimeThreadIdMissingError
+  | CodexSessionRuntimeConversationTargetError;
+
+export class CodexSessionRuntimeConversationTargetError extends Schema.TaggedErrorClass<CodexSessionRuntimeConversationTargetError>()(
+  "CodexSessionRuntimeConversationTargetError",
+  {
+    nativeThreadId: Schema.String,
+    targetTurnId: Schema.NullOr(Schema.String),
+    issue: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Cannot navigate Codex thread '${this.nativeThreadId}' to '${this.targetTurnId ?? "baseline"}': ${this.issue}`;
+  }
+}
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -438,6 +476,73 @@ interface CodexThreadOpenClient {
     payload: CodexRpc.ClientRequestParamsByMethod[M],
   ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
 }
+
+type CodexConversationNavigationMethod =
+  | "thread/read"
+  | "thread/fork"
+  | "thread/rollback"
+  | "thread/delete";
+
+interface CodexConversationNavigationClient {
+  readonly request: <M extends CodexConversationNavigationMethod>(
+    method: M,
+    payload: CodexRpc.ClientRequestParamsByMethod[M],
+  ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
+}
+
+/**
+ * Characterized against the 0.144.4 protocol: `thread/fork` has no turn
+ * selector. The source must therefore be forked in full before trimming only
+ * the fork. Keeping this operation standalone makes that ordering testable.
+ */
+export const prepareCodexConversationCursor = (input: {
+  readonly client: CodexConversationNavigationClient;
+  readonly sourceNativeThreadId: string;
+  readonly targetTurnId: string | null;
+}): Effect.Effect<
+  CodexConversationCursor,
+  CodexErrors.CodexAppServerError | CodexSessionRuntimeConversationTargetError
+> =>
+  Effect.gen(function* () {
+    const source = yield* input.client.request("thread/read", {
+      threadId: input.sourceNativeThreadId,
+      includeTurns: true,
+    });
+    const targetIndex =
+      input.targetTurnId === null
+        ? -1
+        : source.thread.turns.findIndex((turn) => turn.id === input.targetTurnId);
+    if (input.targetTurnId !== null && targetIndex < 0) {
+      return yield* new CodexSessionRuntimeConversationTargetError({
+        nativeThreadId: input.sourceNativeThreadId,
+        targetTurnId: input.targetTurnId,
+        issue: "the target turn is not present in the source thread",
+      });
+    }
+
+    const forked = yield* input.client.request("thread/fork", {
+      threadId: input.sourceNativeThreadId,
+    });
+    const nativeThreadId = forked.thread.id;
+    const numTurns = source.thread.turns.length - (targetIndex + 1);
+    if (numTurns > 0) {
+      yield* input.client
+        .request("thread/rollback", {
+          threadId: nativeThreadId,
+          numTurns,
+        })
+        .pipe(
+          Effect.tapError(() =>
+            input.client.request("thread/delete", { threadId: nativeThreadId }).pipe(Effect.ignore),
+          ),
+        );
+    }
+    return {
+      nativeThreadId,
+      sourceNativeThreadId: input.sourceNativeThreadId,
+      targetTurnId: input.targetTurnId,
+    };
+  });
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -1345,6 +1450,52 @@ export const makeCodexSessionRuntime = (
             activeTurnId: undefined,
           });
           return parseThreadSnapshot(response);
+        }),
+      prepareConversationCursor: ({ sourceNativeThreadId, targetTurnId }) =>
+        prepareCodexConversationCursor({
+          client,
+          sourceNativeThreadId,
+          targetTurnId,
+        }),
+      activateConversationCursor: (cursor) =>
+        Effect.gen(function* () {
+          const priorNativeThreadId = yield* readProviderThreadId;
+          // `thread/read` is both a validity check and makes restart-loaded
+          // payload failures surface before T3 changes its persisted binding.
+          yield* client.request("thread/read", {
+            threadId: cursor.nativeThreadId,
+            includeTurns: false,
+          });
+          yield* updateSession(sessionRef, {
+            status: "ready",
+            activeTurnId: undefined,
+            resumeCursor: { threadId: cursor.nativeThreadId },
+          });
+          return { nativeThreadId: priorNativeThreadId } satisfies CodexConversationBinding;
+        }),
+      restoreConversationBinding: (binding) =>
+        Effect.gen(function* () {
+          yield* client.request("thread/read", {
+            threadId: binding.nativeThreadId,
+            includeTurns: false,
+          });
+          yield* updateSession(sessionRef, {
+            status: "ready",
+            activeTurnId: undefined,
+            resumeCursor: { threadId: binding.nativeThreadId },
+          });
+        }),
+      disposeConversationCursor: (cursor) =>
+        Effect.gen(function* () {
+          const activeNativeThreadId = yield* readProviderThreadId;
+          if (activeNativeThreadId === cursor.nativeThreadId) {
+            return yield* new CodexSessionRuntimeConversationTargetError({
+              nativeThreadId: cursor.nativeThreadId,
+              targetTurnId: cursor.targetTurnId,
+              issue: "the prepared cursor is currently active",
+            });
+          }
+          yield* client.request("thread/delete", { threadId: cursor.nativeThreadId });
         }),
       respondToRequest: (requestId, decision) =>
         Effect.gen(function* () {

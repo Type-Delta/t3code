@@ -1163,7 +1163,10 @@ export function makeCursorAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        conversationNavigation: "unsupported",
+      },
       startSession,
       sendTurn,
       interruptTurn,

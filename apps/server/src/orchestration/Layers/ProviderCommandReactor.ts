@@ -19,6 +19,7 @@ import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -26,6 +27,13 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import { CheckpointRepositoryIdentityResolver } from "../../checkpointing/CheckpointRepositoryIdentity.ts";
+import { WorkspaceMutationCoordinator } from "../../checkpointing/WorkspaceMutationCoordinator.ts";
+import {
+  CheckpointNavigationError,
+  CheckpointNavigationService,
+} from "../../checkpointing/CheckpointNavigationService.ts";
+import { CheckpointNavigationRepository } from "../../persistence/Services/CheckpointNavigation.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
@@ -85,6 +93,7 @@ const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
+const PROVIDER_MUTATION_RELEASE_GRACE = Duration.seconds(2);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
 
@@ -196,6 +205,10 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  const checkpointNavigation = yield* CheckpointNavigationService;
+  const checkpointNavigationOperations = yield* CheckpointNavigationRepository;
+  const checkpointIdentities = yield* CheckpointRepositoryIdentityResolver;
+  const mutationCoordinator = yield* WorkspaceMutationCoordinator;
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -213,6 +226,31 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  const preparedProviderMutationThreads = new Set<string>();
+
+  const prepareCheckpointTimelineForTurn = Effect.fn(
+    "ProviderCommandReactor.prepareCheckpointTimelineForTurn",
+  )(function* (threadId: ThreadId, createdAt: string) {
+    const unresolved = yield* checkpointNavigationOperations.getUnresolvedByThread({ threadId });
+    if (Option.isSome(unresolved)) {
+      return yield* new CheckpointNavigationError({
+        code: "navigation-recovery-required",
+        detail: "A prior checkpoint navigation operation requires recovery before starting a turn.",
+        operationId: unresolved.value.operationId,
+      });
+    }
+    const abandoned = yield* checkpointNavigation.abandonForwardHistory(threadId);
+    if (!abandoned.abandoned) return;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.checkpoint.forward-history.abandon",
+      commandId: yield* serverCommandId("checkpoint-forward-history-abandon"),
+      threadId,
+      abandonedGeneration: abandoned.abandonedGeneration,
+      activeGeneration: abandoned.activeGeneration,
+      cursorVersion: abandoned.cursorVersion,
+      createdAt,
+    });
+  });
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -744,6 +782,44 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const prepareProviderTurnMutation = Effect.fn(
+    "ProviderCommandReactor.prepareProviderTurnMutation",
+  )(function* (threadId: ThreadId) {
+    const thread = yield* resolveThread(threadId);
+    if (!thread) return false;
+    const project = yield* resolveProject(thread.projectId);
+    const cwd = resolveThreadWorkspaceCwd({
+      thread,
+      projects: project ? [project] : [],
+    });
+    if (!cwd) return false;
+    const identity = yield* checkpointIdentities.resolve(cwd);
+    let prepared = yield* mutationCoordinator.prepareProviderMutation(
+      threadId,
+      identity.worktreeKey,
+    );
+    if (!prepared) {
+      const released = yield* mutationCoordinator
+        .awaitProviderMutationRelease(threadId)
+        .pipe(Effect.timeoutOption(PROVIDER_MUTATION_RELEASE_GRACE));
+      if (Option.isSome(released)) {
+        prepared = yield* mutationCoordinator.prepareProviderMutation(
+          threadId,
+          identity.worktreeKey,
+        );
+      }
+    }
+    if (!prepared) {
+      return yield* new ProviderAdapterRequestError({
+        provider: "checkpoint",
+        method: "thread.turn.start",
+        detail: `Thread '${threadId}' already has an active workspace mutation.`,
+      });
+    }
+    preparedProviderMutationThreads.add(threadId);
+    return true;
+  });
+
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
   ) {
@@ -769,6 +845,24 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+
+    const timelinePrepared = yield* prepareCheckpointTimelineForTurn(
+      event.payload.threadId,
+      event.payload.createdAt,
+    ).pipe(
+      Effect.as(true),
+      Effect.catchCause((cause) =>
+        appendProviderFailureActivity({
+          threadId: event.payload.threadId,
+          kind: "provider.turn.start.failed",
+          summary: "Provider turn start blocked",
+          detail: formatFailureDetail(cause),
+          turnId: null,
+          createdAt: event.payload.createdAt,
+        }).pipe(Effect.as(false)),
+      ),
+    );
+    if (!timelinePrepared) return;
 
     const isFirstUserMessageTurn =
       thread.messages.filter((entry) => entry.role === "user").length === 1;
@@ -855,9 +949,37 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    yield* Effect.gen(function* () {
+      const preparedMutation = yield* prepareProviderTurnMutation(event.payload.threadId);
+      const turn = yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+        Effect.onExit((exit) =>
+          preparedMutation && Exit.isFailure(exit)
+            ? mutationCoordinator.cancelProviderMutation(event.payload.threadId).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => preparedProviderMutationThreads.delete(event.payload.threadId)),
+                ),
+                Effect.asVoid,
+              )
+            : Effect.void,
+        ),
+      );
+      if (preparedMutation) {
+        const bound = yield* mutationCoordinator.bindProviderMutation(
+          event.payload.threadId,
+          String(turn.turnId),
+        );
+        if (!bound) {
+          yield* Effect.logWarning(
+            "provider turn started without its prepared workspace mutation",
+            {
+              threadId: event.payload.threadId,
+              turnId: turn.turnId,
+            },
+          );
+        }
+      }
+      return turn;
+    }).pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
@@ -1061,6 +1183,11 @@ const make = Effect.gen(function* () {
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
+    yield* Effect.addFinalizer(() =>
+      Effect.forEach(preparedProviderMutationThreads, (threadId) =>
+        mutationCoordinator.cancelProviderMutation(threadId),
+      ).pipe(Effect.asVoid),
+    );
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
       if (
         event.type === "thread.runtime-mode-set" ||

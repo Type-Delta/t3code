@@ -554,10 +554,44 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           occurredAt: command.createdAt,
           commandId: command.commandId,
         })),
-        type: "thread.checkpoint-revert-requested",
+        type: "thread.checkpoint-navigation-requested",
         payload: {
           threadId: command.threadId,
-          turnCount: command.turnCount,
+          kind: "jump",
+          targetTurnCount: command.turnCount,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.checkpoint.jump":
+    case "thread.checkpoint.undo":
+    case "thread.checkpoint.redo": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.checkpoint-navigation-requested",
+        payload: {
+          threadId: command.threadId,
+          kind:
+            command.type === "thread.checkpoint.jump"
+              ? "jump"
+              : command.type === "thread.checkpoint.undo"
+                ? "undo"
+                : "redo",
+          targetTurnCount: command.type === "thread.checkpoint.jump" ? command.turnCount : null,
+          ...(command.type !== "thread.checkpoint.redo" && command.filesOnlyConfirmed !== undefined
+            ? { filesOnlyConfirmed: command.filesOnlyConfirmed }
+            : {}),
           createdAt: command.createdAt,
         },
       };
@@ -725,6 +759,64 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           turnCount: command.turnCount,
+        },
+      };
+    }
+
+    case "thread.checkpoint.navigation.complete": {
+      yield* requireThread({ readModel, command, threadId: command.threadId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.checkpoint-navigation-completed",
+        payload: {
+          threadId: command.threadId,
+          operationId: command.operationId,
+          kind: command.kind,
+          targetEntryId: command.targetEntryId,
+          cursorVersion: command.cursorVersion,
+        },
+      };
+    }
+
+    case "thread.checkpoint.navigation.fail": {
+      yield* requireThread({ readModel, command, threadId: command.threadId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.checkpoint-navigation-failed",
+        payload: {
+          threadId: command.threadId,
+          operationId: command.operationId,
+          kind: command.kind,
+          code: command.code,
+        },
+      };
+    }
+
+    case "thread.checkpoint.forward-history.abandon": {
+      yield* requireThread({ readModel, command, threadId: command.threadId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.checkpoint-forward-history-abandoned",
+        payload: {
+          threadId: command.threadId,
+          abandonedGeneration: command.abandonedGeneration,
+          activeGeneration: command.activeGeneration,
+          cursorVersion: command.cursorVersion,
         },
       };
     }

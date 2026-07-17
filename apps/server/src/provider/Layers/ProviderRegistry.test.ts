@@ -28,6 +28,7 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { deepMerge } from "@t3tools/shared/Struct";
 import { createModelCapabilities } from "@t3tools/shared/model";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
@@ -282,7 +283,7 @@ function makeMutableServerSettingsService(
 ) {
   return Effect.gen(function* () {
     const settingsRef = yield* Ref.make(initial);
-    const changes = yield* PubSub.unbounded<ContractServerSettings>();
+    const changes = yield* PubSub.unbounded<ContractServerSettings>({ replay: 1 });
 
     return {
       start: Effect.void,
@@ -773,7 +774,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             checkedAt: "2026-04-14T00:01:00.000Z",
             models: [],
           } satisfies ServerProvider;
-          const changes = yield* PubSub.unbounded<ServerProvider>();
+          // Provider snapshots are state, not transient events. Replay the
+          // latest value so the fixture matches production sources whose
+          // getSnapshot observes an update even if subscription startup lags.
+          const changes = yield* PubSub.unbounded<ServerProvider>({ replay: 1 });
           const instance = {
             instanceId: cursorInstanceId,
             driverKind: cursorDriver,
@@ -838,7 +842,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             let cachedProvider = yield* readProviderStatusCache(filePath);
             for (
               let attempt = 0;
-              attempt < 50 && cachedProvider?.checkedAt !== refreshedProvider.checkedAt;
+              attempt < 500 && cachedProvider?.checkedAt !== refreshedProvider.checkedAt;
               attempt += 1
             ) {
               yield* TestClock.adjust("10 millis");
@@ -1272,7 +1276,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             // executable. This verifies the public settings-to-probe behavior
             // without depending on timestamps assigned by TestClock.
             const refreshed = yield* Effect.gen(function* () {
-              for (let attempts = 0; attempts < 60; attempts += 1) {
+              const platform = yield* HostProcessPlatform;
+              const maxAttempts = platform === "win32" ? 300 : 60;
+              for (let attempts = 0; attempts < maxAttempts; attempts += 1) {
                 const providers = yield* registry.getProviders;
                 const codex = providers.find((provider) => provider.instanceId === "codex");
                 if (
@@ -1283,6 +1289,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   return providers;
                 }
                 yield* TestClock.adjust("50 millis");
+                if (platform === "win32") {
+                  // Command discovery scans PATHEXT candidates using async
+                  // filesystem calls. Give the Windows event loop real time
+                  // to settle instead of advancing only the virtual clock.
+                  yield* Effect.sleep("10 millis").pipe(TestClock.withLive);
+                }
                 yield* Effect.yieldNow;
               }
               return yield* registry.getProviders;

@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFSP from "node:fs/promises";
+
 import { assert, it, describe } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -9,10 +12,12 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 import type { VcsDriverKind } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as VcsDriver from "../VcsDriver.ts";
 
-function normalizePathForComparison(value: string): string {
-  return value.replaceAll("\\", "/");
+function normalizePathForComparison(value: string, platform: NodeJS.Platform): string {
+  const normalized = value.replaceAll("\\", "/");
+  return platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 export interface VcsDriverFixture<R, E> {
@@ -71,10 +76,17 @@ export function runVcsDriverContractSuite<R, E>(input: VcsDriverContractSuiteInp
           yield* input.fixture.writeFile(cwd, "src/index.ts", "export const value = 1;\n");
           const identity = yield* driver.detectRepository(cwd);
           assert.equal(identity?.kind, input.kind);
-          assert.isTrue(
-            normalizePathForComparison(identity?.rootPath ?? "").endsWith(
-              normalizePathForComparison(cwd),
-            ),
+          const platform = yield* HostProcessPlatform;
+          // Effect's lexical Windows fallback preserves 8.3 aliases while
+          // Git expands them. Native realpath gives both values the same
+          // canonical long-path spelling before this strict identity check.
+          const canonicalRoot = yield* Effect.promise(() =>
+            NodeFSP.realpath(identity?.rootPath ?? ""),
+          );
+          const canonicalCwd = yield* Effect.promise(() => NodeFSP.realpath(cwd));
+          assert.equal(
+            normalizePathForComparison(canonicalRoot, platform),
+            normalizePathForComparison(canonicalCwd, platform),
           );
           assert.equal(identity?.freshness.source, "live-local");
           assert.isTrue(DateTime.isDateTime(identity?.freshness.observedAt));

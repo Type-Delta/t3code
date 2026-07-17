@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  checkpointNavigationConfirmationMessage,
   clampCollapsedComposerCursor,
   collapseExpandedComposerCursor,
   detectComposerTrigger,
@@ -8,6 +9,7 @@ import {
   isCollapsedCursorAdjacentToInlineToken,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
+  resolveCheckpointNavigationDisabledReason,
 } from "./composer-logic";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
 
@@ -344,7 +346,121 @@ describe("parseStandaloneComposerSlashCommand", () => {
     expect(parseStandaloneComposerSlashCommand("/default")).toBe("default");
   });
 
+  it("parses standalone /undo and /redo commands", () => {
+    expect(parseStandaloneComposerSlashCommand(" /undo ")).toBe("undo");
+    expect(parseStandaloneComposerSlashCommand("/redo")).toBe("redo");
+  });
+
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/undo this turn")).toBeNull();
+  });
+});
+
+describe("resolveCheckpointNavigationDisabledReason", () => {
+  const navigation = {
+    capability: "branching" as const,
+    canUndo: true,
+    canRedo: true,
+    isNavigating: false,
+    latestCheckpointBlockingStatus: null,
+    reason: null,
+    cursorVersion: 2,
+    currentOrdinal: 1,
+    forwardTipOrdinal: 2,
+  };
+  const resolve = (
+    overrides: Partial<Parameters<typeof resolveCheckpointNavigationDisabledReason>[0]> = {},
+  ) =>
+    resolveCheckpointNavigationDisabledReason({
+      command: "undo",
+      threadCreated: true,
+      reconnectLabel: null,
+      busy: false,
+      locallyNavigating: false,
+      navigation,
+      ...overrides,
+    });
+
+  it("reports busy, pending, contended, and no-target reasons", () => {
+    expect(resolve({ busy: true })).toBe(
+      "Interrupt the current turn before navigating checkpoints.",
+    );
+    expect(
+      resolve({ navigation: { ...navigation, latestCheckpointBlockingStatus: "pending" } }),
+    ).toBe("The latest checkpoint is still pending.");
+    expect(
+      resolve({ navigation: { ...navigation, latestCheckpointBlockingStatus: "contended" } }),
+    ).toBe("The latest checkpoint could not be captured because the workspace changed.");
+    expect(resolve({ navigation: { ...navigation, canUndo: false } })).toBe(
+      "No ready checkpoint is available to undo.",
+    );
+  });
+
+  it("explains why redo is disabled for non-branching providers", () => {
+    expect(
+      resolve({
+        command: "redo",
+        navigation: { ...navigation, capability: "rollback-only", canRedo: false },
+      }),
+    ).toBe("This provider cannot preserve conversation branches for redo.");
+  });
+
+  it("allows undo and jump for non-branching providers when the server projects a target", () => {
+    expect(
+      resolve({ navigation: { ...navigation, capability: "rollback-only", canUndo: true } }),
+    ).toBeNull();
+    expect(
+      resolve({
+        command: "jump",
+        navigation: { ...navigation, capability: "unsupported", canUndo: false },
+      }),
+    ).toBeNull();
+  });
+
+  it("allows projected targets and blocks concurrent navigation", () => {
+    expect(resolve()).toBeNull();
+    expect(resolve({ navigation: { ...navigation, isNavigating: true } })).toBe(
+      "Checkpoint navigation is already in progress.",
+    );
+  });
+});
+
+describe("checkpointNavigationConfirmationMessage", () => {
+  it("warns before files-only undo for rollback-only providers", () => {
+    expect(
+      checkpointNavigationConfirmationMessage({ command: "undo", capability: "rollback-only" }),
+    ).toBe(
+      [
+        "Restore workspace files from the previous checkpoint?",
+        "Only workspace files will be restored. Chat history will NOT be reverted.",
+        "The provider may still remember the later conversation and changes.",
+      ].join("\n"),
+    );
+  });
+
+  it("warns before files-only jump for unsupported providers", () => {
+    expect(
+      checkpointNavigationConfirmationMessage({
+        command: "jump",
+        capability: "unsupported",
+        turnCount: 3,
+      }),
+    ).toContain("Restore workspace files from checkpoint 3?");
+  });
+
+  it("keeps branching jump confirmation and leaves branching undo unconfirmed", () => {
+    expect(
+      checkpointNavigationConfirmationMessage({
+        command: "jump",
+        capability: "branching",
+        turnCount: 2,
+      }),
+    ).toBe(
+      "Revert this thread to checkpoint 2?\nNewer messages and turn diffs will be hidden until you redo them.",
+    );
+    expect(
+      checkpointNavigationConfirmationMessage({ command: "undo", capability: "branching" }),
+    ).toBeNull();
   });
 });

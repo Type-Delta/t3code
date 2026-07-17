@@ -192,3 +192,84 @@ Checkpoint file-content assertions normalize Git's Windows CRLF checkout convers
 - Windows-specific desktop, bootstrap, relay-client, workspace, Tailscale, and oxlint test slices pass.
 
 **Last updated:** 2026-07-15
+
+### DL006 — Isolated checkpoint sidecars and recoverable undo/redo
+
+Checkpoint capture and navigation are now production server services independent of the provider
+test harness. New snapshots live in private bare Git sidecars below the server state directory and
+are addressed through opaque `t3-sidecar:v1:` locators. Sidecar commands use explicit Git/worktree
+paths and sanitized environments, never write objects, refs, indexes, reflogs, or alternates into the
+project repository, and serialize maintenance against capture/import/restore operations. Capture
+and atomic restore cover tracked and untracked non-ignored files, deletions, binaries, executable
+bits, linked worktrees, symlinks, Windows path canonicalization, and `core.symlinks=false` checkouts.
+
+Rollback-only and unsupported providers expose an explicit filesystem-only fallback for `/undo` and
+message rewind. The client first confirms that workspace files will be restored while chat history
+and the provider conversation remain unchanged, and the server requires that confirmation signal.
+This path uses a mode-tagged durable navigation journal, the per-worktree mutation lock,
+repository/worktree identity validation, a retained rescue snapshot, and restart-safe filesystem
+compensation, but never calls the provider or moves the durable conversation cursor. `/redo`
+remains branching-only.
+
+SQLite now owns durable capture jobs, immutable checkpoint entries, timeline generations and
+cursors, provider bindings, retention metadata, and crash-recoverable navigation journals. Turn
+completion only enqueues bounded per-worktree capture. Workers lease jobs, verify the workspace tree
+twice around capture, reject contended boundaries, repair ready jobs whose timeline publication was
+interrupted, and recover safely after restart. New turns behind the forward tip fork the logical
+timeline while retaining abandoned forward data for its grace period.
+
+Undo, redo, and arbitrary message rewind share one server-side navigation saga. Each operation
+captures a rescue snapshot, prepares a non-destructive provider branch, restores the filesystem,
+activates the provider binding, moves the visible SQLite cursor, and persists every phase. Failures
+compensate the provider, filesystem, and cursor in reverse order; unresolved compensation blocks new
+mutations and is resumed at startup. Codex advertises branching only through its verified native
+fork/resume path. Providers without a proven non-destructive branch capability remain explicitly
+unsupported for conversation navigation, so redo never replays prompts or silently falls back to
+destructive rollback.
+
+The projection and client layers are cursor-aware: forward messages, plans, activities, and ready
+checkpoint summaries are hidden after undo while their rows and sidecar objects remain available for
+redo. Standalone `/undo` and `/redo`, disabled-reason UX, rewind/jump, command contracts, optimistic
+client state, and refresh behavior all use the same navigation commands. Legacy project refs remain
+dual-readable and can be imported, verified, observed, retained, and cleaned up durably; sidecar-only
+GC, startup scavenging, retention grace periods, and diagnostics complete the rollout.
+
+**Primary implementation areas:**
+
+- `apps/server/src/checkpointing/`
+- `apps/server/src/persistence/Migrations/033_CheckpointDurableState.ts`
+- `apps/server/src/persistence/Migrations/034_CheckpointLegacyMigration.ts`
+- `apps/server/src/persistence/Migrations/036_CheckpointNavigationMode.ts`
+- `apps/server/src/persistence/{Layers,Services}/Checkpoint*.ts`
+- `apps/server/src/orchestration/`
+- `apps/server/src/provider/`
+- `packages/contracts/src/orchestration.ts`
+- `packages/client-runtime/src/`
+- `apps/web/src/composer-logic.ts`
+- `apps/web/src/components/ChatView.tsx`
+- `apps/web/src/components/chat/{ChatComposer,ComposerCommandMenu}.tsx`
+- `vite.config.ts` (bounded Windows workers for root `vp test`)
+
+**Validation:**
+
+- Migration-focused matrix passes: 29 files, 312 tests; the post-review durability regression matrix
+  passes 8 files and 63 tests.
+- The exact-turn workspace-mutation regression matrix passes 3 files and 58 tests, including
+  restore/turn worker deadlock, stale terminal ownership, terminal-before-bind, interruption cleanup,
+  and bounded prior-turn release waiting.
+- Sidecar characterization passes 18/18, including unborn repositories, submodules, and concurrent
+  linked-worktree captures.
+- Real orchestration integration passes: 11 tests, with 1 provider-capability-gated test skipped.
+- Windows/provider isolation slices pass: 279 tests across the affected server, desktop, and web
+  files; Git/VCS sidecar slices also pass independently.
+- Full `vp test` passes within the 30-minute limit: 596 files and 4,690 tests passed; 2 files and 9
+  tests were skipped by existing capability/platform gates (745.92 seconds).
+- `vp check`, `vp run typecheck`, and `git diff --check` pass. Remaining lint output consists of
+  existing warnings outside this change.
+- An independent Fable review was run read-only. Its retention-lineage, in-flight rescue, restarted
+  capture, provider-binding boundary, and crash-compensation findings were resolved and covered by
+  regression tests. Follow-up review also verified exact provider-turn mutation ownership, atomic
+  runtime mutation registration, non-blocking sequential event handling, and prior-turn release
+  ordering; its final pass reported no findings.
+
+**Last updated:** 2026-07-17

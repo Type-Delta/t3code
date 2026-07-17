@@ -51,7 +51,7 @@ export type FixtureProviderRuntimeEvent = {
 export type LegacyProviderRuntimeEvent = FixtureProviderRuntimeEvent;
 
 interface SessionState {
-  readonly session: ProviderSession;
+  session: ProviderSession;
   snapshot: ProviderThreadSnapshot;
   turnCount: number;
   readonly queuedResponses: Array<TestTurnResponse>;
@@ -230,6 +230,10 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     let sessionCount = 0;
     const sessions = new Map<ThreadId, SessionState>();
+    const branches = new Map<
+      string,
+      { readonly snapshot: ProviderThreadSnapshot; readonly turnCount: number }
+    >();
     const queuedResponsesForNextSession: TestTurnResponse[] = [];
     const interruptCallsBySession = new Map<ThreadId, Array<TurnId | undefined>>();
     const approvalResponsesBySession = new Map<
@@ -254,6 +258,11 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
             }),
         ),
       );
+    const bindingKey = (binding: unknown) => JSON.stringify(binding);
+    const cloneSnapshot = (snapshot: ProviderThreadSnapshot): ProviderThreadSnapshot => ({
+      threadId: snapshot.threadId,
+      turns: snapshot.turns.map((turn) => ({ ...turn, items: [...turn.items] })),
+    });
 
     const startSession: ProviderAdapterShape<ProviderAdapterError>["startSession"] = (input) =>
       Effect.gen(function* () {
@@ -269,6 +278,11 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         const threadId = input.threadId;
         const createdAt = nowIso();
 
+        const resumeCursor = input.resumeCursor ?? {
+          threadId: String(threadId),
+          seed: sessionCount,
+        };
+        const restoredBranch = branches.get(bindingKey(resumeCursor));
         const session: ProviderSession = {
           provider,
           ...(input.providerInstanceId !== undefined
@@ -278,20 +292,21 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
           runtimeMode: input.runtimeMode,
           threadId,
           cwd: input.cwd,
-          resumeCursor: input.resumeCursor ?? { threadId: String(threadId), seed: sessionCount },
+          resumeCursor,
           createdAt,
           updatedAt: createdAt,
         };
 
         sessions.set(threadId, {
           session,
-          snapshot: {
-            threadId,
-            turns: [],
-          },
-          turnCount: 0,
+          snapshot: restoredBranch?.snapshot ?? { threadId, turns: [] },
+          turnCount: restoredBranch?.turnCount ?? 0,
           queuedResponses: queuedResponsesForNextSession.splice(0),
           rollbackCalls: [],
+        });
+        branches.set(bindingKey(resumeCursor), {
+          snapshot: cloneSnapshot(restoredBranch?.snapshot ?? { threadId, turns: [] }),
+          turnCount: restoredBranch?.turnCount ?? 0,
         });
 
         return session;
@@ -330,6 +345,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
           if (Object.hasOwn(rawEvent, "turnId")) {
             rawEvent.turnId = turnId;
           }
+          rawEvent.providerRefs = { providerTurnId: String(turnId) };
 
           const runtimeEvent = normalizeFixtureEvent(rawEvent);
           const runtimeType = (runtimeEvent as { type: string }).type;
@@ -375,6 +391,12 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
           threadId: state.snapshot.threadId,
           turns: [...state.snapshot.turns, nextTurn],
         };
+        if (state.session.resumeCursor !== undefined) {
+          branches.set(bindingKey(state.session.resumeCursor), {
+            snapshot: cloneSnapshot(state.snapshot),
+            turnCount: state.turnCount,
+          });
+        }
 
         if (deferredTurnCompletedEvents.length === 0) {
           yield* emit({
@@ -488,11 +510,108 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         sessions.clear();
       });
 
+    const conversationNavigation: NonNullable<
+      ProviderAdapterShape<ProviderAdapterError>["conversationNavigation"]
+    > = {
+      prepareCursor: (threadId, checkpoint) => {
+        const state = sessions.get(threadId);
+        if (!state) return missingSessionEffect(provider, threadId);
+        const source = branches.get(bindingKey(checkpoint.binding)) ?? {
+          snapshot: cloneSnapshot(state.snapshot),
+          turnCount: state.turnCount,
+        };
+        const targetTurnCount =
+          checkpoint.targetTurnId === null
+            ? 0
+            : source.snapshot.turns.findIndex(
+                (turn) => String(turn.id) === checkpoint.targetTurnId,
+              ) + 1;
+        if (checkpoint.targetTurnId !== null && targetTurnCount === 0) {
+          return Effect.fail(
+            new ProviderAdapterValidationError({
+              provider,
+              operation: "prepareCursor",
+              issue: `Unknown target turn '${checkpoint.targetTurnId}'.`,
+            }),
+          );
+        }
+        return randomUUIDv4(threadId).pipe(
+          Effect.map((cursorId) => ({
+            schemaVersion: 1,
+            sourceBinding: checkpoint.binding,
+            targetBinding: { threadId: String(threadId), branch: String(cursorId) },
+            targetSnapshot: {
+              threadId,
+              turns: source.snapshot.turns.slice(0, targetTurnCount),
+            },
+            targetTurnCount,
+          })),
+        );
+      },
+      activateCursor: (threadId, cursor) => {
+        const state = sessions.get(threadId);
+        if (!state) return missingSessionEffect(provider, threadId);
+        if (
+          !isRecord(cursor) ||
+          !isRecord(cursor.targetBinding) ||
+          !isRecord(cursor.targetSnapshot)
+        ) {
+          return Effect.fail(
+            new ProviderAdapterValidationError({
+              provider,
+              operation: "activateCursor",
+              issue: "Invalid test conversation cursor.",
+            }),
+          );
+        }
+        const targetSnapshot = cursor.targetSnapshot as unknown as ProviderThreadSnapshot;
+        const targetTurnCount = Number(cursor.targetTurnCount);
+        return Effect.sync(() => {
+          if (state.session.resumeCursor !== undefined) {
+            branches.set(bindingKey(state.session.resumeCursor), {
+              snapshot: cloneSnapshot(state.snapshot),
+              turnCount: state.turnCount,
+            });
+          }
+          state.snapshot = cloneSnapshot(targetSnapshot);
+          state.turnCount = targetTurnCount;
+          state.session = { ...state.session, resumeCursor: cursor.targetBinding };
+          branches.set(bindingKey(cursor.targetBinding), {
+            snapshot: cloneSnapshot(targetSnapshot),
+            turnCount: targetTurnCount,
+          });
+          return cursor.targetBinding;
+        });
+      },
+      restoreBinding: (threadId, binding) => {
+        const state = sessions.get(threadId);
+        if (!state) return missingSessionEffect(provider, threadId);
+        const branch = branches.get(bindingKey(binding));
+        if (!branch) {
+          return Effect.fail(
+            new ProviderAdapterValidationError({
+              provider,
+              operation: "restoreBinding",
+              issue: "Unknown test conversation binding.",
+            }),
+          );
+        }
+        return Effect.sync(() => {
+          state.snapshot = cloneSnapshot(branch.snapshot);
+          state.turnCount = branch.turnCount;
+          state.session = { ...state.session, resumeCursor: binding };
+        });
+      },
+      disposeCursor: () => Effect.void,
+    };
+
     const adapter: ProviderAdapterShape<ProviderAdapterError> = {
       provider,
       capabilities: {
         sessionModelSwitch: "in-session",
+        conversationNavigation: provider === "codex" ? "branching" : "unsupported",
       },
+      ...(provider === "codex" ? { conversationNavigation } : {}),
       startSession,
       sendTurn,
       interruptTurn,
