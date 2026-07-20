@@ -99,8 +99,12 @@ const MAX_EVALUATION_BYTES = 64_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
 const MAX_INTERACTIVE_ELEMENTS = 200;
 const MAX_SCREENSHOT_WIDTH = 1280;
-const DIAGNOSTIC_BUFFER_LIMIT = 200;
+const DIAGNOSTIC_BUFFER_LIMIT = 50;
 const MAX_ARTIFACT_SITE_SLUG_LENGTH = 80;
+const DEFAULT_AUTOMATION_TIMEOUT_MS = 15_000;
+const AUTOMATION_RESPONSE_BUDGET_MS = 250;
+const AUTOMATION_RETRY_INTERVAL_MS = 50;
+const MAX_SNAPSHOT_STABILITY_ATTEMPTS = 3;
 const AGENT_CURSOR_MOVE_MS = 160;
 const AGENT_CURSOR_CLICK_LEAD_MS = 40;
 const encodeUnknownJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
@@ -679,6 +683,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     });
   });
 
+  const resetBrowserDiagnostics = (webContentsId: number) =>
+    Ref.update(diagnosticsRef, (allDiagnostics) => {
+      if (!allDiagnostics.has(webContentsId)) return allDiagnostics;
+      return replaceMap(allDiagnostics, (copy) => {
+        copy.set(webContentsId, {
+          consoleEntries: [],
+          networkEntries: [],
+          requests: new Map(),
+        });
+      });
+    });
+
   const detachControlSession = Effect.fn("PreviewManager.detachControlSession")(function* (
     webContentsId: number,
     expected?: BrowserControlSession,
@@ -1190,6 +1206,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     });
     const sync = () => runFork(syncState(true));
     const syncNavigation = () => runFork(syncState(false));
+    const startedNavigation = (
+      _event: Electron.Event,
+      _url: string,
+      _isInPlace: boolean,
+      isMainFrame: boolean,
+    ): void => {
+      if (isMainFrame) runFork(resetBrowserDiagnostics(wc.id));
+    };
     const failed = (
       _event: Event,
       code: number,
@@ -1259,6 +1283,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       attempt({ operation: "detachListeners", tabId, webContentsId: wc.id }, () => {
         wc.off("did-navigate", syncNavigation);
         wc.off("did-navigate-in-page", syncNavigation);
+        wc.off("did-start-navigation", startedNavigation as never);
         wc.off("page-title-updated", sync);
         wc.off("did-start-loading", sync);
         wc.off("did-stop-loading", sync);
@@ -1271,6 +1296,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       yield* attempt({ operation: "attachListeners", tabId, webContentsId: wc.id }, () => {
         wc.on("did-navigate", syncNavigation);
         wc.on("did-navigate-in-page", syncNavigation);
+        wc.on("did-start-navigation", startedNavigation as never);
         wc.on("page-title-updated", sync);
         wc.on("did-start-loading", sync);
         wc.on("did-stop-loading", sync);
@@ -1878,16 +1904,38 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         concurrency: 2,
         discard: true,
       });
-      const page = yield* evaluateWithDebugger<{
-        url: string;
-        title: string;
-        loading: boolean;
-        visibleText: string;
-        interactiveElements: PreviewAutomationSnapshot["interactiveElements"];
-      }>(
-        tabId,
-        send,
-        `(() => {
+      type PageState = Pick<
+        PreviewAutomationSnapshot,
+        "url" | "title" | "loading" | "visibleText" | "interactiveElements"
+      >;
+      type SnapshotAttempt = {
+        readonly page: PageState;
+        readonly accessibility: unknown;
+        readonly sourceImage: Electron.NativeImage;
+      };
+      let capture: SnapshotAttempt | null = null;
+      for (
+        let attemptIndex = 0;
+        attemptIndex < MAX_SNAPSHOT_STABILITY_ATTEMPTS;
+        attemptIndex += 1
+      ) {
+        const before = yield* evaluateWithDebugger<{ revision: number; page: PageState }>(
+          tabId,
+          send,
+          `(async () => {
+          const state = globalThis.__t3PreviewSnapshotState ??= {
+            revision: 0,
+            observer: null
+          };
+          if (!state.observer) {
+            state.observer = new MutationObserver(() => { state.revision += 1; });
+            state.observer.observe(document, {
+              attributes: true,
+              characterData: true,
+              childList: true,
+              subtree: true
+            });
+          }
           const selectorFor = (element) => {
             if (element.id) return "#" + CSS.escape(element.id);
             for (const attribute of ["data-testid", "name"]) {
@@ -1915,41 +1963,91 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             const rect = element.getBoundingClientRect();
             return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
           };
-          const elements = Array.from(document.querySelectorAll(
+          const roleFor = (element) => {
+            const explicit = element.getAttribute("role");
+            if (explicit) return explicit;
+            if (element instanceof HTMLButtonElement) return "button";
+            if (element instanceof HTMLAnchorElement && element.hasAttribute("href")) return "link";
+            if (element instanceof HTMLTextAreaElement) return "textbox";
+            if (element instanceof HTMLSelectElement) return "combobox";
+            if (element instanceof HTMLInputElement) {
+              if (element.type === "checkbox") return "checkbox";
+              if (element.type === "radio") return "radio";
+              if (new Set(["button", "image", "reset", "submit"]).has(element.type)) return "button";
+              return "textbox";
+            }
+            return null;
+          };
+          const candidates = Array.from(document.querySelectorAll(
             "a[href],button,input,textarea,select,[role],[tabindex]"
-          )).filter(visible).slice(0, ${MAX_INTERACTIVE_ELEMENTS}).map((element) => {
+          )).filter(visible).slice(0, ${MAX_INTERACTIVE_ELEMENTS});
+          const descriptors = candidates.map((element) => {
             const rect = element.getBoundingClientRect();
+            const role = roleFor(element);
+            const name = (element.getAttribute("aria-label") || element.innerText || element.getAttribute("name") || "").trim();
+            const selector = selectorFor(element);
             return {
               tag: element.tagName.toLowerCase(),
-              role: element.getAttribute("role"),
-              name: element.getAttribute("aria-label") || element.innerText || element.getAttribute("name") || "",
-              selector: selectorFor(element),
+              role,
+              name,
+              selector,
               x: rect.x,
               y: rect.y,
               width: rect.width,
               height: rect.height
             };
           });
+          const semanticLocatorCounts = new Map();
+          for (const descriptor of descriptors) {
+            if (!descriptor.role || !descriptor.name) continue;
+            const key = descriptor.role + "\u0000" + descriptor.name;
+            semanticLocatorCounts.set(key, (semanticLocatorCounts.get(key) ?? 0) + 1);
+          }
+          const elements = descriptors.map((descriptor) => {
+            const semanticLocatorIsUnique = descriptor.role && descriptor.name &&
+              semanticLocatorCounts.get(descriptor.role + "\u0000" + descriptor.name) === 1;
+            return {
+              ...descriptor,
+              locator: semanticLocatorIsUnique
+                ? "role=" + descriptor.role + "[name=" + JSON.stringify(descriptor.name) + "]"
+                : "css=" + descriptor.selector
+            };
+          });
           return {
-            url: location.href,
-            title: document.title,
-            loading: document.readyState !== "complete",
-            visibleText: (document.body?.innerText || "").slice(0, ${MAX_VISIBLE_TEXT_LENGTH}),
-            interactiveElements: elements
+            revision: state.revision,
+            page: {
+              url: location.href,
+              title: document.title,
+              loading: document.readyState !== "complete",
+              visibleText: (document.body?.innerText || "").slice(0, ${MAX_VISIBLE_TEXT_LENGTH}),
+              interactiveElements: elements
+            }
           };
         })()`,
-        true,
-      );
-      const [accessibility, sourceImage, diagnostics, timelines] = yield* Effect.all([
-        send("Accessibility.getFullAXTree"),
-        attemptPromise(
-          {
-            operation: "automationSnapshot.capturePage",
-            tabId,
-            webContentsId: wc.id,
-          },
-          () => wc.capturePage(),
-        ),
+          true,
+        );
+        const [accessibility, sourceImage] = yield* Effect.all([
+          send("Accessibility.getFullAXTree"),
+          attemptPromise(
+            {
+              operation: "automationSnapshot.capturePage",
+              tabId,
+              webContentsId: wc.id,
+            },
+            () => wc.capturePage(),
+          ),
+        ]);
+        const afterRevision = yield* evaluateWithDebugger<number>(
+          tabId,
+          send,
+          "globalThis.__t3PreviewSnapshotState?.revision ?? -1",
+          true,
+        );
+        capture = { page: before.page, accessibility, sourceImage };
+        if (before.revision === afterRevision) break;
+      }
+      const { page, accessibility, sourceImage } = capture!;
+      const [diagnostics, timelines] = yield* Effect.all([
         Ref.get(diagnosticsRef),
         Ref.get(actionTimelineRef),
       ]);
@@ -1989,6 +2087,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
     send: SendCommand,
     input: PreviewAutomationClickInput,
+    operationDeadline?: number,
   ) {
     if (!("selector" in input) && !("locator" in input)) {
       return { x: input.x!, y: input.y! };
@@ -1999,12 +2098,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       { operation: "automationClick.encodeLocator", tabId },
       locator,
     );
-    const point = yield* evaluateWithDebugger<
-      { x: number; y: number } | { invalidSelector: true; message: string } | { notFound: true }
-    >(
-      tabId,
-      send,
-      `(() => {
+    const timeoutMs = Math.max(
+      1,
+      (input.timeoutMs ?? DEFAULT_AUTOMATION_TIMEOUT_MS) - AUTOMATION_RESPONSE_BUDGET_MS,
+    );
+    const deadline = operationDeadline ?? (yield* currentMillis) + timeoutMs;
+    while (true) {
+      const point = yield* evaluateWithDebugger<
+        { x: number; y: number } | { invalidSelector: true; message: string } | { notFound: true }
+      >(
+        tabId,
+        send,
+        `(() => {
           try {
             const injected = globalThis.__t3PlaywrightInjected;
             const parsed = injected.parseSelector(${locatorJson});
@@ -2020,25 +2125,27 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             return { invalidSelector: true, message: String(error) };
           }
         })()`,
-      true,
-    );
-    if ("invalidSelector" in point) {
-      return yield* new PreviewAutomationInvalidSelectorError({
-        operation: "click",
-        tabId,
-        ...automationSelectorDiagnostics(input),
-        reasonLength: point.message.length,
-        cause: point,
-      });
+        true,
+      );
+      if ("invalidSelector" in point) {
+        return yield* new PreviewAutomationInvalidSelectorError({
+          operation: "click",
+          tabId,
+          ...automationSelectorDiagnostics(input),
+          reasonLength: point.message.length,
+          cause: point,
+        });
+      }
+      if (!("notFound" in point)) return point;
+      if ((yield* currentMillis) >= deadline) {
+        return yield* new PreviewAutomationTargetNotFoundError({
+          operation: "click",
+          tabId,
+          ...automationSelectorDiagnostics(input),
+        });
+      }
+      yield* Effect.sleep(AUTOMATION_RETRY_INTERVAL_MS);
     }
-    if ("notFound" in point) {
-      return yield* new PreviewAutomationTargetNotFoundError({
-        operation: "click",
-        tabId,
-        ...automationSelectorDiagnostics(input),
-      });
-    }
-    return point;
   });
 
   const emitPointerEvent = Effect.fn("PreviewManager.emitPointerEvent")(function* (
@@ -2058,7 +2165,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     send: SendCommand,
   ) {
     yield* prepareAutomationInput(send, true);
-    const point = yield* resolveClickPoint(tabId, send, input);
+    const timeoutMs = Math.max(
+      1,
+      (input.timeoutMs ?? DEFAULT_AUTOMATION_TIMEOUT_MS) - AUTOMATION_RESPONSE_BUDGET_MS,
+    );
+    const operationDeadline = (yield* currentMillis) + timeoutMs;
+    const point = yield* resolveClickPoint(tabId, send, input, operationDeadline);
     const viewport = yield* evaluateWithDebugger<{ width: number; height: number }>(
       tabId,
       send,
@@ -2084,26 +2196,44 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       createdAt: moveCreatedAt,
     });
     yield* Effect.sleep(AGENT_CURSOR_MOVE_MS);
+    // The visible cursor animation intentionally takes time. Resolve semantic
+    // targets again afterward so a layout shift does not turn a valid locator
+    // into a stale coordinate click.
+    const clickPoint = yield* resolveClickPoint(tabId, send, input, operationDeadline);
+    if (
+      clickPoint.x < 0 ||
+      clickPoint.y < 0 ||
+      clickPoint.x > viewport.width ||
+      clickPoint.y > viewport.height
+    ) {
+      return yield* new PreviewAutomationCoordinatesOutsideViewportError({
+        tabId,
+        x: clickPoint.x,
+        y: clickPoint.y,
+        viewportWidth: viewport.width,
+        viewportHeight: viewport.height,
+      });
+    }
     const clickSequence = yield* nextCounter(pointerSequenceRef);
     const clickCreatedAt = yield* currentIso;
     yield* emitPointerEvent({
       tabId,
       phase: "click",
-      ...point,
+      ...clickPoint,
       sequence: clickSequence,
       createdAt: clickCreatedAt,
     });
     yield* Effect.sleep(AGENT_CURSOR_CLICK_LEAD_MS);
-    yield* expectAgentInput(tabId, { kind: "pointer", ...point, button: 0 });
+    yield* expectAgentInput(tabId, { kind: "pointer", ...clickPoint, button: 0 });
     yield* send("Input.dispatchMouseEvent", {
       type: "mousePressed",
-      ...point,
+      ...clickPoint,
       button: "left",
       clickCount: 1,
     });
     yield* send("Input.dispatchMouseEvent", {
       type: "mouseReleased",
-      ...point,
+      ...clickPoint,
       button: "left",
       clickCount: 1,
     });
@@ -2133,15 +2263,21 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       { operation: "automationType.encodeText", tabId },
       input.text,
     );
-    const result = yield* evaluateWithDebugger<
-      | { ok: true }
-      | { invalidSelector: true; message: string }
-      | { notEditable: true }
-      | { notFound: true }
-    >(
-      tabId,
-      send,
-      `(() => {
+    const timeoutMs = Math.max(
+      1,
+      (input.timeoutMs ?? DEFAULT_AUTOMATION_TIMEOUT_MS) - AUTOMATION_RESPONSE_BUDGET_MS,
+    );
+    const deadline = (yield* currentMillis) + timeoutMs;
+    while (true) {
+      const result = yield* evaluateWithDebugger<
+        | { ok: true }
+        | { invalidSelector: true; message: string }
+        | { notEditable: true }
+        | { notFound: true }
+      >(
+        tabId,
+        send,
+        `(() => {
           try {
             const element = ${locatorJson ? `(() => { const injected = globalThis.__t3PlaywrightInjected; return injected.querySelector(injected.parseSelector(${locatorJson}), document, true); })()` : "document.activeElement"};
             if (!element) return { notFound: true };
@@ -2198,29 +2334,31 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             return { invalidSelector: true, message: String(error) };
           }
         })()`,
-      true,
-    );
-    if ("invalidSelector" in result) {
-      return yield* new PreviewAutomationInvalidSelectorError({
-        operation: "type",
-        tabId,
-        ...automationSelectorDiagnostics(input),
-        reasonLength: result.message.length,
-        cause: result,
-      });
-    }
-    if ("notFound" in result) {
-      return yield* new PreviewAutomationTargetNotFoundError({
-        operation: "type",
-        tabId,
-        ...automationSelectorDiagnostics(input),
-      });
-    }
-    if ("notEditable" in result) {
-      return yield* new PreviewAutomationTargetNotEditableError({
-        tabId,
-        ...automationSelectorDiagnostics(input),
-      });
+        true,
+      );
+      if ("invalidSelector" in result) {
+        return yield* new PreviewAutomationInvalidSelectorError({
+          operation: "type",
+          tabId,
+          ...automationSelectorDiagnostics(input),
+          reasonLength: result.message.length,
+          cause: result,
+        });
+      }
+      if ("ok" in result) return;
+      if (!locator || (yield* currentMillis) >= deadline) {
+        return yield* "notFound" in result
+          ? new PreviewAutomationTargetNotFoundError({
+              operation: "type",
+              tabId,
+              ...automationSelectorDiagnostics(input),
+            })
+          : new PreviewAutomationTargetNotEditableError({
+              tabId,
+              ...automationSelectorDiagnostics(input),
+            });
+      }
+      yield* Effect.sleep(AUTOMATION_RETRY_INTERVAL_MS);
     }
   });
 

@@ -716,6 +716,157 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("waits for locator targets and re-resolves them after cursor movement", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let locatorAttempts = 0;
+        const sendCommand = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+          if (method !== "Runtime.evaluate") return undefined;
+          const expression = String(params?.["expression"] ?? "");
+          if (expression.includes("Boolean(globalThis.__t3PlaywrightInjected)")) {
+            return { result: { value: true } };
+          }
+          if (expression.includes("scrollIntoView")) {
+            locatorAttempts += 1;
+            return {
+              result: {
+                value: locatorAttempts === 1 ? { notFound: true } : { x: 120, y: 80 },
+              },
+            };
+          }
+          return { result: { value: { width: 800, height: 600 } } };
+        });
+        fromId.mockReturnValue({
+          id: 42,
+          isDestroyed: () => false,
+          getType: () => "webview",
+          getURL: () => "https://example.com",
+          getTitle: () => "Example",
+          isLoading: () => false,
+          isDevToolsOpened: () => false,
+          getZoomFactor: () => 1,
+          setZoomFactor: vi.fn(),
+          on: vi.fn(),
+          off: vi.fn(),
+          ipc: { on: vi.fn(), off: vi.fn() },
+          send: webviewSend,
+          navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+          setWindowOpenHandler: vi.fn(),
+          debugger: {
+            isAttached: () => false,
+            attach: vi.fn(),
+            sendCommand,
+            on: vi.fn(),
+            off: vi.fn(),
+          },
+        } as never);
+
+        yield* manager.createTab("tab_retry_click");
+        yield* manager.registerWebview("tab_retry_click", 42);
+        const click = yield* manager
+          .automationClick("tab_retry_click", {
+            locator: "role=button[name='Delayed']",
+            timeoutMs: 1_000,
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(500);
+        yield* Fiber.join(click);
+
+        expect(locatorAttempts).toBe(3);
+        expect(sendCommand).toHaveBeenCalledWith("Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          x: 120,
+          y: 80,
+          button: "left",
+          clickCount: 1,
+        });
+      }),
+    ),
+  );
+
+  effectIt.effect("retries snapshots when the DOM changes between semantics and pixels", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let snapshotAttempts = 0;
+        const capturePage = vi.fn(async () => {
+          const png = Buffer.from(snapshotAttempts === 1 ? "before-png" : "after-png");
+          return {
+            getSize: () => ({ width: 800, height: 600 }),
+            resize: () => ({
+              getSize: () => ({ width: 800, height: 600 }),
+              toPNG: () => png,
+            }),
+            toPNG: () => png,
+          };
+        });
+        const sendCommand = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+          if (method === "Accessibility.getFullAXTree") {
+            return { nodes: [{ name: `attempt-${snapshotAttempts}` }] };
+          }
+          if (method !== "Runtime.evaluate") return undefined;
+          const expression = String(params?.["expression"] ?? "");
+          if (expression.includes("__t3PreviewSnapshotState ??=")) {
+            snapshotAttempts += 1;
+            const stable = snapshotAttempts > 1;
+            return {
+              result: {
+                value: {
+                  revision: stable ? 1 : 0,
+                  page: {
+                    url: "https://example.com",
+                    title: "Example",
+                    loading: false,
+                    visibleText: stable ? "After capture" : "Before capture",
+                    interactiveElements: [],
+                  },
+                },
+              },
+            };
+          }
+          if (expression.includes("__t3PreviewSnapshotState?.revision")) {
+            return { result: { value: 1 } };
+          }
+          return { result: { value: false } };
+        });
+        fromId.mockReturnValue({
+          id: 42,
+          isDestroyed: () => false,
+          getType: () => "webview",
+          getURL: () => "https://example.com",
+          getTitle: () => "Example",
+          isLoading: () => false,
+          isDevToolsOpened: () => false,
+          getZoomFactor: () => 1,
+          setZoomFactor: vi.fn(),
+          on: vi.fn(),
+          off: vi.fn(),
+          ipc: { on: vi.fn(), off: vi.fn() },
+          send: webviewSend,
+          navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+          setWindowOpenHandler: vi.fn(),
+          debugger: {
+            isAttached: () => false,
+            attach: vi.fn(),
+            sendCommand,
+            on: vi.fn(),
+            off: vi.fn(),
+          },
+          capturePage,
+        } as never);
+
+        yield* manager.createTab("tab_stable_snapshot");
+        yield* manager.registerWebview("tab_stable_snapshot", 42);
+        const snapshot = yield* manager.automationSnapshot("tab_stable_snapshot");
+
+        expect(snapshotAttempts).toBe(2);
+        expect(capturePage).toHaveBeenCalledTimes(2);
+        expect(snapshot.visibleText).toBe("After capture");
+        expect(snapshot.screenshot.data).toBe(Buffer.from("after-png").toString("base64"));
+      }),
+    ),
+  );
+
   effectIt.effect("types in background webviews and enables native key input", () =>
     withManager((manager) =>
       Effect.gen(function* () {

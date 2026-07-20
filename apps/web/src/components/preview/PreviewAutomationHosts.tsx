@@ -65,6 +65,10 @@ import {
   resolvePreviewAutomationTarget,
 } from "./previewAutomationTarget";
 import { isPreviewViewportReady } from "./previewViewportReadiness";
+import {
+  readPreviewWebviewViewport,
+  type PreviewWebviewViewportReader,
+} from "./previewWebviewViewport";
 
 const waitForDesktopOverlay = async (
   threadRef: ScopedThreadRef,
@@ -136,37 +140,17 @@ const waitForNavigationReadiness = async (
   });
 };
 
-interface ExecutablePreviewWebview extends Element {
-  readonly executeJavaScript: (code: string, userGesture?: boolean) => Promise<unknown>;
-}
+interface ExecutablePreviewWebview extends Element, PreviewWebviewViewportReader {}
 
 const findPreviewWebview = (tabId: string): ExecutablePreviewWebview | null =>
   Array.from(document.querySelectorAll<ExecutablePreviewWebview>("webview[data-preview-tab]")).find(
     (candidate) => candidate.getAttribute("data-preview-tab") === tabId,
   ) ?? null;
 
-const readWebviewViewport = async (
-  webview: ExecutablePreviewWebview,
-): Promise<PreviewRenderedViewportSize | null> => {
-  const value = await webview.executeJavaScript(
-    "({ width: window.innerWidth, height: window.innerHeight })",
-  );
-  if (typeof value !== "object" || value === null) return null;
-  const { width, height } = value as { readonly width?: unknown; readonly height?: unknown };
-  return typeof width === "number" &&
-    Number.isInteger(width) &&
-    width > 0 &&
-    typeof height === "number" &&
-    Number.isInteger(height) &&
-    height > 0
-    ? { width, height }
-    : null;
-};
-
 const readRenderedViewport = async (tabId: string): Promise<PreviewRenderedViewportSize | null> => {
   const webview = findPreviewWebview(tabId);
   if (!webview) return null;
-  return await readWebviewViewport(webview);
+  return await readPreviewWebviewViewport(webview);
 };
 
 const readDeclaredViewport = (
@@ -195,7 +179,7 @@ const waitForRenderedViewport = async (
       const webview = findPreviewWebview(tabId);
       const appliedSettingKey = webview?.getAttribute("data-preview-viewport-key") ?? null;
       const declaredViewport = readDeclaredViewport(webview);
-      const renderedViewport = webview ? await readWebviewViewport(webview) : null;
+      const renderedViewport = webview ? await readPreviewWebviewViewport(webview) : null;
       if (
         renderedViewport &&
         isPreviewViewportReady({

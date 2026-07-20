@@ -466,6 +466,12 @@ export const PreviewAutomationElement = Schema.Struct({
   role: Schema.NullOr(Schema.String),
   name: Schema.String,
   selector: Schema.String,
+  locator: Schema.optional(
+    Schema.String.annotate({
+      description:
+        "Preferred Playwright locator for focused preview actions. Optional for compatibility with older desktop hosts.",
+    }),
+  ),
   x: Schema.Number,
   y: Schema.Number,
   width: Schema.Number,

@@ -56,3 +56,7 @@ agents.
   examples of idiomatic usage, tests, module structure, and API design.
 - When writing relay infrastructure code with Alchemy, inspect `.repos/alchemy-effect/` for examples of
   idiomatic usage, tests, module structure, and API design.
+
+## Gotchas
+
+- When running dev server, don't run `dev:web`, use `dev` instead. `dev:web` will not start the required backend server.

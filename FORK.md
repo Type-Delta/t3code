@@ -371,3 +371,46 @@ Each split pane has a compact local header with the thread title, lower-contrast
 - `git diff --check` passes.
 
 **Last updated:** 2026-07-20
+
+### DL010 — Stabilize collaborative preview pairing and browser automation
+
+Local development now pins the Vite client, advertised dev URL, and backend client URLs to the
+IPv4 loopback address. This prevents Windows from binding Vite only to `::1` while collaborative
+environment-port navigation resolves through `127.0.0.1`, which previously made valid pairing URLs
+fail with `ERR_CONNECTION_REFUSED` before their fragment could be consumed.
+
+Locator-based click and type operations honor their advertised timeout and retry while dynamic
+targets are absent or temporarily non-editable. Clicks resolve semantic targets again after the
+visible cursor movement so layout shifts do not dispatch to stale coordinates. Snapshot capture
+tracks DOM revisions and retries when semantics, accessibility data, and pixels straddle a mutation.
+Snapshot elements include preferred Playwright locators, and browser diagnostics are reset on
+main-frame navigation with a smaller bounded history. Guest viewport measurement is also bounded so
+a redirect cannot leave `preview_navigate` or `preview_status` waiting forever on a stale webview
+execution context.
+
+**Files modified:**
+
+- `scripts/dev-runner.ts`
+- `scripts/dev-runner.test.ts`
+- `packages/contracts/src/previewAutomation.ts`
+- `apps/desktop/src/preview/Manager.ts`
+- `apps/desktop/src/preview/Manager.test.ts`
+- `apps/web/src/components/preview/PreviewAutomationHosts.tsx`
+- `apps/web/src/components/preview/previewWebviewViewport.ts`
+- `apps/web/src/components/preview/previewWebviewViewport.test.ts`
+- `docs/operations/collaborative-preview-pairing-investigation.md`
+
+**Validation:**
+
+- `vp check` passes (0 errors; 23 pre-existing warnings).
+- `vp run typecheck` passes for all 15 packages.
+- Focused dev-runner, desktop preview, and webview viewport tests pass (50 tests).
+- Contracts and desktop package typechecks pass.
+- Live development verification confirms Vite listens on `127.0.0.1`, environment-port navigation
+  opens the pairing route, consumes its token, and reaches authenticated app state.
+- Rebuilt-harness smoke tests confirm delayed click/type retries, click re-resolution after a layout
+  shift, coherent cross-mutation snapshots, preferred snapshot locators, and diagnostic reset.
+- Final rebuilt-harness pairing confirms `domContentLoaded` navigation, immediate status, redirect
+  completion, and authenticated-state waiting all return without wedging.
+
+**Last updated:** 2026-07-20
