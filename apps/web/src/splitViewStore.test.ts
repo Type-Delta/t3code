@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   MAX_SPLIT_VIEW_PANES,
+  migratePersistedSplitViewState,
   selectActiveSplitPane,
   selectIsSplitViewActive,
   useSplitViewStore,
@@ -25,7 +26,11 @@ function paneKeys(): string[] {
 
 describe("splitViewStore", () => {
   beforeEach(() => {
-    useSplitViewStore.setState({ paneRefs: [], activeThreadKey: null });
+    useSplitViewStore.setState({
+      paneRefs: [],
+      activeThreadKey: null,
+      isSplitModeActive: false,
+    });
   });
 
   it("opens a target beside the current thread and focuses it", () => {
@@ -121,6 +126,68 @@ describe("splitViewStore", () => {
     expect(useSplitViewStore.getState()).toMatchObject({
       paneRefs: [],
       activeThreadKey: null,
+      isSplitModeActive: false,
+    });
+  });
+
+  it("keeps a saved layout when leaving split mode and restores it on a pane click", () => {
+    const store = useSplitViewStore.getState();
+    store.openInSplit(THREAD_A, THREAD_B);
+
+    store.exitSplit();
+    expect(selectIsSplitViewActive(useSplitViewStore.getState())).toBe(false);
+    expect(paneKeys()).toEqual([scopedThreadKey(THREAD_A), scopedThreadKey(THREAD_B)]);
+
+    store.resumeSplit(THREAD_A);
+    expect(selectIsSplitViewActive(useSplitViewStore.getState())).toBe(true);
+    expect(useSplitViewStore.getState().activeThreadKey).toBe(scopedThreadKey(THREAD_A));
+  });
+
+  it("places new panes and moves existing panes at the requested insertion index", () => {
+    const store = useSplitViewStore.getState();
+    store.openInSplit(THREAD_A, THREAD_B);
+
+    expect(store.placePane(THREAD_A, THREAD_C, 0)).toBe("opened");
+    expect(paneKeys()).toEqual([
+      scopedThreadKey(THREAD_C),
+      scopedThreadKey(THREAD_A),
+      scopedThreadKey(THREAD_B),
+    ]);
+
+    store.movePane(THREAD_B, 0);
+    expect(paneKeys()).toEqual([
+      scopedThreadKey(THREAD_B),
+      scopedThreadKey(THREAD_C),
+      scopedThreadKey(THREAD_A),
+    ]);
+  });
+
+  it("restores only valid persisted panes and never reactivates an incomplete layout", () => {
+    expect(
+      migratePersistedSplitViewState({
+        paneRefs: [
+          { environmentId: "environment-a", threadId: "thread-a" },
+          { environmentId: "environment-a", threadId: "thread-b" },
+          { environmentId: 5, threadId: "bad" },
+        ],
+        activeThreadKey: scopedThreadKey(THREAD_B),
+        isSplitModeActive: true,
+      }),
+    ).toMatchObject({
+      paneRefs: [THREAD_A, THREAD_B],
+      activeThreadKey: scopedThreadKey(THREAD_B),
+      isSplitModeActive: true,
+    });
+
+    expect(
+      migratePersistedSplitViewState({
+        paneRefs: [{ environmentId: "environment-a", threadId: "thread-a" }],
+        isSplitModeActive: true,
+      }),
+    ).toMatchObject({
+      paneRefs: [THREAD_A],
+      activeThreadKey: scopedThreadKey(THREAD_A),
+      isSplitModeActive: false,
     });
   });
 });

@@ -77,7 +77,7 @@ import { isElectron } from "../env";
 import { APP_STAGE_LABEL } from "../branding";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { isMacPlatform } from "../lib/utils";
+import { cn, isMacPlatform } from "../lib/utils";
 import {
   readThreadShell,
   useProject,
@@ -189,6 +189,12 @@ import {
   selectSplitPaneRefs,
   useSplitViewStore,
 } from "../splitViewStore";
+import {
+  beginSplitThreadDrag,
+  endSplitThreadDrag,
+  hasSplitThreadDrag,
+  readSplitThreadDrag,
+} from "../splitViewDrag";
 import { useOpenAddProjectCommandPalette } from "../commandPaletteContext";
 import {
   getSidebarThreadIdsToPrewarm,
@@ -333,6 +339,7 @@ interface SidebarThreadRowProps {
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
   isDisplayedInSplitView: boolean;
+  isInSplitLayout: boolean;
   jumpLabel: string | null;
   appSettingsConfirmThreadArchive: boolean;
   renamingThreadKey: string | null;
@@ -371,6 +378,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     orderedProjectThreadKeys,
     isActive,
     isDisplayedInSplitView,
+    isInSplitLayout,
     jumpLabel,
     appSettingsConfirmThreadArchive,
     renamingThreadKey,
@@ -586,6 +594,15 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     },
     [clearSelection, handleMultiSelectContextMenu, handleThreadContextMenu, isSelected, threadRef],
   );
+  const handleThreadDragStart = useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      beginSplitThreadDrag(event.dataTransfer, threadRef);
+    },
+    [threadRef],
+  );
+  const handleThreadDragEnd = useCallback(() => {
+    endSplitThreadDrag();
+  }, []);
   const handlePrClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       if (!prStatus) return;
@@ -698,12 +715,28 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
           isSelected,
           isSplitPane: isDisplayedInSplitView,
         })} relative isolate`}
+        draggable
         onClick={handleRowClick}
         onDoubleClick={handleRowDoubleClick}
+        onDragEnd={handleThreadDragEnd}
+        onDragStart={handleThreadDragStart}
         onKeyDown={handleRowKeyDown}
         onContextMenu={handleRowContextMenu}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+          {isInSplitLayout ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span
+                    aria-label="Included in saved split view"
+                    className="size-1.5 shrink-0 rounded-full bg-primary"
+                  />
+                }
+              />
+              <TooltipPopup side="top">Included in split view</TooltipPopup>
+            </Tooltip>
+          ) : null}
           {prStatus && (
             <Tooltip>
               <TooltipTrigger
@@ -1029,6 +1062,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 (!isSplitViewActive && activeRouteThreadKey === threadKey)
               }
               isDisplayedInSplitView={splitViewThreadState.isDisplayedPane}
+              isInSplitLayout={splitPaneThreadKeys.has(threadKey)}
               jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
               appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
               renamingThreadKey={renamingThreadKey}
@@ -1749,10 +1783,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         paneThreadKeys: splitViewState.paneRefs.map(scopedThreadKey),
         threadKey: scopedThreadKey(threadRef),
       });
-      if (splitNavigation.activatePane) {
+      const savedPaneMatch = splitViewState.paneRefs.some(
+        (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
+      );
+      if (!selectIsSplitViewActive(splitViewState) && savedPaneMatch) {
+        splitViewState.resumeSplit(threadRef);
+      } else if (splitNavigation.activatePane) {
         splitViewState.activatePane(threadRef);
       } else if (splitNavigation.clearSplit) {
-        splitViewState.clearSplit();
+        splitViewState.exitSplit();
       }
       setSelectionAnchor(scopedThreadKey(threadRef));
       if (isMobile) {
@@ -2976,6 +3015,11 @@ interface SidebarProjectsContentProps {
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
   attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
+  isSplitThreadDragOver: boolean;
+  onSplitThreadDragEnd: () => void;
+  onSplitThreadDragLeave: (event: React.DragEvent<HTMLDivElement>) => void;
+  onSplitThreadDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
+  onSplitThreadDrop: (event: React.DragEvent<HTMLDivElement>) => void;
 }
 
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
@@ -3017,6 +3061,11 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     suppressProjectClickForContextMenuRef,
     attachProjectListAutoAnimateRef,
     projectsLength,
+    isSplitThreadDragOver,
+    onSplitThreadDragEnd,
+    onSplitThreadDragLeave,
+    onSplitThreadDragOver,
+    onSplitThreadDrop,
   } = props;
 
   const handleProjectSortOrderChange = useCallback(
@@ -3045,7 +3094,20 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
   );
 
   return (
-    <SidebarContent className="gap-0">
+    <SidebarContent
+      className={cn("relative gap-0", isSplitThreadDragOver && "bg-primary/[0.035]")}
+      onDragEnd={onSplitThreadDragEnd}
+      onDragLeave={onSplitThreadDragLeave}
+      onDragOver={onSplitThreadDragOver}
+      onDrop={onSplitThreadDrop}
+    >
+      {isSplitThreadDragOver ? (
+        <div className="pointer-events-none absolute inset-x-2 top-2 z-30 flex justify-center">
+          <span className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground shadow-sm">
+            Drop to detach from split view
+          </span>
+        </div>
+      ) : null}
       <SidebarGroup className="px-2 pt-2 pb-1">
         <SidebarMenu>
           <SidebarMenuItem>
@@ -3406,10 +3468,15 @@ export default function Sidebar() {
         paneThreadKeys: splitViewState.paneRefs.map(scopedThreadKey),
         threadKey: scopedThreadKey(threadRef),
       });
-      if (splitNavigation.activatePane) {
+      const savedPaneMatch = splitViewState.paneRefs.some(
+        (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
+      );
+      if (!selectIsSplitViewActive(splitViewState) && savedPaneMatch) {
+        splitViewState.resumeSplit(threadRef);
+      } else if (splitNavigation.activatePane) {
         splitViewState.activatePane(threadRef);
       } else if (splitNavigation.clearSplit) {
-        splitViewState.clearSplit();
+        splitViewState.exitSplit();
       }
       setSelectionAnchor(scopedThreadKey(threadRef));
       if (isMobile) {
@@ -3836,6 +3903,46 @@ export default function Sidebar() {
     });
   }, []);
 
+  const [isSplitThreadDragOver, setIsSplitThreadDragOver] = useState(false);
+  const clearSplitThreadDragTarget = useCallback(() => {
+    endSplitThreadDrag();
+    setIsSplitThreadDragOver(false);
+  }, []);
+  const handleSplitThreadDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const threadRef = readSplitThreadDrag(event.dataTransfer);
+    const splitState = useSplitViewStore.getState();
+    const canDetach =
+      threadRef !== null &&
+      selectIsSplitViewActive(splitState) &&
+      splitState.paneRefs.some(
+        (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
+      );
+    if (!canDetach) {
+      setIsSplitThreadDragOver(false);
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setIsSplitThreadDragOver(true);
+  }, []);
+  const handleSplitThreadDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setIsSplitThreadDragOver(false);
+  }, []);
+  const handleSplitThreadDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const threadRef = readSplitThreadDrag(event.dataTransfer);
+    event.preventDefault();
+    endSplitThreadDrag();
+    setIsSplitThreadDragOver(false);
+    if (!threadRef) return;
+    const splitState = useSplitViewStore.getState();
+    if (!selectIsSplitViewActive(splitState)) return;
+    splitState.detachPane(threadRef);
+  }, []);
+
   return (
     <>
       {prewarmedSidebarThreadRefs.map((threadRef) => (
@@ -3883,6 +3990,11 @@ export default function Sidebar() {
             suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
             attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
             projectsLength={projects.length}
+            isSplitThreadDragOver={isSplitThreadDragOver}
+            onSplitThreadDragEnd={clearSplitThreadDragTarget}
+            onSplitThreadDragLeave={handleSplitThreadDragLeave}
+            onSplitThreadDragOver={handleSplitThreadDragOver}
+            onSplitThreadDrop={handleSplitThreadDrop}
           />
 
           <SidebarSeparator />

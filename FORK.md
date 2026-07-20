@@ -346,3 +346,28 @@ Split membership is intentionally transient and separate from sidebar bulk selec
 - **2026-07-17** — Changed three- and four-pane layouts from a 2×2 grid to full-height vertical columns, added pane transition animation with unmount cleanup, and closed pane-owned pull-request dialogs when their pane becomes inactive.
 
 **Last updated:** 2026-07-17
+
+### DL009 — Persist split layouts and add direct thread placement
+
+Split view now saves its ordered pane layout and active state in local storage. Leaving split mode for a normal thread keeps that layout available: selecting one of its marked threads in the sidebar restores the same pane set, and the layout survives an app restart. The sidebar now gives each thread in the saved layout a shared blue leading marker, including when the layout is temporarily inactive.
+
+Each split pane has a compact local header with the thread title, lower-contrast project name, a visible drag affordance, and a detach control. Dragging a pane header onto another pane moves it before or after that pane; dragging it to the sidebar detaches it. Sidebar thread rows are also draggable: dropping one directly onto the normal workspace starts a split, and dropping one into an existing split inserts it at the indicated position. The pane and workspace targets use explicit in-place labels such as “Drop to place before this pane” and “Drop to detach from split view,” rather than relying on color alone.
+
+**Files modified:**
+
+- `apps/web/src/splitViewStore.ts`
+- `apps/web/src/splitViewStore.test.ts`
+- `apps/web/src/splitViewDrag.ts`
+- `apps/web/src/components/SplitThreadWorkspace.tsx`
+- `apps/web/src/components/SplitThreadWorkspace.test.tsx`
+- `apps/web/src/components/Sidebar.tsx`
+- `apps/web/src/routes/_chat.$environmentId.$threadId.tsx`
+
+**Validation:**
+
+- `vp test apps/web/src/splitViewStore.test.ts apps/web/src/components/SplitThreadWorkspace.test.tsx` passes (13 tests).
+- `vp run typecheck` passes with three existing suggestions outside this change.
+- `vp check` passes with 23 existing repository warnings and no errors.
+- `git diff --check` passes.
+
+**Last updated:** 2026-07-20
