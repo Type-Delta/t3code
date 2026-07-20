@@ -153,6 +153,8 @@ it.layer(WorkspaceMutationCoordinatorLive)("WorkspaceMutationCoordinator", (it) 
       const coordinator = yield* WorkspaceMutationCoordinator;
       assert.isTrue(yield* coordinator.prepareProviderMutation("thread-owned", "worktree-owned"));
       assert.isTrue(yield* coordinator.bindProviderMutation("thread-owned", "turn-current"));
+      assert.isTrue(yield* coordinator.isProviderMutationOwnedBy("thread-owned", "turn-current"));
+      assert.isFalse(yield* coordinator.isProviderMutationOwnedBy("thread-owned", "turn-stale"));
 
       assert.isFalse(yield* coordinator.completeProviderMutation("thread-owned", "turn-stale"));
       const duringMutation = yield* coordinator.beginCapture("worktree-owned");
@@ -162,6 +164,72 @@ it.layer(WorkspaceMutationCoordinatorLive)("WorkspaceMutationCoordinator", (it) 
       assert.isTrue(yield* coordinator.completeProviderMutation("thread-owned", "turn-current"));
       const stable = yield* coordinator.beginCapture("worktree-owned");
       assert.isTrue(yield* coordinator.completeCapture(stable));
+    }),
+  );
+
+  it.effect("holds an old-owner terminal event through a replacement handoff", () =>
+    Effect.gen(function* () {
+      const coordinator = yield* WorkspaceMutationCoordinator;
+      assert.isTrue(yield* coordinator.prepareProviderMutation("thread-steer", "worktree-steer"));
+      assert.isTrue(yield* coordinator.bindProviderMutation("thread-steer", "turn-old"));
+      assert.isTrue(yield* coordinator.beginProviderMutationHandoff("thread-steer", "turn-old"));
+
+      assert.isTrue(yield* coordinator.completeProviderMutation("thread-steer", "turn-old"));
+      assert.isTrue(yield* coordinator.isProviderMutationOwnedBy("thread-steer", "turn-old"));
+      assert.isTrue(
+        yield* coordinator.finishProviderMutationHandoff("thread-steer", "turn-old", "turn-new"),
+      );
+      assert.isTrue(yield* coordinator.isProviderMutationOwnedBy("thread-steer", "turn-new"));
+      assert.isFalse(yield* coordinator.completeProviderMutation("thread-steer", "turn-old"));
+      assert.isTrue(yield* coordinator.completeProviderMutation("thread-steer", "turn-new"));
+    }),
+  );
+
+  it.effect("consumes a replacement terminal event observed during handoff", () =>
+    Effect.gen(function* () {
+      const coordinator = yield* WorkspaceMutationCoordinator;
+      assert.isTrue(
+        yield* coordinator.prepareProviderMutation("thread-steer-early", "worktree-steer-early"),
+      );
+      assert.isTrue(yield* coordinator.bindProviderMutation("thread-steer-early", "turn-old"));
+      assert.isTrue(
+        yield* coordinator.beginProviderMutationHandoff("thread-steer-early", "turn-old"),
+      );
+
+      assert.isFalse(yield* coordinator.completeProviderMutation("thread-steer-early", "turn-new"));
+      assert.isTrue(
+        yield* coordinator.finishProviderMutationHandoff(
+          "thread-steer-early",
+          "turn-old",
+          "turn-new",
+        ),
+      );
+      assert.isFalse(
+        yield* coordinator.isProviderMutationOwnedBy("thread-steer-early", "turn-new"),
+      );
+
+      const stable = yield* coordinator.beginCapture("worktree-steer-early");
+      assert.isTrue(yield* coordinator.completeCapture(stable));
+    }),
+  );
+
+  it.effect("releases an old-owner terminal event after a failed handoff", () =>
+    Effect.gen(function* () {
+      const coordinator = yield* WorkspaceMutationCoordinator;
+      assert.isTrue(
+        yield* coordinator.prepareProviderMutation("thread-steer-failed", "worktree-steer-failed"),
+      );
+      assert.isTrue(yield* coordinator.bindProviderMutation("thread-steer-failed", "turn-old"));
+      assert.isTrue(
+        yield* coordinator.beginProviderMutationHandoff("thread-steer-failed", "turn-old"),
+      );
+      assert.isTrue(yield* coordinator.completeProviderMutation("thread-steer-failed", "turn-old"));
+      assert.isTrue(
+        yield* coordinator.finishProviderMutationHandoff("thread-steer-failed", "turn-old", null),
+      );
+      assert.isFalse(
+        yield* coordinator.isProviderMutationOwnedBy("thread-steer-failed", "turn-old"),
+      );
     }),
   );
 

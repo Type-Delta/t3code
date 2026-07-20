@@ -23,6 +23,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
@@ -97,6 +98,10 @@ const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const PROVIDER_MUTATION_RELEASE_GRACE = Duration.seconds(2);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const DEFAULT_THREAD_TITLE = "New thread";
+
+type ProviderTurnMutationPreparation =
+  | { readonly state: "skipped" }
+  | { readonly state: "prepared" };
 
 export function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -229,6 +234,16 @@ const make = Effect.gen(function* () {
 
   const threadModelSelections = new Map<string, ModelSelection>();
   const preparedProviderMutationThreads = new Set<string>();
+  const providerTurnDispatchSemaphores = new Map<string, Semaphore.Semaphore>();
+
+  const withProviderTurnDispatch = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
+    Effect.sync(() => {
+      const existing = providerTurnDispatchSemaphores.get(threadId);
+      if (existing) return existing;
+      const created = Semaphore.makeUnsafe(1);
+      providerTurnDispatchSemaphores.set(threadId, created);
+      return created;
+    }).pipe(Effect.flatMap((semaphore) => semaphore.withPermits(1)(effect)));
 
   const prepareCheckpointTimelineForTurn = Effect.fn(
     "ProviderCommandReactor.prepareCheckpointTimelineForTurn",
@@ -332,12 +347,20 @@ const make = Effect.gen(function* () {
     if (!session) {
       return;
     }
+    const activeProviderTurnId = (yield* providerService.listSessions()).find(
+      (providerSession) => providerSession.threadId === input.threadId,
+    )?.activeTurnId;
     yield* setThreadSession({
       threadId: input.threadId,
       session: {
         ...session,
-        status: session.status === "stopped" ? "stopped" : "ready",
-        activeTurnId: null,
+        status:
+          session.status === "stopped"
+            ? "stopped"
+            : activeProviderTurnId !== undefined
+              ? "running"
+              : "ready",
+        activeTurnId: activeProviderTurnId ?? null,
         lastError: input.detail,
         updatedAt: input.createdAt,
       },
@@ -788,13 +811,13 @@ const make = Effect.gen(function* () {
     "ProviderCommandReactor.prepareProviderTurnMutation",
   )(function* (threadId: ThreadId) {
     const thread = yield* resolveThread(threadId);
-    if (!thread) return false;
+    if (!thread) return { state: "skipped" } satisfies ProviderTurnMutationPreparation;
     const project = yield* resolveProject(thread.projectId);
     const cwd = resolveThreadWorkspaceCwd({
       thread,
       projects: project ? [project] : [],
     });
-    if (!cwd) return false;
+    if (!cwd) return { state: "skipped" } satisfies ProviderTurnMutationPreparation;
     const gitRepository = yield* vcsRegistry.detect({ cwd, requestedKind: "git" }).pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
@@ -808,7 +831,7 @@ const make = Effect.gen(function* () {
         ).pipe(Effect.as(null));
       }),
     );
-    if (!gitRepository) return false;
+    if (!gitRepository) return { state: "skipped" } satisfies ProviderTurnMutationPreparation;
     const identityOption = yield* checkpointIdentities.resolve(cwd).pipe(
       Effect.map(Option.some),
       Effect.catchCause((cause) => {
@@ -823,7 +846,9 @@ const make = Effect.gen(function* () {
         ).pipe(Effect.as(Option.none()));
       }),
     );
-    if (Option.isNone(identityOption)) return false;
+    if (Option.isNone(identityOption)) {
+      return { state: "skipped" } satisfies ProviderTurnMutationPreparation;
+    }
     const identity = identityOption.value;
     let prepared = yield* mutationCoordinator.prepareProviderMutation(
       threadId,
@@ -848,7 +873,20 @@ const make = Effect.gen(function* () {
       });
     }
     preparedProviderMutationThreads.add(threadId);
-    return true;
+    return { state: "prepared" } satisfies ProviderTurnMutationPreparation;
+  });
+
+  const reserveActiveProviderTurnHandoff = Effect.fn(
+    "ProviderCommandReactor.reserveActiveProviderTurnHandoff",
+  )(function* (threadId: ThreadId) {
+    const activeTurnId = (yield* providerService.listSessions()).find(
+      (session) => session.threadId === threadId,
+    )?.activeTurnId;
+    if (activeTurnId === undefined) return Option.none<string>();
+    const turnId = String(activeTurnId);
+    return (yield* mutationCoordinator.beginProviderMutationHandoff(threadId, turnId))
+      ? Option.some(turnId)
+      : Option.none<string>();
   });
 
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
@@ -980,21 +1018,63 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* Effect.gen(function* () {
-      const preparedMutation = yield* prepareProviderTurnMutation(event.payload.threadId);
-      const turn = yield* providerService.sendTurn(sendTurnRequest.value).pipe(
-        Effect.onExit((exit) =>
-          preparedMutation && Exit.isFailure(exit)
-            ? mutationCoordinator.cancelProviderMutation(event.payload.threadId).pipe(
-                Effect.tap(() =>
-                  Effect.sync(() => preparedProviderMutationThreads.delete(event.payload.threadId)),
-                ),
-                Effect.asVoid,
-              )
+    const runTurnStart = Effect.gen(function* () {
+      const steeredTurn = yield* Effect.acquireUseRelease(
+        reserveActiveProviderTurnHandoff(event.payload.threadId),
+        (reservedTurnId) =>
+          Option.isSome(reservedTurnId)
+            ? providerService.sendTurn(sendTurnRequest.value).pipe(Effect.map(Option.some))
+            : Effect.succeed(Option.none()),
+        (reservedTurnId, exit) =>
+          Option.isSome(reservedTurnId)
+            ? mutationCoordinator
+                .finishProviderMutationHandoff(
+                  event.payload.threadId,
+                  reservedTurnId.value,
+                  Exit.isSuccess(exit) && Option.isSome(exit.value)
+                    ? String(exit.value.value.turnId)
+                    : null,
+                )
+                .pipe(
+                  Effect.tap((finished) =>
+                    finished
+                      ? Effect.void
+                      : Effect.logWarning("provider steer mutation handoff was lost", {
+                          threadId: event.payload.threadId,
+                          previousTurnId: reservedTurnId.value,
+                          replacementTurnId:
+                            Exit.isSuccess(exit) && Option.isSome(exit.value)
+                              ? exit.value.value.turnId
+                              : null,
+                        }),
+                  ),
+                  Effect.asVoid,
+                )
             : Effect.void,
-        ),
       );
-      if (preparedMutation) {
+      if (Option.isSome(steeredTurn)) return steeredTurn.value;
+
+      const mutationPreparation = yield* prepareProviderTurnMutation(event.payload.threadId);
+      const turn = yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          return yield* restore(providerService.sendTurn(sendTurnRequest.value)).pipe(
+            Effect.onExit((exit) => {
+              if (mutationPreparation.state === "prepared" && Exit.isFailure(exit)) {
+                return mutationCoordinator.cancelProviderMutation(event.payload.threadId).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() =>
+                      preparedProviderMutationThreads.delete(event.payload.threadId),
+                    ),
+                  ),
+                  Effect.asVoid,
+                );
+              }
+              return Effect.void;
+            }),
+          );
+        }),
+      );
+      if (mutationPreparation.state === "prepared") {
         const bound = yield* mutationCoordinator.bindProviderMutation(
           event.payload.threadId,
           String(turn.turnId),
@@ -1010,7 +1090,9 @@ const make = Effect.gen(function* () {
         }
       }
       return turn;
-    }).pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    }).pipe(Effect.catchCause(recoverTurnStartFailure));
+
+    yield* withProviderTurnDispatch(event.payload.threadId, runTurnStart).pipe(Effect.forkScoped);
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (

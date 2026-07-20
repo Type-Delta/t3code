@@ -173,6 +173,13 @@ describe("ProviderCommandReactor", () => {
     readonly abandonForwardHistory?: boolean;
     readonly unresolvedNavigation?: boolean;
     readonly autoCompleteTurns?: boolean;
+    readonly steerStartsNewTurn?: boolean;
+    readonly failSteer?: boolean;
+    readonly interruptSteer?: boolean;
+    readonly blockFirstSteer?: {
+      readonly entered: Deferred.Deferred<void>;
+      readonly release: Deferred.Deferred<void>;
+    };
     readonly gitManaged?: boolean;
     readonly vcsDetectionFailure?: boolean;
     readonly checkpointIdentityFailure?: boolean;
@@ -187,6 +194,7 @@ describe("ProviderCommandReactor", () => {
     let mutationCoordinatorForProvider: WorkspaceMutationCoordinatorShape | undefined;
     let nextSessionIndex = 1;
     let nextTurnIndex = 1;
+    let blockedFirstSteer = false;
     const runtimeSessions: Array<ProviderSession> = [];
     const modelSelection = input?.threadModelSelection ?? {
       instanceId: ProviderInstanceId.make("codex"),
@@ -251,11 +259,52 @@ describe("ProviderCommandReactor", () => {
     const sendTurn = vi.fn((_: unknown) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make("thread-1");
-        const turnId = asTurnId(`turn-${nextTurnIndex++}`);
+        const activeTurnId = runtimeSessions.find(
+          (session) => session.threadId === threadId,
+        )?.activeTurnId;
+        if (
+          activeTurnId !== undefined &&
+          input?.blockFirstSteer !== undefined &&
+          !blockedFirstSteer
+        ) {
+          blockedFirstSteer = true;
+          yield* Deferred.succeed(input.blockFirstSteer.entered, undefined);
+          yield* Deferred.await(input.blockFirstSteer.release);
+        }
+        if (activeTurnId !== undefined && input?.failSteer === true) {
+          return yield* new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/start",
+            detail: "steer failed",
+          });
+        }
+        if (activeTurnId !== undefined && input?.interruptSteer === true) {
+          return yield* Effect.interrupt;
+        }
+        const turnId =
+          activeTurnId !== undefined && input?.steerStartsNewTurn !== true
+            ? activeTurnId
+            : asTurnId(`turn-${nextTurnIndex++}`);
         // Mocked turns finish immediately. Report their terminal boundary
         // before returning to exercise the real terminal-before-bind race.
-        if (input?.autoCompleteTurns !== false && mutationCoordinatorForProvider) {
+        if (
+          activeTurnId === undefined &&
+          input?.autoCompleteTurns !== false &&
+          mutationCoordinatorForProvider
+        ) {
           yield* mutationCoordinatorForProvider.completeProviderMutation(threadId, turnId);
+        }
+        if (activeTurnId !== undefined && input?.steerStartsNewTurn === true) {
+          const activeSessionIndex = runtimeSessions.findIndex(
+            (session) => session.threadId === threadId,
+          );
+          if (activeSessionIndex >= 0) {
+            runtimeSessions[activeSessionIndex] = {
+              ...runtimeSessions[activeSessionIndex]!,
+              status: "running",
+              activeTurnId: turnId,
+            };
+          }
         }
         return { threadId, turnId };
       }),
@@ -689,6 +738,421 @@ describe("ProviderCommandReactor", () => {
       harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-1"),
     );
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+  });
+
+  it("reuses the exact active-turn mutation when steering", async () => {
+    const harness = await createHarness({ autoCompleteTurns: false });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-steer"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-before-steer"),
+        role: "user",
+        text: "begin a long turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(() =>
+      runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-1"),
+      ),
+    );
+
+    const activeSession = harness.runtimeSessions.find(
+      (session) => session.threadId === ThreadId.make("thread-1"),
+    );
+    expect(activeSession).toBeDefined();
+    const activeSessionIndex = harness.runtimeSessions.indexOf(activeSession!);
+    harness.runtimeSessions[activeSessionIndex] = {
+      ...activeSession!,
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+    };
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-steer"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-steer"),
+        role: "user",
+        text: "steer the active turn",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.resolveCheckpointIdentity).toHaveBeenCalledTimes(1);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toBe(false);
+
+    await runtime!.runPromise(
+      harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-1"),
+    );
+  });
+
+  it("transfers the active mutation when steering opens a replacement turn", async () => {
+    const harness = await createHarness({ autoCompleteTurns: false, steerStartsNewTurn: true });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const dispatchTurn = (commandId: string, messageId: string, text: string) =>
+      harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(commandId),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(messageId),
+          role: "user",
+          text,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      });
+
+    await dispatchTurn("cmd-turn-start-before-replacement", "msg-before-replacement", "start");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await waitFor(() =>
+      runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-1"),
+      ),
+    );
+
+    const activeSession = harness.runtimeSessions.find(
+      (session) => session.threadId === ThreadId.make("thread-1"),
+    );
+    expect(activeSession).toBeDefined();
+    const activeSessionIndex = harness.runtimeSessions.indexOf(activeSession!);
+    harness.runtimeSessions[activeSessionIndex] = {
+      ...activeSession!,
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+    };
+
+    await dispatchTurn("cmd-turn-steer-replacement", "msg-steer-replacement", "steer");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await waitFor(() =>
+      runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-2"),
+      ),
+    );
+    expect(harness.resolveCheckpointIdentity).toHaveBeenCalledTimes(1);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-1"),
+      ),
+    ).toBe(false);
+
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-1"),
+      ),
+    ).toBe(false);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-2"),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-2"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the mutation reserved when the old turn completes during steering", async () => {
+    const entered = Deferred.makeUnsafe<void>();
+    const release = Deferred.makeUnsafe<void>();
+    const harness = await createHarness({
+      autoCompleteTurns: false,
+      steerStartsNewTurn: true,
+      blockFirstSteer: { entered, release },
+    });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const dispatchTurn = (commandId: string, messageId: string, text: string) =>
+      harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(commandId),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(messageId),
+          role: "user",
+          text,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      });
+
+    await dispatchTurn("cmd-turn-before-pending-steer", "msg-before-pending-steer", "start");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const activeSessionIndex = harness.runtimeSessions.findIndex(
+      (session) => session.threadId === ThreadId.make("thread-1"),
+    );
+    harness.runtimeSessions[activeSessionIndex] = {
+      ...harness.runtimeSessions[activeSessionIndex]!,
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+    };
+
+    await dispatchTurn("cmd-turn-pending-steer", "msg-pending-steer", "steer");
+    await runtime!.runPromise(Deferred.await(entered));
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
+
+    await runtime!.runPromise(Deferred.succeed(release, undefined));
+    await waitFor(() =>
+      runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-2"),
+      ),
+    );
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-2"),
+      ),
+    ).toBe(true);
+  });
+
+  it("serializes concurrent replacement steers and advances the mutation owner", async () => {
+    const entered = Deferred.makeUnsafe<void>();
+    const release = Deferred.makeUnsafe<void>();
+    const harness = await createHarness({
+      autoCompleteTurns: false,
+      steerStartsNewTurn: true,
+      blockFirstSteer: { entered, release },
+    });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const dispatchTurn = (commandId: string, messageId: string, text: string) =>
+      harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(commandId),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(messageId),
+          role: "user",
+          text,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      });
+
+    await dispatchTurn("cmd-turn-before-concurrent-steers", "msg-before-concurrent", "start");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const activeSessionIndex = harness.runtimeSessions.findIndex(
+      (session) => session.threadId === ThreadId.make("thread-1"),
+    );
+    harness.runtimeSessions[activeSessionIndex] = {
+      ...harness.runtimeSessions[activeSessionIndex]!,
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+    };
+
+    await dispatchTurn("cmd-turn-concurrent-steer-1", "msg-concurrent-steer-1", "steer one");
+    await runtime!.runPromise(Deferred.await(entered));
+    await dispatchTurn("cmd-turn-concurrent-steer-2", "msg-concurrent-steer-2", "steer two");
+    await harness.drain();
+    expect(harness.sendTurn.mock.calls.length).toBe(2);
+
+    await runtime!.runPromise(Deferred.succeed(release, undefined));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 3);
+    await waitFor(() =>
+      runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-3"),
+      ),
+    );
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-1"),
+      ),
+    ).toBe(false);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-2"),
+      ),
+    ).toBe(false);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-3"),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-3"),
+      ),
+    ).toBe(true);
+  });
+
+  it("preserves the running session and mutation when a steer fails", async () => {
+    const harness = await createHarness({ autoCompleteTurns: false, failSteer: true });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-before-failed-steer"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("msg-before-failed-steer"),
+        role: "user",
+        text: "start",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const activeSessionIndex = harness.runtimeSessions.findIndex(
+      (session) => session.threadId === ThreadId.make("thread-1"),
+    );
+    harness.runtimeSessions[activeSessionIndex] = {
+      ...harness.runtimeSessions[activeSessionIndex]!,
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+    };
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-session-running-before-failed-steer"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "running",
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-1"),
+        lastError: null,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-failed-steer"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("msg-failed-steer"),
+        role: "user",
+        text: "steer",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await waitFor(async () => {
+      const model = await harness.readModel();
+      return (
+        model.threads
+          .find((thread) => thread.id === ThreadId.make("thread-1"))
+          ?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ?? false
+      );
+    });
+
+    const model = await harness.readModel();
+    const thread = model.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session).toMatchObject({
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+      lastError: "steer failed",
+    });
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
+  });
+
+  it("releases the handoff reservation when a steer is interrupted", async () => {
+    const harness = await createHarness({ autoCompleteTurns: false, interruptSteer: true });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-before-interrupted-steer"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("msg-before-interrupted-steer"),
+        role: "user",
+        text: "start",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const activeSessionIndex = harness.runtimeSessions.findIndex(
+      (session) => session.threadId === ThreadId.make("thread-1"),
+    );
+    harness.runtimeSessions[activeSessionIndex] = {
+      ...harness.runtimeSessions[activeSessionIndex]!,
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+    };
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-interrupted-steer"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("msg-interrupted-steer"),
+        role: "user",
+        text: "steer",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await waitFor(() =>
+      runtime!.runPromise(
+        harness.mutationCoordinator.beginProviderMutationHandoff("thread-1", "turn-1"),
+      ),
+    );
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.finishProviderMutationHandoff("thread-1", "turn-1", null),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutation("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
   });
 
   it("abandons forward checkpoint history before dispatching a new provider turn", async () => {

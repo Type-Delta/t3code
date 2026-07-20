@@ -208,7 +208,10 @@ and atomic restore cover tracked and untracked non-ignored files, deletions, bin
 bits, linked worktrees, symlinks, Windows path canonicalization, and `core.symlinks=false` checkouts.
 Provider turn dispatch first performs non-throwing VCS detection: workspaces outside a Git worktree
 skip checkpoint identity and mutation setup, while detection or identity failures disable
-checkpointing for that turn without blocking the conversation.
+checkpointing for that turn without blocking the conversation. Steering an already-active provider
+turn reserves and reuses only that exact turn's workspace-mutation lease, serializes concurrent
+steers for the thread, and hands ownership to a replacement turn id without exposing a mutation gap.
+Failed steers retain the running turn and its lease, while stale-turn ownership checks remain exact.
 
 Rollback-only and unsupported providers expose an explicit filesystem-only fallback for `/undo` and
 message rewind. The client first confirms that workspace files will be restored while chat history
@@ -266,6 +269,10 @@ GC, startup scavenging, retention grace periods, and diagnostics complete the ro
   and bounded prior-turn release waiting.
 - Provider command coverage verifies that a turn starts outside a Git worktree without invoking
   checkpoint identity resolution.
+- Provider command and coordinator coverage verifies that steering reuses the exact active-turn
+  mutation while retaining stale-turn rejection: 2 files and 58 tests pass, including old-turn
+  completion during handoff, concurrent replacement steers, failed-steer recovery, and interruption
+  cleanup.
 - Sidecar characterization passes 18/18, including unborn repositories, submodules, and concurrent
   linked-worktree captures.
 - Real orchestration integration passes: 11 tests, with 1 provider-capability-gated test skipped.

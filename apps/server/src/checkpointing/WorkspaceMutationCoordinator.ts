@@ -25,6 +25,7 @@ interface ActiveCapture {
 interface ProviderMutation {
   readonly ticket: WorkspaceMutationTicket;
   readonly ownerTurnId: string | null;
+  readonly handoffInProgress: boolean;
 }
 
 interface State {
@@ -70,6 +71,19 @@ export interface WorkspaceMutationCoordinatorShape {
   ) => Effect.Effect<boolean>;
   /** Binds a prepared lease to the exact provider turn that owns it. */
   readonly bindProviderMutation: (threadId: string, turnId: string) => Effect.Effect<boolean>;
+  /** Reports whether the exact provider turn currently owns the thread lease. */
+  readonly isProviderMutationOwnedBy: (threadId: string, turnId: string) => Effect.Effect<boolean>;
+  /** Reserves an exact provider turn lease while a steering request is in flight. */
+  readonly beginProviderMutationHandoff: (
+    threadId: string,
+    turnId: string,
+  ) => Effect.Effect<boolean>;
+  /** Completes a reserved steering handoff, or keeps the old owner on failure. */
+  readonly finishProviderMutationHandoff: (
+    threadId: string,
+    fromTurnId: string,
+    toTurnId: string | null,
+  ) => Effect.Effect<boolean>;
   /** Releases only the lease owned by the matching provider turn. */
   readonly completeProviderMutation: (threadId: string, turnId: string) => Effect.Effect<boolean>;
   /** Releases an unbound/prepared lease when dispatch fails or shuts down. */
@@ -330,7 +344,11 @@ const make = Effect.gen(function* () {
             if (providerMutations.has(threadId) || providerReleaseSignals.has(threadId)) {
               return false;
             }
-            providerMutations.set(threadId, { ticket, ownerTurnId: null });
+            providerMutations.set(threadId, {
+              ticket,
+              ownerTurnId: null,
+              handoffInProgress: false,
+            });
             providerTerminalTurns.delete(threadId);
             providerReleaseSignals.set(threadId, Deferred.makeUnsafe<void>());
             return true;
@@ -371,6 +389,62 @@ const make = Effect.gen(function* () {
       return result.bound;
     });
 
+  const isProviderMutationOwnedBy: WorkspaceMutationCoordinatorShape["isProviderMutationOwnedBy"] =
+    (threadId, turnId) =>
+      locked(Effect.sync(() => providerMutations.get(threadId)?.ownerTurnId === turnId));
+
+  const rememberProviderTerminalTurn = (threadId: string, turnId: string) => {
+    const terminalTurns = providerTerminalTurns.get(threadId) ?? new Set<string>();
+    terminalTurns.add(turnId);
+    while (terminalTurns.size > 8) {
+      const oldest = terminalTurns.values().next().value;
+      if (oldest === undefined) break;
+      terminalTurns.delete(oldest);
+    }
+    providerTerminalTurns.set(threadId, terminalTurns);
+  };
+
+  const beginProviderMutationHandoff: WorkspaceMutationCoordinatorShape["beginProviderMutationHandoff"] =
+    (threadId, turnId) =>
+      locked(
+        Effect.sync(() => {
+          const found = providerMutations.get(threadId);
+          if (!found || found.ownerTurnId !== turnId || found.handoffInProgress) return false;
+          providerMutations.set(threadId, { ...found, handoffInProgress: true });
+          return true;
+        }),
+      );
+
+  const finishProviderMutationHandoff: WorkspaceMutationCoordinatorShape["finishProviderMutationHandoff"] =
+    (threadId, fromTurnId, toTurnId) =>
+      Effect.gen(function* () {
+        const result = yield* locked(
+          Effect.sync(() => {
+            const found = providerMutations.get(threadId);
+            if (!found || found.ownerTurnId !== fromTurnId || found.handoffInProgress !== true) {
+              return { finished: false, ticket: undefined } as const;
+            }
+
+            const nextTurnId = toTurnId ?? fromTurnId;
+            const terminalTurns = providerTerminalTurns.get(threadId);
+            if (terminalTurns?.has(nextTurnId)) {
+              providerMutations.delete(threadId);
+              providerTerminalTurns.delete(threadId);
+              return { finished: true, ticket: found.ticket } as const;
+            }
+
+            providerMutations.set(threadId, {
+              ...found,
+              ownerTurnId: nextTurnId,
+              handoffInProgress: false,
+            });
+            return { finished: true, ticket: undefined } as const;
+          }),
+        );
+        if (result.ticket) yield* completeProviderTicket(threadId, result.ticket);
+        return result.finished;
+      });
+
   const completeProviderMutation: WorkspaceMutationCoordinatorShape["completeProviderMutation"] = (
     threadId,
     turnId,
@@ -381,18 +455,16 @@ const make = Effect.gen(function* () {
           const found = providerMutations.get(threadId);
           if (!found) return { handled: false, ticket: undefined } as const;
           if (found.ownerTurnId === null) {
-            const terminalTurns = providerTerminalTurns.get(threadId) ?? new Set<string>();
-            terminalTurns.add(turnId);
-            while (terminalTurns.size > 8) {
-              const oldest = terminalTurns.values().next().value;
-              if (oldest === undefined) break;
-              terminalTurns.delete(oldest);
-            }
-            providerTerminalTurns.set(threadId, terminalTurns);
+            rememberProviderTerminalTurn(threadId, turnId);
             return { handled: true, ticket: undefined } as const;
           }
           if (found.ownerTurnId !== turnId) {
+            rememberProviderTerminalTurn(threadId, turnId);
             return { handled: false, ticket: undefined } as const;
+          }
+          if (found.handoffInProgress) {
+            rememberProviderTerminalTurn(threadId, turnId);
+            return { handled: true, ticket: undefined } as const;
           }
           providerMutations.delete(threadId);
           providerTerminalTurns.delete(threadId);
@@ -503,6 +575,9 @@ const make = Effect.gen(function* () {
     preemptCaptures,
     prepareProviderMutation,
     bindProviderMutation,
+    isProviderMutationOwnedBy,
+    beginProviderMutationHandoff,
+    finishProviderMutationHandoff,
     completeProviderMutation,
     cancelProviderMutation,
     awaitProviderMutationRelease,
