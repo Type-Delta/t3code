@@ -3,8 +3,10 @@ import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import { TestClock } from "effect/testing";
 import { McpSchema, McpServer } from "effect/unstable/ai";
 import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 
@@ -92,6 +94,72 @@ it.effect("returns bounded structural preview snapshot failures", () =>
           operation: "snapshot",
           failureCount: 1,
         },
+      });
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("recovers preview status through a healthy host within the tool timeout", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      let staleConnectionId = "";
+      const staleEvents = yield* broker.connect({
+        clientId: "mcp-stale-client",
+        environmentId,
+      });
+      yield* Stream.runForEach(staleEvents, (event) => {
+        if (event.type === "connected") staleConnectionId = event.connectionId;
+        return Effect.void;
+      }).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      yield* broker.focusHost({
+        clientId: "mcp-stale-client",
+        environmentId,
+        connectionId: staleConnectionId,
+        focused: true,
+      });
+
+      const healthyEvents = yield* broker.connect({
+        clientId: "mcp-healthy-client",
+        environmentId,
+      });
+      yield* Stream.runForEach(healthyEvents, (event) =>
+        event.type === "connected"
+          ? Effect.void
+          : broker.respond({
+              clientId: "mcp-healthy-client",
+              connectionId: event.connectionId,
+              requestId: event.request.requestId,
+              ok: true,
+              result: {
+                available: true,
+                visible: true,
+                tabId,
+                url: "http://example.test/",
+                title: "Recovered",
+                loading: false,
+              },
+            }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const statusFiber = yield* server
+        .callTool({ name: "preview_status", arguments: {} })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+          Effect.forkChild({ startImmediately: true }),
+        );
+      yield* TestClock.adjust(3_000);
+      const status = yield* Fiber.join(statusFiber);
+
+      expect(status.isError).toBe(false);
+      expect(status.structuredContent).toMatchObject({
+        available: true,
+        tabId,
+        title: "Recovered",
       });
     }),
   ).pipe(Effect.provide(TestLayer)),

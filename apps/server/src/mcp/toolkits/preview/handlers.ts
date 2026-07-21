@@ -13,6 +13,9 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
 
+const STATUS_HOST_PROBE_TIMEOUT_MS = 3_000;
+const STATUS_RECOVERY_TIMEOUT_MS = 12_000;
+
 const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
   operation: PreviewAutomationOperation,
   input: unknown,
@@ -46,8 +49,15 @@ const invokeTargeted = <A>(
   return invoke<A>(operation, operationInput, timeoutMs, tabId);
 };
 
+const invokeStatus = (input: { readonly tabId?: PreviewTabId | undefined }) =>
+  invokeTargeted<PreviewAutomationStatus>("status", input, STATUS_HOST_PROBE_TIMEOUT_MS).pipe(
+    Effect.catchTag("PreviewAutomationTimeoutError", () =>
+      invokeTargeted<PreviewAutomationStatus>("status", input, STATUS_RECOVERY_TIMEOUT_MS),
+    ),
+  );
+
 const handlers = {
-  preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
+  preview_status: (input) => invokeStatus(input ?? {}),
   preview_open: (input) =>
     invokeTargeted<PreviewAutomationStatus>("open", {
       ...input,

@@ -386,7 +386,12 @@ tracks DOM revisions and retries when semantics, accessibility data, and pixels 
 Snapshot elements include preferred Playwright locators, and browser diagnostics are reset on
 main-frame navigation with a smaller bounded history. Guest viewport measurement is also bounded so
 a redirect cannot leave `preview_navigate` or `preview_status` waiting forever on a stale webview
-execution context.
+execution context. The preview automation broker also quarantines a host that misses its response
+deadline and releases that host's provider-session assignments. A follow-up call can therefore fail
+over to a healthy desktop client instead of repeatedly waiting 15 seconds on the same stale focused
+stream; late responses or focus reports restore a recovered client without reconnecting the entire
+environment. `preview_status` uses a three-second host liveness probe and retries through the
+remaining twelve seconds, so stale-host failover stays within its original 15-second tool budget.
 
 **Files modified:**
 
@@ -398,13 +403,17 @@ execution context.
 - `apps/web/src/components/preview/PreviewAutomationHosts.tsx`
 - `apps/web/src/components/preview/previewWebviewViewport.ts`
 - `apps/web/src/components/preview/previewWebviewViewport.test.ts`
+- `apps/server/src/mcp/PreviewAutomationBroker.ts`
+- `apps/server/src/mcp/PreviewAutomationBroker.test.ts`
+- `apps/server/src/mcp/toolkits/preview/handlers.ts`
+- `apps/server/src/mcp/McpHttpServer.test.ts`
 - `docs/operations/collaborative-preview-pairing-investigation.md`
 
 **Validation:**
 
 - `vp check` passes (0 errors; 23 pre-existing warnings).
 - `vp run typecheck` passes for all 15 packages.
-- Focused dev-runner, desktop preview, and webview viewport tests pass (50 tests).
+- Focused dev-runner, desktop preview, webview viewport, broker, and MCP tests pass (82 tests).
 - Contracts and desktop package typechecks pass.
 - Live development verification confirms Vite listens on `127.0.0.1`, environment-port navigation
   opens the pairing route, consumes its token, and reaches authenticated app state.
@@ -412,5 +421,7 @@ execution context.
   shift, coherent cross-mutation snapshots, preferred snapshot locators, and diagnostic reset.
 - Final rebuilt-harness pairing confirms `domContentLoaded` navigation, immediate status, redirect
   completion, and authenticated-state waiting all return without wedging.
+- Cold `preview_status` and `preview_open` calls return immediately on the current harness; broker
+  regressions cover stale focused-host failover and recovery after renderer activity resumes.
 
-**Last updated:** 2026-07-20
+**Last updated:** 2026-07-21

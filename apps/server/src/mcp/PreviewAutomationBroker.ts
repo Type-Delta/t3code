@@ -66,6 +66,7 @@ interface ClientConnection {
   readonly supportedOperations: ReadonlySet<PreviewAutomationOperation>;
   readonly focused: boolean;
   readonly focusOrder: number;
+  readonly unhealthyUntil: number;
   readonly queue: Queue.Queue<PreviewAutomationStreamEvent>;
 }
 
@@ -106,6 +107,8 @@ interface BrokerState {
   readonly requestSequence: number;
   readonly focusSequence: number;
 }
+
+const HOST_TIMEOUT_QUARANTINE_MS = 30_000;
 
 const removeConnectionFromState = (
   current: BrokerState,
@@ -327,6 +330,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       supportedOperations: new Set(host.supportedOperations ?? PREVIEW_AUTOMATION_V1_OPERATIONS),
       focused: false,
       focusOrder: 0,
+      unhealthyUntil: 0,
       queue,
     };
     const registration = yield* SynchronizedRef.modify(state, (current) => {
@@ -382,9 +386,34 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       clients.set(host.clientId, {
         ...currentHost,
         focused: host.focused,
+        unhealthyUntil: 0,
         focusOrder: host.focused ? focusSequence : currentHost.focusOrder,
       });
       return { ...current, clients, focusSequence };
+    });
+  });
+
+  const quarantineTimedOutConnection = Effect.fn(
+    "PreviewAutomationBroker.quarantineTimedOutConnection",
+  )(function* (connection: ClientConnection) {
+    const now = yield* Clock.currentTimeMillis;
+    yield* SynchronizedRef.update(state, (current) => {
+      const active = current.clients.get(connection.clientId);
+      if (active?.connectionId !== connection.connectionId || active.queue !== connection.queue) {
+        return current;
+      }
+      const clients = new Map(current.clients);
+      clients.set(connection.clientId, {
+        ...active,
+        focused: false,
+        unhealthyUntil: now + HOST_TIMEOUT_QUARANTINE_MS,
+      });
+      const assignments = new Map(
+        Array.from(current.assignments).filter(
+          ([, assignment]) => assignment.queue !== active.queue,
+        ),
+      );
+      return { ...current, clients, assignments };
     });
   });
 
@@ -392,17 +421,29 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     "PreviewAutomationBroker.respond",
   )(function* (response) {
     const pending = yield* SynchronizedRef.modify(state, (current) => {
+      const responseClient = current.clients.get(response.clientId);
+      const responseIsFromActiveConnection = responseClient?.connectionId === response.connectionId;
+      const clients =
+        responseIsFromActiveConnection && responseClient.unhealthyUntil !== 0
+          ? new Map(current.clients).set(response.clientId, {
+              ...responseClient,
+              unhealthyUntil: 0,
+            })
+          : current.clients;
       const entry = current.pending.get(response.requestId);
       if (
         !entry ||
         entry.context.clientId !== response.clientId ||
         entry.context.connectionId !== response.connectionId
       ) {
-        return [undefined, current] as const;
+        return [
+          undefined,
+          clients === current.clients ? current : { ...current, clients },
+        ] as const;
       }
       const next = new Map(current.pending);
       next.delete(response.requestId);
-      return [entry, { ...current, pending: next }] as const;
+      return [entry, { ...current, clients, pending: next }] as const;
     });
     if (!pending) return;
     if (response.ok) {
@@ -430,7 +471,8 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
           return (
             assignment.expiresAt > now &&
             connection?.connectionId === assignment.connectionId &&
-            connection.queue === assignment.queue
+            connection.queue === assignment.queue &&
+            connection.unhealthyUntil <= now
           );
         }),
       );
@@ -453,6 +495,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
                 .filter(
                   (host) =>
                     host.environmentId === input.scope.environmentId &&
+                    host.unhealthyUntil <= now &&
                     supportsOperation(host, input.operation),
                 )
                 .sort(
@@ -543,7 +586,17 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       }
       const result = yield* Deferred.await(deferred).pipe(Effect.timeoutOption(timeoutMs));
       return yield* Option.match(result, {
-        onNone: () => Effect.fail(new PreviewAutomationTimeoutError(requestContext)),
+        // A connected host that misses the response contract is not safe to
+        // keep routing through. In particular, renderer reloads can leave an
+        // old focused request stream looking live until its transport notices
+        // the disconnect. Quarantine it and release its assignments so the
+        // next request can select a healthy replacement. Keep the stream open:
+        // a late response or focus report proves recovery without requiring a
+        // full environment reconnect.
+        onNone: () =>
+          quarantineTimedOutConnection(connection).pipe(
+            Effect.andThen(Effect.fail(new PreviewAutomationTimeoutError(requestContext))),
+          ),
         onSome: (value) => Effect.succeed(value as A),
       });
     });

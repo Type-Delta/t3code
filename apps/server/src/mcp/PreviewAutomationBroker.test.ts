@@ -7,6 +7,7 @@ import {
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
   PreviewAutomationTargetNotEditableError,
+  PreviewAutomationTimeoutError,
   PreviewTabId,
   ProviderInstanceId,
   ThreadId,
@@ -19,6 +20,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
+import { TestClock } from "effect/testing";
 
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
@@ -865,6 +867,103 @@ it.effect("fails over a pinned provider session only after its host disconnects"
         "second",
       );
       expect(secondRoutedTabId).toBeUndefined();
+    }),
+  ),
+);
+
+it.effect("quarantines an unresponsive focused host so the next request can fail over", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      let staleConnectionId = "";
+      const staleRequests = requestsFrom(
+        yield* broker.connect(makeHost({ clientId: "client-stale" })),
+        (connectionId) => {
+          staleConnectionId = connectionId;
+        },
+      );
+      yield* Stream.runDrain(staleRequests).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      yield* broker.focusHost({
+        clientId: "client-stale",
+        environmentId: scope.environmentId,
+        connectionId: staleConnectionId,
+        focused: true,
+      });
+
+      const healthyRequests = requestsFrom(
+        yield* broker.connect(makeHost({ clientId: "client-healthy" })),
+      );
+      yield* Stream.runForEach(healthyRequests, (request) =>
+        broker.respond({
+          clientId: "client-healthy",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: true,
+          result: "healthy",
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const timedOut = yield* broker
+        .invoke<void>({ scope, operation: "status", input: {}, timeoutMs: 1_000 })
+        .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust(1_000);
+      expect(yield* Fiber.join(timedOut)).toBeInstanceOf(PreviewAutomationTimeoutError);
+
+      expect(
+        yield* broker.invoke<string>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: true },
+          timeoutMs: 1_000,
+        }),
+      ).toBe("healthy");
+    }),
+  ),
+);
+
+it.effect("restores a quarantined host when it reports renderer activity", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      let connectionId = "";
+      let requestCount = 0;
+      const requests = requestsFrom(yield* broker.connect(makeHost()), (connectedId) => {
+        connectionId = connectedId;
+      });
+      yield* Stream.runForEach(requests, (request) => {
+        requestCount += 1;
+        return requestCount === 1
+          ? Effect.void
+          : broker.respond({
+              clientId: "client-1",
+              connectionId: request.connectionId,
+              requestId: request.requestId,
+              ok: true,
+              result: "recovered",
+            });
+      }).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+
+      const timedOut = yield* broker
+        .invoke<void>({ scope, operation: "status", input: {}, timeoutMs: 1_000 })
+        .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust(1_000);
+      expect(yield* Fiber.join(timedOut)).toBeInstanceOf(PreviewAutomationTimeoutError);
+      expect(
+        yield* broker.invoke<void>({ scope, operation: "status", input: {} }).pipe(Effect.flip),
+      ).toBeInstanceOf(PreviewAutomationNoAvailableHostError);
+
+      yield* broker.focusHost({
+        clientId: "client-1",
+        environmentId: scope.environmentId,
+        connectionId,
+        focused: false,
+      });
+      expect(yield* broker.invoke<string>({ scope, operation: "status", input: {} })).toBe(
+        "recovered",
+      );
     }),
   ),
 );
