@@ -16,6 +16,7 @@ import {
   resolveSidebarNewThreadEnvMode,
   resolveSidebarSplitViewThreadState,
   resolveSidebarStageBadgeLabel,
+  resolveSplitViewGroupRowBackgroundImage,
   resolveSidebarThreadNavigation,
   resolveSplitViewDetachNavigationTarget,
   resolveThreadRowClassName,
@@ -784,6 +785,15 @@ describe("resolveThreadRowClassName", () => {
     });
     expect(className).toContain("bg-primary/15");
     expect(className).not.toContain("bg-accent/50");
+  });
+});
+
+describe("resolveSplitViewGroupRowBackgroundImage", () => {
+  it("creates a translucent row gradient so hover colors remain visible beneath it", () => {
+    const backgroundImage = resolveSplitViewGroupRowBackgroundImage("oklch(0.68 0.19 264)");
+
+    expect(backgroundImage).toContain("color-mix(in oklch, oklch(0.68 0.19 264) 24%, transparent)");
+    expect(backgroundImage).toContain("transparent 78%");
   });
 });
 

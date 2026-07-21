@@ -5,6 +5,7 @@ vi.mock("./DiffWorkerPoolProvider", () => ({ DiffWorkerPoolProvider: () => null 
 
 import {
   resolveSplitPaneDropPosition,
+  resolveSplitRightPanelOwner,
   splitThreadGridColumnClassName,
 } from "./SplitThreadWorkspace";
 
@@ -24,5 +25,27 @@ describe("splitThreadGridColumnClassName", () => {
 
     expect(resolveSplitPaneDropPosition({ clientX: 180 }, element)).toBe("before");
     expect(resolveSplitPaneDropPosition({ clientX: 260 }, element)).toBe("after");
+  });
+
+  it("keeps an open right panel visible when a pane without one becomes active", () => {
+    expect(
+      resolveSplitRightPanelOwner({
+        paneKeys: ["thread-a", "thread-b"],
+        activePaneKey: "thread-b",
+        currentOwnerKey: "thread-a",
+        openPanelKeys: new Set(["thread-a"]),
+      }),
+    ).toBe("thread-a");
+  });
+
+  it("hands the right panel to the active pane when that pane has one open", () => {
+    expect(
+      resolveSplitRightPanelOwner({
+        paneKeys: ["thread-a", "thread-b"],
+        activePaneKey: "thread-b",
+        currentOwnerKey: "thread-a",
+        openPanelKeys: new Set(["thread-a", "thread-b"]),
+      }),
+    ).toBe("thread-b");
   });
 });

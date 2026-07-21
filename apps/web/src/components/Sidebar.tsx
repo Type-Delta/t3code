@@ -183,10 +183,13 @@ import {
 } from "./ui/sidebar";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import {
+  findSplitViewGroupForThread,
   MAX_SPLIT_VIEW_PANES,
   selectActiveSplitPane,
   selectIsSplitViewActive,
   selectSplitPaneRefs,
+  selectSplitViewGroups,
+  splitViewGroupColor,
   useSplitViewStore,
 } from "../splitViewStore";
 import {
@@ -206,7 +209,7 @@ import {
   resolveSidebarNewThreadEnvMode,
   resolveSidebarSplitViewThreadState,
   resolveSidebarStageBadgeLabel,
-  resolveSidebarThreadNavigation,
+  resolveSplitViewGroupRowBackgroundImage,
   resolveSplitViewDetachNavigationTarget,
   resolveThreadRowClassName,
   resolveThreadStatusPill,
@@ -339,7 +342,7 @@ interface SidebarThreadRowProps {
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
   isDisplayedInSplitView: boolean;
-  isInSplitLayout: boolean;
+  splitGroupIndicator: { colorHue: number; label: string } | null;
   jumpLabel: string | null;
   appSettingsConfirmThreadArchive: boolean;
   renamingThreadKey: string | null;
@@ -378,7 +381,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     orderedProjectThreadKeys,
     isActive,
     isDisplayedInSplitView,
-    isInSplitLayout,
+    splitGroupIndicator,
     jumpLabel,
     appSettingsConfirmThreadArchive,
     renamingThreadKey,
@@ -460,7 +463,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
       event.stopPropagation();
       navigateToThread(threadRef);
       void (async () => {
-        const result = await openDiscoveredPort({ threadRef, port, openPreview });
+        const result = await openDiscoveredPort({
+          threadRef,
+          port,
+          openPreview,
+        });
         if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
           return;
         }
@@ -710,11 +717,23 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         size="sm"
         isActive={isActive}
         data-testid={`thread-row-${thread.id}`}
+        aria-description={
+          splitGroupIndicator ? `Included in ${splitGroupIndicator.label}` : undefined
+        }
         className={`${resolveThreadRowClassName({
           isActive,
           isSelected,
           isSplitPane: isDisplayedInSplitView,
         })} relative isolate`}
+        style={
+          splitGroupIndicator
+            ? {
+                backgroundImage: resolveSplitViewGroupRowBackgroundImage(
+                  splitViewGroupColor(splitGroupIndicator.colorHue),
+                ),
+              }
+            : undefined
+        }
         draggable
         onClick={handleRowClick}
         onDoubleClick={handleRowDoubleClick}
@@ -724,19 +743,6 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         onContextMenu={handleRowContextMenu}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
-          {isInSplitLayout ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    aria-label="Included in saved split view"
-                    className="size-1.5 shrink-0 rounded-full bg-primary"
-                  />
-                }
-              />
-              <TooltipPopup side="top">Included in split view</TooltipPopup>
-            </Tooltip>
-          ) : null}
           {prStatus && (
             <Tooltip>
               <TooltipTrigger
@@ -946,6 +952,7 @@ interface SidebarProjectThreadListProps {
   activeSplitThreadKey: string | null;
   isSplitViewActive: boolean;
   splitPaneThreadKeys: ReadonlySet<string>;
+  splitGroupByThreadKey: ReadonlyMap<string, { colorHue: number; label: string }>;
   threadJumpLabelByKey: ReadonlyMap<string, string>;
   appSettingsConfirmThreadArchive: boolean;
   renamingThreadKey: string | null;
@@ -1000,6 +1007,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     activeSplitThreadKey,
     isSplitViewActive,
     splitPaneThreadKeys,
+    splitGroupByThreadKey,
     threadJumpLabelByKey,
     appSettingsConfirmThreadArchive,
     renamingThreadKey,
@@ -1062,7 +1070,7 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
                 (!isSplitViewActive && activeRouteThreadKey === threadKey)
               }
               isDisplayedInSplitView={splitViewThreadState.isDisplayedPane}
-              isInSplitLayout={splitPaneThreadKeys.has(threadKey)}
+              splitGroupIndicator={splitGroupByThreadKey.get(threadKey) ?? null}
               jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
               appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
               renamingThreadKey={renamingThreadKey}
@@ -1188,12 +1196,24 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   );
   const router = useRouter();
   const splitPaneRefs = useSplitViewStore(selectSplitPaneRefs);
+  const splitGroups = useSplitViewStore(selectSplitViewGroups);
   const isSplitViewActive = useSplitViewStore(selectIsSplitViewActive);
   const activeSplitPane = useSplitViewStore(selectActiveSplitPane);
   const splitPaneThreadKeys = useMemo(
     () => new Set(splitPaneRefs.map(scopedThreadKey)),
     [splitPaneRefs],
   );
+  const splitGroupByThreadKey = useMemo(() => {
+    const membership = new Map<string, { colorHue: number; label: string }>();
+    splitGroups.forEach((group, index) => {
+      const indicator = {
+        colorHue: group.colorHue,
+        label: `split view group ${index + 1}`,
+      };
+      group.paneRefs.forEach((paneRef) => membership.set(scopedThreadKey(paneRef), indicator));
+    });
+    return membership;
+  }, [splitGroups]);
   const activeSplitThreadKey = activeSplitPane ? scopedThreadKey(activeSplitPane) : null;
   const { isMobile, setOpenMobile } = useSidebar();
   const markThreadUnread = useUiStateStore((state) => state.markThreadUnread);
@@ -1691,7 +1711,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                 openProjectGroupingDialog(member);
                 return;
               case "copy-path":
-                copyPathToClipboard(member.workspaceRoot, { path: member.workspaceRoot });
+                copyPathToClipboard(member.workspaceRoot, {
+                  path: member.workspaceRoot,
+                });
                 return;
               case "delete":
                 return handleRemoveProject(member);
@@ -1778,19 +1800,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         clearSelection();
       }
       const splitViewState = useSplitViewStore.getState();
-      const splitNavigation = resolveSidebarThreadNavigation({
-        isSplitViewActive: selectIsSplitViewActive(splitViewState),
-        paneThreadKeys: splitViewState.paneRefs.map(scopedThreadKey),
-        threadKey: scopedThreadKey(threadRef),
-      });
-      const savedPaneMatch = splitViewState.paneRefs.some(
-        (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
-      );
-      if (!selectIsSplitViewActive(splitViewState) && savedPaneMatch) {
+      const splitGroup = findSplitViewGroupForThread(splitViewState, threadRef);
+      const switchingWithinActiveGroup = splitGroup?.id === splitViewState.activeGroupId;
+      if (splitGroup) {
         splitViewState.resumeSplit(threadRef);
-      } else if (splitNavigation.activatePane) {
-        splitViewState.activatePane(threadRef);
-      } else if (splitNavigation.clearSplit) {
+      } else {
         splitViewState.exitSplit();
       }
       setSelectionAnchor(scopedThreadKey(threadRef));
@@ -1800,7 +1814,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       void router.navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(threadRef),
-        ...(splitNavigation.replace || options?.replace ? { replace: true } : {}),
+        ...(switchingWithinActiveGroup || options?.replace ? { replace: true } : {}),
       });
     },
     [clearSelection, isMobile, router, setOpenMobile, setSelectionAnchor],
@@ -2204,12 +2218,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       const threadWorkspacePath =
         thread.worktreePath ?? threadProject?.workspaceRoot ?? project.workspaceRoot ?? null;
       const splitViewState = useSplitViewStore.getState();
-      const splitViewThreadState = resolveSidebarSplitViewThreadState({
-        isSplitViewActive: selectIsSplitViewActive(splitViewState),
-        paneThreadKeys: splitViewState.paneRefs.map(scopedThreadKey),
-        activeThreadKey: splitViewState.activeThreadKey,
-        threadKey,
-      });
+      const threadSplitGroup = findSplitViewGroupForThread(splitViewState, threadKey);
       const currentRouteParams =
         router.state.matches[router.state.matches.length - 1]?.params ?? {};
       const currentRouteTarget = resolveThreadRouteTarget(currentRouteParams);
@@ -2226,17 +2235,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             : null);
       const canOpenInSplit =
         currentSplitThreadRef !== null && scopedThreadKey(currentSplitThreadRef) !== threadKey;
-      const splitViewActionId = splitViewThreadState.isDisplayedPane
-        ? "detach-from-split"
-        : "open-in-split";
+      const splitViewActionId = threadSplitGroup ? "detach-from-split" : "open-in-split";
       const clicked = await api.contextMenu.show(
         [
           {
             id: splitViewActionId,
-            label: splitViewThreadState.isDisplayedPane
-              ? "Detach from split view"
-              : "Open in split view",
-            ...(!splitViewThreadState.isDisplayedPane && !canOpenInSplit ? { disabled: true } : {}),
+            label: threadSplitGroup ? "Detach from split view" : "Open in split view",
+            ...(!threadSplitGroup && !canOpenInSplit ? { disabled: true } : {}),
           },
           { id: "rename", label: "Rename thread" },
           { id: "mark-unread", label: "Mark unread" },
@@ -2264,7 +2269,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "detach-from-split") {
-        const wasActive = splitViewState.activeThreadKey === threadKey;
+        const wasActive =
+          threadSplitGroup?.id === splitViewState.activeGroupId &&
+          splitViewState.activeThreadKey === threadKey;
         const detachFallback = splitViewState.detachPane(threadRef);
         const fallbackThreadRef = resolveSplitViewDetachNavigationTarget({
           wasActive,
@@ -2465,6 +2472,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         activeSplitThreadKey={activeSplitThreadKey}
         isSplitViewActive={isSplitViewActive}
         splitPaneThreadKeys={splitPaneThreadKeys}
+        splitGroupByThreadKey={splitGroupByThreadKey}
         threadJumpLabelByKey={threadJumpLabelByKey}
         appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
         renamingThreadKey={renamingThreadKey}
@@ -3463,19 +3471,11 @@ export default function Sidebar() {
         clearSelection();
       }
       const splitViewState = useSplitViewStore.getState();
-      const splitNavigation = resolveSidebarThreadNavigation({
-        isSplitViewActive: selectIsSplitViewActive(splitViewState),
-        paneThreadKeys: splitViewState.paneRefs.map(scopedThreadKey),
-        threadKey: scopedThreadKey(threadRef),
-      });
-      const savedPaneMatch = splitViewState.paneRefs.some(
-        (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
-      );
-      if (!selectIsSplitViewActive(splitViewState) && savedPaneMatch) {
+      const splitGroup = findSplitViewGroupForThread(splitViewState, threadRef);
+      const switchingWithinActiveGroup = splitGroup?.id === splitViewState.activeGroupId;
+      if (splitGroup) {
         splitViewState.resumeSplit(threadRef);
-      } else if (splitNavigation.activatePane) {
-        splitViewState.activatePane(threadRef);
-      } else if (splitNavigation.clearSplit) {
+      } else {
         splitViewState.exitSplit();
       }
       setSelectionAnchor(scopedThreadKey(threadRef));
@@ -3485,7 +3485,7 @@ export default function Sidebar() {
       void navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(threadRef),
-        ...(splitNavigation.replace ? { replace: true } : {}),
+        ...(switchingWithinActiveGroup ? { replace: true } : {}),
       });
     },
     [clearSelection, isMobile, navigate, setOpenMobile, setSelectionAnchor],
@@ -3913,11 +3913,7 @@ export default function Sidebar() {
     const threadRef = readSplitThreadDrag(event.dataTransfer);
     const splitState = useSplitViewStore.getState();
     const canDetach =
-      threadRef !== null &&
-      selectIsSplitViewActive(splitState) &&
-      splitState.paneRefs.some(
-        (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
-      );
+      threadRef !== null && findSplitViewGroupForThread(splitState, threadRef) !== null;
     if (!canDetach) {
       setIsSplitThreadDragOver(false);
       return;
@@ -3939,7 +3935,7 @@ export default function Sidebar() {
     setIsSplitThreadDragOver(false);
     if (!threadRef) return;
     const splitState = useSplitViewStore.getState();
-    if (!selectIsSplitViewActive(splitState)) return;
+    if (!findSplitViewGroupForThread(splitState, threadRef)) return;
     splitState.detachPane(threadRef);
   }, []);
 

@@ -7,49 +7,63 @@ import { resolveStorage } from "./lib/storage";
 
 export const MAX_SPLIT_VIEW_PANES = 4;
 export const SPLIT_VIEW_STORAGE_KEY = "t3code:split-view:v1";
+export const SPLIT_VIEW_STORAGE_VERSION = 2;
 
 export type OpenInSplitResult = "opened" | "activated" | "at-capacity";
 
-export interface SplitViewState {
-  /** Ordered thread refs that make up the saved split layout. */
+export interface SplitViewGroup {
+  /** Stable persisted identity used to switch between saved layouts. */
+  id: string;
+  /** OKLCH hue used by the sidebar membership indicator. */
+  colorHue: number;
+  /** Ordered thread refs rendered from left to right. */
   paneRefs: readonly ScopedThreadRef[];
-  /** The scoped key of the focused pane, or null when the layout is inactive. */
+}
+
+export interface SplitViewState {
+  /** Every saved split layout. Threads belong to at most one group. */
+  groups: readonly SplitViewGroup[];
+  /** The group currently rendered, or null for a normal single-thread workspace. */
+  activeGroupId: string | null;
+  /** The focused pane in the active group. */
   activeThreadKey: string | null;
-  /** Whether the saved layout is currently rendered as split panes. */
-  isSplitModeActive: boolean;
 }
 
 interface SplitViewStore extends SplitViewState {
-  /** Open a thread beside the current one, or focus it when it is already open. */
+  /** Ephemeral route target used to disambiguate group switches from browser navigation. */
+  pendingNavigationThreadKey: string | null;
+  /** Open a thread beside the current one, or focus it when it is already grouped. */
   openInSplit: (currentRef: ScopedThreadRef, targetRef: ScopedThreadRef) => OpenInSplitResult;
-  /** Insert or move a pane to a specific grid position. */
+  /** Insert or move a pane to a specific position in the current thread's group. */
   placePane: (
     currentRef: ScopedThreadRef,
     targetRef: ScopedThreadRef,
     insertionIndex: number,
   ) => OpenInSplitResult;
-  /** Reorder a pane already present in the split layout. */
+  /** Reorder a pane in the active split group. */
   movePane: (threadRef: ScopedThreadRef, insertionIndex: number) => void;
-  /** Restore a saved split layout and focus the specified pane. */
+  /** Open the saved group containing this thread and focus the requested pane. */
   resumeSplit: (threadRef: ScopedThreadRef) => void;
-  /** Leave split mode while keeping its layout available to restore. */
+  /** Switch to a normal thread while retaining every saved group. */
   exitSplit: () => void;
-  /** Focus an existing pane. */
+  /** Focus an existing pane in the active group. */
   activatePane: (threadRef: ScopedThreadRef) => void;
-  /** Close a pane and return the thread that should remain visible, if split mode exits. */
+  /** Clear a pending target after the browser URL reaches it. */
+  confirmNavigation: (threadRef: ScopedThreadRef) => void;
+  /** Remove a thread from its group and return a standalone fallback when needed. */
   detachPane: (threadRef: ScopedThreadRef) => ScopedThreadRef | null;
-  /** Forget the saved split layout completely. */
+  /** Forget every saved split group. */
   clearSplit: () => void;
-  /** Remove a deleted thread from split mode and return a fallback when needed. */
+  /** Remove a deleted thread from its group and return a fallback when needed. */
   removeThread: (threadRef: ScopedThreadRef) => ScopedThreadRef | null;
-  /**
-   * Remove panes missing from the authoritative thread list. Returns a fallback
-   * when reconciliation exits split mode.
-   */
+  /** Reconcile every saved group against the authoritative thread list. */
   reconcilePanes: (availableRefs: readonly ScopedThreadRef[]) => ScopedThreadRef | null;
 }
 
+const EMPTY_GROUPS: readonly SplitViewGroup[] = Object.freeze([]);
 const EMPTY_PANE_REFS: readonly ScopedThreadRef[] = Object.freeze([]);
+const GROUP_COLOR_HUES = [264, 205, 150, 75, 20, 315, 120, 345, 185, 45, 285, 235] as const;
+let splitGroupSequence = 0;
 
 function uniquePaneRefs(paneRefs: readonly ScopedThreadRef[]): ScopedThreadRef[] {
   const unique: ScopedThreadRef[] = [];
@@ -67,63 +81,84 @@ function clampInsertionIndex(index: number, paneCount: number): number {
   return Math.max(0, Math.min(Math.trunc(index), paneCount));
 }
 
+function nextGroupId(groups: readonly SplitViewGroup[]): string {
+  const existingIds = new Set(groups.map((group) => group.id));
+  let id: string;
+  do {
+    splitGroupSequence += 1;
+    id = `split-group-${Date.now().toString(36)}-${splitGroupSequence.toString(36)}`;
+  } while (existingIds.has(id));
+  return id;
+}
+
+function circularHueDistance(left: number, right: number): number {
+  const distance = Math.abs(left - right) % 360;
+  return Math.min(distance, 360 - distance);
+}
+
+function nextGroupColorHue(groups: readonly SplitViewGroup[]): number {
+  const usedHues = groups.map((group) => group.colorHue);
+  const predefined = GROUP_COLOR_HUES.find((hue) =>
+    usedHues.every((usedHue) => circularHueDistance(hue, usedHue) >= 18),
+  );
+  if (predefined !== undefined) return predefined;
+
+  // Golden-angle stepping keeps additional groups distinct without imposing a
+  // hard group limit. The color is supplemented by accessible group metadata.
+  for (let index = 0; index < 360; index += 1) {
+    const hue = Math.round((264 + index * 137.508) % 360);
+    if (usedHues.every((usedHue) => circularHueDistance(hue, usedHue) >= 1)) return hue;
+  }
+  return 264;
+}
+
+export function splitViewGroupColor(colorHue: number): string {
+  return `oklch(0.68 0.19 ${colorHue})`;
+}
+
 /** Split mode is meaningful only when at least two distinct panes are open. */
 export function isSplitViewActive(paneRefs: readonly ScopedThreadRef[]): boolean {
   return paneRefs.length >= 2;
 }
 
+export function selectSplitViewGroups(state: SplitViewState): readonly SplitViewGroup[] {
+  return state.groups;
+}
+
+export function selectActiveSplitGroup(state: SplitViewState): SplitViewGroup | null {
+  if (state.activeGroupId === null) return null;
+  const group = state.groups.find((candidate) => candidate.id === state.activeGroupId) ?? null;
+  return group && isSplitViewActive(group.paneRefs) ? group : null;
+}
+
 export function selectSplitPaneRefs(state: SplitViewState): readonly ScopedThreadRef[] {
-  return state.paneRefs;
+  return selectActiveSplitGroup(state)?.paneRefs ?? EMPTY_PANE_REFS;
 }
 
 export function selectIsSplitViewActive(state: SplitViewState): boolean {
-  return state.isSplitModeActive && isSplitViewActive(state.paneRefs);
+  return selectActiveSplitGroup(state) !== null;
 }
 
 export function selectActiveSplitPane(state: SplitViewState): ScopedThreadRef | null {
-  if (!selectIsSplitViewActive(state) || state.activeThreadKey === null) {
-    return null;
-  }
+  const activeGroup = selectActiveSplitGroup(state);
+  if (!activeGroup || state.activeThreadKey === null) return null;
   return (
-    state.paneRefs.find((paneRef) => scopedThreadKey(paneRef) === state.activeThreadKey) ?? null
+    activeGroup.paneRefs.find((paneRef) => scopedThreadKey(paneRef) === state.activeThreadKey) ??
+    null
   );
 }
 
-function nextStateAfterRemovingPane(
+export function findSplitViewGroupForThread(
   state: SplitViewState,
-  threadRef: ScopedThreadRef,
-): {
-  paneRefs: readonly ScopedThreadRef[];
-  activeThreadKey: string | null;
-  isSplitModeActive: boolean;
-  fallback: ScopedThreadRef | null;
-} {
-  const threadKey = scopedThreadKey(threadRef);
-  const paneIndex = state.paneRefs.findIndex((paneRef) => scopedThreadKey(paneRef) === threadKey);
-  if (paneIndex < 0) {
-    return { ...state, fallback: null };
-  }
-
-  const paneRefs = state.paneRefs.filter((paneRef) => scopedThreadKey(paneRef) !== threadKey);
-  if (!isSplitViewActive(paneRefs)) {
-    return {
-      paneRefs: EMPTY_PANE_REFS,
-      activeThreadKey: null,
-      isSplitModeActive: false,
-      fallback: paneRefs[0] ?? null,
-    };
-  }
-
-  const activeThreadKey =
-    state.activeThreadKey === threadKey
-      ? scopedThreadKey(paneRefs[Math.min(paneIndex, paneRefs.length - 1)]!)
-      : state.activeThreadKey;
-  return {
-    paneRefs,
-    activeThreadKey,
-    isSplitModeActive: state.isSplitModeActive,
-    fallback: null,
-  };
+  threadRefOrKey: ScopedThreadRef | string,
+): SplitViewGroup | null {
+  const threadKey =
+    typeof threadRefOrKey === "string" ? threadRefOrKey : scopedThreadKey(threadRefOrKey);
+  return (
+    state.groups.find((group) =>
+      group.paneRefs.some((paneRef) => scopedThreadKey(paneRef) === threadKey),
+    ) ?? null
+  );
 }
 
 function parsePersistedPaneRef(value: unknown): ScopedThreadRef | null {
@@ -138,105 +173,204 @@ function parsePersistedPaneRef(value: unknown): ScopedThreadRef | null {
   );
 }
 
-export function migratePersistedSplitViewState(persistedState: unknown): SplitViewState {
-  if (!persistedState || typeof persistedState !== "object") {
-    return { paneRefs: EMPTY_PANE_REFS, activeThreadKey: null, isSplitModeActive: false };
-  }
-  const persisted = persistedState as {
-    paneRefs?: unknown;
-    activeThreadKey?: unknown;
-    isSplitModeActive?: unknown;
-  };
-  const paneRefs = uniquePaneRefs(
-    Array.isArray(persisted.paneRefs)
-      ? persisted.paneRefs.flatMap((value) => {
-          const paneRef = parsePersistedPaneRef(value);
+function parsePersistedPaneRefs(value: unknown): ScopedThreadRef[] {
+  return uniquePaneRefs(
+    Array.isArray(value)
+      ? value.flatMap((candidate) => {
+          const paneRef = parsePersistedPaneRef(candidate);
           return paneRef ? [paneRef] : [];
         })
       : [],
   ).slice(0, MAX_SPLIT_VIEW_PANES);
-  const activeThreadKey =
-    typeof persisted.activeThreadKey === "string" &&
-    paneRefs.some((paneRef) => scopedThreadKey(paneRef) === persisted.activeThreadKey)
-      ? persisted.activeThreadKey
-      : paneRefs.at(-1)
-        ? scopedThreadKey(paneRefs.at(-1)!)
-        : null;
-  const isSplitModeActive = persisted.isSplitModeActive === true && isSplitViewActive(paneRefs);
+}
 
-  return { paneRefs, activeThreadKey, isSplitModeActive };
+export function migratePersistedSplitViewState(persistedState: unknown): SplitViewState {
+  if (!persistedState || typeof persistedState !== "object") {
+    return { groups: EMPTY_GROUPS, activeGroupId: null, activeThreadKey: null };
+  }
+
+  const persisted = persistedState as {
+    groups?: unknown;
+    activeGroupId?: unknown;
+    activeThreadKey?: unknown;
+    paneRefs?: unknown;
+    isSplitModeActive?: unknown;
+  };
+
+  // Version 1 stored one pane list. Preserve it as the first saved group.
+  const rawGroups = Array.isArray(persisted.groups)
+    ? persisted.groups
+    : persisted.paneRefs
+      ? [
+          {
+            id: "split-group-legacy",
+            colorHue: GROUP_COLOR_HUES[0],
+            paneRefs: persisted.paneRefs,
+          },
+        ]
+      : [];
+
+  const usedThreadKeys = new Set<string>();
+  const usedGroupIds = new Set<string>();
+  const groups: SplitViewGroup[] = [];
+  for (const [index, rawGroup] of rawGroups.entries()) {
+    if (!rawGroup || typeof rawGroup !== "object") continue;
+    const candidate = rawGroup as { id?: unknown; colorHue?: unknown; paneRefs?: unknown };
+    const paneRefs = parsePersistedPaneRefs(candidate.paneRefs).filter(
+      (paneRef) => !usedThreadKeys.has(scopedThreadKey(paneRef)),
+    );
+    if (!isSplitViewActive(paneRefs)) continue;
+    paneRefs.forEach((paneRef) => usedThreadKeys.add(scopedThreadKey(paneRef)));
+
+    const requestedId = typeof candidate.id === "string" && candidate.id ? candidate.id : null;
+    let id =
+      requestedId && !usedGroupIds.has(requestedId) ? requestedId : `split-group-${index + 1}`;
+    while (usedGroupIds.has(id)) id = `${id}-migrated`;
+    usedGroupIds.add(id);
+    const requestedColorHue =
+      typeof candidate.colorHue === "number" && Number.isFinite(candidate.colorHue)
+        ? ((candidate.colorHue % 360) + 360) % 360
+        : null;
+    const colorHue =
+      requestedColorHue !== null &&
+      groups.every((group) => circularHueDistance(group.colorHue, requestedColorHue) >= 1)
+        ? requestedColorHue
+        : nextGroupColorHue(groups);
+    groups.push({ id, colorHue, paneRefs });
+  }
+
+  const legacyGroupId =
+    !Array.isArray(persisted.groups) && persisted.isSplitModeActive === true
+      ? (groups[0]?.id ?? null)
+      : null;
+  const requestedActiveGroupId =
+    typeof persisted.activeGroupId === "string" ? persisted.activeGroupId : legacyGroupId;
+  const activeGroup = groups.find((group) => group.id === requestedActiveGroupId) ?? null;
+  const requestedActiveThreadKey =
+    typeof persisted.activeThreadKey === "string" ? persisted.activeThreadKey : null;
+  const activeThreadKey = activeGroup
+    ? activeGroup.paneRefs.some((paneRef) => scopedThreadKey(paneRef) === requestedActiveThreadKey)
+      ? requestedActiveThreadKey
+      : scopedThreadKey(activeGroup.paneRefs[0]!)
+    : null;
+
+  return {
+    groups: groups.length > 0 ? groups : EMPTY_GROUPS,
+    activeGroupId: activeGroup?.id ?? null,
+    activeThreadKey,
+  };
 }
 
 export const useSplitViewStore = create<SplitViewStore>()(
   persist(
     (set, get) => ({
-      paneRefs: EMPTY_PANE_REFS,
+      groups: EMPTY_GROUPS,
+      activeGroupId: null,
       activeThreadKey: null,
-      isSplitModeActive: false,
+      pendingNavigationThreadKey: null,
 
       openInSplit: (currentRef, targetRef) => {
         const state = get();
-        const targetKey = scopedThreadKey(targetRef);
-        if (
-          selectIsSplitViewActive(state) &&
-          state.paneRefs.some((paneRef) => scopedThreadKey(paneRef) === targetKey)
-        ) {
-          if (state.activeThreadKey !== targetKey) {
-            set({ activeThreadKey: targetKey });
-          }
+        const currentGroup = findSplitViewGroupForThread(state, currentRef);
+        const targetGroup = findSplitViewGroupForThread(state, targetRef);
+        if (currentGroup && currentGroup.id === targetGroup?.id) {
+          const targetKey = scopedThreadKey(targetRef);
+          set({
+            activeGroupId: currentGroup.id,
+            activeThreadKey: targetKey,
+            pendingNavigationThreadKey: targetKey,
+          });
           return "activated";
         }
         return get().placePane(currentRef, targetRef, Number.MAX_SAFE_INTEGER);
       },
 
       placePane: (currentRef, targetRef, insertionIndex) => {
-        const targetKey = scopedThreadKey(targetRef);
         const state = get();
-        // A saved-but-inactive layout should not unexpectedly absorb the
-        // current normal workspace. Starting a new split intentionally seeds
-        // from the current route instead.
-        const existingPanes = selectIsSplitViewActive(state)
-          ? uniquePaneRefs(state.paneRefs)
-          : uniquePaneRefs([currentRef]);
-        const existingIndex = existingPanes.findIndex(
-          (paneRef) => scopedThreadKey(paneRef) === targetKey,
-        );
-        if (existingIndex >= 0) {
-          const panesWithoutTarget = existingPanes.filter(
-            (paneRef) => scopedThreadKey(paneRef) !== targetKey,
-          );
-          const targetIndex = clampInsertionIndex(insertionIndex, panesWithoutTarget.length);
-          panesWithoutTarget.splice(targetIndex, 0, targetRef);
-          set({
-            paneRefs: panesWithoutTarget,
-            activeThreadKey: targetKey,
-            isSplitModeActive: isSplitViewActive(panesWithoutTarget),
-          });
-          return existingIndex === targetIndex ? "activated" : "opened";
+        const currentKey = scopedThreadKey(currentRef);
+        const targetKey = scopedThreadKey(targetRef);
+        if (currentKey === targetKey) {
+          const currentGroup = findSplitViewGroupForThread(state, currentKey);
+          if (currentGroup) {
+            set({
+              activeGroupId: currentGroup.id,
+              activeThreadKey: currentKey,
+              pendingNavigationThreadKey: currentKey,
+            });
+          }
+          return "activated";
         }
 
-        if (existingPanes.length >= MAX_SPLIT_VIEW_PANES) {
+        const activeGroup = selectActiveSplitGroup(state);
+        const currentGroup = findSplitViewGroupForThread(state, currentKey);
+        const destinationGroup = activeGroup?.paneRefs.some(
+          (paneRef) => scopedThreadKey(paneRef) === currentKey,
+        )
+          ? activeGroup
+          : currentGroup;
+        const destinationPaneRefs = destinationGroup
+          ? uniquePaneRefs(destinationGroup.paneRefs)
+          : [currentRef];
+        const existingIndex = destinationPaneRefs.findIndex(
+          (paneRef) => scopedThreadKey(paneRef) === targetKey,
+        );
+        if (existingIndex < 0 && destinationPaneRefs.length >= MAX_SPLIT_VIEW_PANES) {
           return "at-capacity";
         }
 
-        const targetIndex = clampInsertionIndex(insertionIndex, existingPanes.length);
-        const paneRefs = [...existingPanes];
-        paneRefs.splice(targetIndex, 0, targetRef);
-        if (!isSplitViewActive(paneRefs)) {
-          return "activated";
+        const panesWithoutTarget = destinationPaneRefs.filter(
+          (paneRef) => scopedThreadKey(paneRef) !== targetKey,
+        );
+        const targetIndex = clampInsertionIndex(insertionIndex, panesWithoutTarget.length);
+        panesWithoutTarget.splice(targetIndex, 0, targetRef);
+        if (!isSplitViewActive(panesWithoutTarget)) return "activated";
+
+        const destinationId = destinationGroup?.id ?? nextGroupId(state.groups);
+        const destinationColorHue = destinationGroup?.colorHue ?? nextGroupColorHue(state.groups);
+        const groups: SplitViewGroup[] = [];
+        for (const group of state.groups) {
+          if (group.id === destinationId) {
+            groups.push({ ...group, paneRefs: panesWithoutTarget });
+            continue;
+          }
+          const filteredPaneRefs = group.paneRefs.filter(
+            (paneRef) => scopedThreadKey(paneRef) !== targetKey,
+          );
+          if (isSplitViewActive(filteredPaneRefs)) {
+            groups.push(
+              filteredPaneRefs.length === group.paneRefs.length
+                ? group
+                : { ...group, paneRefs: filteredPaneRefs },
+            );
+          }
         }
-        set({ paneRefs, activeThreadKey: targetKey, isSplitModeActive: true });
-        return "opened";
+        if (!destinationGroup) {
+          groups.push({
+            id: destinationId,
+            colorHue: destinationColorHue,
+            paneRefs: panesWithoutTarget,
+          });
+        }
+
+        set({
+          groups,
+          activeGroupId: destinationId,
+          activeThreadKey: targetKey,
+          pendingNavigationThreadKey: targetKey,
+        });
+        return existingIndex === targetIndex ? "activated" : "opened";
       },
 
       movePane: (threadRef, insertionIndex) => {
         const state = get();
+        const activeGroup = selectActiveSplitGroup(state);
+        if (!activeGroup) return;
         const threadKey = scopedThreadKey(threadRef);
-        const currentIndex = state.paneRefs.findIndex(
+        const currentIndex = activeGroup.paneRefs.findIndex(
           (paneRef) => scopedThreadKey(paneRef) === threadKey,
         );
         if (currentIndex < 0) return;
-        const paneRefs = [...state.paneRefs];
+        const paneRefs = [...activeGroup.paneRefs];
         const [movedPane] = paneRefs.splice(currentIndex, 1);
         if (!movedPane) return;
         const targetIndex = clampInsertionIndex(
@@ -244,77 +378,133 @@ export const useSplitViewStore = create<SplitViewStore>()(
           paneRefs.length,
         );
         paneRefs.splice(targetIndex, 0, movedPane);
-        if (paneRefs.every((paneRef, index) => paneRef === state.paneRefs[index])) return;
-        set({ paneRefs });
+        if (
+          paneRefs.every(
+            (paneRef, index) =>
+              scopedThreadKey(paneRef) === scopedThreadKey(activeGroup.paneRefs[index]!),
+          )
+        ) {
+          return;
+        }
+        set({
+          groups: state.groups.map((group) =>
+            group.id === activeGroup.id ? { ...group, paneRefs } : group,
+          ),
+        });
       },
 
       resumeSplit: (threadRef) => {
         const state = get();
+        const group = findSplitViewGroupForThread(state, threadRef);
+        if (!group) return;
         const threadKey = scopedThreadKey(threadRef);
-        if (!state.paneRefs.some((paneRef) => scopedThreadKey(paneRef) === threadKey)) return;
-        if (state.isSplitModeActive && state.activeThreadKey === threadKey) return;
-        set({ activeThreadKey: threadKey, isSplitModeActive: true });
+        if (state.activeGroupId === group.id && state.activeThreadKey === threadKey) return;
+        set({
+          activeGroupId: group.id,
+          activeThreadKey: threadKey,
+          pendingNavigationThreadKey: threadKey,
+        });
       },
 
       exitSplit: () => {
         const state = get();
-        if (!state.isSplitModeActive && state.activeThreadKey === null) return;
-        set({ activeThreadKey: null, isSplitModeActive: false });
+        if (state.activeGroupId === null && state.activeThreadKey === null) return;
+        set({
+          activeGroupId: null,
+          activeThreadKey: null,
+          pendingNavigationThreadKey: null,
+        });
       },
 
       activatePane: (threadRef) => {
-        const threadKey = scopedThreadKey(threadRef);
         const state = get();
+        const activeGroup = selectActiveSplitGroup(state);
+        const threadKey = scopedThreadKey(threadRef);
         if (
-          !selectIsSplitViewActive(state) ||
+          !activeGroup ||
           state.activeThreadKey === threadKey ||
-          !state.paneRefs.some((paneRef) => scopedThreadKey(paneRef) === threadKey)
+          !activeGroup.paneRefs.some((paneRef) => scopedThreadKey(paneRef) === threadKey)
         ) {
           return;
         }
-        set({ activeThreadKey: threadKey });
+        set({ activeThreadKey: threadKey, pendingNavigationThreadKey: threadKey });
+      },
+
+      confirmNavigation: (threadRef) => {
+        const threadKey = scopedThreadKey(threadRef);
+        if (get().pendingNavigationThreadKey !== threadKey) return;
+        set({ pendingNavigationThreadKey: null });
       },
 
       detachPane: (threadRef) => {
         const state = get();
-        const next = nextStateAfterRemovingPane(state, threadRef);
-        if (
-          next.paneRefs === state.paneRefs &&
-          next.activeThreadKey === state.activeThreadKey &&
-          next.isSplitModeActive === state.isSplitModeActive
-        ) {
-          return next.fallback;
+        const threadKey = scopedThreadKey(threadRef);
+        const group = findSplitViewGroupForThread(state, threadKey);
+        if (!group) return null;
+        const paneIndex = group.paneRefs.findIndex(
+          (paneRef) => scopedThreadKey(paneRef) === threadKey,
+        );
+        const paneRefs = group.paneRefs.filter((paneRef) => scopedThreadKey(paneRef) !== threadKey);
+        const isActiveGroup = state.activeGroupId === group.id;
+
+        if (!isSplitViewActive(paneRefs)) {
+          set({
+            groups: state.groups.filter((candidate) => candidate.id !== group.id),
+            ...(isActiveGroup
+              ? {
+                  activeGroupId: null,
+                  activeThreadKey: null,
+                  pendingNavigationThreadKey: null,
+                }
+              : {}),
+          });
+          return isActiveGroup ? (paneRefs[0] ?? null) : null;
         }
+
+        const activeThreadKey =
+          isActiveGroup && state.activeThreadKey === threadKey
+            ? scopedThreadKey(paneRefs[Math.min(paneIndex, paneRefs.length - 1)]!)
+            : state.activeThreadKey;
         set({
-          paneRefs: next.paneRefs,
-          activeThreadKey: next.activeThreadKey,
-          isSplitModeActive: next.isSplitModeActive,
+          groups: state.groups.map((candidate) =>
+            candidate.id === group.id ? { ...candidate, paneRefs } : candidate,
+          ),
+          ...(isActiveGroup
+            ? { activeThreadKey, pendingNavigationThreadKey: activeThreadKey }
+            : {}),
         });
-        return next.fallback;
+        return null;
       },
 
       clearSplit: () => {
         const state = get();
         if (
-          state.paneRefs.length === 0 &&
-          state.activeThreadKey === null &&
-          !state.isSplitModeActive
+          state.groups.length === 0 &&
+          state.activeGroupId === null &&
+          state.activeThreadKey === null
         ) {
           return;
         }
-        set({ paneRefs: EMPTY_PANE_REFS, activeThreadKey: null, isSplitModeActive: false });
+        set({
+          groups: EMPTY_GROUPS,
+          activeGroupId: null,
+          activeThreadKey: null,
+          pendingNavigationThreadKey: null,
+        });
       },
 
       removeThread: (threadRef) => get().detachPane(threadRef),
 
       reconcilePanes: (availableRefs) => {
         const availableKeys = new Set(availableRefs.map(scopedThreadKey));
-        const paneRefs = get().paneRefs;
+        const groups = get().groups;
         let fallback: ScopedThreadRef | null = null;
-        for (const paneRef of paneRefs) {
-          if (!availableKeys.has(scopedThreadKey(paneRef))) {
-            const nextFallback = get().detachPane(paneRef);
-            fallback ??= nextFallback;
+        for (const group of groups) {
+          for (const paneRef of group.paneRefs) {
+            if (!availableKeys.has(scopedThreadKey(paneRef))) {
+              const nextFallback = get().detachPane(paneRef);
+              fallback ??= nextFallback;
+            }
           }
         }
         return fallback;
@@ -322,15 +512,15 @@ export const useSplitViewStore = create<SplitViewStore>()(
     }),
     {
       name: SPLIT_VIEW_STORAGE_KEY,
-      version: 1,
+      version: SPLIT_VIEW_STORAGE_VERSION,
       storage: createJSONStorage(() =>
         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
       ),
       migrate: (persistedState) => migratePersistedSplitViewState(persistedState),
       partialize: (state) => ({
-        paneRefs: state.paneRefs,
+        groups: state.groups,
+        activeGroupId: state.activeGroupId,
         activeThreadKey: state.activeThreadKey,
-        isSplitModeActive: state.isSplitModeActive,
       }),
     },
   ),

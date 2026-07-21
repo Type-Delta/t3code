@@ -349,9 +349,11 @@ Split membership is intentionally transient and separate from sidebar bulk selec
 
 ### DL009 — Persist split layouts and add direct thread placement
 
-Split view now saves its ordered pane layout and active state in local storage. Leaving split mode for a normal thread keeps that layout available: selecting one of its marked threads in the sidebar restores the same pane set, and the layout survives an app restart. The sidebar now gives each thread in the saved layout a shared blue leading marker, including when the layout is temporarily inactive.
+Split view now saves multiple independent ordered pane groups and active state in local storage. Leaving split mode for a normal thread keeps every group available: selecting any member of a marked group restores that pane set and focuses the selected thread, and all layouts survive an app restart. Each group receives a stable distinct hue. The sidebar shows membership by tinting the full thread-row background with a subtle group-color-to-transparent gradient, including when that group is not currently displayed. The translucent tint layers over the existing hover, active, and selection backgrounds so interaction feedback remains visible.
 
-Each split pane has a compact local header with the thread title, lower-contrast project name, a visible drag affordance, and a detach control. Dragging a pane header onto another pane moves it before or after that pane; dragging it to the sidebar detaches it. Sidebar thread rows are also draggable: dropping one directly onto the normal workspace starts a split, and dropping one into an existing split inserts it at the indicated position. The pane and workspace targets use explicit in-place labels such as “Drop to place before this pane” and “Drop to detach from split view,” rather than relying on color alone.
+Each split pane has a compact local header with the thread title, lower-contrast project name, a visible drag affordance, and a detach control. Dragging a pane header onto another pane moves it before or after that pane; dragging it to the sidebar detaches it. Sidebar thread rows are also draggable: dropping one directly onto the normal workspace starts a split, and dropping one into an existing split inserts it at the indicated position. Drop feedback now covers the complete target pane, highlights the selected left or right half, and includes a dashed midpoint divider plus an explicit action label. In a normal single-thread workspace, the overlay is constrained to the thread column and never covers an open right panel.
+
+Right-panel ownership is independent from pane focus inside a split group. If any member has an open browser, diff, file, plan, or terminal surface, that panel remains visible when the user focuses a different pane that has no open panel of its own. Focusing a pane with its own open panel switches the shared right panel to that thread.
 
 **Files modified:**
 
@@ -360,17 +362,25 @@ Each split pane has a compact local header with the thread title, lower-contrast
 - `apps/web/src/splitViewDrag.ts`
 - `apps/web/src/components/SplitThreadWorkspace.tsx`
 - `apps/web/src/components/SplitThreadWorkspace.test.tsx`
+- `apps/web/src/components/SplitPaneDropHint.tsx`
 - `apps/web/src/components/Sidebar.tsx`
+- `apps/web/src/components/ChatView.tsx`
 - `apps/web/src/routes/_chat.$environmentId.$threadId.tsx`
 
 **Validation:**
 
-- `vp test apps/web/src/splitViewStore.test.ts apps/web/src/components/SplitThreadWorkspace.test.tsx` passes (13 tests).
+- `vp test apps/web/src/components/Sidebar.logic.test.ts apps/web/src/splitViewStore.test.ts apps/web/src/components/SplitThreadWorkspace.test.tsx` passes (81 tests).
 - `vp run typecheck` passes with three existing suggestions outside this change.
 - `vp check` passes with 23 existing repository warnings and no errors.
 - `git diff --check` passes.
 
-**Last updated:** 2026-07-20
+**Change Log:**
+
+- **2026-07-20** — Added multiple persistent color-coded groups, any-member group restoration, full-pane left/right drop feedback with a midpoint divider, thread-column-only standalone feedback, and persistent right-panel ownership across pane focus changes.
+- **2026-07-21** — Stabilized the inactive split-pane selector so React subscribers reuse one empty snapshot instead of entering an update loop when the sidebar mounts.
+- **2026-07-21** — Replaced the standalone sidebar group marker with a full-row translucent gradient while preserving the existing hover, active, and selection palettes underneath it.
+
+**Last updated:** 2026-07-21
 
 ### DL010 — Stabilize collaborative preview pairing and browser automation
 

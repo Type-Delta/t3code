@@ -24,16 +24,19 @@ import {
   readSplitThreadDrag,
 } from "../splitViewDrag";
 import {
+  findSplitViewGroupForThread,
   MAX_SPLIT_VIEW_PANES,
   selectActiveSplitPane,
   selectIsSplitViewActive,
   selectSplitPaneRefs,
   useSplitViewStore,
 } from "../splitViewStore";
+import { useRightPanelStore } from "../rightPanelStore";
 import { useProject, useThread, useThreadRefs } from "../state/entities";
 import ChatView from "./ChatView";
 import { threadHasStarted } from "./ChatView.logic";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
+import { SplitPaneDropHint } from "./SplitPaneDropHint";
 import { Button } from "./ui/button";
 import { SidebarInset } from "./ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -82,6 +85,19 @@ export function resolveSplitPaneDropPosition(
   return event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
 }
 
+export function resolveSplitRightPanelOwner(input: {
+  paneKeys: readonly string[];
+  activePaneKey: string | null;
+  currentOwnerKey: string | null;
+  openPanelKeys: ReadonlySet<string>;
+}): string | null {
+  const paneHasOpenPanel = (paneKey: string | null): paneKey is string =>
+    paneKey !== null && input.paneKeys.includes(paneKey) && input.openPanelKeys.has(paneKey);
+  if (paneHasOpenPanel(input.activePaneKey)) return input.activePaneKey;
+  if (paneHasOpenPanel(input.currentOwnerKey)) return input.currentOwnerKey;
+  return input.paneKeys.find((paneKey) => input.openPanelKeys.has(paneKey)) ?? null;
+}
+
 function routeToPane(
   navigate: ReturnType<typeof useNavigate>,
   threadRef: ScopedThreadRef,
@@ -107,6 +123,7 @@ function SplitThreadPane(props: {
   threadRef: ScopedThreadRef;
   draftPane: DraftPane | undefined;
   active: boolean;
+  isRightPanelOwner: boolean;
   paneIndex: number;
   dropTarget: SplitPaneDropTarget | null;
   canPlaceThread: (threadRef: ScopedThreadRef | null) => boolean;
@@ -123,6 +140,7 @@ function SplitThreadPane(props: {
     draftPane,
     dropTarget,
     headerSlot,
+    isRightPanelOwner,
     onActivate,
     onDetach,
     onDropTargetChange,
@@ -212,18 +230,11 @@ function SplitThreadPane(props: {
 
   const threadTitle = serverThread?.title ?? "New thread";
   const projectName = project?.title ?? "Project unavailable";
-  const dropLabel = isDropTarget
-    ? dropTarget.position === "before"
-      ? "Drop to place before this pane"
-      : "Drop to place after this pane"
-    : null;
-
   return (
     <div
       className={cn(
         "relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-background",
-        active && "z-10 outline outline-1 -outline-offset-1 outline-primary/60",
-        isDropTarget && "bg-primary/[0.035] ring-2 ring-inset ring-primary/70",
+        active && "z-10",
       )}
       data-split-thread-pane
       data-split-thread-pane-active={active}
@@ -267,14 +278,6 @@ function SplitThreadPane(props: {
           <TooltipPopup side="bottom">Detach from split view</TooltipPopup>
         </Tooltip>
       </div>
-      {dropLabel ? (
-        <div
-          aria-live="polite"
-          className="pointer-events-none absolute inset-x-2 top-14 z-20 rounded-md bg-primary px-2 py-1 text-center text-[11px] font-medium text-primary-foreground shadow-sm"
-        >
-          {dropLabel}
-        </div>
-      ) : null}
       <div className="flex min-h-0 min-w-0 flex-1">
         {draftPane && !serverThreadStarted ? (
           <ChatView
@@ -282,17 +285,32 @@ function SplitThreadPane(props: {
             threadId={threadRef.threadId}
             routeKind="draft"
             draftId={draftPane.draftId}
-            paneMode={{ isActive: active, onActivate, headerSlot, rightPanelSlot }}
+            paneMode={{
+              isActive: active,
+              isRightPanelOwner,
+              onActivate,
+              headerSlot,
+              rightPanelSlot,
+            }}
           />
         ) : (
           <ChatView
             environmentId={threadRef.environmentId}
             threadId={threadRef.threadId}
             routeKind="server"
-            paneMode={{ isActive: active, onActivate, headerSlot, rightPanelSlot }}
+            paneMode={{
+              isActive: active,
+              isRightPanelOwner,
+              onActivate,
+              headerSlot,
+              rightPanelSlot,
+            }}
           />
         )}
       </div>
+      {isDropTarget ? (
+        <SplitPaneDropHint className="inset-0" position={dropTarget.position} />
+      ) : null}
     </div>
   );
 }
@@ -310,6 +328,8 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   const draftThreadsById = useComposerDraftStore((state) => state.draftThreadsByThreadKey);
   const [headerSlot, setHeaderSlot] = useState<HTMLDivElement | null>(null);
   const [rightPanelSlot, setRightPanelSlot] = useState<HTMLDivElement | null>(null);
+  const rightPanelStateByThreadKey = useRightPanelStore((state) => state.byThreadKey);
+  const [rightPanelOwnerThreadKey, setRightPanelOwnerThreadKey] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<SplitPaneDropTarget | null>(null);
   const paneGridAnimationRef = useRef<{
     node: HTMLElement;
@@ -368,26 +388,62 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   }, [availablePaneRefs, navigateToPane]);
 
   const activePaneKey = activePane ? scopedThreadKey(activePane) : null;
+  useEffect(() => {
+    const paneKeys = paneRefs.map(scopedThreadKey);
+    const openPanelKeys = new Set(
+      paneRefs.flatMap((paneRef) => {
+        const paneKey = scopedThreadKey(paneRef);
+        return rightPanelStateByThreadKey[paneKey]?.isOpen ? [paneKey] : [];
+      }),
+    );
+    setRightPanelOwnerThreadKey((currentOwnerKey) =>
+      resolveSplitRightPanelOwner({
+        paneKeys,
+        activePaneKey,
+        currentOwnerKey,
+        openPanelKeys,
+      }),
+    );
+  }, [activePaneKey, paneRefs, rightPanelStateByThreadKey]);
   const currentRouteKey = currentRouteRef ? scopedThreadKey(currentRouteRef) : null;
   useEffect(() => {
-    // A normal navigation outside the displayed panes exits split mode while
-    // preserving its layout for a later return.
+    const state = useSplitViewStore.getState();
+    const currentActivePane = selectActiveSplitPane(state);
+    const pendingThreadKey = state.pendingNavigationThreadKey;
+
+    // Store actions intentionally precede URL updates. During a group switch,
+    // keep the requested group active until the router reaches its focused pane.
+    if (pendingThreadKey) {
+      if (currentRouteKey === pendingThreadKey && currentRouteRef) {
+        state.confirmNavigation(currentRouteRef);
+      } else if (currentActivePane && scopedThreadKey(currentActivePane) === pendingThreadKey) {
+        navigateToPane(currentActivePane);
+        return;
+      }
+    }
+
     if (
       currentRouteKey &&
       !paneRefs.some((paneRef) => scopedThreadKey(paneRef) === currentRouteKey)
     ) {
-      useSplitViewStore.getState().exitSplit();
+      const routeGroup = findSplitViewGroupForThread(state, currentRouteKey);
+      if (routeGroup && currentRouteRef) {
+        state.resumeSplit(currentRouteRef);
+      } else {
+        // A normal navigation outside every saved group exits split mode while
+        // preserving all layouts for a later return.
+        state.exitSplit();
+      }
       return;
     }
 
     // Re-read after reconciliation: this effect runs immediately after the
     // reconciliation effect above and must not navigate to a just-removed pane.
-    const currentActivePane = selectActiveSplitPane(useSplitViewStore.getState());
     if (!currentActivePane || currentRouteKey === scopedThreadKey(currentActivePane)) {
       return;
     }
     navigateToPane(currentActivePane);
-  }, [activePane, activePaneKey, currentRouteKey, navigateToPane, paneRefs]);
+  }, [activePane, activePaneKey, currentRouteKey, currentRouteRef, navigateToPane, paneRefs]);
 
   const activatePane = useCallback(
     (threadRef: ScopedThreadRef) => {
@@ -417,14 +473,15 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   const placeThread = useCallback(
     (threadRef: ScopedThreadRef, insertionIndex: number) => {
       const state = useSplitViewStore.getState();
-      const isExistingPane = state.paneRefs.some(
+      const activePaneRefs = selectSplitPaneRefs(state);
+      const isExistingPane = activePaneRefs.some(
         (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
       );
       if (isExistingPane) {
         state.movePane(threadRef, insertionIndex);
         return;
       }
-      const anchor = currentRouteRef ?? state.paneRefs[0];
+      const anchor = currentRouteRef ?? activePaneRefs[0];
       if (!anchor) return;
       state.placePane(anchor, threadRef, insertionIndex);
     },
@@ -509,6 +566,7 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
                     threadRef={threadRef}
                     draftPane={draftPaneByThreadKey.get(threadKey)}
                     active={threadKey === activePaneKey}
+                    isRightPanelOwner={threadKey === rightPanelOwnerThreadKey}
                     paneIndex={paneIndex}
                     dropTarget={dropTarget}
                     canPlaceThread={canPlaceThread}

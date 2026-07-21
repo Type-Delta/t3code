@@ -417,6 +417,10 @@ export function resolveThreadRowClassName(input: {
   return cn(baseClassName, "text-muted-foreground hover:bg-accent hover:text-foreground");
 }
 
+export function resolveSplitViewGroupRowBackgroundImage(groupColor: string): string {
+  return `linear-gradient(110deg, color-mix(in oklch, ${groupColor} 24%, transparent) 0%, transparent 78%)`;
+}
+
 export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
 }): ThreadStatusPill | null {

@@ -4,6 +4,7 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useCallback, useEffect, useState, type DragEvent } from "react";
 
 import ChatView from "../components/ChatView";
+import { SplitPaneDropHint, type SplitPaneDropSide } from "../components/SplitPaneDropHint";
 import { threadHasStarted } from "../components/ChatView.logic";
 import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
 import { resolveThreadRouteRef } from "../threadRoutes";
@@ -16,39 +17,71 @@ import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 
 function StandaloneThreadDropWorkspace({ threadRef }: { threadRef: ScopedThreadRef }) {
-  const [dropPosition, setDropPosition] = useState<"before" | "after" | null>(null);
+  const [dropHint, setDropHint] = useState<{
+    position: SplitPaneDropSide;
+    bounds: { left: number; top: number; width: number; height: number };
+  } | null>(null);
+  const resolveDropHint = useCallback((event: DragEvent<HTMLDivElement>) => {
+    const threadArea = event.currentTarget.querySelector<HTMLElement>(
+      "[data-chat-column-maximized-away]",
+    );
+    if (!threadArea) return null;
+    const bounds = threadArea.getBoundingClientRect();
+    const pointerInsideThreadArea =
+      event.clientX >= bounds.left &&
+      event.clientX <= bounds.right &&
+      event.clientY >= bounds.top &&
+      event.clientY <= bounds.bottom;
+    if (!pointerInsideThreadArea || bounds.width <= 0 || bounds.height <= 0) return null;
+
+    const workspaceBounds = event.currentTarget.getBoundingClientRect();
+    return {
+      position: event.clientX < bounds.left + bounds.width / 2 ? "before" : "after",
+      bounds: {
+        left: bounds.left - workspaceBounds.left,
+        top: bounds.top - workspaceBounds.top,
+        width: bounds.width,
+        height: bounds.height,
+      },
+    } satisfies NonNullable<typeof dropHint>;
+  }, []);
   const handleDragOver = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       if (!hasSplitThreadDrag(event.dataTransfer)) return;
       const draggedRef = readSplitThreadDrag(event.dataTransfer);
       if (!draggedRef || scopedThreadKey(draggedRef) === scopedThreadKey(threadRef)) {
-        setDropPosition(null);
+        setDropHint(null);
+        return;
+      }
+      const nextDropHint = resolveDropHint(event);
+      if (!nextDropHint) {
+        setDropHint(null);
         return;
       }
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
-      const bounds = event.currentTarget.getBoundingClientRect();
-      setDropPosition(event.clientX < bounds.left + bounds.width / 2 ? "before" : "after");
+      setDropHint(nextDropHint);
     },
-    [threadRef],
+    [resolveDropHint, threadRef],
   );
   const handleDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
     const nextTarget = event.relatedTarget;
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
-    setDropPosition(null);
+    setDropHint(null);
   }, []);
   const handleDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       if (!hasSplitThreadDrag(event.dataTransfer)) return;
       const draggedRef = readSplitThreadDrag(event.dataTransfer);
+      const nextDropHint = resolveDropHint(event);
+      setDropHint(null);
+      if (!nextDropHint) return;
       event.preventDefault();
-      setDropPosition(null);
       if (!draggedRef || scopedThreadKey(draggedRef) === scopedThreadKey(threadRef)) return;
-      const bounds = event.currentTarget.getBoundingClientRect();
-      const insertionIndex = event.clientX < bounds.left + bounds.width / 2 ? 0 : 1;
+      const insertionIndex = nextDropHint.position === "before" ? 0 : 1;
       useSplitViewStore.getState().placePane(threadRef, draggedRef, insertionIndex);
     },
-    [threadRef],
+    [resolveDropHint, threadRef],
   );
 
   return (
@@ -56,7 +89,7 @@ function StandaloneThreadDropWorkspace({ threadRef }: { threadRef: ScopedThreadR
       className="relative h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh"
       onDragEnd={() => {
         endSplitThreadDrag();
-        setDropPosition(null);
+        setDropHint(null);
       }}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -67,17 +100,16 @@ function StandaloneThreadDropWorkspace({ threadRef }: { threadRef: ScopedThreadR
         threadId={threadRef.threadId}
         routeKind="server"
       />
-      {dropPosition ? (
-        <div
-          aria-live="polite"
-          className="pointer-events-none absolute inset-3 z-30 flex items-center justify-center rounded-lg bg-primary/8 ring-2 ring-primary/70"
-        >
-          <span className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm">
-            {dropPosition === "before"
-              ? "Drop to open this thread before the current pane"
-              : "Drop to open this thread after the current pane"}
-          </span>
-        </div>
+      {dropHint ? (
+        <SplitPaneDropHint
+          position={dropHint.position}
+          style={{
+            left: dropHint.bounds.left,
+            top: dropHint.bounds.top,
+            width: dropHint.bounds.width,
+            height: dropHint.bounds.height,
+          }}
+        />
       ) : null}
     </SidebarInset>
   );

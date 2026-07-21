@@ -340,6 +340,8 @@ const SCRIPT_TERMINAL_ROWS = 30;
 interface ChatViewPaneMode {
   /** Whether this pane owns the app-wide keyboard and action-bus listeners. */
   isActive: boolean;
+  /** Whether this pane owns the split workspace's persistent right panel. */
+  isRightPanelOwner: boolean;
   /** Focus the pane before handling any interaction inside it. */
   onActivate: () => void;
   /** Workspace-owned portal destination for the active pane's top chrome. */
@@ -5231,7 +5233,7 @@ function ChatViewContent(props: ChatViewProps) {
     </>
   );
   const renderedRightPanel =
-    isPaneMode && isActivePane && rightPanelSlot
+    isPaneMode && paneMode.isRightPanelOwner && rightPanelSlot
       ? createPortal(rightPanelChrome, rightPanelSlot)
       : isPaneMode
         ? null

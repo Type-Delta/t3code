@@ -1,12 +1,14 @@
-import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  findSplitViewGroupForThread,
   MAX_SPLIT_VIEW_PANES,
   migratePersistedSplitViewState,
   selectActiveSplitPane,
   selectIsSplitViewActive,
+  selectSplitPaneRefs,
   useSplitViewStore,
 } from "./splitViewStore";
 
@@ -21,16 +23,24 @@ const THREAD_A_IN_OTHER_ENVIRONMENT = scopeThreadRef(
 );
 
 function paneKeys(): string[] {
-  return useSplitViewStore.getState().paneRefs.map(scopedThreadKey);
+  return selectSplitPaneRefs(useSplitViewStore.getState()).map(scopedThreadKey);
 }
 
 describe("splitViewStore", () => {
   beforeEach(() => {
     useSplitViewStore.setState({
-      paneRefs: [],
+      groups: [],
+      activeGroupId: null,
       activeThreadKey: null,
-      isSplitModeActive: false,
+      pendingNavigationThreadKey: null,
     });
+  });
+
+  it("returns a stable empty pane collection while split mode is inactive", () => {
+    const state = useSplitViewStore.getState();
+
+    expect(selectSplitPaneRefs(state)).toBe(selectSplitPaneRefs(state));
+    expect(selectSplitPaneRefs(state)).toEqual([]);
   });
 
   it("opens a target beside the current thread and focuses it", () => {
@@ -56,7 +66,7 @@ describe("splitViewStore", () => {
     expect(useSplitViewStore.getState().activeThreadKey).toBe(scopedThreadKey(THREAD_A));
   });
 
-  it("activates only an open pane", () => {
+  it("activates only a pane in the displayed group", () => {
     const store = useSplitViewStore.getState();
     store.openInSplit(THREAD_A, THREAD_B);
 
@@ -90,57 +100,91 @@ describe("splitViewStore", () => {
     expect(useSplitViewStore.getState().activeThreadKey).toBe(scopedThreadKey(THREAD_B));
   });
 
-  it("exits split mode cleanly and returns the remaining thread when detaching from two", () => {
+  it("removes a group and returns its standalone thread when detaching from two", () => {
     const store = useSplitViewStore.getState();
     store.openInSplit(THREAD_A, THREAD_B);
 
     expect(store.detachPane(THREAD_B)).toEqual(THREAD_A);
     const state = useSplitViewStore.getState();
-    expect(state.paneRefs).toEqual([]);
+    expect(state.groups).toEqual([]);
+    expect(state.activeGroupId).toBeNull();
     expect(state.activeThreadKey).toBeNull();
     expect(selectIsSplitViewActive(state)).toBe(false);
-    expect(selectActiveSplitPane(state)).toBeNull();
   });
 
-  it("removes deleted threads and reconciles panes against authoritative thread refs", () => {
+  it("keeps multiple saved groups with distinct colors and opens either group from any member", () => {
     const store = useSplitViewStore.getState();
     store.openInSplit(THREAD_A, THREAD_B);
-    store.openInSplit(THREAD_B, THREAD_C);
+    store.exitSplit();
+    store.openInSplit(THREAD_C, THREAD_D);
 
-    expect(store.removeThread(THREAD_B)).toBeNull();
-    expect(paneKeys()).toEqual([scopedThreadKey(THREAD_A), scopedThreadKey(THREAD_C)]);
-    expect(useSplitViewStore.getState().activeThreadKey).toBe(scopedThreadKey(THREAD_C));
+    const stateWithTwoGroups = useSplitViewStore.getState();
+    expect(stateWithTwoGroups.groups).toHaveLength(2);
+    expect(new Set(stateWithTwoGroups.groups.map((group) => group.colorHue)).size).toBe(2);
 
-    expect(store.reconcilePanes([THREAD_A])).toEqual(THREAD_A);
+    store.resumeSplit(THREAD_B);
+    expect(paneKeys()).toEqual([scopedThreadKey(THREAD_A), scopedThreadKey(THREAD_B)]);
+    expect(selectActiveSplitPane(useSplitViewStore.getState())).toEqual(THREAD_B);
+    expect(useSplitViewStore.getState().pendingNavigationThreadKey).toBe(scopedThreadKey(THREAD_B));
+    store.confirmNavigation(THREAD_B);
+    expect(useSplitViewStore.getState().pendingNavigationThreadKey).toBeNull();
+
+    store.resumeSplit(THREAD_C);
+    expect(paneKeys()).toEqual([scopedThreadKey(THREAD_C), scopedThreadKey(THREAD_D)]);
+    expect(selectActiveSplitPane(useSplitViewStore.getState())).toEqual(THREAD_C);
+  });
+
+  it("moves a thread between groups without leaving duplicate membership", () => {
+    const store = useSplitViewStore.getState();
+    store.openInSplit(THREAD_A, THREAD_B);
+    store.exitSplit();
+    store.openInSplit(THREAD_C, THREAD_D);
+
+    expect(store.placePane(THREAD_C, THREAD_A, 1)).toBe("opened");
+    expect(paneKeys()).toEqual([
+      scopedThreadKey(THREAD_C),
+      scopedThreadKey(THREAD_A),
+      scopedThreadKey(THREAD_D),
+    ]);
+    expect(useSplitViewStore.getState().groups).toHaveLength(1);
+    expect(findSplitViewGroupForThread(useSplitViewStore.getState(), THREAD_B)).toBeNull();
+  });
+
+  it("removes deleted threads and reconciles every saved group", () => {
+    const store = useSplitViewStore.getState();
+    store.openInSplit(THREAD_A, THREAD_B);
+    store.exitSplit();
+    store.openInSplit(THREAD_C, THREAD_D);
+
+    expect(store.reconcilePanes([THREAD_A, THREAD_C, THREAD_D])).toBeNull();
+    expect(findSplitViewGroupForThread(useSplitViewStore.getState(), THREAD_A)).toBeNull();
+    expect(paneKeys()).toEqual([scopedThreadKey(THREAD_C), scopedThreadKey(THREAD_D)]);
+
+    expect(store.reconcilePanes([THREAD_C])).toEqual(THREAD_C);
     expect(useSplitViewStore.getState()).toMatchObject({
-      paneRefs: [],
+      groups: [],
+      activeGroupId: null,
       activeThreadKey: null,
     });
   });
 
-  it("clears split state", () => {
-    const store = useSplitViewStore.getState();
-    store.openInSplit(THREAD_A, THREAD_B);
-    store.clearSplit();
-
-    expect(useSplitViewStore.getState()).toMatchObject({
-      paneRefs: [],
-      activeThreadKey: null,
-      isSplitModeActive: false,
-    });
-  });
-
-  it("keeps a saved layout when leaving split mode and restores it on a pane click", () => {
+  it("keeps saved groups when leaving split mode and clears them only on request", () => {
     const store = useSplitViewStore.getState();
     store.openInSplit(THREAD_A, THREAD_B);
 
     store.exitSplit();
     expect(selectIsSplitViewActive(useSplitViewStore.getState())).toBe(false);
-    expect(paneKeys()).toEqual([scopedThreadKey(THREAD_A), scopedThreadKey(THREAD_B)]);
+    expect(useSplitViewStore.getState().groups).toHaveLength(1);
 
     store.resumeSplit(THREAD_A);
-    expect(selectIsSplitViewActive(useSplitViewStore.getState())).toBe(true);
-    expect(useSplitViewStore.getState().activeThreadKey).toBe(scopedThreadKey(THREAD_A));
+    expect(selectActiveSplitPane(useSplitViewStore.getState())).toEqual(THREAD_A);
+
+    store.clearSplit();
+    expect(useSplitViewStore.getState()).toMatchObject({
+      groups: [],
+      activeGroupId: null,
+      activeThreadKey: null,
+    });
   });
 
   it("places new panes and moves existing panes at the requested insertion index", () => {
@@ -162,32 +206,27 @@ describe("splitViewStore", () => {
     ]);
   });
 
-  it("restores only valid persisted panes and never reactivates an incomplete layout", () => {
-    expect(
-      migratePersistedSplitViewState({
-        paneRefs: [
-          { environmentId: "environment-a", threadId: "thread-a" },
-          { environmentId: "environment-a", threadId: "thread-b" },
-          { environmentId: 5, threadId: "bad" },
-        ],
-        activeThreadKey: scopedThreadKey(THREAD_B),
-        isSplitModeActive: true,
-      }),
-    ).toMatchObject({
-      paneRefs: [THREAD_A, THREAD_B],
+  it("migrates the previous single-layout state into a valid group", () => {
+    const migrated = migratePersistedSplitViewState({
+      paneRefs: [
+        { environmentId: "environment-a", threadId: "thread-a" },
+        { environmentId: "environment-a", threadId: "thread-b" },
+        { environmentId: 5, threadId: "bad" },
+      ],
       activeThreadKey: scopedThreadKey(THREAD_B),
       isSplitModeActive: true,
     });
+
+    expect(migrated.groups).toHaveLength(1);
+    expect(migrated.groups[0]?.paneRefs).toEqual([THREAD_A, THREAD_B]);
+    expect(migrated.activeGroupId).toBe(migrated.groups[0]?.id);
+    expect(migrated.activeThreadKey).toBe(scopedThreadKey(THREAD_B));
 
     expect(
       migratePersistedSplitViewState({
         paneRefs: [{ environmentId: "environment-a", threadId: "thread-a" }],
         isSplitModeActive: true,
       }),
-    ).toMatchObject({
-      paneRefs: [THREAD_A],
-      activeThreadKey: scopedThreadKey(THREAD_A),
-      isSplitModeActive: false,
-    });
+    ).toEqual({ groups: [], activeGroupId: null, activeThreadKey: null });
   });
 });
