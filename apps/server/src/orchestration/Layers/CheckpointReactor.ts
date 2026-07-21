@@ -330,7 +330,11 @@ const makeCaptureObserver = Effect.gen(function* () {
             cwd: context.cwd,
             fromCheckpointRef: previousRef,
             toCheckpointRef: checkpointRef,
-            fallbackFromToHead: false,
+            // Older threads and interrupted baseline jobs may not have the
+            // preceding sidecar snapshot. Degrade to the repository HEAD so
+            // the changed-file summary still reaches the client instead of
+            // silently publishing an empty DiffPanel payload.
+            fallbackFromToHead: true,
             ignoreWhitespace: false,
           })
           .pipe(

@@ -156,13 +156,29 @@ async function waitForThread(
     readonly threads: ReadonlyArray<{
       readonly id: ThreadId;
       readonly latestTurn: { readonly turnId: string } | null;
-      readonly checkpoints: ReadonlyArray<{ readonly checkpointTurnCount: number }>;
+      readonly checkpoints: ReadonlyArray<{
+        readonly checkpointTurnCount: number;
+        readonly files: ReadonlyArray<{
+          readonly path: string;
+          readonly kind: string;
+          readonly additions: number;
+          readonly deletions: number;
+        }>;
+      }>;
       readonly activities: ReadonlyArray<{ readonly kind: string }>;
     }>;
   }>,
   predicate: (thread: {
     latestTurn: { turnId: string } | null;
-    checkpoints: ReadonlyArray<{ checkpointTurnCount: number }>;
+    checkpoints: ReadonlyArray<{
+      checkpointTurnCount: number;
+      files: ReadonlyArray<{
+        path: string;
+        kind: string;
+        additions: number;
+        deletions: number;
+      }>;
+    }>;
     activities: ReadonlyArray<{ kind: string }>;
   }) => boolean,
   timeoutMs = 15_000,
@@ -170,7 +186,15 @@ async function waitForThread(
   const deadline = (await Effect.runPromise(Clock.currentTimeMillis)) + timeoutMs;
   const poll = async (): Promise<{
     latestTurn: { turnId: string } | null;
-    checkpoints: ReadonlyArray<{ checkpointTurnCount: number }>;
+    checkpoints: ReadonlyArray<{
+      checkpointTurnCount: number;
+      files: ReadonlyArray<{
+        path: string;
+        kind: string;
+        additions: number;
+        deletions: number;
+      }>;
+    }>;
     activities: ReadonlyArray<{ kind: string }>;
   }> => {
     const snapshot = await readModel();
@@ -684,6 +708,9 @@ describe("CheckpointReactor", () => {
       (entry) => entry.latestTurn?.turnId === "turn-1" && entry.checkpoints.length === 1,
     );
     expect(thread.checkpoints[0]?.checkpointTurnCount).toBe(1);
+    expect(thread.checkpoints[0]?.files).toEqual([
+      { path: "README.md", kind: "modified", additions: 1, deletions: 1 },
+    ]);
     const turnRef = await waitForSidecarCheckpoint(harness.checkpointStore, harness.cwd, 1);
     expect(
       gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0)),
@@ -849,7 +876,7 @@ describe("CheckpointReactor", () => {
     ).toBe(false);
   });
 
-  it("uses the durable initial baseline when completion arrives without turn.started", async () => {
+  it("falls back to HEAD when completion arrives without an available baseline", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const createdAt = "2026-01-01T00:00:00.000Z";
 
@@ -871,7 +898,14 @@ describe("CheckpointReactor", () => {
       }),
     );
 
-    await waitForSidecarCheckpoint(harness.checkpointStore, harness.cwd, 0);
+    const baselineRef = await waitForSidecarCheckpoint(harness.checkpointStore, harness.cwd, 0);
+    await Effect.runPromise(
+      harness.checkpointStore.deleteCheckpointRefs({
+        cwd: harness.cwd,
+        checkpointRefs: [baselineRef],
+      }),
+    );
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
     harness.provider.emit({
       type: "turn.completed",
       eventId: EventId.make("evt-turn-completed-missing-baseline"),
@@ -892,6 +926,9 @@ describe("CheckpointReactor", () => {
     );
 
     expect(thread.checkpoints[0]?.checkpointTurnCount).toBe(1);
+    expect(thread.checkpoints[0]?.files).toEqual([
+      { path: "README.md", kind: "modified", additions: 1, deletions: 1 },
+    ]);
     expect(thread.activities.some((activity) => activity.kind === "checkpoint.captured")).toBe(
       true,
     );

@@ -24,6 +24,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
@@ -45,6 +46,70 @@ interface AssistantSegmentState {
   baseKey: string;
   nextSegmentIndex: number;
   activeMessageId: MessageId | null;
+}
+
+interface PendingFileChangeSummary {
+  readonly path: string;
+  readonly kind: "modified";
+  readonly additions: number;
+  readonly deletions: number;
+}
+
+function countChangedLines(diff: string, changeType: string | undefined) {
+  const lines = diff.endsWith("\n") ? diff.slice(0, -1).split("\n") : diff.split("\n");
+  const hasUnifiedDiffMarkers = lines.some(
+    (line) => line.startsWith("@@") || line.startsWith("+++") || line.startsWith("---"),
+  );
+  if (hasUnifiedDiffMarkers) {
+    return {
+      additions: lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
+      deletions: lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
+    };
+  }
+  const lineCount = diff.length === 0 ? 0 : lines.length;
+  return {
+    additions: changeType === "delete" ? 0 : lineCount,
+    deletions: changeType === "delete" ? lineCount : 0,
+  };
+}
+
+function fileChangeSummariesFromItemData(
+  data: unknown,
+  workspaceCwd: string | undefined,
+): ReadonlyArray<PendingFileChangeSummary> {
+  if (typeof data !== "object" || data === null) return [];
+  const item =
+    "item" in data && typeof data.item === "object" && data.item !== null ? data.item : data;
+  if (!("changes" in item) || !Array.isArray(item.changes)) return [];
+
+  return item.changes.flatMap((change): ReadonlyArray<PendingFileChangeSummary> => {
+    if (typeof change !== "object" || change === null || !("path" in change)) return [];
+    if (typeof change.path !== "string" || change.path.length === 0) return [];
+    const diff = "diff" in change && typeof change.diff === "string" ? change.diff : "";
+    const changeType =
+      "kind" in change &&
+      typeof change.kind === "object" &&
+      change.kind !== null &&
+      "type" in change.kind &&
+      typeof change.kind.type === "string"
+        ? change.kind.type
+        : undefined;
+    const normalizedPath = change.path.replaceAll("\\", "/");
+    const normalizedWorkspace = workspaceCwd?.replaceAll("\\", "/").replace(/\/$/, "");
+    const path =
+      normalizedWorkspace &&
+      normalizedPath.toLowerCase().startsWith(`${normalizedWorkspace.toLowerCase()}/`)
+        ? normalizedPath.slice(normalizedWorkspace.length + 1)
+        : normalizedPath;
+    const counts = countChangedLines(diff, changeType);
+    return [
+      {
+        path,
+        kind: "modified",
+        ...counts,
+      },
+    ];
+  });
 }
 
 const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
@@ -638,6 +703,9 @@ const make = Effect.gen(function* () {
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
     );
+  const pendingFileChangesByTurn = yield* Ref.make(
+    new Map<string, Map<string, PendingFileChangeSummary>>(),
+  );
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -1539,6 +1607,41 @@ const make = Effect.gen(function* () {
         });
       }
 
+      if (
+        event.type === "item.completed" &&
+        event.payload.itemType === "file_change" &&
+        event.turnId !== undefined
+      ) {
+        const checkpointContext = yield* projectionSnapshotQuery
+          .getThreadCheckpointContext(thread.id)
+          .pipe(Effect.map(Option.getOrUndefined));
+        const workspaceCwd =
+          checkpointContext?.worktreePath ?? checkpointContext?.workspaceRoot ?? undefined;
+        const summaries = fileChangeSummariesFromItemData(event.payload.data, workspaceCwd);
+        if (summaries.length > 0) {
+          const key = providerTurnKey(thread.id, TurnId.make(String(event.turnId)));
+          yield* Ref.update(pendingFileChangesByTurn, (current) => {
+            const next = new Map(current);
+            const byPath = new Map(next.get(key) ?? []);
+            for (const summary of summaries) {
+              const previous = byPath.get(summary.path);
+              byPath.set(
+                summary.path,
+                previous
+                  ? {
+                      ...summary,
+                      additions: previous.additions + summary.additions,
+                      deletions: previous.deletions + summary.deletions,
+                    }
+                  : summary,
+              );
+            }
+            next.set(key, byPath);
+            return next;
+          });
+        }
+      }
+
       if (event.type === "turn.completed") {
         const detailedThread = yield* getLoadedThreadDetail();
         const messages = detailedThread?.messages ?? [];
@@ -1546,6 +1649,42 @@ const make = Effect.gen(function* () {
         const turnId = toTurnId(event.turnId);
         if (turnId) {
           const assistantMessageIds = yield* getAssistantMessageIdsForTurn(thread.id, turnId);
+          const pendingFiles = yield* Ref.modify(pendingFileChangesByTurn, (current) => {
+            const key = providerTurnKey(thread.id, turnId);
+            const files = Array.from(current.get(key)?.values() ?? []);
+            const next = new Map(current);
+            next.delete(key);
+            return [files, next] as const;
+          });
+          if (pendingFiles.length > 0) {
+            const checkpointContext = yield* projectionSnapshotQuery
+              .getThreadCheckpointContext(thread.id)
+              .pipe(Effect.map(Option.getOrUndefined));
+            const workspaceCwd =
+              checkpointContext?.worktreePath ?? checkpointContext?.workspaceRoot ?? undefined;
+            if (
+              checkpointContext &&
+              workspaceCwd &&
+              isGitRepository(workspaceCwd) &&
+              !hasCheckpointForTurn(checkpointContext.checkpoints, turnId)
+            ) {
+              const assistantMessageId =
+                Array.from(assistantMessageIds).at(-1) ?? MessageId.make(`assistant:${turnId}`);
+              yield* orchestrationEngine.dispatch({
+                type: "thread.turn.diff.complete",
+                commandId: yield* providerCommandId(event, "file-change-turn-diff-complete"),
+                threadId: thread.id,
+                turnId,
+                completedAt: now,
+                checkpointRef: CheckpointRef.make(`provider-file-change:${event.eventId}`),
+                status: "missing",
+                files: pendingFiles,
+                assistantMessageId,
+                checkpointTurnCount: maxCheckpointTurnCount(checkpointContext.checkpoints) + 1,
+                createdAt: now,
+              });
+            }
+          }
           yield* Effect.forEach(
             assistantMessageIds,
             (assistantMessageId) =>
@@ -1577,6 +1716,22 @@ const make = Effect.gen(function* () {
 
       if (event.type === "session.exited") {
         yield* clearTurnStateForSession(thread.id);
+        yield* Ref.update(pendingFileChangesByTurn, (current) => {
+          const next = new Map(current);
+          const threadPrefix = `${thread.id}:`;
+          for (const key of next.keys()) {
+            if (key.startsWith(threadPrefix)) next.delete(key);
+          }
+          return next;
+        });
+      }
+
+      if (event.type === "turn.aborted" && event.turnId !== undefined) {
+        yield* Ref.update(pendingFileChangesByTurn, (current) => {
+          const next = new Map(current);
+          next.delete(providerTurnKey(thread.id, TurnId.make(String(event.turnId))));
+          return next;
+        });
       }
 
       if (event.type === "runtime.error") {

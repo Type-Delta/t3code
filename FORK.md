@@ -435,3 +435,20 @@ remaining twelve seconds, so stale-host failover stays within its original 15-se
   regressions cover stale focused-host failover and recovery after renderer activity resumes.
 
 **Last updated:** 2026-07-21
+
+### DL011 — Preserve turn diff summaries when sidecar baselines are unavailable
+
+Turn-completion sidecar diffs now fall back to the repository `HEAD` when the preceding sidecar
+snapshot is missing. This keeps changed-file summaries available to the web DiffPanel for older
+threads, incomplete migrations, and interrupted baseline captures instead of silently publishing an
+empty file list. Checkpoint reactor coverage now verifies both the normal sidecar-to-sidecar summary
+and the missing-baseline fallback, while checkpoint-store coverage verifies the sidecar locator
+fallback itself.
+
+Provider runtime ingestion also aggregates completed `file_change` items by turn and publishes their
+file summaries when a provider completes the turn without emitting `turn.diff.updated`. This keeps
+the DiffPanel working with current Codex app-server events while allowing a later sidecar capture to
+replace the temporary provider-derived checkpoint. Regression coverage verifies path normalization,
+line counts, and the completed-turn projection.
+
+**Last updated:** 2026-07-21

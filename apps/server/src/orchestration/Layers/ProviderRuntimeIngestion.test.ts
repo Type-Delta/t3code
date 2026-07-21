@@ -313,6 +313,7 @@ describe("ProviderRuntimeIngestion", () => {
 
     return {
       engine,
+      workspaceRoot,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
@@ -2665,6 +2666,66 @@ describe("ProviderRuntimeIngestion", () => {
     expect(checkpoint?.status).toBe("missing");
     expect(checkpoint?.assistantMessageId).toBe("assistant:item-p1-assistant");
     expect(checkpoint?.checkpointRef).toBe("provider-diff:evt-turn-diff-updated");
+  });
+
+  it("projects completed file-change items when the provider omits turn.diff.updated", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-file-change-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-file-change-fallback"),
+      itemId: asItemId("item-file-change-fallback"),
+      payload: {
+        itemType: "file_change",
+        status: "completed",
+        data: {
+          item: {
+            changes: [
+              {
+                path: NodePath.join(harness.workspaceRoot, "diff-panel-live-check.txt"),
+                kind: { type: "add" },
+                diff: "DiffPanel live verification.\n",
+              },
+            ],
+          },
+        },
+      },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-file-change-fallback"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-file-change-fallback"),
+      payload: { state: "completed" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.checkpoints.some(
+        (checkpoint: ProviderRuntimeTestCheckpoint) =>
+          checkpoint.turnId === "turn-file-change-fallback",
+      ),
+    );
+    const checkpoint = thread.checkpoints.find(
+      (entry: ProviderRuntimeTestCheckpoint) => entry.turnId === "turn-file-change-fallback",
+    );
+    expect(checkpoint?.checkpointRef).toBe(
+      "provider-file-change:evt-turn-completed-file-change-fallback",
+    );
+    expect(checkpoint?.files).toEqual([
+      {
+        path: "diff-panel-live-check.txt",
+        kind: "modified",
+        additions: 1,
+        deletions: 0,
+      },
+    ]);
   });
 
   it("projects context window updates into normalized thread activities", async () => {

@@ -140,6 +140,30 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
   });
 
   describe("diffCheckpoints", () => {
+    it.effect("falls back from a missing sidecar locator to HEAD", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir("checkpoint-sidecar-head-fallback-");
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const missingFrom = yield* makeSidecarRef(tmp, "missing-from");
+        const toCheckpointRef = yield* makeSidecarRef(tmp, "captured-to");
+
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "changed after HEAD\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: toCheckpointRef });
+
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd: tmp,
+          fromCheckpointRef: missingFrom,
+          toCheckpointRef,
+          fallbackFromToHead: true,
+          ignoreWhitespace: false,
+        });
+
+        expect(diff).toContain("README.md");
+        expect(diff).toContain("+changed after HEAD");
+      }),
+    );
+
     it.effect("returns full oversized checkpoint diffs without truncation", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();

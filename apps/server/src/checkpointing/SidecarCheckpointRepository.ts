@@ -917,6 +917,54 @@ export const make = Effect.gen(function* () {
             input.cwd,
             "Sidecar repository is unavailable.",
           );
+        const copyWorktreeRevision = Effect.fn(
+          "SidecarCheckpointRepository.copyWorktreeDiffRevision",
+        )(function* (sourceRevision: string) {
+          const resolved = yield* git(
+            "SidecarCheckpointRepository.resolveWorktreeDiffRevision",
+            input.cwd,
+            [
+              "-C",
+              identity.worktreeRoot,
+              "rev-parse",
+              "--verify",
+              "--quiet",
+              `${sourceRevision}^{commit}`,
+            ],
+            { allowNonZeroExit: true, maxOutputBytes: 4_096 },
+          );
+          const commit = resolved.exitCode === 0 ? resolved.stdout.trim() || undefined : undefined;
+          if (!commit) return undefined;
+
+          // Copy the exact worktree revision into T3's object database. An
+          // operation-local project alternate would make this diff depend on the
+          // user's future history and garbage collection, violating sidecar
+          // isolation. The repository lock also prevents sidecar prune-now from
+          // racing this deliberately unreferenced compatibility object.
+          yield* git(
+            "SidecarCheckpointRepository.copyWorktreeDiffRevision",
+            input.cwd,
+            sidecarGitArgs(gitDir, identity.worktreeRoot, [
+              "fetch",
+              "--no-tags",
+              "--no-write-fetch-head",
+              identity.commonDir,
+              sourceRevision,
+            ]),
+          );
+          const copied = yield* git(
+            "SidecarCheckpointRepository.verifyWorktreeDiffRevision",
+            input.cwd,
+            sidecarGitArgs(gitDir, identity.worktreeRoot, [
+              "rev-parse",
+              "--verify",
+              "--quiet",
+              `${commit}^{commit}`,
+            ]),
+            { allowNonZeroExit: true, maxOutputBytes: 4_096 },
+          );
+          return copied.exitCode === 0 && copied.stdout.trim() === commit ? commit : undefined;
+        });
         const resolveRevision = Effect.fn("SidecarCheckpointRepository.resolveDiffRevision")(
           function* (checkpointRef: CheckpointRef, fallbackToHead: boolean) {
             if (isSidecarCheckpointRef(checkpointRef)) {
@@ -926,63 +974,18 @@ export const make = Effect.gen(function* () {
                 checkpointRef,
                 identity,
               );
-              return yield* resolveCommit(input.cwd, gitDir, identity.worktreeRoot, locator);
-            }
-            const result = yield* git(
-              "SidecarCheckpointRepository.resolveLegacyDiffRevision",
-              input.cwd,
-              [
-                "-C",
-                identity.worktreeRoot,
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                `${checkpointRef}^{commit}`,
-              ],
-              { allowNonZeroExit: true, maxOutputBytes: 4_096 },
-            );
-            let commit = result.exitCode === 0 ? result.stdout.trim() || undefined : undefined;
-            let sourceRevision = String(checkpointRef);
-            if (!commit && fallbackToHead) {
-              const head = yield* git(
-                "SidecarCheckpointRepository.resolveLegacyDiffHead",
+              const commit = yield* resolveCommit(
                 input.cwd,
-                ["-C", identity.worktreeRoot, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-                { allowNonZeroExit: true, maxOutputBytes: 4_096 },
+                gitDir,
+                identity.worktreeRoot,
+                locator,
               );
-              commit = head.exitCode === 0 ? head.stdout.trim() || undefined : undefined;
-              sourceRevision = "HEAD";
+              return commit ?? (fallbackToHead ? yield* copyWorktreeRevision("HEAD") : undefined);
             }
-            if (!commit) return undefined;
-
-            // Copy the exact legacy revision into T3's object database. An
-            // operation-local project alternate would make this diff depend on the
-            // user's future history and garbage collection, violating sidecar
-            // isolation. The repository lock also prevents sidecar prune-now from
-            // racing this deliberately unreferenced compatibility object.
-            yield* git(
-              "SidecarCheckpointRepository.copyLegacyDiffRevision",
-              input.cwd,
-              sidecarGitArgs(gitDir, identity.worktreeRoot, [
-                "fetch",
-                "--no-tags",
-                "--no-write-fetch-head",
-                identity.commonDir,
-                sourceRevision,
-              ]),
+            return (
+              (yield* copyWorktreeRevision(String(checkpointRef))) ??
+              (fallbackToHead ? yield* copyWorktreeRevision("HEAD") : undefined)
             );
-            const copied = yield* git(
-              "SidecarCheckpointRepository.verifyLegacyDiffRevision",
-              input.cwd,
-              sidecarGitArgs(gitDir, identity.worktreeRoot, [
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                `${commit}^{commit}`,
-              ]),
-              { allowNonZeroExit: true, maxOutputBytes: 4_096 },
-            );
-            return copied.exitCode === 0 && copied.stdout.trim() === commit ? commit : undefined;
           },
         );
         const [fromCommit, toCommit] = yield* Effect.all([
