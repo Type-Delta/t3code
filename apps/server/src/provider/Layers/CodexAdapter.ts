@@ -1295,7 +1295,10 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
           message,
-          ...(!willRetry ? { class: "provider_error" as const } : {}),
+          // Codex's `error` notification is scoped to a thread and turn. A
+          // non-retryable turn error must remain visible, but it is not proof
+          // that the app-server session itself has died.
+          ...(!willRetry ? { class: "turn_error" as const } : {}),
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },

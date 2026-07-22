@@ -16,6 +16,7 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
+  ProviderDriverKind,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -1364,6 +1365,15 @@ const make = Effect.gen(function* () {
             case "session.exited":
               return "stopped";
             case "turn.completed":
+              if (
+                event.provider === ProviderDriverKind.make("codex") &&
+                normalizeRuntimeTurnState(event.payload.state) === "failed"
+              ) {
+                // A failed Codex turn leaves the app-server session usable for
+                // follow-ups. Surface the failure via `lastError` instead of
+                // presenting it as a disconnection.
+                return "ready";
+              }
               return normalizeRuntimeTurnState(event.payload.state) === "failed"
                 ? "error"
                 : "ready";
@@ -1734,7 +1744,7 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (event.type === "runtime.error") {
+      if (event.type === "runtime.error" && event.payload.class !== "turn_error") {
         const runtimeErrorMessage = event.payload.message;
 
         const shouldApplyRuntimeError = !STRICT_PROVIDER_LIFECYCLE_GUARD

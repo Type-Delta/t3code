@@ -36,6 +36,10 @@ import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
+// Model and skill discovery enriches the picker, but is not evidence that an
+// already-running app-server session is unavailable. Keep it bounded so a
+// slow catalog cannot turn a healthy provider into an error snapshot.
+const CODEX_CATALOG_PROBE_TIMEOUT_MS = 3_000;
 
 const CODEX_PRESENTATION = {
   displayName: "Codex",
@@ -357,21 +361,34 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     } satisfies CodexAppServerProviderSnapshot;
   }
 
-  const [skillsResponse, models] = yield* Effect.all(
+  const [skillsResult, modelsResult] = yield* Effect.all(
     [
-      client.request("skills/list", {
-        cwds: [input.cwd],
-      }),
-      requestAllCodexModels(client),
+      client
+        .request("skills/list", {
+          cwds: [input.cwd],
+        })
+        .pipe(
+          Effect.timeoutOption(Duration.millis(CODEX_CATALOG_PROBE_TIMEOUT_MS)),
+          Effect.orElseSucceed(() => Option.none<CodexSchema.V2SkillsListResponse>()),
+        ),
+      requestAllCodexModels(client).pipe(
+        Effect.timeoutOption(Duration.millis(CODEX_CATALOG_PROBE_TIMEOUT_MS)),
+        Effect.orElseSucceed(() => Option.none<ReadonlyArray<ServerProviderModel>>()),
+      ),
     ],
     { concurrency: "unbounded" },
   );
+  const skills = Option.match(skillsResult, {
+    onNone: () => [],
+    onSome: (response) => parseCodexSkillsListResponse(response, input.cwd),
+  });
+  const models = Option.getOrElse(modelsResult, () => []);
 
   return {
     account: accountResponse,
     version,
     models: appendCustomCodexModels(models, input.customModels ?? []),
-    skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
+    skills,
   } satisfies CodexAppServerProviderSnapshot;
 });
 

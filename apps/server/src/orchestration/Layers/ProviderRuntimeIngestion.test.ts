@@ -355,11 +355,11 @@ describe("ProviderRuntimeIngestion", () => {
     const thread = await waitForThread(
       harness.readModel,
       (entry) =>
-        entry.session?.status === "error" &&
+        entry.session?.status === "ready" &&
         entry.session?.activeTurnId === null &&
         entry.session?.lastError === "turn failed",
     );
-    expect(thread.session?.status).toBe("error");
+    expect(thread.session?.status).toBe("ready");
     expect(thread.session?.lastError).toBe("turn failed");
   });
 
@@ -2405,6 +2405,42 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime exploded");
+  });
+
+  it("keeps the session running for a turn-scoped runtime error", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-scoped-error-start"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-turn-scoped-error"),
+      payload: {},
+    });
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-turn-scoped-error"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-turn-scoped-error"),
+      payload: { message: "Turn failed but session remains available", class: "turn_error" },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.session?.status === "running" &&
+        entry.session?.activeTurnId === "turn-turn-scoped-error" &&
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) => activity.id === "evt-turn-scoped-error",
+        ),
+    );
+    expect(thread.session?.status).toBe("running");
+    expect(thread.session?.lastError).toBeNull();
   });
 
   it("records runtime.error activities from the typed payload message", async () => {

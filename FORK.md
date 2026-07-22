@@ -471,3 +471,34 @@ optimistic user message until the projected `thread.message-sent` event replaces
 - The repository `dev` workflow starts successfully and serves the T3 Code HTML entrypoint.
 
 **Last updated:** 2026-07-22
+
+### DL013 — Keep healthy Codex sessions available during catalog and turn errors
+
+Codex provider-status refreshes now treat model and skill discovery as optional catalog enrichment.
+Those requests are bounded and fail soft after the app-server has initialized and authenticated, so a
+slow or unavailable catalog can no longer replace a healthy provider snapshot with the misleading
+"Timed out while checking Codex app-server provider status" error banner.
+
+Codex app-server `error` notifications are turn-scoped. Non-retryable turn errors now remain visible
+as runtime errors without marking the app-server session disconnected, and failed turns leave the
+session ready for follow-up messages while retaining their error text. Actual process and transport
+failures continue to mark the session unavailable.
+
+**Files modified:**
+
+- `apps/server/src/provider/Layers/CodexProvider.ts`
+- `apps/server/src/provider/Layers/CodexSessionRuntime.ts`
+- `apps/server/src/provider/Layers/CodexAdapter.ts`
+- `apps/server/src/provider/Layers/CodexAdapter.test.ts`
+- `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`
+- `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`
+- `packages/contracts/src/providerRuntime.ts`
+
+**Validation:**
+
+- Focused Codex adapter test passes.
+- Focused provider-runtime ingestion tests pass.
+- `vp check` passes (0 errors; 23 existing warnings).
+- `vp run typecheck` passes for all 15 packages (existing suggestions only).
+
+**Last updated:** 2026-07-22

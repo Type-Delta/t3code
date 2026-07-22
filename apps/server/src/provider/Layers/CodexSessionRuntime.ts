@@ -1044,12 +1044,12 @@ export const makeCodexSessionRuntime = (
           if (providerThreadId && payloadThreadId && payloadThreadId !== providerThreadId) {
             return Effect.void;
           }
-          const errorMessage = payload.error.message;
-          const willRetry = payload.willRetry;
-          return updateSession(sessionRef, {
-            status: willRetry ? "running" : "error",
-            ...(errorMessage ? { lastError: errorMessage } : {}),
-          });
+          // `error` is a turn-scoped notification. It does not mean that the
+          // app-server process or its stdio transport has disconnected; the
+          // subsequent `turn/completed` notification settles the turn. Do not
+          // poison the session state while it can still stream notifications
+          // and accept approval/tool responses.
+          return payload.willRetry ? updateSession(sessionRef, { status: "running" }) : Effect.void;
         }),
       ),
     );
