@@ -3602,7 +3602,10 @@ function ChatViewContent(props: ChatViewProps) {
     });
     resetLocalDispatch();
     setExpandedImage(null);
-  }, [draftId, resetLocalDispatch, threadId]);
+    // A draft-to-server promotion retains the same scoped thread identity.
+    // Resetting here on `draftId` changing would discard the local optimistic
+    // prompt before the server's `thread.message-sent` event is projected.
+  }, [resetLocalDispatch, routeThreadKey]);
 
   const closeExpandedImage = useCallback(() => {
     setExpandedImage(null);

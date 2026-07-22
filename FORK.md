@@ -452,3 +452,22 @@ replace the temporary provider-derived checkpoint. Regression coverage verifies 
 line counts, and the completed-turn projection.
 
 **Last updated:** 2026-07-21
+
+### DL012 — Preserve sent prompts while draft threads are promoted
+
+The first prompt in a new draft thread remains visible while that thread is promoted to its
+server-backed representation. The chat view now resets local timeline state only when its scoped
+thread identity changes, rather than when the route switches from draft to server. This retains the
+optimistic user message until the projected `thread.message-sent` event replaces it.
+
+**Files modified:**
+
+- `apps/web/src/components/ChatView.tsx`
+
+**Validation:**
+
+- `vp check` passes.
+- `vp run typecheck` passes.
+- The repository `dev` workflow starts successfully and serves the T3 Code HTML entrypoint.
+
+**Last updated:** 2026-07-22
