@@ -9,6 +9,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  type VcsStatusLocalResult,
 } from "@t3tools/contracts";
 import {
   CommandId,
@@ -22,6 +23,7 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -321,6 +323,7 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    readonly refreshLocalStatus?: (cwd: string) => Effect.Effect<VcsStatusLocalResult>;
   }) {
     const cwd = createGitRepository();
     tempDirs.push(cwd);
@@ -349,6 +352,7 @@ describe("CheckpointReactor", () => {
     const vcsStatusBroadcasterLayer = Layer.succeed(VcsStatusBroadcaster, {
       getStatus: () => Effect.die("getStatus should not be called in this test"),
       refreshLocalStatus: (cwd: string) =>
+        options?.refreshLocalStatus?.(cwd) ??
         Effect.sync(() => {
           options?.gitStatusRefreshCalls?.push(cwd);
         }).pipe(
@@ -359,7 +363,7 @@ describe("CheckpointReactor", () => {
             refName: "main",
             hasWorkingTreeChanges: false,
             workingTree: { files: [], insertions: 0, deletions: 0 },
-          }),
+          } satisfies VcsStatusLocalResult),
         ),
       refreshStatus: () => Effect.die("refreshStatus should not be called in this test"),
       streamStatus: () => Stream.empty,
@@ -751,6 +755,67 @@ describe("CheckpointReactor", () => {
     expect(gitStatusRefreshCalls).toEqual([harness.cwd]);
   });
 
+  it("releases the completed turn mutation before a blocked status refresh", async () => {
+    const refreshStarted = Deferred.makeUnsafe<void>();
+    const releaseRefresh = Deferred.makeUnsafe<void>();
+    const status: VcsStatusLocalResult = {
+      isRepo: true,
+      hasPrimaryRemote: false,
+      isDefaultRef: true,
+      refName: "main",
+      hasWorkingTreeChanges: false,
+      workingTree: { files: [], insertions: 0, deletions: 0 },
+    };
+    const harness = await createHarness({
+      seedFilesystemCheckpoints: false,
+      refreshLocalStatus: () =>
+        Deferred.succeed(refreshStarted, undefined).pipe(
+          Effect.ignore,
+          Effect.andThen(Deferred.await(releaseRefresh)),
+          Effect.as(status),
+        ),
+    });
+    const identity = await runtime!.runPromise(harness.checkpointIdentities.resolve(harness.cwd));
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.prepareProviderMutation("thread-1", identity.worktreeKey),
+      ),
+    ).toBe(true);
+
+    harness.provider.emit({
+      type: "turn.started",
+      eventId: EventId.make("evt-turn-terminal-release-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-terminal-release"),
+    });
+    await harness.drain();
+
+    harness.provider.emit({
+      type: "turn.completed",
+      eventId: EventId.make("evt-turn-terminal-release-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-terminal-release"),
+      payload: { state: "completed" },
+    });
+    await runtime!.runPromise(Deferred.await(refreshStarted));
+
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.prepareProviderMutation("thread-1", identity.worktreeKey),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(harness.mutationCoordinator.cancelProviderMutation("thread-1")),
+    ).toBe(true);
+
+    await runtime!.runPromise(Deferred.succeed(releaseRefresh, undefined));
+    await harness.drain();
+  });
+
   it("ignores auxiliary thread turn completion while primary turn is active", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const createdAt = "2026-01-01T00:00:00.000Z";
@@ -899,7 +964,7 @@ describe("CheckpointReactor", () => {
     );
 
     const baselineRef = await waitForSidecarCheckpoint(harness.checkpointStore, harness.cwd, 0);
-    await Effect.runPromise(
+    await runtime!.runPromise(
       harness.checkpointStore.deleteCheckpointRefs({
         cwd: harness.cwd,
         checkpointRefs: [baselineRef],
