@@ -289,6 +289,112 @@ layer("checkpoint durable state", (it) => {
     }),
   );
 
+  it.effect("retries failed logical capture jobs", () =>
+    Effect.gen(function* () {
+      const repository = yield* CheckpointCaptureJobRepository;
+      yield* repository.upsertRepository({
+        repositoryKey: "repo-logical-retry",
+        commonDirFingerprint: "fingerprint-logical-retry",
+        objectFormat: "sha1",
+        sidecarRelativePath: "repositories/repo-logical-retry.git",
+        createdAt: now,
+        lastUsedAt: now,
+      });
+
+      for (const state of ["contended", "error"] as const) {
+        const suffix = state;
+        const input = {
+          snapshot: {
+            snapshotId: `snapshot-logical-retry-${suffix}`,
+            repositoryKey: "repo-logical-retry",
+            worktreeKey: `worktree-logical-retry-${suffix}`,
+            kind: "turn" as const,
+            createdAt: now,
+            expiresAt: null,
+          },
+          job: {
+            jobId: `job-logical-retry-${suffix}`,
+            snapshotId: `snapshot-logical-retry-${suffix}`,
+            threadId: `thread-logical-retry-${suffix}`,
+            timelineGeneration: 0,
+            turnId: `turn-logical-retry-${suffix}`,
+            providerTurnId: null,
+            turnOrdinal: 1,
+            repositoryKey: "repo-logical-retry",
+            worktreeKey: `worktree-logical-retry-${suffix}`,
+            requestedBoundary: "turn-completed",
+            requestedGeneration: 1,
+            createdAt: now,
+          },
+        };
+        yield* repository.enqueue(input);
+        const claimed = Option.getOrThrow(
+          yield* repository.claimNext({
+            leaseOwner: `worker-logical-retry-${suffix}`,
+            now,
+            leaseExpiresAt: "2026-07-16T00:01:00.000Z",
+          }),
+        );
+        yield* repository.complete({
+          jobId: claimed.jobId,
+          leaseOwner: `worker-logical-retry-${suffix}`,
+          state,
+          commitOid: null,
+          treeOid: null,
+          errorCode: `${state}-failure`,
+          completedAt: "2026-07-16T00:00:01.000Z",
+        });
+
+        const replacementSnapshotId = `snapshot-logical-retry-replacement-${suffix}`;
+        const retried = yield* repository.enqueue({
+          snapshot: {
+            ...input.snapshot,
+            snapshotId: replacementSnapshotId,
+          },
+          job: {
+            ...input.job,
+            jobId: `job-logical-retry-replacement-${suffix}`,
+            snapshotId: replacementSnapshotId,
+          },
+        });
+        assert.equal(retried.jobId, input.job.jobId);
+        assert.equal(retried.snapshotId, input.snapshot.snapshotId);
+        assert.equal(retried.state, "pending");
+        assert.equal(retried.attemptCount, 0);
+        assert.isNull(retried.leaseOwner);
+        assert.isNull(retried.leaseExpiresAt);
+        assert.isNull(retried.errorCode);
+        assert.isNull(retried.completedAt);
+        assert.equal(
+          Option.getOrThrow(
+            yield* repository.getSnapshot({ snapshotId: input.snapshot.snapshotId }),
+          ).state,
+          "pending",
+        );
+        assert.isTrue(
+          Option.isNone(yield* repository.getSnapshot({ snapshotId: replacementSnapshotId })),
+        );
+        const reClaimed = Option.getOrThrow(
+          yield* repository.claimNext({
+            leaseOwner: `worker-logical-retry-complete-${suffix}`,
+            now: "2026-07-16T00:00:02.000Z",
+            leaseExpiresAt: "2026-07-16T00:01:02.000Z",
+          }),
+        );
+        assert.equal(reClaimed.jobId, input.job.jobId);
+        yield* repository.complete({
+          jobId: reClaimed.jobId,
+          leaseOwner: `worker-logical-retry-complete-${suffix}`,
+          state: "ready",
+          commitOid: "abc123",
+          treeOid: "def456",
+          errorCode: null,
+          completedAt: "2026-07-16T00:00:03.000Z",
+        });
+      }
+    }),
+  );
+
   it.effect("persists immutable entries, cursor generations, provider state, and saga phases", () =>
     Effect.gen(function* () {
       const captures = yield* CheckpointCaptureJobRepository;

@@ -52,6 +52,7 @@ import {
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
   EnvironmentAuthorizationError,
+  VcsRepositoryDetectionError,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -1849,9 +1850,29 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.reviewGetDiffPreview]: (input) =>
-          observeRpcEffect(WS_METHODS.reviewGetDiffPreview, review.getDiffPreview(input), {
-            "rpc.aggregate": "review",
-          }),
+          observeRpcEffect(
+            WS_METHODS.reviewGetDiffPreview,
+            Effect.gen(function* () {
+              const project = yield* projectionSnapshotQuery
+                .getActiveProjectByWorkspaceRoot(input.cwd)
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new VcsRepositoryDetectionError({
+                        operation: "review.getDiffPreview.authorizeProject",
+                        cwd: input.cwd,
+                        detail: "Failed to resolve the selected project's workspace root.",
+                        cause,
+                      }),
+                  ),
+                );
+              return yield* review.getDiffPreview(
+                input,
+                Option.isSome(project) ? [project.value.workspaceRoot] : [],
+              );
+            }),
+            { "rpc.aggregate": "review" },
+          ),
         [WS_METHODS.terminalOpen]: (input) =>
           observeRpcEffect(WS_METHODS.terminalOpen, terminalManager.open(input), {
             "rpc.aggregate": "terminal",

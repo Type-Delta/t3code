@@ -22,6 +22,7 @@ export class ReviewService extends Context.Service<
   {
     readonly getDiffPreview: (
       input: ReviewDiffPreviewInput,
+      authorizedWorkspaceRoots?: ReadonlyArray<string>,
     ) => Effect.Effect<ReviewDiffPreviewResult, ReviewDiffPreviewError>;
   }
 >()("t3/review/ReviewService") {}
@@ -59,14 +60,16 @@ export const make = Effect.gen(function* () {
 
   const assertWorkspaceBoundCwd = Effect.fn("ReviewService.assertWorkspaceBoundCwd")(function* (
     cwd: string,
+    authorizedWorkspaceRoots: ReadonlyArray<string>,
   ) {
-    const [candidate, workspaceRoot, worktreesRoot] = yield* Effect.all([
+    const [candidate, ...workspaceRoots] = yield* Effect.all([
       canonicalizePath(cwd),
       canonicalizePath(config.cwd),
       canonicalizePath(config.worktreesDir),
+      ...authorizedWorkspaceRoots.map(canonicalizePath),
     ]);
 
-    if (isWithinRoot(candidate, workspaceRoot) || isWithinRoot(candidate, worktreesRoot)) {
+    if (workspaceRoots.some((root) => isWithinRoot(candidate, root))) {
       return;
     }
 
@@ -79,8 +82,8 @@ export const make = Effect.gen(function* () {
 
   const getDiffPreview: ReviewService["Service"]["getDiffPreview"] = Effect.fn(
     "ReviewService.getDiffPreview",
-  )(function* (input) {
-    yield* assertWorkspaceBoundCwd(input.cwd);
+  )(function* (input, authorizedWorkspaceRoots = []) {
+    yield* assertWorkspaceBoundCwd(input.cwd, authorizedWorkspaceRoots);
 
     const handle = yield* vcsRegistry.detect({ cwd: input.cwd, requestedKind: "auto" });
     if (!handle) {

@@ -78,9 +78,11 @@ Fork migrations `033`–`036` establish this durable checkpoint state (`033_Chec
 
 Terminal provider events release the mutation lease for their exact turn before local VCS status refresh or post-turn capture. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics.
 
+Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
+
 **Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{033_CheckpointDurableState,034_CheckpointLegacyMigration,035_CheckpointCaptureProviderMetadata,036_CheckpointNavigationMode}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components.
 
-**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including deterministic blocked-status-refresh terminal lease release, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
+**Recorded validation:** migration and durability regression matrices including same-logical contended/error job retries, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including deterministic blocked-status-refresh terminal lease release, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
 
 **Last updated:** 2026-07-27
 
@@ -127,6 +129,18 @@ Diff queries use the active checkpoint timeline generation and the stable pre-tu
 **Implementation evidence:** `apps/server/src/checkpointing/{CheckpointIds,CheckpointDiffQuery,CheckpointStore}.ts`, `apps/server/src/orchestration/Layers/{CheckpointReactor,ProjectionSnapshotQuery}.ts`, `apps/server/src/git/Utils.ts`, and `apps/web/src/hooks/useTurnDiffSummaries.ts` with their tests.
 
 **Recorded validation:** focused checkpoint query, nested-worktree, projection, and web-summary tests; multi-turn orchestration diff integration; `vp check`; and `vp run typecheck`.
+
+**Last updated:** 2026-07-27
+
+### DL015 — Live project-scoped working tree diffs
+
+Diff previews for an active project are authorized against that registered project root, including projects outside the server startup directory. The web client no longer substitutes the environment startup repository when the selected project is outside that directory.
+
+While DiffPanel is open, working-tree and branch previews refresh once per second. Its implicit scope also follows the resolved Git status, so a panel mounted before status arrives changes from branch to working-tree view when the checkout is dirty; an explicit user scope selection still wins.
+
+**Implementation evidence:** `apps/server/src/review/ReviewService.ts`, `apps/server/src/ws.ts`, `apps/web/src/components/DiffPanel.tsx`, and `packages/client-runtime/src/state/review.ts`.
+
+**Recorded validation:** focused review-service authorization and DiffPanel store tests; controlled-browser reproduction and verification with an external registered project, including a file modification made while the panel remained open; `vp check`; and `vp run typecheck`.
 
 **Last updated:** 2026-07-27
 

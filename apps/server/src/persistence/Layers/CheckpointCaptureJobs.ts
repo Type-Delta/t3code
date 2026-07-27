@@ -86,6 +86,52 @@ const make = Effect.gen(function* () {
       LIMIT 1
     `;
 
+  const retrySnapshotJob = Effect.fn("retrySnapshotJob")(function* (
+    snapshotJob: CheckpointCaptureJob,
+    input: Parameters<CheckpointCaptureJobRepositoryShape["enqueue"]>[0],
+  ) {
+    // Reuse a failed snapshot row so retries preserve the one-job-per-snapshot invariant.
+    yield* sql`
+      UPDATE checkpoint_snapshots
+      SET
+        kind = ${input.snapshot.kind},
+        state = 'pending',
+        commit_oid = NULL,
+        tree_oid = NULL,
+        created_at = ${input.snapshot.createdAt},
+        ready_at = NULL,
+        expires_at = ${input.snapshot.expiresAt},
+        error_code = NULL
+      WHERE snapshot_id = ${snapshotJob.snapshotId}
+    `;
+    yield* sql`
+      UPDATE checkpoint_capture_jobs
+      SET
+        thread_id = ${input.job.threadId},
+        timeline_generation = ${input.job.timelineGeneration},
+        turn_id = ${input.job.turnId},
+        provider_turn_id = ${input.job.providerTurnId},
+        provider_binding_json = ${input.job.providerBindingJson ?? null},
+        provider_cursor_json = ${input.job.providerCursorJson ?? null},
+        turn_ordinal = ${input.job.turnOrdinal},
+        repository_key = ${input.job.repositoryKey},
+        worktree_key = ${input.job.worktreeKey},
+        requested_boundary = ${input.job.requestedBoundary},
+        requested_generation = ${input.job.requestedGeneration},
+        state = 'pending',
+        attempt_count = 0,
+        lease_owner = NULL,
+        lease_expires_at = NULL,
+        error_code = NULL,
+        created_at = ${input.job.createdAt},
+        updated_at = ${input.job.createdAt},
+        completed_at = NULL
+      WHERE job_id = ${snapshotJob.jobId}
+    `;
+    const retried = yield* findLogicalJob(input.job);
+    return retried[0]!;
+  });
+
   const listReadyWithoutTimelineEntry: CheckpointCaptureJobRepositoryShape["listReadyWithoutTimelineEntry"] =
     ({ limit }) =>
       sql<CheckpointCaptureJob>`
@@ -111,6 +157,9 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const existing = yield* findLogicalJob(input.job);
           if (existing[0] !== undefined) {
+            if (existing[0].state === "contended" || existing[0].state === "error") {
+              return yield* retrySnapshotJob(existing[0], input);
+            }
             if (
               (existing[0].providerTurnId === null && input.job.providerTurnId !== null) ||
               (existing[0].providerBindingJson === null &&
@@ -146,49 +195,7 @@ const make = Effect.gen(function* () {
               return snapshotJob;
             }
 
-            // A completed turn boundary and the next pre-turn baseline describe the
-            // same ordinal. Reuse a failed/contended snapshot row so an idle
-            // baseline can retry it without violating the one-job-per-snapshot
-            // invariant.
-            yield* sql`
-              UPDATE checkpoint_snapshots
-              SET
-                kind = ${input.snapshot.kind},
-                state = 'pending',
-                commit_oid = NULL,
-                tree_oid = NULL,
-                created_at = ${input.snapshot.createdAt},
-                ready_at = NULL,
-                expires_at = ${input.snapshot.expiresAt},
-                error_code = NULL
-              WHERE snapshot_id = ${input.snapshot.snapshotId}
-            `;
-            yield* sql`
-              UPDATE checkpoint_capture_jobs
-              SET
-                thread_id = ${input.job.threadId},
-                timeline_generation = ${input.job.timelineGeneration},
-                turn_id = ${input.job.turnId},
-                provider_turn_id = ${input.job.providerTurnId},
-                provider_binding_json = ${input.job.providerBindingJson ?? null},
-                provider_cursor_json = ${input.job.providerCursorJson ?? null},
-                turn_ordinal = ${input.job.turnOrdinal},
-                repository_key = ${input.job.repositoryKey},
-                worktree_key = ${input.job.worktreeKey},
-                requested_boundary = ${input.job.requestedBoundary},
-                requested_generation = ${input.job.requestedGeneration},
-                state = 'pending',
-                attempt_count = 0,
-                lease_owner = NULL,
-                lease_expires_at = NULL,
-                error_code = NULL,
-                created_at = ${input.job.createdAt},
-                updated_at = ${input.job.createdAt},
-                completed_at = NULL
-              WHERE job_id = ${snapshotJob.jobId}
-            `;
-            const retried = yield* findLogicalJob(input.job);
-            return retried[0]!;
+            return yield* retrySnapshotJob(snapshotJob, input);
           }
           yield* sql`
             INSERT INTO checkpoint_snapshots (
