@@ -58,27 +58,27 @@ describe("DesktopEnvironment", () => {
         NodePath.join("/Users/alice", "Library", "Application Support"),
       );
       assert.equal(environment.baseDir, "/tmp/t3");
-      assert.equal(environment.stateDir, NodePath.join("/tmp/t3", "dev"));
+      assert.equal(environment.stateDir, NodePath.join("/tmp/t3", "userdata"));
       assert.equal(
         environment.desktopSettingsPath,
-        NodePath.join("/tmp/t3", "dev", "desktop-settings.json"),
+        NodePath.join("/tmp/t3", "userdata", "desktop-settings.json"),
       );
       assert.equal(
         environment.clientSettingsPath,
-        NodePath.join("/tmp/t3", "dev", "client-settings.json"),
+        NodePath.join("/tmp/t3", "userdata", "client-settings.json"),
       );
       assert.equal(
         environment.savedEnvironmentRegistryPath,
-        NodePath.join("/tmp/t3", "dev", "saved-environments.json"),
+        NodePath.join("/tmp/t3", "userdata", "saved-environments.json"),
       );
       assert.equal(
         environment.serverSettingsPath,
-        NodePath.join("/tmp/t3", "dev", "settings.json"),
+        NodePath.join("/tmp/t3", "userdata", "settings.json"),
       );
-      assert.equal(environment.logDir, NodePath.join("/tmp/t3", "dev", "logs"));
+      assert.equal(environment.logDir, NodePath.join("/tmp/t3", "userdata", "logs"));
       assert.equal(
         environment.browserArtifactsDir,
-        NodePath.join("/tmp/t3", "dev", "browser-artifacts"),
+        NodePath.join("/tmp/t3", "userdata", "browser-artifacts"),
       );
       assert.equal(environment.rootDir, NodePath.resolve("/repo"));
       assert.equal(environment.appRoot, NodePath.resolve("/repo"));
@@ -101,7 +101,7 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
-  it.effect("derives production state paths under userdata", () =>
+  it.effect("stores production state under userdata in an explicit home", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(
         {},
@@ -121,6 +121,19 @@ describe("DesktopEnvironment", () => {
         environment.serverSettingsPath,
         NodePath.join("/tmp/t3", "userdata", "settings.json"),
       );
+    }),
+  );
+
+  it.effect("keeps implicit development state separate from production state", () =>
+    Effect.gen(function* () {
+      const development = yield* makeEnvironment(
+        {},
+        { VITE_DEV_SERVER_URL: "http://localhost:5173" },
+      );
+      const production = yield* makeEnvironment();
+
+      assert.equal(development.stateDir, NodePath.join("/Users/alice", ".t3", "dev"));
+      assert.equal(production.stateDir, NodePath.join("/Users/alice", ".t3", "userdata"));
     }),
   );
 

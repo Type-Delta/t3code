@@ -88,6 +88,7 @@ effectIt.effect(
           });
           const engineLayer = Layer.succeed(OrchestrationEngineService, {
             readEvents: () => Stream.empty,
+            latestSequence: Effect.succeed(0),
             streamDomainEvents: Stream.make(requested),
             dispatch: (command) =>
               Effect.gen(function* () {

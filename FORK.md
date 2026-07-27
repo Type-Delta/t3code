@@ -540,3 +540,44 @@ thread has no captured baseline.
 - `vp run typecheck` passes for all packages.
 
 **Last updated:** 2026-07-22
+
+### DL015 — Reconcile upstream lifecycle and sidebar work with Windows and split-view safeguards
+
+The upstream lifecycle, sidebar V2, draft-hero, and single-origin development changes are merged
+with the fork's durable checkpoint and desktop behavior. Checkpoint storage keeps migrations
+33–36 and places the upstream settled/snoozed projection migrations at 37–38, avoiding collisions
+for existing fork installations. A healthy provider session remains ready or running when optional
+catalog work or a turn-scoped failure occurs; only a true session-start failure enters error.
+
+Claude's upstream executable resolver remains the primary path. The fork retains the packaged
+Electron `app.asar.unpacked` native-binary fallback, sanitized diagnostics, and SDK pin/patch until
+a desktop artifact verification can prove that the SDK workaround is redundant. Browser development
+uses the upstream single-origin Vite proxy path for shared/Tailscale origins, while desktop renderer
+and local preview automation continue using explicit IPv4 loopback URLs.
+
+The upstream timeline side-gutter minimap and draft hero are retained. The fork's project/workspace
+context remains available as the supporting empty-state line, and Sidebar V2 now honors persistent
+split groups: displayed panes remain visible when a settled or snoozed shelf is collapsed, active
+pane navigation is replace-based, and split open/detach actions remain available from the V2 context
+menu.
+
+**Files modified:**
+
+- `apps/server/src/persistence/Migrations.ts`
+- `apps/server/src/persistence/Migrations/037_ProjectionThreadsSettled.ts`
+- `apps/server/src/persistence/Migrations/038_ProjectionThreadsSnoozed.ts`
+- `apps/server/src/orchestration/Layers/{ProjectionSnapshotQuery,ProviderCommandReactor}.ts`
+- `apps/server/src/provider/{Drivers/ClaudeExecutable,Layers/ClaudeProvider,Layers/CodexProvider}.ts`
+- `apps/web/src/components/{ChatView,Sidebar,SidebarV2}.tsx`
+- `apps/web/src/components/chat/MessagesTimeline.tsx`
+- `apps/web/src/hooks/useThreadActions.ts`
+- `apps/web/src/routes/{__root,_chat.$environmentId.$threadId,_chat.draft.$draftId}.tsx`
+- `apps/web/src/components/preview/PreviewAutomationHosts.tsx`
+- `scripts/dev-runner.ts`
+
+**Validation:**
+
+- Targeted migration, provider lifecycle, sidebar/timeline, preview automation, and dev-runner tests.
+- `git diff --check` and a repository conflict-marker scan.
+
+**Last updated:** 2026-07-27

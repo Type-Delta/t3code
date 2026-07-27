@@ -49,6 +49,8 @@ import Migration0033 from "./Migrations/033_CheckpointDurableState.ts";
 import Migration0034 from "./Migrations/034_CheckpointLegacyMigration.ts";
 import Migration0035 from "./Migrations/035_CheckpointCaptureProviderMetadata.ts";
 import Migration0036 from "./Migrations/036_CheckpointNavigationMode.ts";
+import Migration0037 from "./Migrations/037_ProjectionThreadsSettled.ts";
+import Migration0038 from "./Migrations/038_ProjectionThreadsSnoozed.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -97,6 +99,8 @@ export const migrationEntries = [
   [34, "CheckpointLegacyMigration", Migration0034],
   [35, "CheckpointCaptureProviderMetadata", Migration0035],
   [36, "CheckpointNavigationMode", Migration0036],
+  [37, "ProjectionThreadsSettled", Migration0037],
+  [38, "ProjectionThreadsSnoozed", Migration0038],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -131,15 +135,11 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  yield* Effect.log(
-    toMigrationInclusive === undefined
-      ? "Running all migrations..."
-      : `Running migrations 1 through ${toMigrationInclusive}...`,
-  );
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
-  yield* Effect.log("Migrations ran successfully").pipe(
-    Effect.annotateLogs({ migrations: executedMigrations.map(([id, name]) => `${id}_${name}`) }),
-  );
+  const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
+  yield* migrations.length === 0
+    ? Effect.logDebug("Database schema is current")
+    : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
   return executedMigrations;
 });
 

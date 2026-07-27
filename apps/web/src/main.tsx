@@ -15,7 +15,10 @@ import { isElectron } from "./env";
 import { ManagedRelayAuthProvider } from "./cloud/managedAuth";
 import { hasCloudPublicConfig } from "./cloud/publicConfig";
 import { getRouter } from "./router";
-import { syncDocumentWindowControlsOverlayClass } from "./lib/windowControlsOverlay";
+import {
+  syncDocumentElectronPlatformClasses,
+  syncDocumentWindowControlsOverlayClass,
+} from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 
 console.info("[t3code/startup] Web application started", {
@@ -32,6 +35,7 @@ const history = isElectron ? createHashHistory() : createBrowserHistory();
 const router = getRouter(history);
 
 if (isElectron) {
+  syncDocumentElectronPlatformClasses(navigator.platform);
   syncDocumentWindowControlsOverlayClass();
 }
 

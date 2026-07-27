@@ -10,6 +10,8 @@ import {
   type PreviewAutomationOpenInput,
   type PreviewAutomationResizeInput,
   type PreviewAutomationResizeResult,
+  type PreviewAutomationSetColorSchemeInput,
+  type PreviewAutomationSetColorSchemeResult,
   type PreviewAutomationHost as PreviewAutomationHostState,
   type PreviewAutomationRequest,
   type PreviewAutomationStatus,
@@ -347,6 +349,12 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
             return await currentStatus(threadRef, tabId);
           case "open": {
             const input = request.input as PreviewAutomationOpenInput;
+            const resolvedInputUrl = input.url
+              ? resolveBrowserNavigationTarget(environmentId, {
+                  kind: "url",
+                  url: input.url,
+                }).resolvedUrl
+              : undefined;
             let activeTabId = resolvePreviewAutomationOpenTab(
               state,
               request.tabId,
@@ -362,7 +370,7 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
                 environmentId,
                 input: {
                   threadId: request.threadId,
-                  ...(input.url ? { url: input.url } : {}),
+                  ...(resolvedInputUrl ? { url: resolvedInputUrl } : {}),
                 },
               });
               if (result._tag === "Failure") {
@@ -387,11 +395,7 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
             }
             if (previewAutomationOpenNeedsNavigationReadiness(input) && previewBridge) {
               if (reusedExistingTab) {
-                const resolution = resolveBrowserNavigationTarget(environmentId, {
-                  kind: "url",
-                  url: input.url,
-                });
-                await previewBridge.navigate(activeTabId, resolution.resolvedUrl);
+                await previewBridge.navigate(activeTabId, resolvedInputUrl ?? input.url);
               }
               await waitForNavigationReadiness(
                 threadRef,
@@ -454,6 +458,15 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               setting,
               viewport,
             } satisfies PreviewAutomationResizeResult;
+          }
+          case "setColorScheme": {
+            const ready = await requireReadyTab();
+            const input = request.input as PreviewAutomationSetColorSchemeInput;
+            await ready.bridge.setColorScheme(ready.tabId, input.colorScheme);
+            return {
+              tabId: ready.tabId,
+              colorScheme: input.colorScheme,
+            } satisfies PreviewAutomationSetColorSchemeResult;
           }
           case "snapshot": {
             const ready = await requireReadyTab();
