@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import { describe, expect } from "vite-plus/test";
 
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { checkpointSnapshotIdFor } from "./CheckpointIds.ts";
 import { checkpointRefForThreadTurn } from "./Utils.ts";
 import * as CheckpointDiffQuery from "./CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
@@ -18,12 +19,14 @@ function makeThreadCheckpointContext(input: {
   readonly worktreePath: string | null;
   readonly checkpointTurnCount: number;
   readonly checkpointRef: CheckpointRef;
+  readonly timelineGeneration?: number;
 }): ProjectionSnapshotQuery.ProjectionThreadCheckpointContext {
   return {
     threadId: input.threadId,
     projectId: input.projectId,
     workspaceRoot: input.workspaceRoot,
     worktreePath: input.worktreePath,
+    timelineGeneration: input.timelineGeneration ?? 0,
     checkpoints: [
       {
         turnId: TurnId.make("turn-1"),
@@ -51,22 +54,31 @@ describe("CheckpointDiffQuery.layer", () => {
         readonly toCheckpointRef: CheckpointRef;
         readonly cwd: string;
         readonly ignoreWhitespace: boolean;
+        readonly fallbackFromToHead: boolean | undefined;
       }> = [];
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
-        allocateCheckpointRef: () => Effect.die("unused"),
+        allocateCheckpointRef: ({ snapshotId }) =>
+          Effect.succeed(CheckpointRef.make(`allocated:${snapshotId}`)),
         captureCheckpoint: () => Effect.void,
         captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
-        diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd, ignoreWhitespace }) =>
+        diffCheckpoints: ({
+          fromCheckpointRef,
+          toCheckpointRef,
+          cwd,
+          ignoreWhitespace,
+          fallbackFromToHead,
+        }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({
               fromCheckpointRef,
               toCheckpointRef,
               cwd,
               ignoreWhitespace,
+              fallbackFromToHead,
             });
             return "full thread diff patch";
           }),
@@ -103,6 +115,7 @@ describe("CheckpointDiffQuery.layer", () => {
                   projectId,
                   workspaceRoot: "/tmp/workspace",
                   worktreePath: "/tmp/worktree",
+                  timelineGeneration: 2,
                   latestCheckpointTurnCount: 4,
                   toCheckpointRef,
                 });
@@ -128,9 +141,12 @@ describe("CheckpointDiffQuery.layer", () => {
       expect(diffCheckpointsCalls).toEqual([
         {
           cwd: "/tmp/worktree",
-          fromCheckpointRef: checkpointRefForThreadTurn(threadId, 0),
+          fromCheckpointRef: CheckpointRef.make(
+            `allocated:${checkpointSnapshotIdFor(threadId, 2, 0)}`,
+          ),
           toCheckpointRef,
           ignoreWhitespace: true,
+          fallbackFromToHead: true,
         },
       ]);
       expect(result).toEqual({
@@ -152,6 +168,7 @@ describe("CheckpointDiffQuery.layer", () => {
         readonly toCheckpointRef: CheckpointRef;
         readonly cwd: string;
         readonly ignoreWhitespace: boolean;
+        readonly fallbackFromToHead: boolean | undefined;
       }> = [];
 
       const threadCheckpointContext = makeThreadCheckpointContext({
@@ -161,22 +178,31 @@ describe("CheckpointDiffQuery.layer", () => {
         worktreePath: null,
         checkpointTurnCount: 1,
         checkpointRef: toCheckpointRef,
+        timelineGeneration: 3,
       });
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
-        allocateCheckpointRef: () => Effect.die("unused"),
+        allocateCheckpointRef: ({ snapshotId }) =>
+          Effect.succeed(CheckpointRef.make(`allocated:${snapshotId}`)),
         captureCheckpoint: () => Effect.void,
         captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
-        diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd, ignoreWhitespace }) =>
+        diffCheckpoints: ({
+          fromCheckpointRef,
+          toCheckpointRef,
+          cwd,
+          ignoreWhitespace,
+          fallbackFromToHead,
+        }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({
               fromCheckpointRef,
               toCheckpointRef,
               cwd,
               ignoreWhitespace,
+              fallbackFromToHead,
             });
             return "diff patch";
           }),
@@ -219,13 +245,16 @@ describe("CheckpointDiffQuery.layer", () => {
         });
       }).pipe(Effect.provide(layer));
 
-      const expectedFromRef = checkpointRefForThreadTurn(threadId, 0);
+      const expectedFromRef = CheckpointRef.make(
+        `allocated:${checkpointSnapshotIdFor(threadId, 3, 0)}`,
+      );
       expect(diffCheckpointsCalls).toEqual([
         {
           cwd: "/tmp/workspace",
           fromCheckpointRef: expectedFromRef,
           toCheckpointRef,
           ignoreWhitespace: true,
+          fallbackFromToHead: true,
         },
       ]);
       expect(result).toEqual({
@@ -255,7 +284,8 @@ describe("CheckpointDiffQuery.layer", () => {
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
-        allocateCheckpointRef: () => Effect.die("unused"),
+        allocateCheckpointRef: ({ snapshotId }) =>
+          Effect.succeed(CheckpointRef.make(`allocated:${snapshotId}`)),
         captureCheckpoint: () => Effect.void,
         captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () => Effect.succeed(true),
@@ -325,7 +355,8 @@ describe("CheckpointDiffQuery.layer", () => {
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
-        allocateCheckpointRef: () => Effect.die("unused"),
+        allocateCheckpointRef: ({ snapshotId }) =>
+          Effect.succeed(CheckpointRef.make(`allocated:${snapshotId}`)),
         captureCheckpoint: () => Effect.void,
         captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () =>
@@ -384,7 +415,8 @@ describe("CheckpointDiffQuery.layer", () => {
 
       const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
         isGitRepository: () => Effect.succeed(true),
-        allocateCheckpointRef: () => Effect.die("unused"),
+        allocateCheckpointRef: ({ snapshotId }) =>
+          Effect.succeed(CheckpointRef.make(`allocated:${snapshotId}`)),
         captureCheckpoint: () => Effect.void,
         captureCheckpointWithMetadata: () => Effect.die("unused"),
         hasCheckpointRef: () => Effect.succeed(true),

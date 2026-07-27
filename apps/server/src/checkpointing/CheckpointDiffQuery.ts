@@ -30,7 +30,7 @@ import {
   CheckpointWorkspacePathMissingError,
 } from "./Errors.ts";
 import type { CheckpointServiceError } from "./Errors.ts";
-import { checkpointRefForThreadTurn } from "./Utils.ts";
+import { checkpointSnapshotIdFor } from "./CheckpointIds.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
 
 /** Service tag for checkpoint diff queries. */
@@ -116,7 +116,10 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const maxTurnCount = threadContext.value.checkpoints.reduce(
+      const readyCheckpoints = threadContext.value.checkpoints.filter(
+        (checkpoint) => checkpoint.status === "ready",
+      );
+      const maxTurnCount = readyCheckpoints.reduce(
         (max, checkpoint) => Math.max(max, checkpoint.checkpointTurnCount),
         0,
       );
@@ -137,12 +140,21 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const fromCheckpointRef =
-        input.fromTurnCount === 0
-          ? checkpointRefForThreadTurn(input.threadId, 0)
-          : threadContext.value.checkpoints.find(
-              (checkpoint) => checkpoint.checkpointTurnCount === input.fromTurnCount,
-            )?.checkpointRef;
+      const projectedFromCheckpoint = readyCheckpoints.find(
+        (checkpoint) => checkpoint.checkpointTurnCount === input.fromTurnCount,
+      );
+      const usesBaselineFromCheckpoint =
+        input.fromTurnCount === 0 || projectedFromCheckpoint === undefined;
+      const fromCheckpointRef = usesBaselineFromCheckpoint
+        ? yield* checkpointStore.allocateCheckpointRef({
+            cwd: workspaceCwd,
+            snapshotId: checkpointSnapshotIdFor(
+              input.threadId,
+              threadContext.value.timelineGeneration,
+              0,
+            ),
+          })
+        : projectedFromCheckpoint.checkpointRef;
       if (!fromCheckpointRef) {
         return yield* new CheckpointRefUnavailableError({
           operation,
@@ -152,7 +164,7 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const toCheckpointRef = threadContext.value.checkpoints.find(
+      const toCheckpointRef = readyCheckpoints.find(
         (checkpoint) => checkpoint.checkpointTurnCount === input.toTurnCount,
       )?.checkpointRef;
       if (!toCheckpointRef) {
@@ -169,7 +181,7 @@ export const make = Effect.gen(function* () {
           cwd: workspaceCwd,
           fromCheckpointRef,
           toCheckpointRef,
-          fallbackFromToHead: false,
+          fallbackFromToHead: usesBaselineFromCheckpoint,
           ignoreWhitespace,
         })
         .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
@@ -254,12 +266,21 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    const fromCheckpointRef = yield* checkpointStore.allocateCheckpointRef({
+      cwd: workspaceCwd,
+      snapshotId: checkpointSnapshotIdFor(
+        input.threadId,
+        threadContext.value.timelineGeneration,
+        0,
+      ),
+    });
+
     const diff = yield* checkpointStore
       .diffCheckpoints({
         cwd: workspaceCwd,
-        fromCheckpointRef: checkpointRefForThreadTurn(input.threadId, 0),
+        fromCheckpointRef,
         toCheckpointRef: threadContext.value.toCheckpointRef as CheckpointRef,
-        fallbackFromToHead: false,
+        fallbackFromToHead: true,
         ignoreWhitespace,
       })
       .pipe(Effect.withSpan("checkpoint.fullThread.diffCheckpoints"));

@@ -10,7 +10,6 @@ import {
   type OrchestrationEvent,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
-import * as NodeCrypto from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -25,6 +24,10 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
+import {
+  checkpointCaptureJobIdFor,
+  checkpointSnapshotIdFor,
+} from "../../checkpointing/CheckpointIds.ts";
 import { publishCheckpointTimelineEntry } from "../../checkpointing/CheckpointTimelinePublication.ts";
 import {
   CheckpointCaptureExecutor,
@@ -58,27 +61,19 @@ const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString
 const BASELINE_BOUNDARY = "pre-turn-baseline";
 const TURN_COMPLETION_BOUNDARY = "turn-completed";
 
-const stableCheckpointId = (kind: "snapshot" | "job", input: string) =>
-  `${kind}-${NodeCrypto.createHash("sha256").update(input).digest("hex")}`;
-
 const isCaptureVerificationContention = (error: CheckpointStoreError): boolean =>
   error._tag === "VcsProcessExitError" &&
   error.operation === "SidecarCheckpointRepository.capture" &&
   error.detail === "Checkpoint workspace changed during capture verification.";
-
-export const checkpointSnapshotIdFor = (
-  threadId: string,
-  timelineGeneration: number,
-  turnOrdinal: number,
-) => stableCheckpointId("snapshot", `${threadId}\0${timelineGeneration}\0${turnOrdinal}`);
 
 const jobIdFor = (
   threadId: string,
   timelineGeneration: number,
   turnId: string,
   requestedBoundary: string,
-) =>
-  stableCheckpointId("job", `${threadId}\0${timelineGeneration}\0${turnId}\0${requestedBoundary}`);
+) => checkpointCaptureJobIdFor(threadId, timelineGeneration, turnId, requestedBoundary);
+
+export { checkpointSnapshotIdFor } from "../../checkpointing/CheckpointIds.ts";
 
 type ReactorInput =
   | {

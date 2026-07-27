@@ -137,6 +137,18 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
         expect(yield* checkpointStore.isGitRepository(tmp)).toBe(true);
       }),
     );
+
+    it.effect("returns true from a directory nested inside a Git repository", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const nested = NodePath.join(tmp, "apps", "server");
+        yield* Effect.promise(() => NodeFSP.mkdir(nested, { recursive: true }));
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+
+        expect(yield* checkpointStore.isGitRepository(nested)).toBe(true);
+      }),
+    );
   });
 
   describe("diffCheckpoints", () => {

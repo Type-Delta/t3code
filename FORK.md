@@ -502,3 +502,41 @@ failures continue to mark the session unavailable.
 - `vp run typecheck` passes for all 15 packages (existing suggestions only).
 
 **Last updated:** 2026-07-22
+
+### DL014 — Make turn diffs reflect loadable Git checkpoints
+
+Turn diff summaries now come only from successfully captured sidecar checkpoints. Provider-reported
+`file_change` items are no longer projected as synthetic checkpoint references, because those
+references do not contain a restorable snapshot and could produce unrelated file names followed by
+"Failed to load turn diff". The web client also hides legacy non-ready checkpoint rows that may
+already exist in persisted projections.
+
+Checkpoint capture now recognizes project roots nested anywhere inside a Git worktree. Diff queries
+resolve the pre-turn baseline through the same stable sidecar snapshot identity used by the capture
+reactor, including the active checkpoint timeline generation, and fall back to `HEAD` when an older
+thread has no captured baseline.
+
+**Files modified:**
+
+- `apps/server/src/checkpointing/CheckpointIds.ts`
+- `apps/server/src/checkpointing/CheckpointDiffQuery.ts`
+- `apps/server/src/checkpointing/CheckpointDiffQuery.test.ts`
+- `apps/server/src/checkpointing/CheckpointStore.test.ts`
+- `apps/server/src/git/Utils.ts`
+- `apps/server/src/orchestration/Layers/CheckpointReactor.ts`
+- `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts`
+- `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts`
+- `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`
+- `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`
+- `apps/server/src/orchestration/Services/ProjectionSnapshotQuery.ts`
+- `apps/web/src/hooks/useTurnDiffSummaries.ts`
+- `apps/web/src/hooks/useTurnDiffSummaries.test.ts`
+
+**Validation:**
+
+- Focused checkpoint query, nested Git workspace, projection context, and web summary tests pass.
+- The orchestration integration harness passes its multi-turn file-edit and persisted-diff scenario.
+- `vp check` passes with existing repository warnings only.
+- `vp run typecheck` passes for all packages.
+
+**Last updated:** 2026-07-22

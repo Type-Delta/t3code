@@ -1134,6 +1134,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           projectId: asProjectId("project-context"),
           workspaceRoot: "/tmp/context-workspace",
           worktreePath: "/tmp/context-worktree",
+          timelineGeneration: 0,
           checkpoints: [
             {
               turnId: asTurnId("turn-1"),

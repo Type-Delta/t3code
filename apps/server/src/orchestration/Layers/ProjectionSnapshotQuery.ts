@@ -128,6 +128,7 @@ const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   projectId: ProjectId,
   workspaceRoot: Schema.String,
   worktreePath: Schema.NullOr(Schema.String),
+  timelineGeneration: NonNegativeInt,
 });
 const FullThreadDiffContextLookupInput = Schema.Struct({
   threadId: ThreadId,
@@ -138,6 +139,7 @@ const ProjectionFullThreadDiffContextRowSchema = Schema.Struct({
   projectId: ProjectId,
   workspaceRoot: Schema.String,
   worktreePath: Schema.NullOr(Schema.String),
+  timelineGeneration: NonNegativeInt,
   latestCheckpointTurnCount: Schema.NullOr(NonNegativeInt),
   toCheckpointRef: Schema.NullOr(CheckpointRef),
 });
@@ -745,7 +747,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           threads.thread_id AS "threadId",
           threads.project_id AS "projectId",
           projects.workspace_root AS "workspaceRoot",
-          threads.worktree_path AS "worktreePath"
+          threads.worktree_path AS "worktreePath",
+          COALESCE((
+            SELECT cursors.active_generation
+            FROM thread_checkpoint_cursors AS cursors
+            WHERE cursors.thread_id = threads.thread_id
+            LIMIT 1
+          ), 0) AS "timelineGeneration"
         FROM projection_threads AS threads
         INNER JOIN projection_projects AS projects
           ON projects.project_id = threads.project_id
@@ -1064,17 +1072,25 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           threads.project_id AS "projectId",
           projects.workspace_root AS "workspaceRoot",
           threads.worktree_path AS "worktreePath",
+          COALESCE((
+            SELECT cursors.active_generation
+            FROM thread_checkpoint_cursors AS cursors
+            WHERE cursors.thread_id = threads.thread_id
+            LIMIT 1
+          ), 0) AS "timelineGeneration",
           (
             SELECT MAX(turns.checkpoint_turn_count)
             FROM projection_turns AS turns
             WHERE turns.thread_id = threads.thread_id
               AND turns.checkpoint_turn_count IS NOT NULL
+              AND turns.checkpoint_status = 'ready'
           ) AS "latestCheckpointTurnCount",
           (
             SELECT turns.checkpoint_ref
             FROM projection_turns AS turns
             WHERE turns.thread_id = threads.thread_id
               AND turns.checkpoint_turn_count = ${checkpointTurnCount}
+              AND turns.checkpoint_status = 'ready'
             LIMIT 1
           ) AS "toCheckpointRef"
         FROM projection_threads AS threads
@@ -2032,6 +2048,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: threadRow.value.projectId,
         workspaceRoot: threadRow.value.workspaceRoot,
         worktreePath: threadRow.value.worktreePath,
+        timelineGeneration: threadRow.value.timelineGeneration,
         checkpoints: checkpointRows.map(
           (row): OrchestrationCheckpointSummary => ({
             turnId: row.turnId,
@@ -2090,6 +2107,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         projectId: row.value.projectId,
         workspaceRoot: row.value.workspaceRoot,
         worktreePath: row.value.worktreePath,
+        timelineGeneration: row.value.timelineGeneration,
         latestCheckpointTurnCount: row.value.latestCheckpointTurnCount ?? 0,
         toCheckpointRef: row.value.toCheckpointRef,
       });
