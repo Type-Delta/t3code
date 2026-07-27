@@ -4,7 +4,7 @@ This fork keeps the Windows reliability, durable checkpointing, and workspace ca
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `23b55022175e69938514934f65c5a607d38f1e47`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `23b55022175e69938514934f65c5a607d38f1e47`, tracked with `base` tag). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -131,6 +131,8 @@ Diff queries use the active checkpoint timeline generation and the stable pre-tu
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
+
+Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
 
 ### 2026-07-27 — Merge upstream/main into main
 
