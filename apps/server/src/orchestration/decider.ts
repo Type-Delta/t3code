@@ -716,6 +716,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const retryingExistingMessage =
+        command.retryMessage === true &&
+        targetThread.messages.some(
+          (message) => message.id === command.message.messageId && message.role === "user",
+        );
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -767,7 +772,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           occurredAt: command.createdAt,
           commandId: command.commandId,
         })),
-        causationEventId: userMessageEvent.eventId,
+        ...(retryingExistingMessage ? {} : { causationEventId: userMessageEvent.eventId }),
         type: "thread.turn-start-requested",
         payload: {
           threadId: command.threadId,
@@ -820,7 +825,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
-      return [...lifecycleResetEvents, userMessageEvent, turnStartRequestedEvent];
+      return [
+        ...lifecycleResetEvents,
+        ...(retryingExistingMessage ? [] : [userMessageEvent]),
+        turnStartRequestedEvent,
+      ];
     }
 
     case "thread.turn.interrupt": {

@@ -736,6 +736,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  retryMessage: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -755,6 +756,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  retryMessage: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 

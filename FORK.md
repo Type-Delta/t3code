@@ -76,13 +76,13 @@ SQLite persists capture jobs, immutable checkpoint entries, timeline generations
 
 Fork migrations `033`–`036` establish this durable checkpoint state (`033_CheckpointDurableState`, `034_CheckpointLegacyMigration`, `035_CheckpointCaptureProviderMetadata`, and `036_CheckpointNavigationMode`). The merged schema then applies upstream lifecycle migrations `037_ProjectionThreadsSettled` and `038_ProjectionThreadsSnoozed`; their ordering is preserved for existing installations, but the upstream lifecycle feature is not itself logged as a fork divergence.
 
-Terminal provider events release the mutation lease for their exact turn before local VCS status refresh or post-turn capture. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics.
+Terminal provider events release the mutation lease for their exact turn before local VCS status refresh or post-turn capture. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
-**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{033_CheckpointDurableState,034_CheckpointLegacyMigration,035_CheckpointCaptureProviderMetadata,036_CheckpointNavigationMode}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components.
+**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{033_CheckpointDurableState,034_CheckpointLegacyMigration,035_CheckpointCaptureProviderMetadata,036_CheckpointNavigationMode}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
 
-**Recorded validation:** migration and durability regression matrices including same-logical contended/error job retries, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including deterministic blocked-status-refresh terminal lease release, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
+**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including deterministic terminal lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
 
 **Last updated:** 2026-07-27
 

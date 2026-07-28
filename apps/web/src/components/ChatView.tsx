@@ -2532,6 +2532,63 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [draftId, routeThreadKey, routeThreadRef, serverThread],
   );
+  const retryableTurnStartMessage = useMemo(() => {
+    if (
+      serverThread?.session?.status !== "error" ||
+      !serverThread.session.lastError?.includes("already has an active workspace mutation")
+    ) {
+      return null;
+    }
+    const failure = serverThread.activities.findLast(
+      (activity) => activity.kind === "provider.turn.start.failed",
+    );
+    const message = serverThread.messages.findLast((entry) => entry.role === "user");
+    return failure &&
+      message &&
+      (message.attachments?.length ?? 0) === 0 &&
+      failure.createdAt >= message.createdAt
+      ? message
+      : null;
+  }, [serverThread]);
+  const retryFailedTurnStart = useCallback(async () => {
+    if (!serverThread || !retryableTurnStartMessage) return;
+    beginLocalDispatch({ preparingWorktree: false });
+    const result = await startThreadTurn({
+      environmentId,
+      input: {
+        threadId: serverThread.id,
+        message: {
+          messageId: retryableTurnStartMessage.id,
+          role: "user",
+          text: retryableTurnStartMessage.text,
+          attachments: [],
+        },
+        modelSelection: serverThread.modelSelection,
+        runtimeMode,
+        interactionMode,
+        retryMessage: true,
+        createdAt: new Date().toISOString(),
+      },
+    });
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      setThreadError(
+        serverThread.id,
+        error instanceof Error ? error.message : "Failed to retry message.",
+      );
+      resetLocalDispatch();
+    }
+  }, [
+    beginLocalDispatch,
+    environmentId,
+    interactionMode,
+    resetLocalDispatch,
+    retryableTurnStartMessage,
+    runtimeMode,
+    serverThread,
+    setThreadError,
+    startThreadTurn,
+  ]);
 
   const focusComposer = useCallback(() => {
     composerRef.current?.focusAtEnd();
@@ -5861,6 +5918,9 @@ function ChatViewContent(props: ChatViewProps) {
         <ThreadErrorBanner
           error={threadError}
           onDismiss={() => setThreadError(activeThread.id, null)}
+          {...(retryableTurnStartMessage
+            ? { onRetry: retryFailedTurnStart, retrying: isSendBusy }
+            : {})}
         />
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">

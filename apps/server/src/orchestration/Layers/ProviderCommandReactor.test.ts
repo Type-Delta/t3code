@@ -750,6 +750,98 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
   });
 
+  it("recovers a stale provider mutation when no provider turn is active", async () => {
+    const harness = await createHarness({ autoCompleteTurns: false });
+    const dispatch = (suffix: string) =>
+      harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`cmd-turn-start-stale-${suffix}`),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(`user-message-stale-${suffix}`),
+          role: "user",
+          text: suffix,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+    await dispatch("first");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await dispatch("retry");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2, 5_000);
+
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.isProviderMutationOwnedBy("thread-1", "turn-2"),
+      ),
+    ).toBe(true);
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toBe(false);
+  });
+
+  it("continues without checkpointing when an active mutation cannot be handed off", async () => {
+    const harness = await createHarness({ autoCompleteTurns: false });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-degraded-first"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-degraded-first"),
+        role: "user",
+        text: "first",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const sessionIndex = harness.runtimeSessions.findIndex(
+      (session) => session.threadId === ThreadId.make("thread-1"),
+    );
+    harness.runtimeSessions[sessionIndex] = {
+      ...harness.runtimeSessions[sessionIndex]!,
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+    };
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.beginProviderMutationHandoff("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-degraded-retry"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-degraded-retry"),
+        role: "user",
+        text: "retry",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt,
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2, 5_000);
+
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toBe(false);
+  });
+
   it("reuses the exact active-turn mutation when steering", async () => {
     const harness = await createHarness({ autoCompleteTurns: false });
     const createdAt = "2026-01-01T00:00:00.000Z";

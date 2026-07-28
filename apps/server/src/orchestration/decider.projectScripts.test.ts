@@ -299,6 +299,62 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
         ]),
         runtimeMode: "approval-required",
       });
+
+      const withMessage = yield* projectEvent(readModel, {
+        ...events[0]!,
+        sequence: 3,
+      });
+      const retry = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-retry"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-user-1"),
+            role: "user",
+            text: "hello",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          retryMessage: true,
+          createdAt: now,
+        },
+        readModel: withMessage,
+      });
+      const retryEvents = Array.isArray(retry) ? retry : [retry];
+      expect(retryEvents).toHaveLength(1);
+      expect(retryEvents[0]?.type).toBe("thread.turn-start-requested");
+      expect(retryEvents[0]?.causationEventId).toBeNull();
+
+      const optimisticOnlyRetry = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-retry-optimistic"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-optimistic-only"),
+            role: "user",
+            text: "recreate me",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          retryMessage: true,
+          createdAt: now,
+        },
+        readModel,
+      });
+      const optimisticOnlyRetryEvents = Array.isArray(optimisticOnlyRetry)
+        ? optimisticOnlyRetry
+        : [optimisticOnlyRetry];
+      expect(optimisticOnlyRetryEvents.map((event) => event.type)).toEqual([
+        "thread.message-sent",
+        "thread.turn-start-requested",
+      ]);
+      expect(optimisticOnlyRetryEvents[1]?.causationEventId).toBe(
+        optimisticOnlyRetryEvents[0]?.eventId ?? null,
+      );
     }),
   );
 

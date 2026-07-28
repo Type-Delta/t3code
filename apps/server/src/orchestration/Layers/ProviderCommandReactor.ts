@@ -898,11 +898,23 @@ const make = Effect.gen(function* () {
       }
     }
     if (!prepared) {
-      return yield* new ProviderAdapterRequestError({
-        provider: "checkpoint",
-        method: "thread.turn.start",
-        detail: `Thread '${threadId}' already has an active workspace mutation.`,
-      });
+      const activeTurnId = (yield* providerService.listSessions()).find(
+        (session) => session.threadId === threadId,
+      )?.activeTurnId;
+      if (activeTurnId === undefined) {
+        yield* mutationCoordinator.cancelProviderMutation(threadId);
+        prepared = yield* mutationCoordinator.prepareProviderMutation(
+          threadId,
+          identity.worktreeKey,
+        );
+      }
+    }
+    if (!prepared) {
+      yield* Effect.logWarning(
+        "checkpoint mutation unavailable; provider turn will continue without checkpointing",
+        { threadId, cwd },
+      );
+      return { state: "skipped" } satisfies ProviderTurnMutationPreparation;
     }
     preparedProviderMutationThreads.add(threadId);
     return { state: "prepared" } satisfies ProviderTurnMutationPreparation;
