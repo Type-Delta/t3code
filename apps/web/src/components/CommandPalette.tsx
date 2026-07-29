@@ -93,6 +93,7 @@ import {
   buildRootGroups,
   buildThreadActionItems,
   enumerateCommandPaletteItems,
+  findCommandPaletteItemForShortcut,
   type CommandPaletteActionItem,
   type CommandPaletteSubmenuItem,
   type CommandPaletteView,
@@ -1163,7 +1164,6 @@ function OpenCommandPaletteDialog(props: {
           </>
         ),
         icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
-        shortcutCommand: "chat.new",
         run: async () => {
           await startNewThreadFromContext({
             activeDraftThread,
@@ -1182,6 +1182,7 @@ function OpenCommandPaletteDialog(props: {
       title: "New thread in...",
       icon: <SquarePenIcon className={ITEM_ICON_CLASS} />,
       addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
+      shortcutCommand: "chat.newLocal",
       groups: [{ value: "projects", label: "Projects", items: projectThreadItems }],
     });
   }
@@ -1687,6 +1688,16 @@ function OpenCommandPaletteDialog(props: {
       platform: navigator.platform,
       context: { modelPickerOpen: false },
     });
+    if (command === "chat.newLocal") {
+      const matchingItem = findCommandPaletteItemForShortcut(rootGroups, command);
+      if (matchingItem) {
+        event.preventDefault();
+        event.stopPropagation();
+        executeItem(matchingItem);
+        return;
+      }
+    }
+
     if (threadJumpIndexFromCommand(command ?? "") !== null) {
       const matchingItem = displayedGroups
         .flatMap((group) => group.items)

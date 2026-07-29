@@ -4,6 +4,7 @@ import type { Thread } from "../types";
 import {
   buildThreadActionItems,
   enumerateCommandPaletteItems,
+  findCommandPaletteItemForShortcut,
   filterCommandPaletteGroups,
   type CommandPaletteGroup,
 } from "./CommandPalette.logic";
@@ -32,6 +33,28 @@ describe("enumerateCommandPaletteItems", () => {
       "thread.jump.9",
       undefined,
     ]);
+  });
+});
+
+describe("findCommandPaletteItemForShortcut", () => {
+  it("finds the New Local project picker from the root groups", () => {
+    const newLocalProjectPicker = {
+      kind: "submenu" as const,
+      value: "action:new-thread-in",
+      searchTerms: [],
+      title: "New thread in...",
+      icon: null,
+      addonIcon: null,
+      shortcutCommand: "chat.newLocal" as const,
+      groups: [],
+    };
+
+    expect(
+      findCommandPaletteItemForShortcut(
+        [{ value: "actions", label: "Actions", items: [newLocalProjectPicker] }],
+        "chat.newLocal",
+      ),
+    ).toBe(newLocalProjectPicker);
   });
 });
 

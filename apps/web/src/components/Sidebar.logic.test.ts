@@ -7,6 +7,7 @@ import {
   getVisibleSidebarThreadIds,
   resolveAdjacentThreadId,
   getFallbackThreadIdAfterDelete,
+  getOtherSplitViewThreads,
   getVisibleThreadsForProject,
   getProjectSortTimestamp,
   hasUnseenCompletion,
@@ -1151,6 +1152,26 @@ describe("resolveSplitViewGroupRowBackgroundImage", () => {
 
     expect(backgroundImage).toContain("color-mix(in oklch, oklch(0.68 0.19 264) 24%, transparent)");
     expect(backgroundImage).toContain("transparent 78%");
+  });
+});
+
+describe("getOtherSplitViewThreads", () => {
+  it("lists the other titled panes in their split-view order", () => {
+    expect(
+      getOtherSplitViewThreads({
+        paneThreadKeys: ["thread-a", "thread-b", "missing-thread", "thread-c"],
+        threadKey: "thread-b",
+        threadTitleByKey: new Map([
+          ["thread-a", "Plan migration"],
+          ["thread-b", "Implement sidebar"],
+          ["thread-c", "Verify UI"],
+        ]),
+      }),
+    ).toEqual([
+      { threadKey: "thread-a", title: "Plan migration" },
+      { threadKey: "missing-thread", title: "New thread" },
+      { threadKey: "thread-c", title: "Verify UI" },
+    ]);
   });
 });
 

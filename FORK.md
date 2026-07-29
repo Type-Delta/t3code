@@ -90,13 +90,13 @@ Capture jobs that first lose the workspace-mutation race or fail can be re-enque
 
 The fork supports up to four visible thread panes in an equal full-height grid, with focused-pane routing, a shared toolbar, one right panel, and controlled ownership of global keyboard, preview, and composer behavior. Panes can be opened or detached from the sidebar, safely reconcile draft promotion/archive/deletion, and animate layout changes without leaving stale portals or listeners.
 
-Split membership is persisted as multiple ordered local groups with active state and stable group colors. Selecting any member restores its group; the sidebar preserves group tinting, supports pane and thread drag placement, and shows complete left/right drop intent. Right-panel ownership remains useful when focus moves to a pane with no surface of its own. Integration with Sidebar V2 keeps displayed panes visible when settled or snoozed shelves are collapsed and preserves split actions in its context menu.
+Split membership is persisted as multiple ordered local groups with active state and stable group colors. Selecting any member restores its group; both sidebar versions preserve group tinting, support pane and thread drag placement, and show complete left/right drop intent. Sidebar V2 also names the other panes in each grouped thread's details tooltip. Right-panel ownership remains useful when focus moves to a pane with no surface of its own. Integration with Sidebar V2 keeps displayed panes visible when settled or snoozed shelves are collapsed and preserves split actions in its context menu.
 
 **Implementation evidence:** `apps/web/src/splitViewStore.ts`, `apps/web/src/splitViewDrag.ts`, `apps/web/src/components/{SplitThreadWorkspace,SplitPaneDropHint,Sidebar,SidebarV2,RightPanelTabs,ChatView}.tsx`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
 
 **Recorded validation:** split-store, sidebar, workspace, right-panel, and drag/drop tests; web typecheck; `vp check`; `git diff --check`; and Electron runtime verification of context menus, routing, pane layout, persistent groups, and right-panel attribution.
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-07-29
 
 ### DL012 — Prompt preservation during draft promotion
 
@@ -143,6 +143,16 @@ While DiffPanel is open, working-tree and branch previews refresh once per secon
 **Recorded validation:** focused review-service authorization and DiffPanel store tests; controlled-browser reproduction and verification with an external registered project, including a file modification made while the panel remained open; `vp check`; and `vp run typecheck`.
 
 **Last updated:** 2026-07-27
+
+### DL016 — Project-selecting local thread shortcut
+
+The configured Chat: New Local shortcut opens the command palette's "New thread in..." project picker instead of immediately creating a draft in the active project. The same shortcut enters that picker when the command palette already has focus, while the active-project quick-create remains available as a separate palette action.
+
+**Implementation evidence:** `apps/web/src/routes/_chat.tsx`, `apps/web/src/components/CommandPalette.tsx`, `apps/web/src/components/CommandPalette.logic.ts`, and `apps/web/src/commandPaletteBus.ts`.
+
+**Recorded validation:** focused command-palette and keybinding tests; controlled-browser verification from the main app and an already-focused palette; `vp check`; `vp run typecheck`; and `git diff --check`.
+
+**Last updated:** 2026-07-29
 
 ## Merge History
 

@@ -658,6 +658,22 @@ export function resolveSplitViewGroupRowBackgroundImage(groupColor: string): str
   return `linear-gradient(110deg, color-mix(in oklch, ${groupColor} 24%, transparent) 0%, transparent 78%)`;
 }
 
+export function getOtherSplitViewThreads(input: {
+  paneThreadKeys: readonly string[];
+  threadKey: string;
+  threadTitleByKey: ReadonlyMap<string, string>;
+}): Array<{ threadKey: string; title: string }> {
+  return input.paneThreadKeys.flatMap((paneThreadKey) => {
+    if (paneThreadKey === input.threadKey) return [];
+    return [
+      {
+        threadKey: paneThreadKey,
+        title: input.threadTitleByKey.get(paneThreadKey) ?? "New thread",
+      },
+    ];
+  });
+}
+
 export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
 }): ThreadStatusPill | null {

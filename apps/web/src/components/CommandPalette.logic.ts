@@ -56,6 +56,19 @@ export interface CommandPaletteView {
   readonly initialQuery?: string;
 }
 
+export function findCommandPaletteItemForShortcut(
+  groups: ReadonlyArray<CommandPaletteGroup>,
+  command: KeybindingCommand | null,
+): CommandPaletteActionItem | CommandPaletteSubmenuItem | null {
+  if (command === null) return null;
+
+  for (const group of groups) {
+    const item = group.items.find((candidate) => candidate.shortcutCommand === command);
+    if (item) return item;
+  }
+  return null;
+}
+
 export function enumerateCommandPaletteItems(
   items: ReadonlyArray<CommandPaletteActionItem>,
 ): CommandPaletteActionItem[] {
