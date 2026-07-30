@@ -9,6 +9,7 @@ import {
   selectActiveSplitPane,
   selectIsSplitViewActive,
   selectSplitPaneRefs,
+  splitViewGroupChroma,
   useSplitViewStore,
 } from "./splitViewStore";
 
@@ -25,6 +26,34 @@ const THREAD_A_IN_OTHER_ENVIRONMENT = scopeThreadRef(
 function paneKeys(): string[] {
   return selectSplitPaneRefs(useSplitViewStore.getState()).map(scopedThreadKey);
 }
+
+describe("splitViewGroupChroma", () => {
+  it("leaves red and blue at full chroma", () => {
+    // These already sit near the sRGB edge, so they render weaker than their
+    // number suggests and need no easing.
+    expect(splitViewGroupChroma(20)).toBeCloseTo(0.19, 5);
+    expect(splitViewGroupChroma(264)).toBeCloseTo(0.19, 5);
+    expect(splitViewGroupChroma(315)).toBeCloseTo(0.19, 5);
+  });
+
+  it("eases yellow-green down so it stops shouting over the rest", () => {
+    const yellowGreen = splitViewGroupChroma(120);
+
+    expect(yellowGreen).toBeLessThan(splitViewGroupChroma(264));
+    expect(yellowGreen).toBeCloseTo(0.19 * 0.68, 4);
+    // Neighbours fall off smoothly rather than stepping at a band edge.
+    expect(splitViewGroupChroma(75)).toBeGreaterThan(yellowGreen);
+    expect(splitViewGroupChroma(150)).toBeGreaterThan(yellowGreen);
+  });
+
+  it("stays positive and within the base chroma across the whole wheel", () => {
+    for (let hue = 0; hue < 360; hue += 1) {
+      const chroma = splitViewGroupChroma(hue);
+      expect(chroma).toBeGreaterThan(0);
+      expect(chroma).toBeLessThanOrEqual(0.19);
+    }
+  });
+});
 
 describe("splitViewStore", () => {
   beforeEach(() => {

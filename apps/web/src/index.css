@@ -38,6 +38,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-new(t3-mobil
   35% {
     opacity: 1;
   }
+
   65%,
   100% {
     opacity: 0;
@@ -49,6 +50,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-new(t3-mobil
   35% {
     opacity: 0;
   }
+
   65%,
   100% {
     opacity: 1;
@@ -69,6 +71,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     opacity: 1;
     transform: translateY(0);
   }
+
   to {
     opacity: 0;
     transform: translateY(-6px);
@@ -168,26 +171,31 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --radius-2xl: calc(var(--radius) + 8px);
   --radius-3xl: calc(var(--radius) + 12px);
   --radius-4xl: calc(var(--radius) + 16px);
+
   @keyframes skeleton {
     to {
       background-position: -200% 0;
     }
   }
+
   @keyframes status-pulse {
     0%,
     40% {
       opacity: 1;
       animation-timing-function: steps(6);
     }
+
     50%,
     90% {
       opacity: 0.5;
       animation-timing-function: steps(6);
     }
+
     100% {
       opacity: 1;
     }
   }
+
   @keyframes status-ping {
     /* Burst first (immediate feedback for click ripples), then hold
        invisible for the rest of the cycle. Mirrors animate-ping's
@@ -197,23 +205,27 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
       scale: 0.75;
       animation-timing-function: steps(8);
     }
+
     40%,
     100% {
       opacity: 0;
       scale: 2;
     }
   }
+
   @keyframes sidebar-working-text {
     0%,
     36% {
       opacity: 1;
       animation-timing-function: steps(10);
     }
+
     50%,
     86% {
       opacity: 0.75;
       animation-timing-function: steps(10);
     }
+
     100% {
       opacity: 1;
     }
@@ -224,6 +236,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   * {
     @apply border-border outline-ring/50;
   }
+
   :where([data-slot="menu-popup"], [data-slot="select-popup"], [data-slot="popover-popup"]):focus,
   :where(
     [data-slot="menu-popup"],
@@ -232,9 +245,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   ):focus-visible {
     @apply outline-none ring-0;
   }
+
   html {
     background-color: var(--app-chrome-background);
   }
+
   body {
     @apply text-foreground relative;
     background-color: var(--app-chrome-background);
@@ -782,12 +797,15 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 @utility pt-safe {
   padding-top: max(env(safe-area-inset-top), 0px);
 }
+
 @utility pb-safe {
   padding-bottom: max(env(safe-area-inset-bottom), 0px);
 }
+
 @utility pl-safe {
   padding-left: max(env(safe-area-inset-left), 0px);
 }
+
 @utility pr-safe {
   padding-right: max(env(safe-area-inset-right), 0px);
 }
@@ -1079,6 +1097,7 @@ code {
 label:has(> select#reasoning-effort) {
   position: relative;
 }
+
 label:has(> select#reasoning-effort) select {
   position: absolute;
   inset: 0;
@@ -1436,6 +1455,7 @@ label:has(> select#reasoning-effort) select {
   from {
     transform: scaleX(1);
   }
+
   to {
     transform: scaleX(0);
   }
@@ -1462,6 +1482,7 @@ label:has(> select#reasoning-effort) select {
   0% {
     background-position: 0% 50%;
   }
+
   100% {
     background-position: 200% 50%;
   }
@@ -1471,9 +1492,78 @@ label:has(> select#reasoning-effort) select {
   0% {
     filter: hue-rotate(0deg) saturate(1.2);
   }
+
   100% {
     filter: hue-rotate(360deg) saturate(1.2);
   }
+}
+
+/* Split-view group membership rows. The group hue and its chroma are set
+   inline (see `resolveSplitViewGroupRowStyle`); this rule composes them into
+   the tint and adds the grain that keeps the tint from reading as a flat slab.
+
+   Lightness and strength are per-theme: the translucency that reads as a clear
+   color band against the near-black dark sidebar washes out to almost nothing
+   against light mode's zinc-50, so light mode takes a deeper, more opaque
+   tint to land at the same presence.
+
+   The grain is a masked pseudo-element rather than a second background layer
+   because background layers cannot carry their own mask, and unmasked grain
+   covers the gradient's faded tail too — which flattens the whole row back
+   into a uniform slab. `isolation` keeps the negative z-index inside the row,
+   so the grain paints above the row background but below its content. */
+.split-view-group-row {
+  --split-view-group-lightness: 0.58;
+  --split-view-group-strength: 44%;
+  --split-view-group-fade-angle: 110deg;
+  --split-view-group-fade-end: 67%;
+  /* The grain stops short of the tint's own fade so the texture is gone before
+     the color is, rather than lingering as bare speckle on the plain row. */
+  --split-view-group-grain-fade-end: 47%;
+
+  position: relative;
+  isolation: isolate;
+  background-image: linear-gradient(
+    var(--split-view-group-fade-angle),
+    color-mix(
+        in oklch,
+        oklch(
+            var(--split-view-group-lightness) var(--split-view-group-chroma)
+              var(--split-view-group-hue)
+          )
+          var(--split-view-group-strength),
+        transparent
+      )
+      0%,
+    transparent var(--split-view-group-fade-end)
+  );
+
+  @variant dark {
+    --split-view-group-lightness: 0.68;
+    --split-view-group-strength: 24%;
+  }
+}
+
+.split-view-group-row::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  /* Desaturated so the grain never shifts the group hue. `stitchTiles` keeps
+     the 140px repeat seamless across wide rows. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='splitViewGroupRowGrain'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.89' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23splitViewGroupRowGrain)' opacity='0.14'/%3E%3C/svg%3E");
+  -webkit-mask-image: linear-gradient(
+    var(--split-view-group-fade-angle),
+    black 0%,
+    transparent var(--split-view-group-grain-fade-end)
+  );
+  mask-image: linear-gradient(
+    var(--split-view-group-fade-angle),
+    black 0%,
+    transparent var(--split-view-group-grain-fade-end)
+  );
 }
 
 .ultrathink-frame {

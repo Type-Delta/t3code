@@ -12,6 +12,7 @@ import type { ThreadRouteTarget } from "../threadRoutes";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
+import { splitViewGroupChroma } from "../splitViewStore";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
@@ -654,8 +655,19 @@ export function formatWorkingDurationLabel(elapsedMs: number): string {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
-export function resolveSplitViewGroupRowBackgroundImage(groupColor: string): string {
-  return `linear-gradient(110deg, color-mix(in oklch, ${groupColor} 24%, transparent) 0%, transparent 78%)`;
+/** Marks a row as carrying the split-view group tint. Pairs with
+    `resolveSplitViewGroupRowStyle`: `.split-view-group-row` in index.css owns
+    the gradient geometry, the grain overlay, and the per-theme lightness and
+    strength, while the style supplies the group's own hue and chroma. */
+export const SPLIT_VIEW_GROUP_ROW_CLASS_NAME = "split-view-group-row";
+
+export function resolveSplitViewGroupRowStyle(colorHue: number): React.CSSProperties {
+  return {
+    "--split-view-group-hue": String(colorHue),
+    // Light and dark compose their own tint from these, so the row hands over
+    // the hue and its gamut-evened chroma rather than a finished color.
+    "--split-view-group-chroma": String(splitViewGroupChroma(colorHue)),
+  } as React.CSSProperties;
 }
 
 export function getOtherSplitViewThreads(input: {

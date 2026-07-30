@@ -175,7 +175,6 @@ import {
   selectIsSplitViewActive,
   selectSplitPaneRefs,
   selectSplitViewGroups,
-  splitViewGroupColor,
   useSplitViewStore,
 } from "../splitViewStore";
 import {
@@ -197,7 +196,8 @@ import {
   resolveSidebarNewThreadEnvMode,
   resolveSidebarSplitViewThreadState,
   resolveSidebarStageBadgeLabel,
-  resolveSplitViewGroupRowBackgroundImage,
+  resolveSplitViewGroupRowStyle,
+  SPLIT_VIEW_GROUP_ROW_CLASS_NAME,
   resolveSplitViewDetachNavigationTarget,
   resolveThreadRowClassName,
   resolveThreadStatusPill,
@@ -711,18 +711,18 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
         aria-description={
           splitGroupIndicator ? `Included in ${splitGroupIndicator.label}` : undefined
         }
-        className={`${resolveThreadRowClassName({
-          isActive,
-          isSelected,
-          isSplitPane: isDisplayedInSplitView,
-        })} relative isolate`}
+        className={cn(
+          resolveThreadRowClassName({
+            isActive,
+            isSelected,
+            isSplitPane: isDisplayedInSplitView,
+          }),
+          "relative isolate",
+          splitGroupIndicator && SPLIT_VIEW_GROUP_ROW_CLASS_NAME,
+        )}
         style={
           splitGroupIndicator
-            ? {
-                backgroundImage: resolveSplitViewGroupRowBackgroundImage(
-                  splitViewGroupColor(splitGroupIndicator.colorHue),
-                ),
-              }
+            ? resolveSplitViewGroupRowStyle(splitGroupIndicator.colorHue)
             : undefined
         }
         draggable
@@ -2397,7 +2397,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
               >
                 <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
                   <span
-                    className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
+                    className={`size-2.25 rounded-full ${projectStatus.dotClass} ${
                       projectStatus.pulse ? "animate-status-pulse" : ""
                     }`}
                   />

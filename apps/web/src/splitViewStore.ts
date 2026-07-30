@@ -63,6 +63,10 @@ interface SplitViewStore extends SplitViewState {
 const EMPTY_GROUPS: readonly SplitViewGroup[] = Object.freeze([]);
 const EMPTY_PANE_REFS: readonly ScopedThreadRef[] = Object.freeze([]);
 const GROUP_COLOR_HUES = [264, 205, 150, 75, 20, 315, 120, 345, 185, 45, 285, 235] as const;
+const GROUP_BASE_CHROMA = 0.19;
+/** Hue the chroma easing is centered on, and how much chroma it removes there. */
+const GROUP_CHROMA_EASE_HUE = 120;
+const GROUP_CHROMA_EASE_DEPTH = 0.32;
 let splitGroupSequence = 0;
 
 function uniquePaneRefs(paneRefs: readonly ScopedThreadRef[]): ScopedThreadRef[] {
@@ -112,8 +116,18 @@ function nextGroupColorHue(groups: readonly SplitViewGroup[]): number {
   return 264;
 }
 
-export function splitViewGroupColor(colorHue: number): string {
-  return `oklch(0.68 0.19 ${colorHue})`;
+/** Chroma to pair with a group hue. One chroma across the wheel does not read
+    as one saturation: yellow-green sits well inside sRGB at these lightnesses
+    and renders at full strength, while red and blue are near the gamut edge
+    and get clipped on the way out — so a flat 0.19 leaves the greens shouting
+    over the reds and blues. Easing chroma down around yellow-green evens them
+    up, and hues a quarter-turn away keep the base chroma untouched. */
+export function splitViewGroupChroma(colorHue: number): number {
+  const towardYellowGreen = Math.max(
+    0,
+    Math.cos(((colorHue - GROUP_CHROMA_EASE_HUE) * Math.PI) / 180),
+  );
+  return Number((GROUP_BASE_CHROMA * (1 - GROUP_CHROMA_EASE_DEPTH * towardYellowGreen)).toFixed(4));
 }
 
 /** Split mode is meaningful only when at least two distinct panes are open. */

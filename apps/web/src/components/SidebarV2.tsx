@@ -111,7 +111,8 @@ import {
   resolveAdjacentThreadId,
   resolveSettledTimestamp,
   resolveSplitViewDetachNavigationTarget,
-  resolveSplitViewGroupRowBackgroundImage,
+  resolveSplitViewGroupRowStyle,
+  SPLIT_VIEW_GROUP_ROW_CLASS_NAME,
   resolveSidebarV2Status,
   resolveWorkingStartedAt,
   shouldNavigateAfterProjectRemoval,
@@ -164,7 +165,6 @@ import {
   selectIsSplitViewActive,
   selectSplitPaneRefs,
   selectSplitViewGroups,
-  splitViewGroupColor,
   useSplitViewStore,
 } from "../splitViewStore";
 import {
@@ -589,10 +589,8 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
           : ""
       }`
     : undefined;
-  const splitGroupBackgroundImage = props.splitGroupIndicator
-    ? resolveSplitViewGroupRowBackgroundImage(
-        splitViewGroupColor(props.splitGroupIndicator.colorHue),
-      )
+  const splitGroupRowStyle = props.splitGroupIndicator
+    ? resolveSplitViewGroupRowStyle(props.splitGroupIndicator.colorHue)
     : undefined;
 
   const handleClick = useCallback(
@@ -811,12 +809,12 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
                 tabIndex={0}
                 data-testid="sidebar-v2-row-slim"
                 aria-description={splitGroupAriaDescription}
-                className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
-                style={
-                  splitGroupBackgroundImage
-                    ? { backgroundImage: splitGroupBackgroundImage }
-                    : undefined
-                }
+                className={cn(
+                  rowSurfaceClassName,
+                  "flex h-9 items-center gap-2.5 px-2.5",
+                  splitGroupRowStyle && SPLIT_VIEW_GROUP_ROW_CLASS_NAME,
+                )}
+                style={splitGroupRowStyle}
                 draggable
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
@@ -929,12 +927,11 @@ const SidebarV2Row = memo(function SidebarV2Row(props: {
               tabIndex={0}
               data-testid="sidebar-v2-row-card"
               aria-description={splitGroupAriaDescription}
-              className={rowSurfaceClassName}
-              style={
-                splitGroupBackgroundImage
-                  ? { backgroundImage: splitGroupBackgroundImage }
-                  : undefined
-              }
+              className={cn(
+                rowSurfaceClassName,
+                splitGroupRowStyle && SPLIT_VIEW_GROUP_ROW_CLASS_NAME,
+              )}
+              style={splitGroupRowStyle}
               draggable
               onClick={handleClick}
               onDoubleClick={handleDoubleClick}

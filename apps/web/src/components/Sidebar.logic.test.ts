@@ -19,7 +19,7 @@ import {
   resolveSidebarNewThreadEnvMode,
   resolveSidebarSplitViewThreadState,
   resolveSidebarStageBadgeLabel,
-  resolveSplitViewGroupRowBackgroundImage,
+  resolveSplitViewGroupRowStyle,
   resolveSidebarThreadNavigation,
   resolveSplitViewDetachNavigationTarget,
   resolveThreadRowClassName,
@@ -50,6 +50,7 @@ import {
   type Project,
   type Thread,
 } from "../types";
+import { splitViewGroupChroma } from "../splitViewStore";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 
@@ -1146,12 +1147,15 @@ describe("resolveThreadRowClassName", () => {
   });
 });
 
-describe("resolveSplitViewGroupRowBackgroundImage", () => {
-  it("creates a translucent row gradient so hover colors remain visible beneath it", () => {
-    const backgroundImage = resolveSplitViewGroupRowBackgroundImage("oklch(0.68 0.19 264)");
+describe("resolveSplitViewGroupRowStyle", () => {
+  it("hands the stylesheet the group hue and its chroma, not a finished color", () => {
+    // Light and dark compose their own lightness and strength around these, so
+    // emitting a resolved color here would pin both themes to one tint.
+    const style = resolveSplitViewGroupRowStyle(264) as Record<string, string>;
 
-    expect(backgroundImage).toContain("color-mix(in oklch, oklch(0.68 0.19 264) 24%, transparent)");
-    expect(backgroundImage).toContain("transparent 78%");
+    expect(style["--split-view-group-hue"]).toBe("264");
+    expect(style["--split-view-group-chroma"]).toBe(String(splitViewGroupChroma(264)));
+    expect(style.backgroundImage).toBeUndefined();
   });
 });
 
