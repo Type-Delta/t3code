@@ -11,15 +11,258 @@ import {
   resolveEnvModeLabel,
   resolveBranchToolbarValue,
   resolveLockedWorkspaceLabel,
+  resolveLockedWorktreeDisplay,
   resolveLocalCheckoutBranchMismatch,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
+  resolveDraftWorktreeContext,
+  resolveWorktreePickerModel,
   shouldIncludeBranchPickerItem,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+
+describe("resolveWorktreePickerModel", () => {
+  const worktrees = [
+    {
+      path: "/repo/worktrees/feature-a",
+      head: "123456789abcdef0",
+      branch: "feature/a",
+      isPrimary: false,
+    },
+    { path: "/repo", head: "23456789abcdef01", branch: "main", isPrimary: true },
+    {
+      path: "/repo/worktrees/detached-a",
+      head: "abcdef0123456789",
+      branch: null,
+      isPrimary: false,
+    },
+  ] as const;
+
+  it("only shows beside the current checkout and defaults to the primary checkout", () => {
+    expect(
+      resolveWorktreePickerModel({
+        effectiveEnvMode: "worktree",
+        activeWorktreePath: null,
+        worktrees,
+      }),
+    ).toBeNull();
+
+    expect(
+      resolveWorktreePickerModel({
+        effectiveEnvMode: "local",
+        activeWorktreePath: null,
+        worktrees,
+      }),
+    ).toMatchObject({
+      value: "/repo",
+      options: [
+        { path: "/repo", label: "Main", isPrimary: true },
+        { path: "/repo/worktrees/feature-a", label: "feature/a" },
+        {
+          path: "/repo/worktrees/detached-a",
+          label: "abcdef0 [detached]",
+        },
+      ],
+    });
+  });
+
+  it("keeps an attached worktree selected", () => {
+    expect(
+      resolveWorktreePickerModel({
+        effectiveEnvMode: "local",
+        activeWorktreePath: "/repo/worktrees/feature-a",
+        worktrees,
+      })?.value,
+    ).toBe("/repo/worktrees/feature-a");
+  });
+
+  it("matches Windows worktree paths across separator and case differences", () => {
+    expect(
+      resolveWorktreePickerModel({
+        effectiveEnvMode: "local",
+        activeWorktreePath: "c:\\repo\\worktrees\\feature-a",
+        worktrees: [
+          {
+            path: "C:/Repo/worktrees/feature-a",
+            head: "123456789abcdef0",
+            branch: "feature/a",
+            isPrimary: false,
+          },
+        ],
+      })?.value,
+    ).toBe("C:/Repo/worktrees/feature-a");
+  });
+});
+
+describe("resolveLockedWorktreeDisplay", () => {
+  const worktrees = [
+    { path: "/repo", head: "23456789abcdef01", branch: "main", isPrimary: true },
+    {
+      path: "/repo/worktrees/feature-a",
+      head: "123456789abcdef0",
+      branch: "feature/a",
+      isPrimary: false,
+    },
+    {
+      path: "/repo/worktrees/detached-a",
+      head: "abcdef0123456789",
+      branch: null,
+      isPrimary: false,
+    },
+  ] as const;
+
+  it("uses the same compact labels as the editable picker", () => {
+    expect(
+      resolveLockedWorktreeDisplay({
+        activeWorktreePath: null,
+        projectWorkspaceRoot: "/repo",
+        branch: "main",
+        worktrees,
+      }),
+    ).toEqual({ isPrimary: true, label: "Main" });
+    expect(
+      resolveLockedWorktreeDisplay({
+        activeWorktreePath: "/repo/worktrees/feature-a",
+        projectWorkspaceRoot: "/repo",
+        branch: "feature/a",
+        worktrees,
+      }),
+    ).toEqual({ isPrimary: false, label: "feature/a" });
+    expect(
+      resolveLockedWorktreeDisplay({
+        activeWorktreePath: "/repo/worktrees/detached-a",
+        projectWorkspaceRoot: "/repo",
+        branch: null,
+        worktrees,
+      }),
+    ).toEqual({ isPrimary: false, label: "abcdef0 [detached]" });
+  });
+
+  it("falls back to thread metadata while the one-shot lookup is pending", () => {
+    expect(
+      resolveLockedWorktreeDisplay({
+        activeWorktreePath: "/repo/worktrees/feature-a",
+        projectWorkspaceRoot: "/repo",
+        branch: "feature/a",
+        worktrees: [],
+      }),
+    ).toEqual({ isPrimary: false, label: "feature/a" });
+    expect(
+      resolveLockedWorktreeDisplay({
+        activeWorktreePath: "/repo/worktrees/detached-a",
+        projectWorkspaceRoot: "/repo",
+        branch: null,
+        worktrees: [],
+      }),
+    ).toEqual({ isPrimary: false, label: "[detached]" });
+  });
+
+  it("resolves an implicit path against a linked project checkout", () => {
+    expect(
+      resolveLockedWorktreeDisplay({
+        activeWorktreePath: null,
+        projectWorkspaceRoot: "/repo/worktrees/feature-a",
+        branch: "feature/a",
+        worktrees,
+      }),
+    ).toEqual({ isPrimary: false, label: "feature/a" });
+  });
+});
+
+describe("resolveDraftWorktreeContext", () => {
+  it("pins a branched worktree without creating or switching one", () => {
+    expect(
+      resolveDraftWorktreeContext(
+        {
+          path: "/repo/worktrees/feature-a",
+          head: "123456789abcdef0",
+          branch: "feature/a",
+          isPrimary: false,
+        },
+        "/repo",
+      ),
+    ).toEqual({
+      branch: "feature/a",
+      worktreePath: "/repo/worktrees/feature-a",
+      envMode: "worktree",
+    });
+  });
+
+  it("pins a detached worktree with a stable null branch payload", () => {
+    expect(
+      resolveDraftWorktreeContext(
+        {
+          path: "/repo/worktrees/detached-a",
+          head: "abcdef0123456789",
+          branch: null,
+          isPrimary: false,
+        },
+        "/repo",
+      ),
+    ).toEqual({
+      branch: null,
+      worktreePath: "/repo/worktrees/detached-a",
+      envMode: "worktree",
+    });
+  });
+
+  it("uses the primary path when the project itself is a linked worktree", () => {
+    expect(
+      resolveDraftWorktreeContext(
+        {
+          path: "/repo",
+          head: "23456789abcdef01",
+          branch: "main",
+          isPrimary: true,
+        },
+        "/repo/worktrees/project",
+      ),
+    ).toEqual({
+      branch: "main",
+      worktreePath: "/repo",
+      envMode: "worktree",
+    });
+  });
+
+  it("keeps the primary project checkout implicit", () => {
+    expect(
+      resolveDraftWorktreeContext(
+        {
+          path: "/repo",
+          head: "23456789abcdef01",
+          branch: "main",
+          isPrimary: true,
+        },
+        "/repo",
+      ),
+    ).toEqual({
+      branch: "main",
+      worktreePath: null,
+      envMode: "local",
+    });
+  });
+
+  it("matches Windows checkout paths across separator and case differences", () => {
+    expect(
+      resolveDraftWorktreeContext(
+        {
+          path: "C:/Code/Repo",
+          head: "23456789abcdef01",
+          branch: "main",
+          isPrimary: true,
+        },
+        "c:\\code\\repo\\",
+      ),
+    ).toEqual({
+      branch: "main",
+      worktreePath: null,
+      envMode: "local",
+    });
+  });
+});
 
 describe("resolvePreviousWorktreeSeed", () => {
   it("picks the most recently updated worktree thread", () => {

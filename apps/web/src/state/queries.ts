@@ -80,6 +80,28 @@ export function useBranches(target: VcsRefTarget) {
   );
 }
 
+export function useWorktrees(target: Pick<VcsRefTarget, "environmentId" | "cwd">) {
+  return useEnvironmentQuery(
+    target.environmentId !== null && target.cwd !== null
+      ? vcsEnvironment.listWorktrees({
+          environmentId: target.environmentId,
+          input: { cwd: target.cwd },
+        })
+      : null,
+  );
+}
+
+export function useWorktreesOnce(target: Pick<VcsRefTarget, "environmentId" | "cwd">) {
+  return useEnvironmentQuery(
+    target.environmentId !== null && target.cwd !== null
+      ? vcsEnvironment.listWorktreesOnce({
+          environmentId: target.environmentId,
+          input: { cwd: target.cwd },
+        })
+      : null,
+  );
+}
+
 export function usePaginatedBranches(target: VcsRefTarget) {
   const query = target.query?.trim() ?? "";
   const targetKey =

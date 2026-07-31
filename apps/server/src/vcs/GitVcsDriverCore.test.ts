@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it, describe } from "@effect/vitest";
+import { assert, describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -12,7 +12,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { GitCommandError } from "@t3tools/contracts";
 import { ServerConfig } from "../config.ts";
-import { splitNullSeparatedGitStdoutPaths } from "./GitVcsDriverCore.ts";
+import { parseGitWorktreeList, splitNullSeparatedGitStdoutPaths } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 
 const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -125,11 +125,13 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
     yield* driver.statusDetailsLocal(cwd);
     yield* driver.statusDetailsRemote(cwd, { refreshUpstream: false });
     yield* driver.listRefs({ cwd });
+    yield* driver.listWorktrees({ cwd });
 
     assert.deepStrictEqual(commands, [
       { args: ["status", "--porcelain=2", "--branch"], lcAll: "C" },
       { args: ["rev-parse", "--abbrev-ref", "HEAD"], lcAll: "C" },
       { args: ["branch", "--no-color", "--no-column"], lcAll: "C" },
+      { args: ["worktree", "list", "--porcelain", "-z"], lcAll: "C" },
     ]);
   }).pipe(Effect.provide(layer));
 });
@@ -661,6 +663,81 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
   });
 
   describe("worktree operations", () => {
+    it("parses primary, branched, and detached worktree records", () => {
+      expect(
+        parseGitWorktreeList(
+          [
+            "worktree /repo",
+            "HEAD 0123456789abcdef",
+            "branch refs/heads/main",
+            "",
+            "worktree /repo-ฟีเจอร์",
+            "HEAD 0123456789abcdef",
+            "branch refs/heads/feature/worktree",
+            "",
+            "worktree /repo-detached\ncopy",
+            "HEAD 0123456789abcdef",
+            "detached",
+            "",
+          ].join("\0"),
+        ),
+      ).toEqual([
+        { path: "/repo", head: "0123456789abcdef", branch: "main", isPrimary: true },
+        {
+          path: "/repo-ฟีเจอร์",
+          head: "0123456789abcdef",
+          branch: "feature/worktree",
+          isPrimary: false,
+        },
+        {
+          path: "/repo-detached\ncopy",
+          head: "0123456789abcdef",
+          branch: null,
+          isPrimary: false,
+        },
+      ]);
+    });
+
+    it.effect("lists primary, branched, and detached worktrees", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const featurePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "feature");
+        const detachedPath = pathService.join(yield* makeTmpDir("git-worktrees-"), "detached");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        yield* driver.createWorktree({
+          cwd,
+          path: featurePath,
+          refName: initialBranch,
+          newRefName: "feature/worktree",
+        });
+        yield* git(cwd, ["worktree", "add", "--detach", detachedPath, "HEAD"]);
+
+        const result = yield* driver.listWorktrees({ cwd });
+        assert.equal(result.isRepo, true);
+        assert.equal(
+          result.worktrees.every((worktree) => pathService.isAbsolute(worktree.path)),
+          true,
+        );
+        assert.equal(
+          result.worktrees.every((worktree) => /^[0-9a-f]{40,64}$/.test(worktree.head)),
+          true,
+        );
+        assert.deepStrictEqual(
+          result.worktrees
+            .map(({ branch, isPrimary }) => ({ branch, isPrimary }))
+            .toSorted((left, right) => String(left.branch).localeCompare(String(right.branch))),
+          [
+            { branch: null, isPrimary: false },
+            { branch: "feature/worktree", isPrimary: false },
+            { branch: initialBranch, isPrimary: true },
+          ].toSorted((left, right) => String(left.branch).localeCompare(String(right.branch))),
+        );
+      }),
+    );
+
     it.effect("creates and removes a worktree for a new refName", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

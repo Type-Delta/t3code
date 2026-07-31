@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   VcsCreateWorktreeInput,
+  VcsListWorktreesResult,
   GitPreparePullRequestThreadInput,
   GitRunStackedActionResult,
   GitRunStackedActionInput,
@@ -16,6 +17,7 @@ const decodePreparePullRequestThreadInput = Schema.decodeUnknownSync(
 const decodeRunStackedActionInput = Schema.decodeUnknownSync(GitRunStackedActionInput);
 const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
 const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
+const decodeListWorktreesResult = Schema.decodeUnknownSync(VcsListWorktreesResult);
 
 describe("VcsCreateWorktreeInput", () => {
   it("accepts omitted newRefName for existing-refName worktrees", () => {
@@ -39,6 +41,33 @@ describe("VcsCreateWorktreeInput", () => {
     });
 
     expect(parsed.baseRefName).toBe("origin/main");
+  });
+});
+
+describe("VcsListWorktreesResult", () => {
+  it("decodes primary, branched, and detached worktrees", () => {
+    const parsed = decodeListWorktreesResult({
+      isRepo: true,
+      worktrees: [
+        { path: "/repo", head: "0123456789abcdef", branch: "main", isPrimary: true },
+        {
+          path: "/repo/worktrees/feature",
+          head: "123456789abcdef0",
+          branch: "feature/worktree",
+          isPrimary: false,
+        },
+        {
+          path: "/repo/worktrees/detached",
+          head: "abcdef0123456789",
+          branch: null,
+          isPrimary: false,
+        },
+      ],
+    });
+
+    expect(parsed.worktrees[2]?.branch).toBeNull();
+    expect(parsed.worktrees[2]?.head).toBe("abcdef0123456789");
+    expect(parsed.worktrees[0]?.isPrimary).toBe(true);
   });
 });
 

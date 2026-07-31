@@ -2,6 +2,8 @@ import {
   type EnvironmentId,
   type VcsListRefsInput,
   type VcsListRefsResult,
+  type VcsListWorktreesInput,
+  type VcsListWorktreesResult,
   type VcsStatusResult,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -13,7 +15,11 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { Atom } from "effect/unstable/reactivity";
 
-import { createEnvironmentRpcCommand, createEnvironmentSubscriptionAtomFamily } from "./runtime.ts";
+import {
+  createEnvironmentRpcCommand,
+  createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentSubscriptionAtomFamily,
+} from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
@@ -142,6 +148,55 @@ export function cachedVcsRefsChanges(environmentId: EnvironmentId, input: VcsLis
   return followStreamInEnvironment(environmentId, Stream.unwrap(makeCachedVcsRefsChanges(input)));
 }
 
+export const makeVcsWorktreesChanges = Effect.fn("VcsWorktreesState.makeChanges")(function* (
+  input: VcsListWorktreesInput,
+) {
+  const supervisor = yield* EnvironmentSupervisor;
+  const environmentId = supervisor.target.environmentId;
+
+  return Stream.concat(
+    Stream.fromEffect(SubscriptionRef.get(supervisor.state)),
+    SubscriptionRef.changes(supervisor.state),
+  ).pipe(
+    Stream.map((connection) => (connection.phase === "connected" ? connection.generation : null)),
+    Stream.changes,
+    Stream.switchMap((generation) =>
+      generation === null
+        ? Stream.empty
+        : Stream.tick(VCS_REFS_REVALIDATE_INTERVAL).pipe(
+            Stream.mapEffect(
+              () =>
+                request(WS_METHODS.vcsListWorktrees, input).pipe(
+                  Effect.provideService(EnvironmentSupervisor, supervisor),
+                  Effect.map(Option.some),
+                  Effect.catch((error) =>
+                    Effect.logWarning("Could not refresh Git worktrees.").pipe(
+                      Effect.annotateLogs({
+                        environmentId,
+                        cwd: input.cwd,
+                        ...safeErrorLogAttributes(error),
+                      }),
+                      Effect.as(Option.none<VcsListWorktreesResult>()),
+                    ),
+                  ),
+                ),
+              { concurrency: 1 },
+            ),
+            Stream.filterMap((result) =>
+              Option.match(result, {
+                onNone: () => Result.failVoid,
+                onSome: Result.succeed,
+              }),
+            ),
+          ),
+    ),
+  );
+});
+
+export function vcsWorktreesChanges(environmentId: EnvironmentId, input: VcsListWorktreesInput) {
+  return followStreamInEnvironment(environmentId, Stream.unwrap(makeVcsWorktreesChanges(input)));
+}
+
 export function createVcsEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | EnvironmentCacheStore | R, E>,
 ) {
@@ -160,9 +215,30 @@ export function createVcsEnvironmentAtoms<R, E>(
     readonly environmentId: EnvironmentId;
     readonly input: VcsListRefsInput;
   }) => listRefsByEnvironment(target.environmentId)(JSON.stringify(target.input));
+  const listWorktreesByEnvironment = Atom.family((environmentId: EnvironmentId) =>
+    Atom.family((inputKey: string) => {
+      const input = JSON.parse(inputKey) as VcsListWorktreesInput;
+      return runtime
+        .atom(vcsWorktreesChanges(environmentId, input))
+        .pipe(
+          Atom.setIdleTTL(5 * 60_000),
+          Atom.withLabel(`environment-data:vcs:list-worktrees:${environmentId}:${inputKey}`),
+        );
+    }),
+  );
+  const listWorktrees = (target: {
+    readonly environmentId: EnvironmentId;
+    readonly input: VcsListWorktreesInput;
+  }) => listWorktreesByEnvironment(target.environmentId)(JSON.stringify(target.input));
+  const listWorktreesOnce = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:vcs:list-worktrees-once",
+    tag: WS_METHODS.vcsListWorktrees,
+  });
 
   return {
     listRefs,
+    listWorktrees,
+    listWorktreesOnce,
     status: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:vcs:status",
       subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.subscribeVcsStatus>) =>

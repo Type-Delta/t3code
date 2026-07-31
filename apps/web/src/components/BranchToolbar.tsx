@@ -9,25 +9,31 @@ import {
   HistoryIcon,
   MonitorIcon,
 } from "lucide-react";
-import { memo, useCallback, useMemo } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { useProject, useThread, useThreadShellsForProjectRefs } from "../state/entities";
+import { useWorktrees, useWorktreesOnce } from "../state/queries";
 import { useIsMobile } from "../hooks/useMediaQuery";
 import {
   type EnvMode,
   type EnvironmentOption,
+  resolveDraftWorktreeContext,
   resolveCurrentWorkspaceLabel,
   resolveEnvModeLabel,
   resolveEffectiveEnvMode,
+  resolveLockedWorktreeDisplay,
   resolveLockedWorkspaceLabel,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
+  resolveWorktreePickerModel,
+  type WorktreeRecord,
   shouldShowEnvironmentIndicator,
 } from "./BranchToolbar.logic";
 import { BranchToolbarBranchSelector } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
+import { BranchToolbarWorktreeSelector } from "./BranchToolbarWorktreeSelector";
 import { Button } from "./ui/button";
 import {
   Menu,
@@ -245,6 +251,33 @@ export const BranchToolbar = memo(function BranchToolbar({
       ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
       : null;
   const activeProject = useProject(activeProjectRef);
+  const canSelectExistingWorktree = draftThread !== null && serverThread === null && !envLocked;
+  const projectWorkspaceRoot = activeProject?.workspaceRoot ?? null;
+  const worktreeQuery = useWorktrees({
+    environmentId,
+    cwd: canSelectExistingWorktree ? projectWorkspaceRoot : null,
+  });
+  const lockedWorktreeQuery = useWorktreesOnce({
+    environmentId,
+    cwd: serverThread !== null ? projectWorkspaceRoot : null,
+  });
+  const draftWorktreesRef = useRef<{
+    workspaceRoot: string | null;
+    worktrees: ReadonlyArray<WorktreeRecord>;
+  }>({ workspaceRoot: null, worktrees: [] });
+  const initializedPrimaryWorktreeKeysRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (worktreeQuery.data !== null && projectWorkspaceRoot !== null) {
+      draftWorktreesRef.current = {
+        workspaceRoot: projectWorkspaceRoot,
+        worktrees: worktreeQuery.data.worktrees,
+      };
+    }
+  }, [projectWorkspaceRoot, worktreeQuery.data]);
+  const cachedDraftWorktrees =
+    draftWorktreesRef.current.workspaceRoot === projectWorkspaceRoot
+      ? draftWorktreesRef.current.worktrees
+      : [];
   const hasActiveThread = serverThread !== null || draftThread !== null;
   const activeWorktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
   const effectiveEnvMode =
@@ -255,6 +288,100 @@ export const BranchToolbar = memo(function BranchToolbar({
       draftThreadEnvMode: draftThread?.envMode,
     });
   const envModeLocked = envLocked || (serverThread !== null && activeWorktreePath !== null);
+  const worktreePickerModel = useMemo(
+    () =>
+      canSelectExistingWorktree
+        ? resolveWorktreePickerModel({
+            effectiveEnvMode,
+            activeWorktreePath,
+            worktrees: worktreeQuery.data?.worktrees ?? [],
+          })
+        : null,
+    [
+      activeWorktreePath,
+      canSelectExistingWorktree,
+      effectiveEnvMode,
+      worktreeQuery.data?.worktrees,
+    ],
+  );
+  const lockedWorktreeDisplay = useMemo(
+    () =>
+      serverThread === null || projectWorkspaceRoot === null
+        ? null
+        : resolveLockedWorktreeDisplay({
+            activeWorktreePath,
+            projectWorkspaceRoot,
+            branch: serverThread.branch,
+            worktrees: lockedWorktreeQuery.data?.worktrees ?? cachedDraftWorktrees,
+          }),
+    [
+      activeWorktreePath,
+      cachedDraftWorktrees,
+      lockedWorktreeQuery.data?.worktrees,
+      projectWorkspaceRoot,
+      serverThread,
+    ],
+  );
+  const worktreeControlModel = serverThread === null ? worktreePickerModel : null;
+  const onWorktreeChange = useCallback(
+    (worktree: NonNullable<typeof worktreePickerModel>["options"][number]) => {
+      if (!activeProjectRef || !canSelectExistingWorktree || !projectWorkspaceRoot) return;
+      setDraftThreadContext(draftId ?? threadRef, {
+        ...resolveDraftWorktreeContext(worktree, projectWorkspaceRoot),
+        projectRef: activeProjectRef,
+      });
+      onComposerFocusRequest?.();
+    },
+    [
+      activeProjectRef,
+      canSelectExistingWorktree,
+      draftId,
+      onComposerFocusRequest,
+      projectWorkspaceRoot,
+      setDraftThreadContext,
+      threadRef,
+    ],
+  );
+  useEffect(() => {
+    if (
+      !canSelectExistingWorktree ||
+      !activeProjectRef ||
+      !projectWorkspaceRoot ||
+      activeWorktreePath !== null
+    ) {
+      return;
+    }
+    const initializationKey = JSON.stringify([draftId ?? threadRef, projectWorkspaceRoot]);
+    if (initializedPrimaryWorktreeKeysRef.current.has(initializationKey)) return;
+    const primaryWorktree = worktreePickerModel?.options.find((worktree) => worktree.isPrimary);
+    if (!primaryWorktree) return;
+    initializedPrimaryWorktreeKeysRef.current.add(initializationKey);
+    if (draftThread?.branch !== null) return;
+    const context = resolveDraftWorktreeContext(primaryWorktree, projectWorkspaceRoot);
+    if (
+      draftThread?.branch === context.branch &&
+      draftThread?.worktreePath === context.worktreePath &&
+      draftThread.envMode === context.envMode
+    ) {
+      return;
+    }
+    setDraftThreadContext(draftId ?? threadRef, {
+      ...context,
+      projectRef: activeProjectRef,
+    });
+  }, [
+    activeProjectRef,
+    activeWorktreePath,
+    canSelectExistingWorktree,
+    draftId,
+    draftThread?.branch,
+    draftThread?.envMode,
+    draftThread?.worktreePath,
+    projectWorkspaceRoot,
+    setDraftThreadContext,
+    threadRef,
+    worktreePickerModel,
+  ]);
 
   // "Previous worktree" hops a draft into the most recently active worktree
   // of this project — the "keep going where I just was" follow-up flow. Only
@@ -306,20 +433,31 @@ export const BranchToolbar = memo(function BranchToolbar({
   return (
     <div className="chat-composer-context-strip -mt-4 mx-auto flex w-[calc(100%-2.75rem)] max-w-[calc(48rem-2.75rem)] items-center gap-2 px-1 pt-5 pb-1">
       {isMobile ? (
-        <MobileRunContextSelector
-          envLocked={envLocked}
-          envModeLocked={envModeLocked}
-          environmentId={environmentId}
-          availableEnvironments={availableEnvironments}
-          showEnvironmentPicker={showEnvironmentPicker}
-          showEnvironmentIndicator={showEnvironmentIndicator}
-          onEnvironmentChange={onEnvironmentChange}
-          effectiveEnvMode={effectiveEnvMode}
-          activeWorktreePath={activeWorktreePath}
-          onEnvModeChange={onEnvModeChange}
-          previousWorktreeLabel={previousWorktreeLabel}
-          onUsePreviousWorktree={onUsePreviousWorktree}
-        />
+        <>
+          <MobileRunContextSelector
+            envLocked={envLocked}
+            envModeLocked={envModeLocked}
+            environmentId={environmentId}
+            availableEnvironments={availableEnvironments}
+            showEnvironmentPicker={showEnvironmentPicker}
+            showEnvironmentIndicator={showEnvironmentIndicator}
+            onEnvironmentChange={onEnvironmentChange}
+            effectiveEnvMode={effectiveEnvMode}
+            activeWorktreePath={activeWorktreePath}
+            onEnvModeChange={onEnvModeChange}
+            previousWorktreeLabel={previousWorktreeLabel}
+            onUsePreviousWorktree={onUsePreviousWorktree}
+          />
+          {worktreeControlModel || lockedWorktreeDisplay ? (
+            <BranchToolbarWorktreeSelector
+              className="min-w-0 max-w-[35%] flex-1 justify-start rounded-md px-[calc(--spacing(2)-1px)] text-sm sm:text-sm md:hidden"
+              model={worktreeControlModel}
+              locked={serverThread !== null}
+              lockedDisplay={lockedWorktreeDisplay}
+              onWorktreeChange={onWorktreeChange}
+            />
+          ) : null}
+        </>
       ) : (
         <div className="flex min-w-0 shrink-0 items-center gap-1">
           {showEnvironmentIndicator && availableEnvironments && (
@@ -341,6 +479,14 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             onUsePreviousWorktree={onUsePreviousWorktree}
           />
+          {worktreeControlModel || lockedWorktreeDisplay ? (
+            <BranchToolbarWorktreeSelector
+              model={worktreeControlModel}
+              locked={serverThread !== null}
+              lockedDisplay={lockedWorktreeDisplay}
+              onWorktreeChange={onWorktreeChange}
+            />
+          ) : null}
         </div>
       )}
 

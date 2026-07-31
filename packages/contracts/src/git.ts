@@ -83,7 +83,15 @@ export const VcsRef = Schema.Struct({
 });
 export type VcsRef = typeof VcsRef.Type;
 
-const VcsWorktree = Schema.Struct({
+export const VcsWorktree = Schema.Struct({
+  path: TrimmedNonEmptyStringSchema,
+  head: TrimmedNonEmptyStringSchema,
+  branch: TrimmedNonEmptyStringSchema.pipe(Schema.NullOr),
+  isPrimary: Schema.Boolean,
+});
+export type VcsWorktree = typeof VcsWorktree.Type;
+
+const VcsCreatedWorktree = Schema.Struct({
   path: TrimmedNonEmptyStringSchema,
   refName: TrimmedNonEmptyStringSchema,
 });
@@ -132,6 +140,11 @@ export const VcsListRefsInput = Schema.Struct({
   ),
 });
 export type VcsListRefsInput = typeof VcsListRefsInput.Type;
+
+export const VcsListWorktreesInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+});
+export type VcsListWorktreesInput = typeof VcsListWorktreesInput.Type;
 
 export const VcsCreateWorktreeInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
@@ -262,9 +275,15 @@ export const VcsListRefsResult = Schema.Struct({
 export type VcsListRefsResult = typeof VcsListRefsResult.Type;
 
 export const VcsCreateWorktreeResult = Schema.Struct({
-  worktree: VcsWorktree,
+  worktree: VcsCreatedWorktree,
 });
 export type VcsCreateWorktreeResult = typeof VcsCreateWorktreeResult.Type;
+
+export const VcsListWorktreesResult = Schema.Struct({
+  worktrees: Schema.Array(VcsWorktree),
+  isRepo: Schema.Boolean,
+});
+export type VcsListWorktreesResult = typeof VcsListWorktreesResult.Type;
 
 export const GitResolvePullRequestResult = Schema.Struct({
   pullRequest: GitResolvedPullRequest,

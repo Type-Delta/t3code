@@ -16,6 +16,114 @@ export interface EnvironmentOption {
 export const EnvMode = Schema.Literals(["local", "worktree"]);
 export type EnvMode = typeof EnvMode.Type;
 
+export interface WorktreeRecord {
+  readonly path: string;
+  readonly head: string;
+  readonly branch: string | null;
+  readonly isPrimary: boolean;
+}
+
+export interface WorktreePickerOption extends WorktreeRecord {
+  readonly label: string;
+}
+
+export interface WorktreeDisplay {
+  readonly label: string;
+  readonly isPrimary: boolean;
+}
+
+export interface WorktreePickerModel {
+  readonly value: string;
+  readonly options: ReadonlyArray<WorktreePickerOption>;
+}
+
+function normalizeWorktreePathForComparison(value: string): string {
+  const normalized = value.replaceAll("\\", "/").replace(/\/+$/, "");
+  return /^(?:[a-z]:\/|\/\/)/i.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function resolveWorktreeDisplay(worktree: WorktreeRecord): WorktreeDisplay {
+  return {
+    isPrimary: worktree.isPrimary,
+    label: worktree.isPrimary
+      ? "Main"
+      : (worktree.branch ?? `${worktree.head.slice(0, 7)} [detached]`),
+  };
+}
+
+export function resolveWorktreePickerModel(input: {
+  effectiveEnvMode: EnvMode;
+  activeWorktreePath: string | null;
+  worktrees: ReadonlyArray<WorktreeRecord>;
+}): WorktreePickerModel | null {
+  if (input.effectiveEnvMode !== "local" || input.worktrees.length === 0) {
+    return null;
+  }
+  const options = [...input.worktrees]
+    .toSorted((left, right) => Number(right.isPrimary) - Number(left.isPrimary))
+    .map((worktree) => ({
+      ...worktree,
+      ...resolveWorktreeDisplay(worktree),
+    }));
+  const primary = options.find((worktree) => worktree.isPrimary) ?? options[0]!;
+  const activeWorktree = input.activeWorktreePath
+    ? options.find(
+        (worktree) =>
+          normalizeWorktreePathForComparison(worktree.path) ===
+          normalizeWorktreePathForComparison(input.activeWorktreePath!),
+      )
+    : null;
+  return {
+    value: activeWorktree?.path ?? input.activeWorktreePath ?? primary.path,
+    options,
+  };
+}
+
+/**
+ * Resolves the compact, immutable worktree label for a materialized thread.
+ * The thread records its checkout path and branch, while the one-shot Git
+ * query provides the detached HEAD hash when one is needed.
+ */
+export function resolveLockedWorktreeDisplay(input: {
+  activeWorktreePath: string | null;
+  projectWorkspaceRoot: string;
+  branch: string | null;
+  worktrees: ReadonlyArray<WorktreeRecord>;
+}): WorktreeDisplay {
+  const activeWorktreePath = input.activeWorktreePath ?? input.projectWorkspaceRoot;
+  const worktree = input.worktrees.find(
+    (candidate) =>
+      normalizeWorktreePathForComparison(candidate.path) ===
+      normalizeWorktreePathForComparison(activeWorktreePath),
+  );
+  if (worktree) {
+    return resolveWorktreeDisplay(worktree);
+  }
+  if (input.activeWorktreePath === null) {
+    return { isPrimary: false, label: input.branch ?? "Main" };
+  }
+  return { isPrimary: false, label: input.branch ?? "[detached]" };
+}
+
+export function resolveDraftWorktreeContext(
+  worktree: WorktreeRecord,
+  projectWorkspaceRoot: string,
+): {
+  branch: string | null;
+  worktreePath: string | null;
+  envMode: EnvMode;
+} {
+  const isPrimaryProjectCheckout =
+    worktree.isPrimary &&
+    normalizeWorktreePathForComparison(worktree.path) ===
+      normalizeWorktreePathForComparison(projectWorkspaceRoot);
+  return {
+    branch: worktree.branch,
+    worktreePath: isPrimaryProjectCheckout ? null : worktree.path,
+    envMode: isPrimaryProjectCheckout ? "local" : "worktree",
+  };
+}
+
 const GENERIC_LOCAL_ENVIRONMENT_LABELS = new Set(["local", "local environment"]);
 
 function normalizeDisplayLabel(value: string | null | undefined): string | null {

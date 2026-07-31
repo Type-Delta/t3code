@@ -24,6 +24,7 @@ import {
   type ReviewDiffPreviewInput,
   type ReviewDiffPreviewSource,
   type VcsRef,
+  type VcsWorktree,
 } from "@t3tools/contracts";
 import { dedupeRemoteBranchesWithLocalMatches, normalizeGitRemoteUrl } from "@t3tools/shared/git";
 import { compactTraceAttributes } from "@t3tools/shared/observability";
@@ -174,6 +175,35 @@ function parseBranchLine(line: string): { name: string; current: boolean } | nul
     name,
     current: trimmed.startsWith("* "),
   };
+}
+
+export function parseGitWorktreeList(stdout: string): ReadonlyArray<VcsWorktree> {
+  let isPrimary = true;
+  return stdout.split("\0\0").flatMap((record) => {
+    const lines = record.split("\0");
+    const worktreeLine = lines.find((line) => line.startsWith("worktree "));
+    if (!worktreeLine) {
+      return [];
+    }
+
+    const path = worktreeLine.slice("worktree ".length);
+    if (path.length === 0) {
+      return [];
+    }
+    const headLine = lines.find((line) => line.startsWith("HEAD "));
+    if (!headLine) {
+      return [];
+    }
+    const branchLine = lines.find((line) => line.startsWith("branch refs/heads/"));
+    const worktree: VcsWorktree = {
+      path,
+      head: headLine.slice("HEAD ".length),
+      branch: branchLine ? branchLine.slice("branch refs/heads/".length) : null,
+      isPrimary,
+    };
+    isPrimary = false;
+    return [worktree];
+  });
 }
 
 function filterBranchesForListQuery(
@@ -1987,6 +2017,64 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       Effect.map((trimmed) => (trimmed.length > 0 ? trimmed : null)),
     );
 
+  const listWorktrees: GitVcsDriver.GitVcsDriver["Service"]["listWorktrees"] = Effect.fn(
+    "listWorktrees",
+  )(function* (input) {
+    const result = yield* executeGitWithStableDiagnostics(
+      "GitVcsDriver.listWorktrees",
+      input.cwd,
+      ["worktree", "list", "--porcelain", "-z"],
+      {
+        timeoutMs: 5_000,
+        allowNonZeroExit: true,
+      },
+    ).pipe(
+      Effect.catchTags({
+        GitCommandError: (error) =>
+          isMissingGitCwdError(error)
+            ? Effect.succeed({
+                exitCode: ChildProcessSpawner.ExitCode(128),
+                stdout: "",
+                stderr: "fatal: not a git repository",
+                stdoutTruncated: false,
+                stderrTruncated: false,
+              })
+            : Effect.fail(error),
+      }),
+    );
+    if (result.exitCode !== 0) {
+      const stderr = result.stderr.trim();
+      if (isNonRepositoryGitStderr(stderr)) {
+        return { worktrees: [], isRepo: false };
+      }
+      return yield* new GitCommandError({
+        ...gitCommandContext({
+          operation: "GitVcsDriver.listWorktrees",
+          cwd: input.cwd,
+          args: ["worktree", "list", "--porcelain", "-z"],
+        }),
+        detail: "Git worktree listing failed.",
+        exitCode: result.exitCode,
+        stdoutLength: result.stdout.length,
+        stderrLength: result.stderr.length,
+      });
+    }
+
+    const candidates = parseGitWorktreeList(result.stdout).filter((worktree) =>
+      path.isAbsolute(worktree.path),
+    );
+    const worktrees = yield* Effect.forEach(candidates, (worktree) =>
+      fileSystem.stat(worktree.path).pipe(
+        Effect.as(worktree),
+        Effect.orElseSucceed(() => null),
+      ),
+    );
+    return {
+      worktrees: worktrees.flatMap((worktree) => (worktree ? [worktree] : [])),
+      isRepo: true,
+    };
+  });
+
   const listRefs: GitVcsDriver.GitVcsDriver["Service"]["listRefs"] = Effect.fn("listRefs")(
     function* (input) {
       const branchRecencyPromise = readBranchRecency(input.cwd).pipe(
@@ -2562,6 +2650,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     getReviewDiffPreview,
     readConfigValue,
     listRefs,
+    listWorktrees,
     createWorktree,
     fetchPullRequestBranch,
     ensureRemote,
