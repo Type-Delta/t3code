@@ -76,15 +76,15 @@ SQLite persists capture jobs, immutable checkpoint entries, timeline generations
 
 Fork migrations `033`–`036` establish this durable checkpoint state (`033_CheckpointDurableState`, `034_CheckpointLegacyMigration`, `035_CheckpointCaptureProviderMetadata`, and `036_CheckpointNavigationMode`). The merged schema then applies upstream lifecycle migrations `037_ProjectionThreadsSettled` and `038_ProjectionThreadsSnoozed`; their ordering is preserved for existing installations, but the upstream lifecycle feature is not itself logged as a fork divergence.
 
-Terminal provider events release the mutation lease for their exact turn before local VCS status refresh or post-turn capture. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
+Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
 **Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{033_CheckpointDurableState,034_CheckpointLegacyMigration,035_CheckpointCaptureProviderMetadata,036_CheckpointNavigationMode}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
 
-**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including deterministic terminal lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
+**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-07-30
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -122,15 +122,15 @@ App-server errors are classified by scope: non-retryable turn errors remain visi
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 
-Turn diff summaries are published only for successfully captured, loadable sidecar checkpoints. Provider-reported `file_change` items are not synthesized into checkpoint references, and the client hides legacy non-ready rows that cannot load a diff.
+Turn diff summaries are published only for successfully captured, loadable sidecar checkpoints. Each summary and DiffPanel query compares the completed full turn against the immediately preceding turn boundary; an empty turn remains loadable but produces no diff card. Provider-reported `file_change` items are not synthesized into checkpoint references, and the client hides legacy non-ready rows that cannot load a diff.
 
 Diff queries use the active checkpoint timeline generation and the stable pre-turn sidecar identity. For an older thread with no captured baseline, the remaining compatibility fallback compares against repository `HEAD`. This absorbs only the surviving baseline-fallback behavior from former DL011; provider-derived summary fallback is not retained.
 
 **Implementation evidence:** `apps/server/src/checkpointing/{CheckpointIds,CheckpointDiffQuery,CheckpointStore}.ts`, `apps/server/src/orchestration/Layers/{CheckpointReactor,ProjectionSnapshotQuery}.ts`, `apps/server/src/git/Utils.ts`, and `apps/web/src/hooks/useTurnDiffSummaries.ts` with their tests.
 
-**Recorded validation:** focused checkpoint query, nested-worktree, projection, and web-summary tests; multi-turn orchestration diff integration; `vp check`; and `vp run typecheck`.
+**Recorded validation:** focused checkpoint query, nested-worktree, projection, and web-summary tests; rapid multi-turn orchestration integration covering pre-thread changes, consecutive edit turns, a no-edit turn, durable capture, projection summaries, and DiffPanel queries; `vp check`; and `vp run typecheck`.
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-07-30
 
 ### DL015 — Live project-scoped working tree diffs
 

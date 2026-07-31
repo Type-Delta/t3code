@@ -30,7 +30,6 @@ import {
   type OrchestrationIntegrationHarness,
 } from "./OrchestrationEngineHarness.integration.ts";
 import { checkpointRefForThreadTurn } from "../src/checkpointing/Utils.ts";
-import { checkpointSnapshotIdFor } from "../src/orchestration/Layers/CheckpointReactor.ts";
 import type {
   CheckpointDiffFinalizedReceipt,
   TurnProcessingQuiescedReceipt,
@@ -384,182 +383,258 @@ it.live.skipIf(!process.env.CODEX_BINARY_PATH)(
     ),
 );
 
-it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
-  withHarness((harness) =>
-    Effect.gen(function* () {
-      yield* seedProjectAndThread(harness);
-      yield* harness.waitForReceipt(
-        (receipt) =>
-          receipt.type === "checkpoint.baseline.captured" && receipt.threadId === THREAD_ID,
-      );
+it.live(
+  "keeps rapid full-turn diffs isolated from pre-thread and prior-turn changes",
+  () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        NodeFS.writeFileSync(
+          NodePath.join(harness.workspaceDir, "before-thread.txt"),
+          "existing\n",
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(harness.workspaceDir, "baseline-load.bin"),
+          Buffer.alloc(64 * 1024, 1),
+        );
+        yield* seedProjectAndThread(harness);
 
-      yield* harness.adapterHarness!.queueTurnResponseForNextSession({
-        events: [
-          {
-            type: "turn.started",
-            ...runtimeBase("evt-multi-1", "2026-02-24T10:01:00.000Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-          },
-          {
-            type: "tool.started",
-            ...runtimeBase("evt-multi-2", "2026-02-24T10:01:00.100Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-            toolKind: "command",
-            title: "Edit file",
-            detail: "README.md",
-          },
-          {
-            type: "tool.completed",
-            ...runtimeBase("evt-multi-3", "2026-02-24T10:01:00.200Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-            toolKind: "command",
-            title: "Edit file",
-            detail: "README.md",
-          },
-          {
-            type: "message.delta",
-            ...runtimeBase("evt-multi-4", "2026-02-24T10:01:00.300Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-            delta: "Updated README to v2.\n",
-          },
-          {
-            type: "turn.completed",
-            ...runtimeBase("evt-multi-5", "2026-02-24T10:01:00.400Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-            status: "completed",
-          },
-        ],
-        mutateWorkspace: ({ cwd }) =>
-          Effect.sync(() => {
-            NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v2\n", "utf8");
-          }),
-      });
+        yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+          events: [
+            {
+              type: "turn.started",
+              ...runtimeBase("evt-multi-1", "2026-02-24T10:01:00.000Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+            },
+            {
+              type: "tool.started",
+              ...runtimeBase("evt-multi-2", "2026-02-24T10:01:00.100Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              toolKind: "command",
+              title: "Edit file",
+              detail: "README.md",
+            },
+            {
+              type: "tool.completed",
+              ...runtimeBase("evt-multi-3", "2026-02-24T10:01:00.200Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              toolKind: "command",
+              title: "Edit file",
+              detail: "README.md",
+            },
+            {
+              type: "message.delta",
+              ...runtimeBase("evt-multi-4", "2026-02-24T10:01:00.300Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              delta: "Updated README to v2.\n",
+            },
+            {
+              type: "turn.completed",
+              ...runtimeBase("evt-multi-5", "2026-02-24T10:01:00.400Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              status: "completed",
+            },
+          ],
+          mutateWorkspace: ({ cwd }) =>
+            Effect.sync(() => {
+              NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v2\n", "utf8");
+              NodeFS.writeFileSync(NodePath.join(cwd, "turn-one.txt"), "one\n", "utf8");
+            }),
+        });
 
-      yield* startTurn({
-        harness,
-        commandId: "cmd-turn-start-multi-1",
-        messageId: "msg-user-multi-1",
-        text: "Make first edit",
-      });
-      const firstReceipt = yield* harness.waitForReceipt(
-        (receipt): receipt is CheckpointDiffFinalizedReceipt =>
-          receipt.type === "checkpoint.diff.finalized" &&
-          receipt.threadId === THREAD_ID &&
-          receipt.checkpointTurnCount === 1,
-      );
+        yield* startTurn({
+          harness,
+          commandId: "cmd-turn-start-multi-1",
+          messageId: "msg-user-multi-1",
+          text: "Make first edit",
+        });
+        yield* harness.waitForThread(
+          THREAD_ID,
+          (entry) => entry.latestTurn?.turnId === "turn-1" && entry.session?.status === "ready",
+        );
 
-      yield* harness.waitForThread(
-        THREAD_ID,
-        (entry) => entry.checkpoints.length === 1 && entry.session?.threadId === "thread-1",
-      );
+        yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+          events: [
+            {
+              type: "turn.started",
+              ...runtimeBase("evt-multi-6", "2026-02-24T10:02:00.000Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+            },
+            {
+              type: "tool.started",
+              ...runtimeBase("evt-multi-7", "2026-02-24T10:02:00.100Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              toolKind: "command",
+              title: "Edit files",
+              detail: "README.md and turn-two.txt",
+            },
+            {
+              type: "tool.completed",
+              ...runtimeBase("evt-multi-8", "2026-02-24T10:02:00.200Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              toolKind: "command",
+              title: "Edit files",
+              detail: "README.md and turn-two.txt",
+            },
+            {
+              type: "message.delta",
+              ...runtimeBase("evt-multi-9", "2026-02-24T10:02:00.300Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              delta: "Updated README to v3.\n",
+            },
+            {
+              type: "turn.completed",
+              ...runtimeBase("evt-multi-10", "2026-02-24T10:02:00.400Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              status: "completed",
+            },
+          ],
+          mutateWorkspace: ({ cwd }) =>
+            Effect.sync(() => {
+              NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v3\n", "utf8");
+              NodeFS.writeFileSync(NodePath.join(cwd, "turn-two.txt"), "two\n", "utf8");
+            }),
+        });
 
-      yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
-        events: [
-          {
-            type: "turn.started",
-            ...runtimeBase("evt-multi-6", "2026-02-24T10:02:00.000Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-          },
-          {
-            type: "message.delta",
-            ...runtimeBase("evt-multi-7", "2026-02-24T10:02:00.100Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-            delta: "Updated README to v3.\n",
-          },
-          {
-            type: "turn.completed",
-            ...runtimeBase("evt-multi-8", "2026-02-24T10:02:00.200Z"),
-            threadId: THREAD_ID,
-            turnId: FIXTURE_TURN_ID,
-            status: "completed",
-          },
-        ],
-        mutateWorkspace: ({ cwd }) =>
-          Effect.sync(() => {
-            NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v3\n", "utf8");
-          }),
-      });
+        yield* startTurn({
+          harness,
+          commandId: "cmd-turn-start-multi-2",
+          messageId: "msg-user-multi-2",
+          text: "Make second edit",
+        });
+        yield* harness.waitForThread(
+          THREAD_ID,
+          (entry) => entry.latestTurn?.turnId === "turn-2" && entry.session?.status === "ready",
+        );
 
-      yield* startTurn({
-        harness,
-        commandId: "cmd-turn-start-multi-2",
-        messageId: "msg-user-multi-2",
-        text: "Make second edit",
-      });
-      const secondReceipt = yield* harness.waitForReceipt(
-        (receipt): receipt is CheckpointDiffFinalizedReceipt =>
-          receipt.type === "checkpoint.diff.finalized" &&
-          receipt.threadId === THREAD_ID &&
-          receipt.checkpointTurnCount === 2,
-      );
-      if (secondReceipt.type !== "checkpoint.diff.finalized") {
-        throw new Error("Expected checkpoint.diff.finalized receipt.");
-      }
-      assert.equal(secondReceipt.status, "ready");
-      yield* harness.waitForReceipt(
-        (receipt): receipt is TurnProcessingQuiescedReceipt =>
-          receipt.type === "turn.processing.quiesced" &&
-          receipt.threadId === THREAD_ID &&
-          receipt.checkpointTurnCount === 2,
-      );
+        yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+          events: [
+            {
+              type: "turn.started",
+              ...runtimeBase("evt-multi-11", "2026-02-24T10:03:00.000Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+            },
+            {
+              type: "message.delta",
+              ...runtimeBase("evt-multi-12", "2026-02-24T10:03:00.100Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              delta: "No files needed changes.\n",
+            },
+            {
+              type: "turn.completed",
+              ...runtimeBase("evt-multi-13", "2026-02-24T10:03:00.200Z"),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+              status: "completed",
+            },
+          ],
+        });
 
-      const secondTurnThread = yield* harness.waitForThread(
-        THREAD_ID,
-        (entry) =>
-          entry.latestTurn?.turnId === "turn-2" &&
-          entry.checkpoints.length === 2 &&
-          entry.checkpoints.some((checkpoint) => checkpoint.checkpointTurnCount === 2),
-      );
-      const secondCheckpoint = secondTurnThread.checkpoints.find(
-        (checkpoint) => checkpoint.checkpointTurnCount === 2,
-      );
-      assert.equal(
-        secondCheckpoint?.files.some((file) => file.path === "README.md"),
-        true,
-      );
+        yield* startTurn({
+          harness,
+          commandId: "cmd-turn-start-multi-3",
+          messageId: "msg-user-multi-3",
+          text: "Inspect without editing",
+        });
 
-      const checkpointRows = yield* harness.checkpointRepository.listByThreadId({
-        threadId: THREAD_ID,
-      });
-      assert.deepEqual(
-        checkpointRows.map((row) => row.checkpointTurnCount),
-        [1, 2],
-      );
+        const receipts = yield* Effect.forEach([1, 2, 3], (checkpointTurnCount) =>
+          harness.waitForReceipt(
+            (receipt): receipt is CheckpointDiffFinalizedReceipt =>
+              receipt.type === "checkpoint.diff.finalized" &&
+              receipt.threadId === THREAD_ID &&
+              receipt.checkpointTurnCount === checkpointTurnCount,
+          ),
+        );
+        for (const receipt of receipts) {
+          if (receipt.type !== "checkpoint.diff.finalized") {
+            throw new Error("Expected checkpoint.diff.finalized receipt.");
+          }
+          assert.equal(receipt.status, "ready");
+        }
+        yield* harness.waitForReceipt(
+          (receipt): receipt is CheckpointDiffFinalizedReceipt =>
+            receipt.type === "checkpoint.diff.finalized" &&
+            receipt.threadId === THREAD_ID &&
+            receipt.checkpointTurnCount === 3,
+        );
+        yield* harness.waitForReceipt(
+          (receipt): receipt is TurnProcessingQuiescedReceipt =>
+            receipt.type === "turn.processing.quiesced" &&
+            receipt.threadId === THREAD_ID &&
+            receipt.checkpointTurnCount === 3,
+        );
 
-      const incrementalDiff = yield* harness.checkpointStore.diffCheckpoints({
-        cwd: harness.workspaceDir,
-        fromCheckpointRef:
-          firstReceipt.type === "checkpoint.diff.finalized"
-            ? firstReceipt.checkpointRef
-            : checkpointRefForThreadTurn(THREAD_ID, 1),
-        toCheckpointRef: secondReceipt.checkpointRef,
-        fallbackFromToHead: false,
-        ignoreWhitespace: false,
-      });
-      assert.equal(incrementalDiff.includes("README.md"), true);
+        const thread = yield* harness.waitForThread(
+          THREAD_ID,
+          (entry) =>
+            entry.latestTurn?.turnId === "turn-3" &&
+            entry.checkpoints.length === 3 &&
+            entry.checkpoints.every((checkpoint) => checkpoint.status === "ready"),
+        );
+        assert.deepEqual(
+          thread.checkpoints.map((checkpoint) => ({
+            turn: checkpoint.checkpointTurnCount,
+            files: checkpoint.files.map((file) => file.path),
+          })),
+          [
+            { turn: 1, files: ["README.md", "turn-one.txt"] },
+            { turn: 2, files: ["README.md", "turn-two.txt"] },
+            { turn: 3, files: [] },
+          ],
+        );
 
-      const fullDiff = yield* harness.checkpointStore.diffCheckpoints({
-        cwd: harness.workspaceDir,
-        fromCheckpointRef: yield* harness.checkpointStore.allocateCheckpointRef({
-          cwd: harness.workspaceDir,
-          snapshotId: checkpointSnapshotIdFor(THREAD_ID, 0, 0),
-        }),
-        toCheckpointRef: secondReceipt.checkpointRef,
-        fallbackFromToHead: false,
-        ignoreWhitespace: false,
-      });
-      assert.equal(fullDiff.includes("README.md"), true);
+        const checkpointRows = yield* harness.checkpointRepository.listByThreadId({
+          threadId: THREAD_ID,
+        });
+        assert.deepEqual(
+          checkpointRows.map((row) => row.checkpointTurnCount),
+          [1, 2, 3],
+        );
 
-      assert.equal(gitRefExists(harness.workspaceDir, String(secondReceipt.checkpointRef)), false);
-    }),
-  ),
+        const firstTurnDiff = yield* harness.checkpointDiffQuery.getTurnDiff({
+          threadId: THREAD_ID,
+          fromTurnCount: 0,
+          toTurnCount: 1,
+          ignoreWhitespace: false,
+        });
+        assert.equal(firstTurnDiff.diff.includes("README.md"), true);
+        assert.equal(firstTurnDiff.diff.includes("turn-one.txt"), true);
+        assert.equal(firstTurnDiff.diff.includes("before-thread.txt"), false);
+        assert.equal(firstTurnDiff.diff.includes("baseline-load.bin"), false);
+
+        const secondTurnDiff = yield* harness.checkpointDiffQuery.getTurnDiff({
+          threadId: THREAD_ID,
+          fromTurnCount: 1,
+          toTurnCount: 2,
+          ignoreWhitespace: false,
+        });
+        assert.equal(secondTurnDiff.diff.includes("-v2"), true);
+        assert.equal(secondTurnDiff.diff.includes("+v3"), true);
+        assert.equal(secondTurnDiff.diff.includes("turn-two.txt"), true);
+        assert.equal(secondTurnDiff.diff.includes("turn-one.txt"), false);
+        assert.equal(secondTurnDiff.diff.includes("before-thread.txt"), false);
+
+        const noEditTurnDiff = yield* harness.checkpointDiffQuery.getTurnDiff({
+          threadId: THREAD_ID,
+          fromTurnCount: 2,
+          toTurnCount: 3,
+          ignoreWhitespace: false,
+        });
+        assert.equal(noEditTurnDiff.diff, "");
+      }),
+    ),
+  300_000,
 );
 
 it.live("tracks approval requests and resolves pending approvals on user response", () =>

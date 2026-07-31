@@ -86,10 +86,19 @@ export interface WorkspaceMutationCoordinatorShape {
   ) => Effect.Effect<boolean>;
   /** Releases only the lease owned by the matching provider turn. */
   readonly completeProviderMutation: (threadId: string, turnId: string) => Effect.Effect<boolean>;
+  /** Ends the workspace mutation but keeps the next provider turn behind a capture barrier. */
+  readonly completeProviderMutationForCapture: (
+    threadId: string,
+    turnId: string,
+  ) => Effect.Effect<boolean>;
+  /** Releases a capture barrier after the post-turn checkpoint has finalized. */
+  readonly releaseProviderMutation: (threadId: string) => Effect.Effect<void>;
   /** Releases an unbound/prepared lease when dispatch fails or shuts down. */
   readonly cancelProviderMutation: (threadId: string) => Effect.Effect<boolean>;
   /** Waits until the current provider lease has fully released its mutation ticket. */
   readonly awaitProviderMutationRelease: (threadId: string) => Effect.Effect<void>;
+  /** Reports that mutation ended and only post-turn checkpoint finalization remains. */
+  readonly isProviderCapturePending: (threadId: string) => Effect.Effect<boolean>;
   /**
    * Registers a runtime-only mutation without exposing an acquired ticket
    * before it is observable by completion handling.
@@ -124,6 +133,7 @@ const make = Effect.gen(function* () {
   const lock = yield* Semaphore.make(1);
   const mutationGates = new Map<string, Semaphore.Semaphore>();
   const mutationIdleSignals = new Map<string, Deferred.Deferred<void>>();
+  const captureIdleSignals = new Map<string, Deferred.Deferred<void>>();
   const providerMutations = new Map<string, ProviderMutation>();
   const providerTerminalTurns = new Map<string, Set<string>>();
   const providerReleaseSignals = new Map<string, Deferred.Deferred<void>>();
@@ -174,43 +184,64 @@ const make = Effect.gen(function* () {
       );
 
   const beginCapture: WorkspaceMutationCoordinatorShape["beginCapture"] = (worktreeKey) =>
-    locked(
-      Effect.gen(function* () {
-        const current = yield* Ref.get(state);
-        const ticketId = current.nextTicketId;
-        const controller = new AbortController();
-        if ((current.mutationDepths.get(worktreeKey) ?? 0) > 0) {
-          controller.abort("workspace-mutation-active");
-        }
-        const captures = copyMap(current.captures);
-        captures.set(ticketId, { worktreeKey, controller });
-        const generation = current.generations.get(worktreeKey) ?? 0;
-        yield* Ref.set(state, {
-          ...current,
-          nextTicketId: ticketId + 1,
-          captures,
-        });
-        return { ticketId, worktreeKey, generation, signal: controller.signal };
-      }),
+    Effect.flatMap(getMutationGate(worktreeKey), (gate) =>
+      gate.withPermits(1)(
+        Effect.gen(function* () {
+          const mutationIdle = yield* locked(
+            Effect.sync(() => mutationIdleSignals.get(worktreeKey)),
+          );
+          if (mutationIdle) yield* Deferred.await(mutationIdle);
+          return yield* locked(
+            Effect.gen(function* () {
+              const current = yield* Ref.get(state);
+              const ticketId = current.nextTicketId;
+              const controller = new AbortController();
+              const captures = copyMap(current.captures);
+              captures.set(ticketId, { worktreeKey, controller });
+              const generation = current.generations.get(worktreeKey) ?? 0;
+              if (!captureIdleSignals.has(worktreeKey)) {
+                captureIdleSignals.set(worktreeKey, yield* Deferred.make<void>());
+              }
+              yield* Ref.set(state, {
+                ...current,
+                nextTicketId: ticketId + 1,
+                captures,
+              });
+              return { ticketId, worktreeKey, generation, signal: controller.signal };
+            }),
+          );
+        }),
+      ),
     );
 
   const completeCapture: WorkspaceMutationCoordinatorShape["completeCapture"] = (ticket) =>
-    locked(
-      Effect.gen(function* () {
-        const current = yield* Ref.get(state);
-        const active = current.captures.get(ticket.ticketId);
-        const captures = copyMap(current.captures);
-        captures.delete(ticket.ticketId);
-        yield* Ref.set(state, { ...current, captures });
-        return (
-          active !== undefined &&
-          active.worktreeKey === ticket.worktreeKey &&
-          !active.controller.signal.aborted &&
-          (current.generations.get(ticket.worktreeKey) ?? 0) === ticket.generation &&
-          (current.mutationDepths.get(ticket.worktreeKey) ?? 0) === 0
-        );
-      }),
-    );
+    Effect.gen(function* () {
+      const captureIdle = yield* locked(
+        Effect.gen(function* () {
+          const current = yield* Ref.get(state);
+          const active = current.captures.get(ticket.ticketId);
+          const captures = copyMap(current.captures);
+          captures.delete(ticket.ticketId);
+          yield* Ref.set(state, { ...current, captures });
+          const stable =
+            active !== undefined &&
+            active.worktreeKey === ticket.worktreeKey &&
+            !active.controller.signal.aborted &&
+            (current.generations.get(ticket.worktreeKey) ?? 0) === ticket.generation &&
+            (current.mutationDepths.get(ticket.worktreeKey) ?? 0) === 0;
+          if (
+            [...captures.values()].some((capture) => capture.worktreeKey === ticket.worktreeKey)
+          ) {
+            return { stable, signal: undefined };
+          }
+          const signal = captureIdleSignals.get(ticket.worktreeKey);
+          captureIdleSignals.delete(ticket.worktreeKey);
+          return { stable, signal };
+        }),
+      );
+      if (captureIdle.signal) yield* Deferred.succeed(captureIdle.signal, undefined);
+      return captureIdle.stable;
+    });
 
   const preempt = (worktreeKey: string, mutationDelta: number) =>
     locked(
@@ -273,7 +304,13 @@ const make = Effect.gen(function* () {
 
   const beginMutation: WorkspaceMutationCoordinatorShape["beginMutation"] = (worktreeKey) =>
     Effect.flatMap(getMutationGate(worktreeKey), (gate) =>
-      gate.withPermits(1)(beginMutationUncoordinated(worktreeKey)),
+      gate.withPermits(1)(
+        Effect.gen(function* () {
+          const captureIdle = yield* locked(Effect.sync(() => captureIdleSignals.get(worktreeKey)));
+          if (captureIdle) yield* Deferred.await(captureIdle);
+          return yield* beginMutationUncoordinated(worktreeKey);
+        }),
+      ),
     );
 
   const completeMutation: WorkspaceMutationCoordinatorShape["completeMutation"] = (ticket) =>
@@ -308,21 +345,29 @@ const make = Effect.gen(function* () {
   const preemptCaptures: WorkspaceMutationCoordinatorShape["preemptCaptures"] = (worktreeKey) =>
     preempt(worktreeKey, 0);
 
+  const releaseProviderMutation: WorkspaceMutationCoordinatorShape["releaseProviderMutation"] = (
+    threadId,
+  ) =>
+    Effect.gen(function* () {
+      const releaseSignal = yield* locked(
+        Effect.sync(() => {
+          const found = providerReleaseSignals.get(threadId);
+          providerReleaseSignals.delete(threadId);
+          return found;
+        }),
+      );
+      if (releaseSignal) yield* Deferred.succeed(releaseSignal, undefined);
+    });
+
   const completeProviderTicket = (
     threadId: string,
     ticket: WorkspaceMutationTicket,
+    release: boolean,
   ): Effect.Effect<void> =>
     Effect.uninterruptible(
       Effect.gen(function* () {
         yield* completeMutation(ticket);
-        const releaseSignal = yield* locked(
-          Effect.sync(() => {
-            const found = providerReleaseSignals.get(threadId);
-            providerReleaseSignals.delete(threadId);
-            return found;
-          }),
-        );
-        if (releaseSignal) yield* Deferred.succeed(releaseSignal, undefined);
+        if (release) yield* releaseProviderMutation(threadId);
       }),
     );
 
@@ -385,7 +430,7 @@ const make = Effect.gen(function* () {
           return { bound: true, ticket: undefined } as const;
         }),
       );
-      if (result.ticket) yield* completeProviderTicket(threadId, result.ticket);
+      if (result.ticket) yield* completeProviderTicket(threadId, result.ticket, true);
       return result.bound;
     });
 
@@ -441,13 +486,14 @@ const make = Effect.gen(function* () {
             return { finished: true, ticket: undefined } as const;
           }),
         );
-        if (result.ticket) yield* completeProviderTicket(threadId, result.ticket);
+        if (result.ticket) yield* completeProviderTicket(threadId, result.ticket, true);
         return result.finished;
       });
 
-  const completeProviderMutation: WorkspaceMutationCoordinatorShape["completeProviderMutation"] = (
-    threadId,
-    turnId,
+  const completeProviderMutationWithRelease = (
+    threadId: string,
+    turnId: string,
+    release: boolean,
   ) =>
     Effect.gen(function* () {
       const result = yield* locked(
@@ -471,9 +517,17 @@ const make = Effect.gen(function* () {
           return { handled: true, ticket: found.ticket } as const;
         }),
       );
-      if (result.ticket) yield* completeProviderTicket(threadId, result.ticket);
+      if (result.ticket) yield* completeProviderTicket(threadId, result.ticket, release);
       return result.handled;
     });
+
+  const completeProviderMutation: WorkspaceMutationCoordinatorShape["completeProviderMutation"] = (
+    threadId,
+    turnId,
+  ) => completeProviderMutationWithRelease(threadId, turnId, true);
+
+  const completeProviderMutationForCapture: WorkspaceMutationCoordinatorShape["completeProviderMutationForCapture"] =
+    (threadId, turnId) => completeProviderMutationWithRelease(threadId, turnId, false);
 
   const cancelProviderMutation: WorkspaceMutationCoordinatorShape["cancelProviderMutation"] = (
     threadId,
@@ -488,7 +542,7 @@ const make = Effect.gen(function* () {
         }),
       );
       if (!ticket) return false;
-      yield* completeProviderTicket(threadId, ticket);
+      yield* completeProviderTicket(threadId, ticket, true);
       return true;
     });
 
@@ -500,6 +554,13 @@ const make = Effect.gen(function* () {
         );
         if (releaseSignal) yield* Deferred.await(releaseSignal);
       });
+
+  const isProviderCapturePending: WorkspaceMutationCoordinatorShape["isProviderCapturePending"] = (
+    threadId,
+  ) =>
+    locked(
+      Effect.sync(() => !providerMutations.has(threadId) && providerReleaseSignals.has(threadId)),
+    );
 
   const prepareRuntimeMutation: WorkspaceMutationCoordinatorShape["prepareRuntimeMutation"] = (
     ownerKey,
@@ -579,8 +640,11 @@ const make = Effect.gen(function* () {
     beginProviderMutationHandoff,
     finishProviderMutationHandoff,
     completeProviderMutation,
+    completeProviderMutationForCapture,
+    releaseProviderMutation,
     cancelProviderMutation,
     awaitProviderMutationRelease,
+    isProviderCapturePending,
     prepareRuntimeMutation,
     completeRuntimeMutation,
     withMutation,

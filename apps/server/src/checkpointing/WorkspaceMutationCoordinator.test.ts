@@ -10,25 +10,26 @@ import {
 } from "./WorkspaceMutationCoordinator.ts";
 
 it.layer(WorkspaceMutationCoordinatorLive)("WorkspaceMutationCoordinator", (it) => {
-  it.effect("preempts overlapping captures and brackets mutation generations", () =>
+  it.effect("serializes captures with mutation generations", () =>
     Effect.gen(function* () {
       const coordinator = yield* WorkspaceMutationCoordinator;
       const capture = yield* coordinator.beginCapture("worktree-a");
       assert.equal(capture.generation, 0);
       assert.isFalse(capture.signal.aborted);
 
-      const mutation = yield* coordinator.beginMutation("worktree-a");
-      assert.isTrue(capture.signal.aborted);
+      const mutationFiber = yield* Effect.forkChild(coordinator.beginMutation("worktree-a"));
+      yield* Effect.yieldNow;
+      assert.isUndefined(mutationFiber.pollUnsafe());
+      assert.isTrue(yield* coordinator.completeCapture(capture));
+      const mutation = yield* Fiber.join(mutationFiber);
       assert.equal(yield* coordinator.getGeneration("worktree-a"), 1);
-      assert.isFalse(yield* coordinator.completeCapture(capture));
 
-      const duringMutation = yield* coordinator.beginCapture("worktree-a");
-      assert.isTrue(duringMutation.signal.aborted);
+      const captureFiber = yield* Effect.forkChild(coordinator.beginCapture("worktree-a"));
+      yield* Effect.yieldNow;
+      assert.isUndefined(captureFiber.pollUnsafe());
       yield* coordinator.completeMutation(mutation);
       assert.equal(yield* coordinator.getGeneration("worktree-a"), 2);
-      assert.isFalse(yield* coordinator.completeCapture(duringMutation));
-
-      const stable = yield* coordinator.beginCapture("worktree-a");
+      const stable = yield* Fiber.join(captureFiber);
       assert.isTrue(yield* coordinator.completeCapture(stable));
     }),
   );
@@ -157,12 +158,12 @@ it.layer(WorkspaceMutationCoordinatorLive)("WorkspaceMutationCoordinator", (it) 
       assert.isFalse(yield* coordinator.isProviderMutationOwnedBy("thread-owned", "turn-stale"));
 
       assert.isFalse(yield* coordinator.completeProviderMutation("thread-owned", "turn-stale"));
-      const duringMutation = yield* coordinator.beginCapture("worktree-owned");
-      assert.isTrue(duringMutation.signal.aborted);
-      assert.isFalse(yield* coordinator.completeCapture(duringMutation));
+      const captureFiber = yield* Effect.forkChild(coordinator.beginCapture("worktree-owned"));
+      yield* Effect.yieldNow;
+      assert.isUndefined(captureFiber.pollUnsafe());
 
       assert.isTrue(yield* coordinator.completeProviderMutation("thread-owned", "turn-current"));
-      const stable = yield* coordinator.beginCapture("worktree-owned");
+      const stable = yield* Fiber.join(captureFiber);
       assert.isTrue(yield* coordinator.completeCapture(stable));
     }),
   );
@@ -240,12 +241,12 @@ it.layer(WorkspaceMutationCoordinatorLive)("WorkspaceMutationCoordinator", (it) 
       assert.isFalse(yield* coordinator.prepareProviderMutation("thread-early", "worktree-early"));
       assert.isTrue(yield* coordinator.completeProviderMutation("thread-early", "turn-early"));
 
-      const beforeBinding = yield* coordinator.beginCapture("worktree-early");
-      assert.isTrue(beforeBinding.signal.aborted);
-      assert.isFalse(yield* coordinator.completeCapture(beforeBinding));
+      const captureFiber = yield* Effect.forkChild(coordinator.beginCapture("worktree-early"));
+      yield* Effect.yieldNow;
+      assert.isUndefined(captureFiber.pollUnsafe());
 
       assert.isTrue(yield* coordinator.bindProviderMutation("thread-early", "turn-early"));
-      const stable = yield* coordinator.beginCapture("worktree-early");
+      const stable = yield* Fiber.join(captureFiber);
       assert.isTrue(yield* coordinator.completeCapture(stable));
     }),
   );
@@ -273,6 +274,37 @@ it.layer(WorkspaceMutationCoordinatorLive)("WorkspaceMutationCoordinator", (it) 
         yield* coordinator.prepareProviderMutation("thread-release", "worktree-release"),
       );
       assert.isTrue(yield* coordinator.cancelProviderMutation("thread-release"));
+    }),
+  );
+
+  it.effect("holds the next provider turn until post-turn capture releases", () =>
+    Effect.gen(function* () {
+      const coordinator = yield* WorkspaceMutationCoordinator;
+      assert.isTrue(
+        yield* coordinator.prepareProviderMutation("thread-capture", "worktree-capture"),
+      );
+      assert.isTrue(yield* coordinator.bindProviderMutation("thread-capture", "turn-capture"));
+
+      assert.isTrue(
+        yield* coordinator.completeProviderMutationForCapture("thread-capture", "turn-capture"),
+      );
+      assert.isTrue(yield* coordinator.isProviderCapturePending("thread-capture"));
+      const nextProviderFiber = yield* Effect.forkChild(
+        coordinator.awaitProviderMutationRelease("thread-capture"),
+      );
+      yield* Effect.yieldNow;
+      assert.isUndefined(nextProviderFiber.pollUnsafe());
+
+      const checkpoint = yield* coordinator.beginCapture("worktree-capture");
+      assert.isTrue(yield* coordinator.completeCapture(checkpoint));
+      yield* coordinator.releaseProviderMutation("thread-capture");
+      assert.isFalse(yield* coordinator.isProviderCapturePending("thread-capture"));
+
+      yield* Fiber.join(nextProviderFiber);
+      assert.isTrue(
+        yield* coordinator.prepareProviderMutation("thread-capture", "worktree-capture"),
+      );
+      assert.isTrue(yield* coordinator.cancelProviderMutation("thread-capture"));
     }),
   );
 

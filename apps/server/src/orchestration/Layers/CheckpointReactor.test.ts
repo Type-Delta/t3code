@@ -616,13 +616,14 @@ describe("CheckpointReactor", () => {
     });
     await harness.drain();
 
-    const duringTurn = await Effect.runPromise(
-      harness.mutationCoordinator.beginCapture(identity.worktreeKey),
+    let captureStarted = false;
+    const duringTurn = Effect.runPromise(
+      harness.mutationCoordinator
+        .beginCapture(identity.worktreeKey)
+        .pipe(Effect.tap(() => Effect.sync(() => (captureStarted = true)))),
     );
-    expect(duringTurn.signal.aborted).toBe(true);
-    expect(await Effect.runPromise(harness.mutationCoordinator.completeCapture(duringTurn))).toBe(
-      false,
-    );
+    await Effect.runPromise(Effect.yieldNow);
+    expect(captureStarted).toBe(false);
 
     harness.provider.emit({
       type: "turn.aborted",
@@ -635,9 +636,7 @@ describe("CheckpointReactor", () => {
     });
     await harness.drain();
 
-    const afterTurn = await Effect.runPromise(
-      harness.mutationCoordinator.beginCapture(identity.worktreeKey),
-    );
+    const afterTurn = await duringTurn;
     expect(afterTurn.signal.aborted).toBe(false);
     expect(await Effect.runPromise(harness.mutationCoordinator.completeCapture(afterTurn))).toBe(
       true,
@@ -755,7 +754,7 @@ describe("CheckpointReactor", () => {
     expect(gitStatusRefreshCalls).toEqual([harness.cwd]);
   });
 
-  it("releases the completed turn mutation before a blocked status refresh", async () => {
+  it("keeps the next provider turn behind capture while status refresh is blocked", async () => {
     const refreshStarted = Deferred.makeUnsafe<void>();
     const releaseRefresh = Deferred.makeUnsafe<void>();
     const status: VcsStatusLocalResult = {
@@ -803,6 +802,19 @@ describe("CheckpointReactor", () => {
     });
     await runtime!.runPromise(Deferred.await(refreshStarted));
 
+    let released = false;
+    const releaseWait = runtime!.runPromise(
+      harness.mutationCoordinator
+        .awaitProviderMutationRelease("thread-1")
+        .pipe(Effect.tap(() => Effect.sync(() => (released = true)))),
+    );
+    await Effect.runPromise(Effect.yieldNow);
+    expect(released).toBe(false);
+
+    await runtime!.runPromise(Deferred.succeed(releaseRefresh, undefined));
+    await harness.drain();
+    await releaseWait;
+    expect(released).toBe(true);
     expect(
       await runtime!.runPromise(
         harness.mutationCoordinator.prepareProviderMutation("thread-1", identity.worktreeKey),
@@ -811,9 +823,6 @@ describe("CheckpointReactor", () => {
     expect(
       await runtime!.runPromise(harness.mutationCoordinator.cancelProviderMutation("thread-1")),
     ).toBe(true);
-
-    await runtime!.runPromise(Deferred.succeed(releaseRefresh, undefined));
-    await harness.drain();
   });
 
   it("ignores auxiliary thread turn completion while primary turn is active", async () => {

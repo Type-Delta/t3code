@@ -23,6 +23,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../src/checkpointing/CheckpointStore.ts";
+import * as CheckpointDiffQuery from "../src/checkpointing/CheckpointDiffQuery.ts";
 import { TextGeneration, type TextGenerationShape } from "../src/textGeneration/TextGeneration.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../src/persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
@@ -195,6 +196,7 @@ export interface OrchestrationIntegrationHarness {
   readonly snapshotQuery: ProjectionSnapshotQuery["Service"];
   readonly providerService: ProviderService["Service"];
   readonly checkpointStore: CheckpointStore.CheckpointStore["Service"];
+  readonly checkpointDiffQuery: CheckpointDiffQuery.CheckpointDiffQuery["Service"];
   readonly checkpointRepository: ProjectionCheckpointRepository["Service"];
   readonly checkpointTimelineRepository: CheckpointTimelineRepository["Service"];
   readonly pendingApprovalRepository: ProjectionPendingApprovalRepository["Service"];
@@ -329,9 +331,13 @@ export const makeOrchestrationIntegrationHarness = (
       providerLayer,
       RuntimeReceiptBusTest,
     );
+    const checkpointDiffQueryLayer = CheckpointDiffQuery.layer.pipe(
+      Layer.provideMerge(runtimeServicesLayer),
+    );
     const serverSettingsLayer = ServerSettingsService.layerTest();
     const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
+      Layer.provideMerge(checkpointDiffQueryLayer),
       Layer.provideMerge(serverSettingsLayer),
     );
     const gitWorkflowLayer = Layer.mock(GitWorkflowService)({
@@ -454,6 +460,9 @@ export const makeOrchestrationIntegrationHarness = (
     ).pipe(Effect.orDie);
     const checkpointStore = yield* tryRuntimePromise("load CheckpointStore service", () =>
       runtime.runPromise(Effect.service(CheckpointStore.CheckpointStore)),
+    ).pipe(Effect.orDie);
+    const checkpointDiffQuery = yield* tryRuntimePromise("load CheckpointDiffQuery service", () =>
+      runtime.runPromise(Effect.service(CheckpointDiffQuery.CheckpointDiffQuery)),
     ).pipe(Effect.orDie);
     const checkpointRepository = yield* tryRuntimePromise(
       "load ProjectionCheckpointRepository service",
@@ -611,6 +620,7 @@ export const makeOrchestrationIntegrationHarness = (
       snapshotQuery,
       providerService,
       checkpointStore,
+      checkpointDiffQuery,
       checkpointRepository,
       checkpointTimelineRepository,
       pendingApprovalRepository,

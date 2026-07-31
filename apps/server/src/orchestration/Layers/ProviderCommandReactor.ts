@@ -895,6 +895,15 @@ const make = Effect.gen(function* () {
           threadId,
           identity.worktreeKey,
         );
+      } else {
+        const capturePending = yield* mutationCoordinator.isProviderCapturePending(threadId);
+        if (capturePending) {
+          yield* mutationCoordinator.awaitProviderMutationRelease(threadId);
+          prepared = yield* mutationCoordinator.prepareProviderMutation(
+            threadId,
+            identity.worktreeKey,
+          );
+        }
       }
     }
     if (!prepared) {
