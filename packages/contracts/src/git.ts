@@ -135,6 +135,7 @@ export const VcsListRefsInput = Schema.Struct({
   cursor: Schema.optional(NonNegativeInt),
   includeMatchingRemoteRefs: Schema.optional(Schema.Boolean),
   refKind: Schema.optional(Schema.Literals(["all", "local", "remote"])),
+  refresh: Schema.optional(Schema.Boolean),
   limit: Schema.optional(
     PositiveInt.check(Schema.isLessThanOrEqualTo(GIT_LIST_BRANCHES_MAX_LIMIT)),
   ),
@@ -143,6 +144,7 @@ export type VcsListRefsInput = typeof VcsListRefsInput.Type;
 
 export const VcsListWorktreesInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
+  refresh: Schema.optional(Schema.Boolean),
 });
 export type VcsListWorktreesInput = typeof VcsListWorktreesInput.Type;
 

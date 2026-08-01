@@ -5,6 +5,9 @@ import {
   previewAutomationNavigationFailure,
   previewAutomationOpenNeedsNavigationReadiness,
   previewAutomationOpenNeedsOverlay,
+  DEFAULT_PREVIEW_AUTOMATION_VIEWPORT,
+  previewAutomationDefaultViewport,
+  shouldOpenPreviewMiniPlayer,
 } from "./previewAutomationOpenReadiness";
 
 const snapshot = (navStatus: PreviewSessionSnapshot["navStatus"]): PreviewSessionSnapshot => ({
@@ -17,6 +20,18 @@ const snapshot = (navStatus: PreviewSessionSnapshot["navStatus"]): PreviewSessio
 });
 
 describe("preview automation open readiness", () => {
+  it("opens the inline preview by default", () => {
+    expect(shouldOpenPreviewMiniPlayer({} as PreviewAutomationOpenInput)).toBe(true);
+  });
+
+  it("supports explicit opt-out and the legacy show alias", () => {
+    expect(shouldOpenPreviewMiniPlayer({ open: false } as PreviewAutomationOpenInput)).toBe(false);
+    expect(shouldOpenPreviewMiniPlayer({ show: false } as PreviewAutomationOpenInput)).toBe(false);
+    expect(
+      shouldOpenPreviewMiniPlayer({ open: true, show: false } as PreviewAutomationOpenInput),
+    ).toBe(true);
+  });
+
   it("does not wait for a desktop overlay when opening an empty tab", () => {
     expect(
       previewAutomationOpenNeedsOverlay(
@@ -60,6 +75,22 @@ describe("preview automation open readiness", () => {
         _tag: "Success",
         url: "https://example.com/",
         title: "Example",
+      }),
+    ).toBeNull();
+  });
+
+  it("gives newly-created automation tabs a stable desktop viewport", () => {
+    expect(previewAutomationDefaultViewport(false, snapshot({ _tag: "Idle" }))).toEqual(
+      DEFAULT_PREVIEW_AUTOMATION_VIEWPORT,
+    );
+  });
+
+  it("preserves reused and already-fixed browser viewports", () => {
+    expect(previewAutomationDefaultViewport(true, snapshot({ _tag: "Idle" }))).toBeNull();
+    expect(
+      previewAutomationDefaultViewport(false, {
+        ...snapshot({ _tag: "Idle" }),
+        viewport: { _tag: "freeform", width: 900, height: 600 },
       }),
     ).toBeNull();
   });

@@ -45,12 +45,13 @@ import Migration0029 from "./Migrations/029_ProjectionThreadDetailOrderingIndexe
 import Migration0030 from "./Migrations/030_ProjectionThreadShellArchiveIndexes.ts";
 import Migration0031 from "./Migrations/031_AuthAuthorizationScopes.ts";
 import Migration0032 from "./Migrations/032_AuthPairingProofKeyThumbprint.ts";
-import Migration0033 from "./Migrations/033_CheckpointDurableState.ts";
-import Migration0034 from "./Migrations/034_CheckpointLegacyMigration.ts";
-import Migration0035 from "./Migrations/035_CheckpointCaptureProviderMetadata.ts";
-import Migration0036 from "./Migrations/036_CheckpointNavigationMode.ts";
-import Migration0037 from "./Migrations/037_ProjectionThreadsSettled.ts";
-import Migration0038 from "./Migrations/038_ProjectionThreadsSnoozed.ts";
+import Migration0033 from "./Migrations/033_ProjectionThreadsSettled.ts";
+import Migration0034 from "./Migrations/034_ProjectionThreadsSnoozed.ts";
+import Migration0035 from "./Migrations/035_ProjectionThreadTitleRegeneration.ts";
+import Migration0036 from "./Migrations/036_CheckpointDurableState.ts";
+import Migration0037 from "./Migrations/037_CheckpointLegacyMigration.ts";
+import Migration0038 from "./Migrations/038_CheckpointCaptureProviderMetadata.ts";
+import Migration0039 from "./Migrations/039_ReconcileCheckpointAndTitleHistory.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -95,12 +96,13 @@ export const migrationEntries = [
   [30, "ProjectionThreadShellArchiveIndexes", Migration0030],
   [31, "AuthAuthorizationScopes", Migration0031],
   [32, "AuthPairingProofKeyThumbprint", Migration0032],
-  [33, "CheckpointDurableState", Migration0033],
-  [34, "CheckpointLegacyMigration", Migration0034],
-  [35, "CheckpointCaptureProviderMetadata", Migration0035],
-  [36, "CheckpointNavigationMode", Migration0036],
-  [37, "ProjectionThreadsSettled", Migration0037],
-  [38, "ProjectionThreadsSnoozed", Migration0038],
+  [33, "ProjectionThreadsSettled", Migration0033],
+  [34, "ProjectionThreadsSnoozed", Migration0034],
+  [35, "ProjectionThreadTitleRegeneration", Migration0035],
+  [36, "CheckpointDurableState", Migration0036],
+  [37, "CheckpointLegacyMigration", Migration0037],
+  [38, "CheckpointCaptureProviderMetadata", Migration0038],
+  [39, "ReconcileCheckpointAndTitleHistory", Migration0039],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -16,6 +16,7 @@ import {
 } from "~/composerDraftStore";
 import { cn } from "~/lib/utils";
 import { buildDraftThreadRouteParams, buildThreadRouteParams } from "~/threadRoutes";
+import { resolveThreadSyncPhase } from "~/threadSync";
 
 import {
   beginSplitThreadDrag,
@@ -32,7 +33,13 @@ import {
   useSplitViewStore,
 } from "../splitViewStore";
 import { useRightPanelStore } from "../rightPanelStore";
-import { useProject, useThread, useThreadRefs } from "../state/entities";
+import {
+  useProject,
+  useThread,
+  useThreadRefs,
+  useThreadShell,
+  useThreadStatus,
+} from "../state/entities";
 import ChatView from "./ChatView";
 import { threadHasStarted } from "./ChatView.logic";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
@@ -151,6 +158,13 @@ function SplitThreadPane(props: {
   } = props;
   const navigate = useNavigate();
   const serverThread = useThread(threadRef);
+  const serverThreadShell = useThreadShell(threadRef);
+  const serverThreadStatus = useThreadStatus(threadRef);
+  const threadSyncPhase = resolveThreadSyncPhase({
+    detailExists: serverThread !== null,
+    shellExists: serverThreadShell !== null,
+    status: serverThreadStatus,
+  });
   const projectRef = useMemo(() => {
     const projectId = serverThread?.projectId ?? draftPane?.projectId;
     return projectId ? scopeProjectRef(threadRef.environmentId, projectId) : null;
@@ -298,6 +312,7 @@ function SplitThreadPane(props: {
             environmentId={threadRef.environmentId}
             threadId={threadRef.threadId}
             routeKind="server"
+            threadSyncPhase={threadSyncPhase}
             paneMode={{
               isActive: active,
               isRightPanelOwner,

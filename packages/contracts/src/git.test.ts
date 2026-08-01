@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   VcsCreateWorktreeInput,
+  VcsListWorktreesInput,
   VcsListWorktreesResult,
   GitPreparePullRequestThreadInput,
   GitRunStackedActionResult,
@@ -18,6 +19,7 @@ const decodeRunStackedActionInput = Schema.decodeUnknownSync(GitRunStackedAction
 const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
 const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
 const decodeListWorktreesResult = Schema.decodeUnknownSync(VcsListWorktreesResult);
+const decodeListWorktreesInput = Schema.decodeUnknownSync(VcsListWorktreesInput);
 
 describe("VcsCreateWorktreeInput", () => {
   it("accepts omitted newRefName for existing-refName worktrees", () => {
@@ -45,6 +47,10 @@ describe("VcsCreateWorktreeInput", () => {
 });
 
 describe("VcsListWorktreesResult", () => {
+  it("accepts an explicit snapshot refresh", () => {
+    expect(decodeListWorktreesInput({ cwd: "/repo", refresh: true }).refresh).toBe(true);
+  });
+
   it("decodes primary, branched, and detached worktrees", () => {
     const parsed = decodeListWorktreesResult({
       isRepo: true,

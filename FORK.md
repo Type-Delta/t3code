@@ -2,6 +2,12 @@
 
 This fork keeps the Windows reliability, durable checkpointing, and workspace capabilities that are still not supplied by the shared base.
 
+Git repository cache keys use Node's native `realpath` so Windows long paths and their 8.3 aliases share one VCS snapshot and refresh history.
+
+## Upstream sync — 2026-08-01
+
+Merged upstream `0ad91b6e7fc1fcb6d5f4bc736d84c337e912bc62` into the fork without dropping checkpoint navigation, split workspaces, existing-worktree selection, preview recovery, provider usage, Claude Windows packaging, or stale-mutation retry/drafts. The integration adopts upstream title regeneration, branch-drift handling, sidebar search and shell loading, preview PiP/runtime identities, telemetry/compression, and VCS cache invalidation. Migration IDs `33`–`35` remain upstream-compatible; checkpoint migrations now occupy `36`–`38`, and idempotent migration `39` reconciles both previously deployed histories.
+
 ## Divergence Log
 
 This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `23b55022175e69938514934f65c5a607d38f1e47`, tracked with `base` tag). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
@@ -74,17 +80,17 @@ Checkpoint capture and navigation are durable server services. Private bare-Git 
 
 SQLite persists capture jobs, immutable checkpoint entries, timeline generations and cursors, provider bindings, retention data, and restart-recoverable navigation journals. Undo, redo, and rewind share a compensating navigation saga; providers without a verified non-destructive branch capability are explicitly limited, and filesystem-only rollback requires confirmation without moving the provider conversation cursor.
 
-Fork migrations `033`–`036` establish this durable checkpoint state (`033_CheckpointDurableState`, `034_CheckpointLegacyMigration`, `035_CheckpointCaptureProviderMetadata`, and `036_CheckpointNavigationMode`). The merged schema then applies upstream lifecycle migrations `037_ProjectionThreadsSettled` and `038_ProjectionThreadsSnoozed`; their ordering is preserved for existing installations, but the upstream lifecycle feature is not itself logged as a fork divergence.
+Fork migrations `036`–`038` establish the durable checkpoint state (`036_CheckpointDurableState`, `037_CheckpointLegacyMigration`, and `038_CheckpointCaptureProviderMetadata`). Upstream lifecycle and title-regeneration migrations retain canonical IDs `033`–`035`; idempotent migration `039_ReconcileCheckpointAndTitleHistory` supplies checkpoint navigation mode and title-regeneration columns for databases that already ran either historical numbering scheme.
 
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
-**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{033_CheckpointDurableState,034_CheckpointLegacyMigration,035_CheckpointCaptureProviderMetadata,036_CheckpointNavigationMode}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
+**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
 
 **Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
 
-**Last updated:** 2026-07-30
+**Last updated:** 2026-08-01
 
 ### DL008 — Persistent multi-thread split workspaces
 

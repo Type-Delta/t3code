@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import type {
   PreviewAutomationOperation,
+  PreviewAutomationOpenInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
   PreviewAutomationResizeResult,
@@ -16,6 +17,18 @@ import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "
 
 const STATUS_HOST_PROBE_TIMEOUT_MS = 3_000;
 const STATUS_RECOVERY_TIMEOUT_MS = 12_000;
+
+export function normalizePreviewOpenInput(
+  input: PreviewAutomationOpenInput,
+): PreviewAutomationOpenInput {
+  const open = input.open ?? input.show ?? true;
+  return {
+    ...input,
+    open,
+    show: open,
+    reuseExistingTab: input.reuseExistingTab ?? true,
+  };
+}
 
 const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
   operation: PreviewAutomationOperation,
@@ -60,11 +73,7 @@ const invokeStatus = (input: { readonly tabId?: PreviewTabId | undefined }) =>
 const handlers = {
   preview_status: (input) => invokeStatus(input ?? {}),
   preview_open: (input) =>
-    invokeTargeted<PreviewAutomationStatus>("open", {
-      ...input,
-      show: input.show ?? true,
-      reuseExistingTab: input.reuseExistingTab ?? true,
-    }),
+    invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
   preview_navigate: (input) =>
     invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
   preview_resize: (input) =>

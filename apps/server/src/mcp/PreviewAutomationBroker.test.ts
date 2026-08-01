@@ -33,7 +33,6 @@ const scope = {
   providerInstanceId: ProviderInstanceId.make("codex"),
   capabilities: new Set(["preview"] as const),
   issuedAt: 1,
-  expiresAt: Number.MAX_SAFE_INTEGER,
 };
 
 const makeHost = (overrides: Partial<PreviewAutomationHost> = {}): PreviewAutomationHost => ({
@@ -176,7 +175,7 @@ it.effect("does not let an older response replace a newer explicit tab target", 
   ),
 );
 
-it.effect("does not replace the default tab with a globally stopped recording tab", () =>
+it.effect("tracks the tab returned by a targeted recording stop", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const broker = yield* makeBroker;
@@ -205,7 +204,7 @@ it.effect("does not replace the default tab with a globally stopped recording ta
       yield* broker.invoke({ scope, operation: "recordingStop", input: {} });
       yield* broker.invoke({ scope, operation: "snapshot", input: {} });
 
-      expect(routedRequests.at(-1)?.tabId).toBe(browsingTabId);
+      expect(routedRequests.at(-1)?.tabId).toBe(recordingTabId);
     }),
   ),
 );

@@ -8,6 +8,7 @@ import { SplitPaneDropHint, type SplitPaneDropSide } from "../components/SplitPa
 import { threadHasStarted } from "../components/ChatView.logic";
 import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
 import { resolveThreadRouteRef, resolveThreadRouteRenderState } from "../threadRoutes";
+import { resolveThreadSyncPhase } from "../threadSync";
 import { SidebarInset } from "~/components/ui/sidebar";
 import { SplitThreadWorkspace } from "../components/SplitThreadWorkspace";
 import { selectIsSplitViewActive, useSplitViewStore } from "../splitViewStore";
@@ -21,7 +22,13 @@ import {
 import { useEnvironmentQuery } from "../state/query";
 import { environmentShell } from "../state/shell";
 
-function StandaloneThreadDropWorkspace({ threadRef }: { threadRef: ScopedThreadRef }) {
+function StandaloneThreadDropWorkspace({
+  threadRef,
+  threadSyncPhase,
+}: {
+  threadRef: ScopedThreadRef;
+  threadSyncPhase: ReturnType<typeof resolveThreadSyncPhase>;
+}) {
   const [dropHint, setDropHint] = useState<{
     position: SplitPaneDropSide;
     bounds: { left: number; top: number; width: number; height: number };
@@ -104,6 +111,7 @@ function StandaloneThreadDropWorkspace({ threadRef }: { threadRef: ScopedThreadR
         environmentId={threadRef.environmentId}
         threadId={threadRef.threadId}
         routeKind="server"
+        threadSyncPhase={threadSyncPhase}
       />
       {dropHint ? (
         <SplitPaneDropHint
@@ -154,6 +162,11 @@ function ChatThreadRouteView() {
     serverThreadDetailDeleted: serverThreadStatus === "deleted",
     draftThreadExists,
   });
+  const threadSyncPhase = resolveThreadSyncPhase({
+    detailExists: serverThreadDetail !== null,
+    shellExists: serverThreadShell !== null,
+    status: serverThreadStatus,
+  });
   const serverThreadStarted = threadHasStarted(serverThreadDetail);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
 
@@ -174,7 +187,7 @@ function ChatThreadRouteView() {
     finalizePromotedDraftThreadByRef(threadRef);
   }, [draftThread, serverThreadStarted, threadRef]);
 
-  if (!threadRef || renderState !== "ready") {
+  if (!threadRef) {
     return null;
   }
 
@@ -182,7 +195,11 @@ function ChatThreadRouteView() {
     return <SplitThreadWorkspace currentRouteRef={threadRef} />;
   }
 
-  return <StandaloneThreadDropWorkspace threadRef={threadRef} />;
+  return renderState === "ready" || (renderState === "loading" && serverThreadShell !== null) ? (
+    <StandaloneThreadDropWorkspace threadRef={threadRef} threadSyncPhase={threadSyncPhase} />
+  ) : (
+    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh" />
+  );
 }
 
 export const Route = createFileRoute("/_chat/$environmentId/$threadId")({
