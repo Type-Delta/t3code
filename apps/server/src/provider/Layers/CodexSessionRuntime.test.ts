@@ -347,12 +347,21 @@ describe("codexSessionAppServerArgs", () => {
 });
 
 describe("isRecoverableThreadResumeError", () => {
-  it("matches missing thread errors", () => {
+  it("matches missing thread and rollout errors", () => {
     NodeAssert.equal(
       isRecoverableThreadResumeError(
         new CodexErrors.CodexAppServerRequestError({
           code: -32603,
           errorMessage: "Thread does not exist",
+        }),
+      ),
+      true,
+    );
+    NodeAssert.equal(
+      isRecoverableThreadResumeError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32603,
+          errorMessage: "no rollout found for thread id native-thread",
         }),
       ),
       true,

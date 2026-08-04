@@ -120,11 +120,13 @@ Codex model and skill discovery is bounded, optional catalog enrichment after a 
 
 App-server errors are classified by scope: non-retryable turn errors remain visible on the turn while the session stays available for a follow-up message; actual process or transport failure still marks the session unavailable.
 
+A missing Codex rollout is treated as a recoverable stale resume cursor, so T3 falls back to a fresh provider thread instead of stopping a newly created thread.
+
 **Implementation evidence:** `apps/server/src/provider/Layers/{CodexProvider,CodexSessionRuntime,CodexAdapter}.ts`, `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`, and `packages/contracts/src/providerRuntime.ts`.
 
 **Recorded validation:** focused Codex adapter and provider-runtime ingestion tests, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-07-22
+**Last updated:** 2026-08-03
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 

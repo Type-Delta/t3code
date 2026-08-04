@@ -54,6 +54,7 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
+  "no rollout found",
   "missing thread",
   "no such thread",
   "unknown thread",
