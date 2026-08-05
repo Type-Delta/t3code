@@ -691,4 +691,33 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("lucide-x");
     expect(markup).toContain('aria-label="Tool call failed"');
   });
+
+  it("shows model and reasoning effort on subagent rows", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-subagent",
+            kind: "work",
+            createdAt: MESSAGE_CREATED_AT,
+            entry: {
+              id: "work-subagent",
+              createdAt: MESSAGE_CREATED_AT,
+              label: "Subagent task",
+              tone: "tool",
+              itemType: "collab_agent_tool_call",
+              subagentRunIds: ["child-thread-1"],
+              subagentPrompt: "Review the database changes",
+              subagentModel: "gpt-5.6-sol",
+              subagentReasoningEffort: "high",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("gpt-5.6-sol · high effort");
+    expect(markup).toContain("Review the database changes");
+  });
 });

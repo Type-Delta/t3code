@@ -1356,6 +1356,17 @@ describe("ClaudeAdapterLive", () => {
       harness.query.emit({
         type: "assistant",
         session_id: "sdk-session-task",
+        uuid: "assistant-child-task-1",
+        parent_tool_use_id: "tool-task-1",
+        message: {
+          id: "assistant-message-child-task-1",
+          content: [{ type: "text", text: "The index migration needs a rollback guard." }],
+        },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-task",
         uuid: "assistant-task-1",
         parent_tool_use_id: null,
         message: {
@@ -1380,6 +1391,12 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(toolStarted.payload.itemType, "collab_agent_tool_call");
         assert.equal(toolStarted.payload.title, "Subagent task");
       }
+      const childAssistantEvent = runtimeEvents.find(
+        (event) =>
+          event.subagentId === "tool-task-1" &&
+          (event.type === "content.delta" || event.type === "item.completed"),
+      );
+      assert.equal(childAssistantEvent?.subagentId, "tool-task-1");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

@@ -104,6 +104,48 @@ function projectCommandData(data: Record<string, unknown>): Record<string, unkno
   return Object.keys(projectedItem).length > 0 ? projectedItem : undefined;
 }
 
+function projectSubagentData(data: Record<string, unknown>): Record<string, unknown> | undefined {
+  const item = asRecord(data.item);
+  if (item?.type === "collabAgentToolCall") {
+    return {
+      item: {
+        type: item.type,
+        ...(typeof item.tool === "string" ? { tool: item.tool } : {}),
+        ...(typeof item.prompt === "string" ? { prompt: item.prompt } : {}),
+        ...(typeof item.model === "string" ? { model: item.model } : {}),
+        ...(typeof item.reasoningEffort === "string"
+          ? { reasoningEffort: item.reasoningEffort }
+          : {}),
+        ...(typeof item.status === "string" ? { status: item.status } : {}),
+        ...(Array.isArray(item.receiverThreadIds)
+          ? { receiverThreadIds: item.receiverThreadIds }
+          : {}),
+      },
+    };
+  }
+
+  const input = asRecord(data.input);
+  if (typeof data.toolName !== "string" || !input) {
+    return undefined;
+  }
+  return {
+    toolName: data.toolName,
+    input: {
+      ...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}),
+      ...(typeof input.description === "string" ? { description: input.description } : {}),
+      ...(typeof input.subagent_type === "string" ? { subagent_type: input.subagent_type } : {}),
+      ...(typeof input.model === "string" ? { model: input.model } : {}),
+      ...(typeof input.effort === "string" ? { effort: input.effort } : {}),
+      ...(typeof input.reasoningEffort === "string"
+        ? { reasoningEffort: input.reasoningEffort }
+        : {}),
+      ...(typeof input.reasoning_effort === "string"
+        ? { reasoning_effort: input.reasoning_effort }
+        : {}),
+    },
+  };
+}
+
 function summarizeToolTextOutput(value: string): string | null {
   const lines: string[] = [];
   for (const rawLine of value.split(/\r?\n/u)) {
@@ -165,6 +207,18 @@ export function projectActivityPayload(
   }
 
   const projectedData: Record<string, unknown> = {};
+  if (payload.itemType === "collab_agent_tool_call") {
+    const subagentData = projectSubagentData(data);
+    return subagentData
+      ? {
+          ...activity,
+          payload: {
+            ...payload,
+            data: subagentData,
+          },
+        }
+      : activity;
+  }
   const item = projectCommandData(data);
   if (item) {
     projectedData.item = item;

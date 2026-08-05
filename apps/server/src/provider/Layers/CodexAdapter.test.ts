@@ -653,6 +653,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         createdAt: "2026-01-01T00:00:00.000Z",
         method: "item/completed",
         threadId: asThreadId("thread-1"),
+        subagentId: "child-thread-1",
         turnId: asTurnId("turn-1"),
         itemId: asItemId("msg_1"),
         payload: {
@@ -680,6 +681,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
       NodeAssert.equal(firstEvent.value.itemId, "msg_1");
       NodeAssert.equal(firstEvent.value.turnId, "turn-1");
+      NodeAssert.equal(firstEvent.value.subagentId, "child-thread-1");
       NodeAssert.equal(firstEvent.value.payload.itemType, "assistant_message");
     }),
   );

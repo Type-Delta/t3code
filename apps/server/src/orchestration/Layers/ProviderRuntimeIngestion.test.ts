@@ -949,6 +949,82 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("keeps parent and subagent assistant messages separate within the same turn", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-shared-turn-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-shared"),
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-parent-message-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-shared"),
+      itemId: asItemId("parent-item"),
+      payload: { streamKind: "assistant_text", delta: "Parent response" },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-child-message-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-shared"),
+      subagentId: "child-thread-1",
+      itemId: asItemId("child-item"),
+      payload: { streamKind: "assistant_text", delta: "Child response" },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-parent-message-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-shared"),
+      itemId: asItemId("parent-item"),
+      payload: { itemType: "assistant_message", status: "completed" },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-child-message-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-shared"),
+      subagentId: "child-thread-1",
+      itemId: asItemId("child-item"),
+      payload: { itemType: "assistant_message", status: "completed" },
+    });
+
+    await harness.drain();
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:child-item" && !message.streaming,
+      ),
+    );
+    const parent = thread.messages.find(
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:parent-item",
+    );
+    const child = thread.messages.find(
+      (message: ProviderRuntimeTestMessage) => message.id === "assistant:child-item",
+    );
+
+    expect(parent?.text).toBe("Parent response");
+    expect(parent?.subagentId).toBeUndefined();
+    expect(child?.text).toBe("Child response");
+    expect(child?.subagentId).toBe("child-thread-1");
+    expect(thread.latestTurn?.assistantMessageId).toBe("assistant:parent-item");
+  });
+
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -992,6 +1068,7 @@ describe("ProviderRuntimeIngestion", () => {
       createdAt: now,
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-tool-completed"),
+      subagentId: "child-tool-run",
       itemId: asItemId("item-tool-completed"),
       payload: {
         itemType: "dynamic_tool_call",
@@ -1029,6 +1106,7 @@ describe("ProviderRuntimeIngestion", () => {
         : undefined;
 
     expect(activity?.kind).toBe("tool.completed");
+    expect(activity?.subagentId).toBe("child-tool-run");
     expect(activity?.summary).toBe("Read file");
     expect(payload?.itemType).toBe("dynamic_tool_call");
     expect(payload?.detail).toBeUndefined();

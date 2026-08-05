@@ -72,6 +72,10 @@ export interface WorkLogEntry {
   tone: "thinking" | "tool" | "info" | "error";
   toolTitle?: string;
   toolData?: unknown;
+  subagentRunIds?: ReadonlyArray<string>;
+  subagentPrompt?: string;
+  subagentModel?: string;
+  subagentReasoningEffort?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   /** From runtime item / task payload `status` when present (e.g. tool.updated). */
@@ -630,7 +634,7 @@ export function deriveWorkLogEntries(
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
-    if (activity.kind === "tool.started") continue;
+    if (activity.kind === "tool.started" && !isSubagentToolActivity(activity)) continue;
     if (activity.kind === "task.started") continue;
     if (activity.kind === "context-window.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;
@@ -641,6 +645,11 @@ export function deriveWorkLogEntries(
     const { activityKind, collapseKey: _collapseKey, ...rest } = entry;
     return Object.assign(rest, { sourceActivityKind: activityKind });
   });
+}
+
+function isSubagentToolActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload = asRecord(activity.payload);
+  return payload?.itemType === "collab_agent_tool_call";
 }
 
 function isPlanBoundaryToolActivity(activity: OrchestrationThreadActivity): boolean {
@@ -740,6 +749,25 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       entry.toolData = data.item;
     }
   }
+  if (itemType === "collab_agent_tool_call") {
+    const data = asRecord(payload?.data);
+    if (data) {
+      entry.toolData = data;
+      const subagent = extractSubagentToolData(payload, data);
+      if (subagent.runIds.length > 0) {
+        entry.subagentRunIds = subagent.runIds;
+      }
+      if (subagent.prompt !== undefined) {
+        entry.subagentPrompt = subagent.prompt;
+      }
+      if (subagent.model !== undefined) {
+        entry.subagentModel = subagent.model;
+      }
+      if (subagent.reasoningEffort !== undefined) {
+        entry.subagentReasoningEffort = subagent.reasoningEffort;
+      }
+    }
+  }
   if (itemType) {
     entry.itemType = itemType;
   }
@@ -782,10 +810,18 @@ function shouldCollapseToolLifecycleEntries(
   previous: DerivedWorkLogEntry,
   next: DerivedWorkLogEntry,
 ): boolean {
-  if (previous.activityKind !== "tool.updated" && previous.activityKind !== "tool.completed") {
+  if (
+    previous.activityKind !== "tool.started" &&
+    previous.activityKind !== "tool.updated" &&
+    previous.activityKind !== "tool.completed"
+  ) {
     return false;
   }
-  if (next.activityKind !== "tool.updated" && next.activityKind !== "tool.completed") {
+  if (
+    next.activityKind !== "tool.started" &&
+    next.activityKind !== "tool.updated" &&
+    next.activityKind !== "tool.completed"
+  ) {
     return false;
   }
   if (previous.activityKind === "tool.completed") {
@@ -818,6 +854,10 @@ function mergeDerivedWorkLogEntries(
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
+  const subagentRunIds = next.subagentRunIds ?? previous.subagentRunIds;
+  const subagentPrompt = next.subagentPrompt ?? previous.subagentPrompt;
+  const subagentModel = next.subagentModel ?? previous.subagentModel;
+  const subagentReasoningEffort = next.subagentReasoningEffort ?? previous.subagentReasoningEffort;
   return {
     ...previous,
     ...next,
@@ -832,6 +872,10 @@ function mergeDerivedWorkLogEntries(
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolLifecycleStatus !== undefined ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
+    ...(subagentRunIds !== undefined ? { subagentRunIds } : {}),
+    ...(subagentPrompt !== undefined ? { subagentPrompt } : {}),
+    ...(subagentModel !== undefined ? { subagentModel } : {}),
+    ...(subagentReasoningEffort !== undefined ? { subagentReasoningEffort } : {}),
   };
 }
 
@@ -847,7 +891,11 @@ function mergeChangedFiles(
 }
 
 function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | undefined {
-  if (entry.activityKind !== "tool.updated" && entry.activityKind !== "tool.completed") {
+  if (
+    entry.activityKind !== "tool.started" &&
+    entry.activityKind !== "tool.updated" &&
+    entry.activityKind !== "tool.completed"
+  ) {
     return undefined;
   }
   if (entry.toolCallId) {
@@ -888,6 +936,106 @@ function asTrimmedString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function extractSubagentToolData(
+  payload: Record<string, unknown> | null,
+  data: Record<string, unknown>,
+): {
+  runIds: string[];
+  prompt?: string;
+  title?: string;
+  model?: string;
+  reasoningEffort?: string;
+  status?: SubagentRunSummary["status"];
+} {
+  const item = asRecord(data.item);
+  if (item?.type === "collabAgentToolCall" && item.tool === "spawnAgent") {
+    const runIds = Array.isArray(item.receiverThreadIds)
+      ? item.receiverThreadIds.filter(
+          (value): value is string => typeof value === "string" && value.length > 0,
+        )
+      : [];
+    const model = asTrimmedString(item.model);
+    const reasoningEffort = asTrimmedString(item.reasoningEffort);
+    return {
+      runIds,
+      ...(typeof item.prompt === "string" ? { prompt: item.prompt } : {}),
+      ...(model ? { model } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      title: model ?? "Subagent",
+      ...(isSubagentRunStatus(item.status) ? { status: item.status } : {}),
+    };
+  }
+
+  const input = asRecord(data.input);
+  const toolCallId = typeof payload?.toolCallId === "string" ? payload.toolCallId : undefined;
+  if (!toolCallId || typeof data.toolName !== "string" || !input) {
+    return { runIds: [] };
+  }
+  const description = asTrimmedString(input.description);
+  const subagentType = asTrimmedString(input.subagent_type);
+  const model = asTrimmedString(input.model);
+  const reasoningEffort =
+    asTrimmedString(input.reasoningEffort) ??
+    asTrimmedString(input.reasoning_effort) ??
+    asTrimmedString(input.effort);
+  return {
+    runIds: [toolCallId],
+    ...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}),
+    title: description ?? subagentType ?? "Subagent",
+    ...(model ? { model } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(isSubagentRunStatus(payload?.status) ? { status: payload.status } : {}),
+  };
+}
+
+function isSubagentRunStatus(value: unknown): value is SubagentRunSummary["status"] {
+  return (
+    value === "inProgress" || value === "completed" || value === "failed" || value === "stopped"
+  );
+}
+
+export interface SubagentRunSummary {
+  id: string;
+  title: string;
+  prompt: string;
+  model?: string;
+  reasoningEffort?: string;
+  status: "inProgress" | "completed" | "failed" | "stopped";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function deriveSubagentRuns(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): SubagentRunSummary[] {
+  const runs = new Map<string, SubagentRunSummary>();
+  for (const activity of [...activities].toSorted(compareActivitiesByOrder)) {
+    const payload = asRecord(activity.payload);
+    if (payload?.itemType !== "collab_agent_tool_call") continue;
+    const data = asRecord(payload.data);
+    if (!data) continue;
+    const subagent = extractSubagentToolData(payload, data);
+    for (const runId of subagent.runIds) {
+      const previous = runs.get(runId);
+      const model = subagent.model ?? previous?.model;
+      const reasoningEffort = subagent.reasoningEffort ?? previous?.reasoningEffort;
+      runs.set(runId, {
+        id: runId,
+        title: subagent.title ?? previous?.title ?? "Subagent",
+        prompt: subagent.prompt ?? previous?.prompt ?? "",
+        ...(model ? { model } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+        status:
+          subagent.status ??
+          (activity.kind === "tool.completed" ? "completed" : (previous?.status ?? "inProgress")),
+        createdAt: previous?.createdAt ?? activity.createdAt,
+        updatedAt: activity.createdAt,
+      });
+    }
+  }
+  return [...runs.values()];
 }
 
 function asNumber(value: unknown): number | null {

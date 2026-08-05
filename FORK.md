@@ -172,6 +172,42 @@ The new-thread Workspace controls expose a neighboring Worktree selector in Curr
 
 **Last updated:** 2026-07-31
 
+### DL018 — Read-only subagent transcripts in the right panel
+
+Codex collaboration-agent output and Claude Task output are correlated with their native child or
+parent tool-use identifiers, persisted separately from the parent assistant stream, and omitted
+from the main transcript. The spawn remains visible as a tool call with a prompt preview; selecting
+it opens a normal chat transcript without a composer in the right panel. The complete, unchanged
+spawn prompt is synthesized as the transcript's first user message. Child plan activity cannot
+replace the parent plan, and child assistant messages cannot become the parent turn's checkpoint
+message. Spawn rows show the reported subagent model and reasoning effort, while a count-labeled
+Subagents dropdown between the composer Worktree and branch controls lists every run and opens its
+transcript directly. Its label contracts from `N Subagents` to `N Sub` with the available composer
+width. The aggregate label and each menu item's bot icon reflect completed, working, and failed
+states; active work breathes, while terminal errors remain static. The composer context strip keeps
+the same left-aligned workspace group and right-aligned subagent/branch group at every viewport
+width. Claude output without a parent Task identifier remains in the main transcript.
+
+Projection migration `040_ProjectionSubagentIds` adds durable correlation columns for messages and
+activities. Codex and Claude are supported; other provider adapters remain unchanged.
+
+**Implementation evidence:** `packages/contracts/src/{provider,providerRuntime,orchestration}.ts`,
+`apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter,ClaudeAdapter}.ts`,
+`apps/server/src/orchestration/`, `apps/server/src/persistence/Migrations/040_ProjectionSubagentIds.ts`,
+and `apps/web/src/components/{BranchToolbar,ChatView,RightPanelTabs}.tsx`,
+`apps/web/src/components/BranchToolbar.logic.ts`,
+`apps/web/src/components/chat/{MessagesTimeline,SubagentPanel}.tsx`, `apps/web/src/session-logic.ts`,
+and `apps/web/src/rightPanelStore.ts`.
+
+**Recorded validation:** focused Codex and Claude adapter tests, provider-runtime ingestion and
+projection migration tests, web session/timeline/right-panel and aggregate subagent-status tests,
+package typechecks, `vp check`, `vp run typecheck`, and an isolated paired web-app verification at
+narrow panel width. The spawn row, complete prompt, separate child transcript, completed status,
+status-aware dropdown, invariant context-strip grouping across the former mobile breakpoint, and
+absent composer were confirmed in the live client.
+
+**Last updated:** 2026-08-04
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

@@ -1,31 +1,21 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import {
-  ChevronDownIcon,
-  CloudIcon,
-  FolderGit2Icon,
-  FolderGitIcon,
-  FolderIcon,
-  HistoryIcon,
-  MonitorIcon,
-} from "lucide-react";
+import { BotIcon, ChevronDownIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
+import type { SubagentRunSummary } from "../session-logic";
 import { useProject, useThread, useThreadShellsForProjectRefs } from "../state/entities";
 import { useWorktrees, useWorktreesOnce } from "../state/queries";
-import { useIsMobile } from "../hooks/useMediaQuery";
 import {
   type EnvMode,
   type EnvironmentOption,
   resolveDraftWorktreeContext,
-  resolveCurrentWorkspaceLabel,
-  resolveEnvModeLabel,
   resolveEffectiveEnvMode,
   resolveLockedWorktreeDisplay,
-  resolveLockedWorkspaceLabel,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
+  resolveSubagentAggregateStatus,
   resolveWorktreePickerModel,
   type WorktreeRecord,
   shouldShowEnvironmentIndicator,
@@ -35,16 +25,7 @@ import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSele
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { BranchToolbarWorktreeSelector } from "./BranchToolbarWorktreeSelector";
 import { Button } from "./ui/button";
-import {
-  Menu,
-  MenuGroup,
-  MenuGroupLabel,
-  MenuPopup,
-  MenuRadioGroup,
-  MenuRadioItem,
-  MenuSeparator,
-  MenuTrigger,
-} from "./ui/menu";
+import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 import { Separator } from "./ui/separator";
 
 interface BranchToolbarProps {
@@ -62,158 +43,98 @@ interface BranchToolbarProps {
   onComposerFocusRequest?: () => void;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  subagentRuns: ReadonlyArray<SubagentRunSummary>;
+  onOpenSubagent: (runIds: ReadonlyArray<string>) => void;
 }
 
-interface MobileRunContextSelectorProps {
-  envLocked: boolean;
-  envModeLocked: boolean;
-  environmentId: EnvironmentId;
-  availableEnvironments: readonly EnvironmentOption[] | undefined;
-  showEnvironmentPicker: boolean;
-  showEnvironmentIndicator: boolean;
-  onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
-  effectiveEnvMode: EnvMode;
-  activeWorktreePath: string | null;
-  onEnvModeChange: (mode: EnvMode) => void;
-  previousWorktreeLabel: string | null;
-  onUsePreviousWorktree: () => void;
+function subagentMenuLabel(run: SubagentRunSummary): string {
+  if (run.title !== run.model) return run.title;
+  return run.prompt.trim().split(/\r?\n/u, 1)[0] || "Subagent";
 }
 
-const MobileRunContextSelector = memo(function MobileRunContextSelector({
-  envLocked,
-  envModeLocked,
-  environmentId,
-  availableEnvironments,
-  showEnvironmentPicker,
-  showEnvironmentIndicator,
-  onEnvironmentChange,
-  effectiveEnvMode,
-  activeWorktreePath,
-  onEnvModeChange,
-  previousWorktreeLabel,
-  onUsePreviousWorktree,
-}: MobileRunContextSelectorProps) {
-  const activeEnvironment = useMemo(
-    () => availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null,
-    [availableEnvironments, environmentId],
+function subagentMenuMetadata(run: SubagentRunSummary): string {
+  const values = [run.model, run.reasoningEffort ? `${run.reasoningEffort} effort` : null].filter(
+    (value): value is string => Boolean(value),
   );
-  const WorkspaceIcon =
-    effectiveEnvMode === "worktree"
-      ? FolderGit2Icon
-      : activeWorktreePath
-        ? FolderGitIcon
-        : FolderIcon;
-  const workspaceLabel = envModeLocked
-    ? resolveLockedWorkspaceLabel(activeWorktreePath)
-    : effectiveEnvMode === "worktree"
-      ? resolveEnvModeLabel("worktree")
-      : resolveCurrentWorkspaceLabel(activeWorktreePath);
-  const isLocked = envLocked || envModeLocked;
-  const EnvironmentIcon = activeEnvironment?.isPrimary ? MonitorIcon : CloudIcon;
-  const icon = showEnvironmentIndicator ? (
-    // Button's base styles apply `-mx-0.5` to descendant SVGs, which eats 4px
-    // out of whatever gap we set. mx-0! cancels that so gap-0.5 reads as 2px.
-    <span className="inline-flex shrink-0 items-center gap-0.5">
-      <EnvironmentIcon className="size-3 shrink-0 mx-0!" />
-      <WorkspaceIcon className="size-3 shrink-0 mx-0!" />
-    </span>
-  ) : (
-    <WorkspaceIcon className="size-3 shrink-0" />
-  );
-  const triggerContent = (
-    <>
-      {icon}
-      <span className="min-w-0 truncate">
-        {showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel}
-      </span>
-    </>
-  );
+  return values.length > 0 ? values.join(" · ") : "Model and effort unavailable";
+}
 
-  if (isLocked) {
-    return (
-      <span className="inline-flex min-w-0 max-w-[48%] flex-1 items-center justify-start gap-1 rounded-md border border-transparent px-[calc(--spacing(2)-1px)] text-sm font-medium text-muted-foreground/70 md:hidden">
-        {triggerContent}
-      </span>
-    );
-  }
+const SUBAGENT_STATUS_LABEL = {
+  inProgress: "Working",
+  completed: "Completed",
+  failed: "Failed",
+  stopped: "Stopped",
+} as const satisfies Record<SubagentRunSummary["status"], string>;
+
+const SUBAGENT_ICON_CLASS = {
+  inProgress:
+    "animate-sidebar-working-text text-sky-600 motion-reduce:animate-none dark:text-sky-400",
+  completed: "text-muted-foreground",
+  failed: "text-red-600 dark:text-red-400",
+  stopped: "text-muted-foreground",
+} as const satisfies Record<SubagentRunSummary["status"], string>;
+
+const SUBAGENT_TRIGGER_CLASS = {
+  complete: "text-muted-foreground hover:text-foreground",
+  working:
+    "animate-sidebar-working-text text-sky-600 motion-reduce:animate-none hover:text-sky-500 dark:text-sky-400 dark:hover:text-sky-300",
+  errorWorking:
+    "animate-sidebar-working-text text-red-600 motion-reduce:animate-none hover:text-red-500 dark:text-red-400 dark:hover:text-red-300",
+  error: "text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300",
+} as const;
+
+const BranchToolbarSubagentSelector = memo(function BranchToolbarSubagentSelector(props: {
+  runs: ReadonlyArray<SubagentRunSummary>;
+  onOpenSubagent: (runIds: ReadonlyArray<string>) => void;
+}) {
+  if (props.runs.length === 0) return null;
+  const aggregateStatus = resolveSubagentAggregateStatus(props.runs.map((run) => run.status));
+  const aggregateStatusLabel =
+    aggregateStatus === "complete"
+      ? "completed"
+      : aggregateStatus === "working"
+        ? "working"
+        : aggregateStatus === "errorWorking"
+          ? "errors, with work still running"
+          : "errors";
 
   return (
     <Menu>
       <MenuTrigger
         render={<Button variant="ghost" size="xs" />}
-        className="min-w-0 max-w-[48%] flex-1 justify-start text-muted-foreground/70 hover:text-foreground/80 md:hidden"
+        className={`shrink-0 justify-start ${SUBAGENT_TRIGGER_CLASS[aggregateStatus]}`}
+        aria-label={`${props.runs.length} ${props.runs.length === 1 ? "subagent" : "subagents"}, ${aggregateStatusLabel}`}
       >
-        {triggerContent}
+        <span className="hidden tabular-nums @[34rem]/composer-strip:inline">
+          {props.runs.length} {props.runs.length === 1 ? "Subagent" : "Subagents"}
+        </span>
+        <span className="tabular-nums @[34rem]/composer-strip:hidden">{props.runs.length} Sub</span>
         <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
       </MenuTrigger>
-      <MenuPopup align="start" side="top" className="w-64">
-        {showEnvironmentPicker && availableEnvironments && onEnvironmentChange ? (
-          <>
-            <MenuGroup>
-              <MenuGroupLabel>Run on</MenuGroupLabel>
-              <MenuRadioGroup
-                value={environmentId}
-                onValueChange={(value) => onEnvironmentChange(value as EnvironmentId)}
-              >
-                {availableEnvironments.map((env) => {
-                  const Icon = env.isPrimary ? MonitorIcon : CloudIcon;
-                  return (
-                    <MenuRadioItem
-                      key={env.environmentId}
-                      disabled={envLocked}
-                      value={env.environmentId}
-                    >
-                      <span className="flex min-w-0 items-center gap-1.5">
-                        <Icon className="size-3" />
-                        <span className="min-w-0 truncate">{env.label}</span>
-                      </span>
-                    </MenuRadioItem>
-                  );
-                })}
-              </MenuRadioGroup>
-            </MenuGroup>
-            <MenuSeparator />
-          </>
-        ) : null}
+      <MenuPopup align="center" side="top" className="w-80 max-w-[calc(100vw-2rem)]">
         <MenuGroup>
-          <MenuGroupLabel>Workspace</MenuGroupLabel>
-          <MenuRadioGroup
-            value={effectiveEnvMode}
-            onValueChange={(value) => {
-              if (value === "previous-worktree") {
-                onUsePreviousWorktree();
-                return;
-              }
-              onEnvModeChange(value as EnvMode);
-            }}
-          >
-            <MenuRadioItem disabled={envModeLocked} value="local">
-              <span className="flex min-w-0 items-center gap-1.5">
-                {activeWorktreePath ? (
-                  <FolderGitIcon className="size-3" />
-                ) : (
-                  <FolderIcon className="size-3" />
-                )}
-                <span className="min-w-0 truncate">
-                  {resolveCurrentWorkspaceLabel(activeWorktreePath)}
+          <MenuGroupLabel>Subagents</MenuGroupLabel>
+          {props.runs.map((run) => (
+            <MenuItem
+              key={run.id}
+              className="h-auto min-w-0 py-2"
+              onClick={() => props.onOpenSubagent([run.id])}
+            >
+              <BotIcon
+                className={`size-3.5 shrink-0 ${SUBAGENT_ICON_CLASS[run.status]}`}
+                aria-hidden
+              />
+              <span className="sr-only">{SUBAGENT_STATUS_LABEL[run.status]}</span>
+              <span className="grid min-w-0 flex-1 gap-0.5">
+                <span className="truncate font-medium text-foreground">
+                  {subagentMenuLabel(run)}
+                </span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {subagentMenuMetadata(run)}
                 </span>
               </span>
-            </MenuRadioItem>
-            <MenuRadioItem disabled={envModeLocked} value="worktree">
-              <span className="flex min-w-0 items-center gap-1.5">
-                <FolderGit2Icon className="size-3" />
-                <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
-              </span>
-            </MenuRadioItem>
-            {previousWorktreeLabel ? (
-              <MenuRadioItem disabled={envModeLocked} value="previous-worktree">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <HistoryIcon className="size-3" />
-                  <span className="min-w-0 truncate">{previousWorktreeLabel}</span>
-                </span>
-              </MenuRadioItem>
-            ) : null}
-          </MenuRadioGroup>
+            </MenuItem>
+          ))}
         </MenuGroup>
       </MenuPopup>
     </Menu>
@@ -235,6 +156,8 @@ export const BranchToolbar = memo(function BranchToolbar({
   onComposerFocusRequest,
   availableEnvironments,
   onEnvironmentChange,
+  subagentRuns,
+  onOpenSubagent,
 }: BranchToolbarProps) {
   const threadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
@@ -426,72 +349,44 @@ export const BranchToolbar = memo(function BranchToolbar({
     activeEnvironment: activeEnvironmentOption,
     canPickEnvironment: showEnvironmentPicker,
   });
-  const isMobile = useIsMobile();
-
   if (!hasActiveThread || !activeProject) return null;
 
   return (
-    <div className="chat-composer-context-strip -mt-4 mx-auto flex w-[calc(100%-2.75rem)] max-w-[calc(48rem-2.75rem)] items-center gap-2 px-1 pt-5 pb-1">
-      {isMobile ? (
-        <>
-          <MobileRunContextSelector
-            envLocked={envLocked}
-            envModeLocked={envModeLocked}
-            environmentId={environmentId}
-            availableEnvironments={availableEnvironments}
-            showEnvironmentPicker={showEnvironmentPicker}
-            showEnvironmentIndicator={showEnvironmentIndicator}
-            onEnvironmentChange={onEnvironmentChange}
-            effectiveEnvMode={effectiveEnvMode}
-            activeWorktreePath={activeWorktreePath}
-            onEnvModeChange={onEnvModeChange}
-            previousWorktreeLabel={previousWorktreeLabel}
-            onUsePreviousWorktree={onUsePreviousWorktree}
-          />
-          {worktreeControlModel || lockedWorktreeDisplay ? (
-            <BranchToolbarWorktreeSelector
-              className="min-w-0 max-w-[35%] flex-1 justify-start rounded-md px-[calc(--spacing(2)-1px)] text-sm sm:text-sm md:hidden"
-              model={worktreeControlModel}
-              locked={serverThread !== null}
-              lockedDisplay={lockedWorktreeDisplay}
-              onWorktreeChange={onWorktreeChange}
+    <div className="chat-composer-context-strip @container/composer-strip -mt-4 mx-auto flex w-[calc(100%-2.75rem)] max-w-[calc(48rem-2.75rem)] items-center gap-2 px-1 pt-5 pb-1">
+      <div className="flex min-w-0 flex-1 items-center gap-1">
+        {showEnvironmentIndicator && availableEnvironments && (
+          <>
+            <BranchToolbarEnvironmentSelector
+              envLocked={envLocked}
+              environmentId={environmentId}
+              availableEnvironments={availableEnvironments}
+              {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
             />
-          ) : null}
-        </>
-      ) : (
-        <div className="flex min-w-0 flex-1 items-center gap-1">
-          {showEnvironmentIndicator && availableEnvironments && (
-            <>
-              <BranchToolbarEnvironmentSelector
-                envLocked={envLocked}
-                environmentId={environmentId}
-                availableEnvironments={availableEnvironments}
-                {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
-              />
-              <Separator orientation="vertical" className="mx-0.5 h-3.5!" />
-            </>
-          )}
-          <BranchToolbarEnvModeSelector
-            envLocked={envModeLocked}
-            effectiveEnvMode={effectiveEnvMode}
-            activeWorktreePath={activeWorktreePath}
-            onEnvModeChange={onEnvModeChange}
-            previousWorktreeLabel={previousWorktreeLabel}
-            onUsePreviousWorktree={onUsePreviousWorktree}
+            <Separator orientation="vertical" className="mx-0.5 h-3.5!" />
+          </>
+        )}
+        <BranchToolbarEnvModeSelector
+          envLocked={envModeLocked}
+          effectiveEnvMode={effectiveEnvMode}
+          activeWorktreePath={activeWorktreePath}
+          onEnvModeChange={onEnvModeChange}
+          previousWorktreeLabel={previousWorktreeLabel}
+          onUsePreviousWorktree={onUsePreviousWorktree}
+        />
+        {worktreeControlModel || lockedWorktreeDisplay ? (
+          <BranchToolbarWorktreeSelector
+            model={worktreeControlModel}
+            locked={serverThread !== null}
+            lockedDisplay={lockedWorktreeDisplay}
+            onWorktreeChange={onWorktreeChange}
           />
-          {worktreeControlModel || lockedWorktreeDisplay ? (
-            <BranchToolbarWorktreeSelector
-              model={worktreeControlModel}
-              locked={serverThread !== null}
-              lockedDisplay={lockedWorktreeDisplay}
-              onWorktreeChange={onWorktreeChange}
-            />
-          ) : null}
-        </div>
-      )}
+        ) : null}
+      </div>
+
+      <BranchToolbarSubagentSelector runs={subagentRuns} onOpenSubagent={onOpenSubagent} />
 
       <BranchToolbarBranchSelector
-        className="min-w-0 flex-1 justify-end md:ml-auto md:flex-none"
+        className="ml-auto min-w-0 flex-none justify-end"
         environmentId={environmentId}
         threadId={threadId}
         {...(draftId ? { draftId } : {})}

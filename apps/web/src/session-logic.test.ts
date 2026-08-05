@@ -12,6 +12,7 @@ import {
   deriveActivePlanState,
   derivePendingApprovals,
   derivePendingUserInputs,
+  deriveSubagentRuns,
   deriveTimelineEntries,
   deriveWorkLogEntries,
   findLatestProposedPlan,
@@ -709,6 +710,86 @@ describe("deriveWorkLogEntries", () => {
 
     const entries = deriveWorkLogEntries(activities);
     expect(entries.map((entry) => entry.id)).toEqual(["tool-complete"]);
+  });
+
+  it("shows a subagent spawn immediately and preserves its full prompt", () => {
+    const prompt = "Audit every SQL change.\n\nInclude migrations, indexes, and rollback risks.";
+    const activities = [
+      makeActivity({
+        id: "subagent-start",
+        kind: "tool.started",
+        summary: "Subagent task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          toolCallId: "spawn-1",
+          status: "inProgress",
+          data: {
+            item: {
+              type: "collabAgentToolCall",
+              tool: "spawnAgent",
+              prompt,
+              model: "reviewer",
+              reasoningEffort: "high",
+              status: "inProgress",
+              receiverThreadIds: ["child-thread-1"],
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.subagentRunIds).toEqual(["child-thread-1"]);
+    expect(entry?.subagentPrompt).toBe(prompt);
+    expect(entry?.subagentModel).toBe("reviewer");
+    expect(entry?.subagentReasoningEffort).toBe("high");
+    expect(deriveSubagentRuns(activities)).toEqual([
+      {
+        id: "child-thread-1",
+        title: "reviewer",
+        prompt,
+        model: "reviewer",
+        reasoningEffort: "high",
+        status: "inProgress",
+        createdAt: "2026-02-23T00:00:00.000Z",
+        updatedAt: "2026-02-23T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("uses the Claude tool id as the subagent run and keeps the exact prompt", () => {
+    const prompt = "First line\n\nSecond line with  two spaces.";
+    const activities = [
+      makeActivity({
+        id: "claude-subagent-start",
+        kind: "tool.started",
+        summary: "Subagent task",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          toolCallId: "tool-task-1",
+          status: "inProgress",
+          data: {
+            toolName: "Task",
+            input: {
+              description: "Review the database layer",
+              prompt,
+              subagent_type: "code-reviewer",
+              model: "sonnet",
+              effort: "max",
+            },
+          },
+        },
+      }),
+    ];
+
+    expect(deriveSubagentRuns(activities)[0]).toMatchObject({
+      id: "tool-task-1",
+      title: "Review the database layer",
+      prompt,
+      model: "sonnet",
+      reasoningEffort: "max",
+      status: "inProgress",
+    });
   });
 
   it("omits task.started but shows task.progress and task.completed", () => {

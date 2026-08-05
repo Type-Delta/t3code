@@ -10,6 +10,13 @@ Common reasons:
 - switch to another account when one account hits limits
 - keep one shared Codex history instead of maintaining two separate Codex setups
 
+## Subagent Transcripts
+
+When Codex delegates work to a subagent, the main chat shows a subagent tool call with a prompt
+preview. Select it to open the subagent transcript in the right panel. The panel uses the normal
+chat layout without a message box, and its first message contains the complete prompt sent to the
+subagent. Subagent responses and tool activity stay out of the main transcript.
+
 ## I Only Use One Codex Account
 
 Use the default provider.

@@ -117,6 +117,30 @@ describe("rightPanelStore", () => {
     ).toHaveLength(2);
   });
 
+  it("opens each subagent run as a titled right-panel surface", () => {
+    useRightPanelStore.getState().openSubagent(refA, "child-thread-1", "Database reviewer");
+    useRightPanelStore.getState().openSubagent(refA, "child-thread-2", "Test reviewer");
+
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "subagent:child-thread-2",
+      surfaces: [
+        {
+          id: "subagent:child-thread-1",
+          kind: "subagent",
+          runId: "child-thread-1",
+          title: "Database reviewer",
+        },
+        {
+          id: "subagent:child-thread-2",
+          kind: "subagent",
+          runId: "child-thread-2",
+          title: "Test reviewer",
+        },
+      ],
+    });
+  });
+
   it("reopening an inactive singleton activates its existing surface", () => {
     useRightPanelStore.getState().open(refA, "diff");
     useRightPanelStore.getState().open(refA, "plan");

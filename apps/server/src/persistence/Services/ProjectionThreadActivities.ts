@@ -12,6 +12,7 @@ import {
   NonNegativeInt,
   OrchestrationThreadActivityTone,
   ThreadId,
+  TrimmedNonEmptyString,
   TurnId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -24,6 +25,7 @@ export const ProjectionThreadActivity = Schema.Struct({
   activityId: EventId,
   threadId: ThreadId,
   turnId: Schema.NullOr(TurnId),
+  subagentId: Schema.optional(TrimmedNonEmptyString),
   tone: OrchestrationThreadActivityTone,
   kind: Schema.String,
   summary: Schema.String,

@@ -965,6 +965,7 @@ export const makeCodexSessionRuntime = (
 
         let requestId: ApprovalRequestId | undefined;
         let requestKind: ProviderRequestKind | undefined;
+        const subagentId = childParentTurnId ? readNotificationThreadId(notification) : undefined;
         let turnId = childParentTurnId ?? route.turnId;
         let itemId = route.itemId;
 
@@ -995,6 +996,7 @@ export const makeCodexSessionRuntime = (
           threadId: options.threadId,
           method: notification.method,
           ...(turnId ? { turnId } : {}),
+          ...(subagentId ? { subagentId } : {}),
           ...(itemId ? { itemId } : {}),
           ...(requestId ? { requestId } : {}),
           ...(requestKind ? { requestKind } : {}),

@@ -85,6 +85,7 @@ import {
   findSidebarProposedPlan,
   findLatestProposedPlan,
   deriveWorkLogEntries,
+  deriveSubagentRuns,
   hasActionableProposedPlan,
   isLatestTurnSettled,
 } from "../session-logic";
@@ -228,6 +229,7 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { SubagentPanel } from "./chat/SubagentPanel";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
@@ -2085,7 +2087,27 @@ function ChatViewContent(props: ChatViewProps) {
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
-  const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
+  const mainThreadActivities = useMemo(
+    () =>
+      threadActivities.filter(
+        (activity) =>
+          activity.subagentId === undefined ||
+          activity.kind === "approval.requested" ||
+          activity.kind === "approval.resolved" ||
+          activity.kind === "user-input.requested" ||
+          activity.kind === "user-input.resolved",
+      ),
+    [threadActivities],
+  );
+  const workLogEntries = useMemo(
+    () => deriveWorkLogEntries(mainThreadActivities),
+    [mainThreadActivities],
+  );
+  const subagentRuns = useMemo(() => deriveSubagentRuns(threadActivities), [threadActivities]);
+  const subagentRunsById = useMemo(
+    () => new Map(subagentRuns.map((run) => [run.id, run])),
+    [subagentRuns],
+  );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
@@ -2147,8 +2169,8 @@ function ChatViewContent(props: ChatViewProps) {
     [activeLatestTurn, activeThread?.id, latestTurnSettled, threadPlanCatalog],
   );
   const activePlan = useMemo(
-    () => deriveActivePlanState(threadActivities, activeLatestTurn?.turnId ?? undefined),
-    [activeLatestTurn?.turnId, threadActivities],
+    () => deriveActivePlanState(mainThreadActivities, activeLatestTurn?.turnId ?? undefined),
+    [activeLatestTurn?.turnId, mainThreadActivities],
   );
   const planSidebarLabel = sidebarProposedPlan || interactionMode === "plan" ? "Plan" : "Tasks";
   const showPlanFollowUpPrompt =
@@ -2366,7 +2388,7 @@ function ChatViewContent(props: ChatViewProps) {
     };
   }, [attachmentPreviewHandoffByMessageId, clearAttachmentPreviewHandoff, displayServerMessages]);
   const timelineMessages = useMemo(() => {
-    const messages = displayServerMessages;
+    const messages = displayServerMessages.filter((message) => message.subagentId === undefined);
     const serverMessagesWithPreviewHandoff =
       Object.keys(attachmentPreviewHandoffByMessageId).length === 0
         ? messages
@@ -3240,6 +3262,19 @@ function ChatViewContent(props: ChatViewProps) {
       useRightPanelStore.getState().openFile(activeThreadRef, relativePath);
     },
     [activeProject, activeThreadRef],
+  );
+  const openSubagentRuns = useCallback(
+    (runIds: ReadonlyArray<string>) => {
+      if (!activeThreadRef) return;
+      for (let index = runIds.length - 1; index >= 0; index -= 1) {
+        const runId = runIds[index];
+        if (!runId) continue;
+        useRightPanelStore
+          .getState()
+          .openSubagent(activeThreadRef, runId, subagentRunsById.get(runId)?.title ?? "Subagent");
+      }
+    },
+    [activeThreadRef, subagentRunsById],
   );
   const togglePreviewPanel = useCallback(() => {
     if (!activeThreadRef || !isPreviewSupportedInRuntime()) return;
@@ -5823,6 +5858,17 @@ function ChatViewContent(props: ChatViewProps) {
       {panelToggleControls}
     </div>
   );
+  const activeSubagentRun =
+    activeRightPanelSurface?.kind === "subagent"
+      ? (subagentRunsById.get(activeRightPanelSurface.runId) ?? {
+          id: activeRightPanelSurface.runId,
+          title: activeRightPanelSurface.title,
+          prompt: "",
+          status: "stopped" as const,
+          createdAt: activeThread.createdAt,
+          updatedAt: activeThread.updatedAt,
+        })
+      : null;
   const rightPanelContent = activeThreadRef ? (
     activeRightPanelSurface?.kind === "preview" ? (
       <Suspense fallback={null}>
@@ -5834,6 +5880,19 @@ function ChatViewContent(props: ChatViewProps) {
           visible
         />
       </Suspense>
+    ) : activeRightPanelSurface?.kind === "subagent" && activeSubagentRun ? (
+      <SubagentPanel
+        run={activeSubagentRun}
+        messages={activeThread.messages}
+        activities={threadActivities}
+        environmentId={activeThread.environmentId}
+        routeThreadKey={routeThreadKey}
+        markdownCwd={gitCwd ?? undefined}
+        workspaceRoot={activeWorkspaceRoot}
+        resolvedTheme={resolvedTheme}
+        timestampFormat={timestampFormat}
+        onOpenSubagent={openSubagentRuns}
+      />
     ) : activeRightPanelSurface?.kind === "terminal" ? (
       <PersistentThreadTerminalPanel
         threadRef={activeThreadRef}
@@ -6092,6 +6151,7 @@ function ChatViewContent(props: ChatViewProps) {
                 contentInsetEndAdjustment={composerOverlayHeight}
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
+                onOpenSubagent={openSubagentRuns}
                 emptyState={{
                   projectName: activeProject?.title ?? null,
                   machineName: activeEnvironment?.label ?? "This device",
@@ -6291,6 +6351,8 @@ function ChatViewContent(props: ChatViewProps) {
                                   : {})}
                                 {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
                                 availableEnvironments={logicalProjectEnvironments}
+                                subagentRuns={subagentRuns}
+                                onOpenSubagent={openSubagentRuns}
                               />
                             </div>
                           )}

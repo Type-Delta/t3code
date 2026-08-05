@@ -10,6 +10,15 @@ Common reasons:
 - run Claude through a router such as Claude Code Router
 - use external providers exposed through a Claude-compatible workflow
 
+## Subagent Transcripts
+
+When Claude delegates work with its Task tool, the main chat shows a subagent tool call with a
+prompt preview. Select it to open the subagent transcript in the right panel. The panel uses the
+normal chat layout without a message box, and its first message contains the complete prompt sent
+to the subagent. Subagent responses and tool activity stay out of the main transcript when Claude
+supplies their parent Task identifier. Dynamic output without that identifier remains in the main
+chat so it is not hidden.
+
 ## I Only Use One Claude Account
 
 Use the default provider.

@@ -18,6 +18,7 @@ import {
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
   resolveDraftWorktreeContext,
+  resolveSubagentAggregateStatus,
   resolveWorktreePickerModel,
   shouldIncludeBranchPickerItem,
   shouldShowEnvironmentIndicator,
@@ -25,6 +26,15 @@ import {
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+
+describe("resolveSubagentAggregateStatus", () => {
+  it("prioritizes errors and working runs according to the aggregate status matrix", () => {
+    expect(resolveSubagentAggregateStatus(["completed", "stopped"])).toBe("complete");
+    expect(resolveSubagentAggregateStatus(["completed", "inProgress"])).toBe("working");
+    expect(resolveSubagentAggregateStatus(["failed", "inProgress"])).toBe("errorWorking");
+    expect(resolveSubagentAggregateStatus(["failed", "completed"])).toBe("error");
+  });
+});
 
 describe("resolveWorktreePickerModel", () => {
   const worktrees = [

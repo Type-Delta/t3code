@@ -1,6 +1,7 @@
 import type { EnvironmentId, VcsRef, ProjectId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { toSortableTimestamp } from "../lib/threadSort";
+import type { SubagentRunSummary } from "../session-logic";
 export {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
@@ -15,6 +16,17 @@ export interface EnvironmentOption {
 
 export const EnvMode = Schema.Literals(["local", "worktree"]);
 export type EnvMode = typeof EnvMode.Type;
+
+export type SubagentAggregateStatus = "complete" | "working" | "errorWorking" | "error";
+
+export function resolveSubagentAggregateStatus(
+  statuses: ReadonlyArray<SubagentRunSummary["status"]>,
+): SubagentAggregateStatus {
+  const hasWorking = statuses.includes("inProgress");
+  const hasError = statuses.includes("failed");
+  if (hasError) return hasWorking ? "errorWorking" : "error";
+  return hasWorking ? "working" : "complete";
+}
 
 export interface WorktreeRecord {
   readonly path: string;

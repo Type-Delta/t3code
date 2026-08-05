@@ -135,6 +135,7 @@ interface TimelineRowSharedState {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorElement?: HTMLElement) => void;
+  onOpenSubagent: (runIds: ReadonlyArray<string>) => void;
 }
 
 interface TimelineRowActivityState {
@@ -150,6 +151,7 @@ const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FADE_HEADER = <div className="h-10 sm:h-12" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const doNothing = () => {};
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -182,6 +184,7 @@ interface MessagesTimelineProps {
   contentInsetEndAdjustment: number;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onManualNavigation: () => void;
+  onOpenSubagent?: (runIds: ReadonlyArray<string>) => void;
   emptyState: {
     projectName: string | null;
     machineName: string;
@@ -222,6 +225,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   contentInsetEndAdjustment,
   onIsAtEndChange,
   onManualNavigation,
+  onOpenSubagent = doNothing,
   emptyState,
   hideEmptyPlaceholder = false,
   topFadeEnabled = false,
@@ -443,6 +447,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onOpenSubagent,
     }),
     [
       timestampFormat,
@@ -457,6 +462,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onOpenSubagent,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -1853,9 +1859,10 @@ function workToneIcon(tone: TimelineWorkEntry["tone"]): {
 }
 
 function workEntryPreview(
-  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles">,
+  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles" | "subagentPrompt">,
   workspaceRoot: string | undefined,
 ) {
+  if (workEntry.subagentPrompt) return workEntry.subagentPrompt;
   if (workEntry.command) return workEntry.command;
   if (workEntry.detail) return workEntry.detail;
   if ((workEntry.changedFiles?.length ?? 0) === 0) return null;
@@ -1865,6 +1872,15 @@ function workEntryPreview(
   return workEntry.changedFiles!.length === 1
     ? displayPath
     : `${displayPath} +${workEntry.changedFiles!.length - 1} more`;
+}
+
+function subagentMetadata(workEntry: TimelineWorkEntry): string | null {
+  const model = workEntry.subagentModel?.trim();
+  const effort = workEntry.subagentReasoningEffort?.trim();
+  if (model && effort) return `${model} · ${effort} effort`;
+  if (model) return model;
+  if (effort) return `${effort} effort`;
+  return null;
 }
 
 function workEntryRawCommand(
@@ -1958,6 +1974,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workspaceRoot: string | undefined;
 }) {
   const { workEntry, workspaceRoot } = props;
+  const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
@@ -1971,9 +1988,11 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       normalizeCompactToolLabel(heading).toLowerCase()
       ? null
       : rawPreview;
-  const displayText = preview ? `${heading} - ${preview}` : heading;
+  const metadata = subagentMetadata(workEntry);
+  const displayText = [heading, metadata, preview].filter(Boolean).join(" - ");
   const expandedBody = buildToolCallExpandedBody(workEntry, workspaceRoot);
   const canExpand = expandedBody !== null;
+  const opensSubagent = (workEntry.subagentRunIds?.length ?? 0) > 0;
   const showFailedIndicator = workEntryIndicatesToolFailure(workEntry);
   const showDestructiveRowStyle =
     showFailedIndicator &&
@@ -1998,26 +2017,37 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const showSuccessIndicator =
     workEntryIndicatesToolSuccess(workEntry) ||
     (turnSettled && workEntryIndicatesToolNeutralStatus(workEntry));
-  const rowToggleProps = canExpand
-    ? {
-        role: "button" as const,
-        tabIndex: 0 as const,
-        "aria-label": displayText,
-        onClick: () => setExpanded((v) => !v),
-        onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
+  const rowToggleProps =
+    canExpand || opensSubagent
+      ? {
+          role: "button" as const,
+          tabIndex: 0 as const,
+          "aria-label": displayText,
+          onClick: () => {
+            if (opensSubagent) {
+              ctx.onOpenSubagent(workEntry.subagentRunIds!);
+              return;
+            }
             setExpanded((v) => !v);
-          }
-        },
-      }
-    : {};
+          },
+          onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              if (opensSubagent) {
+                ctx.onOpenSubagent(workEntry.subagentRunIds!);
+                return;
+              }
+              setExpanded((v) => !v);
+            }
+          },
+        }
+      : {};
 
   return (
     <div
       className={cn(
         "flex flex-col rounded-md px-0.5 py-0.5 transition-colors",
-        canExpand &&
+        (canExpand || opensSubagent) &&
           "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
       )}
       {...rowToggleProps}
@@ -2033,6 +2063,11 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
           <div className="min-w-0 flex-1 overflow-hidden">
             <p className="flex min-w-0 w-full items-baseline gap-1.5 text-[12px] leading-5">
               <span className={cn("min-w-0 shrink truncate", headingClass)}>{heading}</span>
+              {metadata && (
+                <span className="min-w-0 max-w-48 shrink truncate text-[11px] text-muted-foreground/70 tabular-nums">
+                  {metadata}
+                </span>
+              )}
               {preview && (
                 <span className="min-w-0 flex-1 truncate text-muted-foreground/55">{preview}</span>
               )}
@@ -2041,9 +2076,11 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
           <div className="flex shrink-0 items-center gap-px text-muted-foreground/55">
             <span
               className="flex size-4 shrink-0 items-center justify-center"
-              aria-hidden={!canExpand}
+              aria-hidden={!canExpand && !opensSubagent}
             >
-              {canExpand ? (
+              {opensSubagent ? (
+                <ChevronRightIcon className="size-3 shrink-0 opacity-70" aria-hidden />
+              ) : canExpand ? (
                 <ChevronDownIcon
                   className={cn(
                     "size-3 shrink-0 opacity-70 transition-transform duration-200",

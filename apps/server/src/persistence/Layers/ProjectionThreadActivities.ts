@@ -1,6 +1,6 @@
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
-import { NonNegativeInt } from "@t3tools/contracts";
+import { NonNegativeInt, TrimmedNonEmptyString } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -20,6 +20,7 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
     payload: Schema.fromJsonString(Schema.Unknown),
     sequence: Schema.NullOr(NonNegativeInt),
+    subagentId: Schema.NullOr(TrimmedNonEmptyString),
   }),
 );
 
@@ -41,6 +42,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
               activity_id,
               thread_id,
               turn_id,
+              subagent_id,
               tone,
               kind,
               summary,
@@ -52,6 +54,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
               ${row.activityId},
               ${row.threadId},
               ${row.turnId},
+              ${row.subagentId ?? null},
               ${row.tone},
               ${row.kind},
               ${row.summary},
@@ -63,6 +66,10 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
             DO UPDATE SET
               thread_id = excluded.thread_id,
               turn_id = excluded.turn_id,
+              subagent_id = COALESCE(
+                excluded.subagent_id,
+                projection_thread_activities.subagent_id
+              ),
               tone = excluded.tone,
               kind = excluded.kind,
               summary = excluded.summary,
@@ -81,6 +88,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          subagent_id AS "subagentId",
           tone,
           kind,
           summary,
@@ -129,6 +137,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           activityId: row.activityId,
           threadId: row.threadId,
           turnId: row.turnId,
+          ...(row.subagentId !== null ? { subagentId: row.subagentId } : {}),
           tone: row.tone,
           kind: row.kind,
           summary: row.summary,

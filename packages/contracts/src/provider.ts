@@ -122,6 +122,7 @@ export const ProviderEvent = Schema.Struct({
   method: TrimmedNonEmptyString,
   message: Schema.optional(TrimmedNonEmptyString),
   turnId: Schema.optional(TurnId),
+  subagentId: Schema.optional(TrimmedNonEmptyString),
   itemId: Schema.optional(ProviderItemId),
   requestId: Schema.optional(ApprovalRequestId),
   requestKind: Schema.optional(ProviderRequestKind),

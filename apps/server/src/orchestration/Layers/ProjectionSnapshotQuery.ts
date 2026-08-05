@@ -25,6 +25,7 @@ import {
   ModelSelection,
   ProjectId,
   ThreadId,
+  TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -75,6 +76,7 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   Struct.assign({
     isStreaming: Schema.Number,
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
+    subagentId: Schema.NullOr(TrimmedNonEmptyString),
   }),
 );
 const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
@@ -87,6 +89,7 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
     payload: Schema.fromJsonString(Schema.Unknown),
     sequence: Schema.NullOr(NonNegativeInt),
+    subagentId: Schema.NullOr(TrimmedNonEmptyString),
   }),
 );
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSession;
@@ -498,6 +501,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           message_id AS "messageId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          subagent_id AS "subagentId",
           role,
           text,
           attachments_json AS "attachments",
@@ -537,6 +541,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          subagent_id AS "subagentId",
           tone,
           kind,
           summary,
@@ -941,6 +946,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           message_id AS "messageId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          subagent_id AS "subagentId",
           role,
           text,
           attachments_json AS "attachments",
@@ -982,6 +988,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          subagent_id AS "subagentId",
           tone,
           kind,
           summary,
@@ -1409,6 +1416,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   text: row.text,
                   ...(row.attachments !== null ? { attachments: row.attachments } : {}),
                   turnId: row.turnId,
+                  ...(row.subagentId !== null ? { subagentId: row.subagentId } : {}),
                   streaming: row.isStreaming === 1,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -1447,6 +1455,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   summary: row.summary,
                   payload: row.payload,
                   turnId: row.turnId,
+                  ...(row.subagentId !== null ? { subagentId: row.subagentId } : {}),
                   ...(row.sequence !== null ? { sequence: row.sequence } : {}),
                   createdAt: row.createdAt,
                 });
@@ -2513,6 +2522,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               role: row.role,
               text: row.text,
               turnId: row.turnId,
+              ...(row.subagentId !== null ? { subagentId: row.subagentId } : {}),
               streaming: row.isStreaming === 1,
               createdAt: row.createdAt,
               updatedAt: row.updatedAt,
@@ -2535,6 +2545,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               summary: row.summary,
               payload: row.payload,
               turnId: row.turnId,
+              ...(row.subagentId !== null ? { subagentId: row.subagentId } : {}),
               createdAt: row.createdAt,
             };
             if (row.sequence !== null) {
