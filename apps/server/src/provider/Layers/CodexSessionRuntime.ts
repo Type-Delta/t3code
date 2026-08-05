@@ -52,6 +52,7 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+export const CODEX_SUBAGENT_STATUS_METHOD = "item/subAgent/status";
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
   "no rollout found",
@@ -272,6 +273,12 @@ type CodexServerNotification = {
     readonly params: CodexRpc.ServerNotificationParamsByMethod[M];
   };
 }[CodexRpc.ServerNotificationMethod];
+
+interface CodexCollabReceiverRoute {
+  readonly parentTurnId: TurnId;
+  readonly itemId: ProviderItemId;
+  readonly agentPath?: string;
+}
 
 function makeCodexServerNotification<M extends CodexRpc.ServerNotificationMethod>(
   method: M,
@@ -706,8 +713,8 @@ function readRouteFields(notification: CodexServerNotification): {
   }
 }
 
-function rememberCollabReceiverTurns(
-  collabReceiverTurns: Map<string, TurnId>,
+function rememberCollabReceiverRoutes(
+  collabReceiverRoutes: Map<string, CodexCollabReceiverRoute>,
   notification: CodexServerNotification,
   parentTurnId: TurnId | undefined,
 ): void {
@@ -719,12 +726,23 @@ function rememberCollabReceiverTurns(
     return;
   }
 
-  if (notification.params.item.type !== "collabAgentToolCall") {
+  const item = notification.params.item;
+  if (item.type === "collabAgentToolCall") {
+    for (const receiverThreadId of item.receiverThreadIds) {
+      collabReceiverRoutes.set(receiverThreadId, {
+        parentTurnId,
+        itemId: ProviderItemId.make(item.id),
+      });
+    }
     return;
   }
 
-  for (const receiverThreadId of notification.params.item.receiverThreadIds) {
-    collabReceiverTurns.set(receiverThreadId, parentTurnId);
+  if (item.type === "subAgentActivity") {
+    collabReceiverRoutes.set(item.agentThreadId, {
+      parentTurnId,
+      itemId: ProviderItemId.make(item.id),
+      agentPath: item.agentPath,
+    });
   }
 }
 
@@ -828,7 +846,7 @@ export const makeCodexSessionRuntime = (
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
-    const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
+    const collabReceiverRoutesRef = yield* Ref.make(new Map<string, CodexCollabReceiverRoute>());
     const closedRef = yield* Ref.make(false);
 
     // `~` is not shell-expanded when env vars are set via
@@ -949,24 +967,59 @@ export const makeCodexSessionRuntime = (
       Effect.gen(function* () {
         const payload = notification.params;
         const route = readRouteFields(notification);
-        const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
-        const childParentTurnId = (() => {
+        const collabReceiverRoutes = yield* Ref.get(collabReceiverRoutesRef);
+        const childRoute = (() => {
           const providerConversationId = readNotificationThreadId(notification);
           return providerConversationId
-            ? collabReceiverTurns.get(providerConversationId)
+            ? collabReceiverRoutes.get(providerConversationId)
             : undefined;
         })();
 
-        rememberCollabReceiverTurns(collabReceiverTurns, notification, route.turnId);
-        if (childParentTurnId && shouldSuppressChildConversationNotification(notification.method)) {
-          yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
+        rememberCollabReceiverRoutes(
+          collabReceiverRoutes,
+          notification,
+          childRoute?.parentTurnId ?? route.turnId,
+        );
+        if (
+          childRoute &&
+          (notification.method === "turn/started" || notification.method === "turn/completed")
+        ) {
+          const childThreadId = notification.params.threadId;
+          const status =
+            notification.method === "turn/started"
+              ? "inProgress"
+              : notification.params.turn.status === "completed"
+                ? "completed"
+                : "failed";
+          yield* Ref.set(collabReceiverRoutesRef, collabReceiverRoutes);
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: CODEX_SUBAGENT_STATUS_METHOD,
+            turnId: childRoute.parentTurnId,
+            subagentId: childThreadId,
+            itemId: childRoute.itemId,
+            payload: {
+              item: {
+                type: "subAgentActivity",
+                id: childRoute.itemId,
+                agentThreadId: childThreadId,
+                ...(childRoute.agentPath ? { agentPath: childRoute.agentPath } : {}),
+                status,
+              },
+            },
+          });
+          return;
+        }
+        if (childRoute && shouldSuppressChildConversationNotification(notification.method)) {
+          yield* Ref.set(collabReceiverRoutesRef, collabReceiverRoutes);
           return;
         }
 
         let requestId: ApprovalRequestId | undefined;
         let requestKind: ProviderRequestKind | undefined;
-        const subagentId = childParentTurnId ? readNotificationThreadId(notification) : undefined;
-        let turnId = childParentTurnId ?? route.turnId;
+        const subagentId = childRoute ? readNotificationThreadId(notification) : undefined;
+        let turnId = childRoute?.parentTurnId ?? route.turnId;
         let itemId = route.itemId;
 
         if (notification.method === "serverRequest/resolved") {
@@ -990,7 +1043,7 @@ export const makeCodexSessionRuntime = (
           }
         }
 
-        yield* Ref.set(collabReceiverTurnsRef, collabReceiverTurns);
+        yield* Ref.set(collabReceiverRoutesRef, collabReceiverRoutes);
         yield* emitEvent({
           kind: "notification",
           threadId: options.threadId,

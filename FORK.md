@@ -177,8 +177,12 @@ The new-thread Workspace controls expose a neighboring Worktree selector in Curr
 Codex collaboration-agent output and Claude Task output are correlated with their native child or
 parent tool-use identifiers, persisted separately from the parent assistant stream, and omitted
 from the main transcript. The spawn remains visible as a tool call with a prompt preview; selecting
-it opens a normal chat transcript without a composer in the right panel. The complete, unchanged
-spawn prompt is synthesized as the transcript's first user message. Child plan activity cannot
+it opens a normal chat transcript without a composer in the right panel. When the provider reports
+it, the complete, unchanged spawn prompt is synthesized as the transcript's first user message.
+Current Codex multi-agent v2 events expose the child thread and path but omit the spawn prompt,
+model, and reasoning effort, so the client labels that metadata unavailable instead of inventing
+it; Claude and legacy rich Codex collaboration events retain the complete metadata. Child plan
+activity cannot
 replace the parent plan, and child assistant messages cannot become the parent turn's checkpoint
 message. Spawn rows show the reported subagent model and reasoning effort, while a count-labeled
 Subagents dropdown between the composer Worktree and branch controls lists every run and opens its
@@ -189,7 +193,8 @@ the same left-aligned workspace group and right-aligned subagent/branch group at
 width. Claude output without a parent Task identifier remains in the main transcript.
 
 Projection migration `040_ProjectionSubagentIds` adds durable correlation columns for messages and
-activities. Codex and Claude are supported; other provider adapters remain unchanged.
+activities. Codex v2 child-thread lifecycle events are converted into durable working/completed/
+failed status updates. Codex and Claude are supported; other provider adapters remain unchanged.
 
 **Implementation evidence:** `packages/contracts/src/{provider,providerRuntime,orchestration}.ts`,
 `apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter,ClaudeAdapter}.ts`,
@@ -202,11 +207,14 @@ and `apps/web/src/rightPanelStore.ts`.
 **Recorded validation:** focused Codex and Claude adapter tests, provider-runtime ingestion and
 projection migration tests, web session/timeline/right-panel and aggregate subagent-status tests,
 package typechecks, `vp check`, `vp run typecheck`, and an isolated paired web-app verification at
-narrow panel width. The spawn row, complete prompt, separate child transcript, completed status,
+narrow panel width. A real Codex 0.146.0 turn also spawned and completed a v2 child through T3,
+confirming the canonical spawn activity, child-correlated output, and working-to-completed status
+transition. The spawn row, complete prompt where supplied, separate child transcript, completed
+status,
 status-aware dropdown, invariant context-strip grouping across the former mobile breakpoint, and
 absent composer were confirmed in the live client.
 
-**Last updated:** 2026-08-04
+**Last updated:** 2026-08-05
 
 ## Merge History
 

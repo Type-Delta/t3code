@@ -950,20 +950,29 @@ function extractSubagentToolData(
   status?: SubagentRunSummary["status"];
 } {
   const item = asRecord(data.item);
-  if (item?.type === "collabAgentToolCall" && item.tool === "spawnAgent") {
-    const runIds = Array.isArray(item.receiverThreadIds)
+  if (
+    item &&
+    ((item.type === "collabAgentToolCall" && item.tool === "spawnAgent") ||
+      item.type === "subAgentActivity")
+  ) {
+    const receiverThreadIds = Array.isArray(item.receiverThreadIds)
       ? item.receiverThreadIds.filter(
           (value): value is string => typeof value === "string" && value.length > 0,
         )
       : [];
+    const agentThreadId = asTrimmedString(item.agentThreadId);
+    const runIds =
+      receiverThreadIds.length > 0 ? receiverThreadIds : agentThreadId ? [agentThreadId] : [];
     const model = asTrimmedString(item.model);
     const reasoningEffort = asTrimmedString(item.reasoningEffort);
+    const agentPath = asTrimmedString(item.agentPath);
+    const agentName = agentPath?.split("/").findLast((segment) => segment.length > 0) ?? null;
     return {
       runIds,
       ...(typeof item.prompt === "string" ? { prompt: item.prompt } : {}),
       ...(model ? { model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
-      title: model ?? "Subagent",
+      title: agentName ?? model ?? "Subagent",
       ...(isSubagentRunStatus(item.status) ? { status: item.status } : {}),
     };
   }

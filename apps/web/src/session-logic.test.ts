@@ -757,6 +757,59 @@ describe("deriveWorkLogEntries", () => {
     ]);
   });
 
+  it("derives a real Codex v2 subagent run from subAgentActivity", () => {
+    const started = makeActivity({
+      id: "codex-v2-subagent-start",
+      kind: "tool.completed",
+      summary: "Subagent task",
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "inProgress",
+        data: {
+          item: {
+            type: "subAgentActivity",
+            tool: "spawnAgent",
+            agentThreadId: "child-thread-1",
+            agentPath: "/root/reviewer",
+            receiverThreadIds: ["child-thread-1"],
+            status: "inProgress",
+          },
+        },
+      },
+    });
+    const completed = makeActivity({
+      id: "codex-v2-subagent-complete",
+      kind: "tool.updated",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      summary: "Subagent task",
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "completed",
+        data: {
+          item: {
+            type: "subAgentActivity",
+            tool: "spawnAgent",
+            agentThreadId: "child-thread-1",
+            agentPath: "/root/reviewer",
+            receiverThreadIds: ["child-thread-1"],
+            status: "completed",
+          },
+        },
+      },
+    });
+
+    expect(deriveSubagentRuns([started, completed])).toEqual([
+      {
+        id: "child-thread-1",
+        title: "reviewer",
+        prompt: "",
+        status: "completed",
+        createdAt: "2026-02-23T00:00:00.000Z",
+        updatedAt: "2026-02-23T00:00:01.000Z",
+      },
+    ]);
+  });
+
   it("uses the Claude tool id as the subagent run and keeps the exact prompt", () => {
     const prompt = "First line\n\nSecond line with  two spaces.";
     const activities = [

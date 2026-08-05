@@ -104,22 +104,38 @@ function projectCommandData(data: Record<string, unknown>): Record<string, unkno
   return Object.keys(projectedItem).length > 0 ? projectedItem : undefined;
 }
 
-function projectSubagentData(data: Record<string, unknown>): Record<string, unknown> | undefined {
+function projectSubagentData(
+  data: Record<string, unknown>,
+  lifecycleStatus: unknown,
+): Record<string, unknown> | undefined {
   const item = asRecord(data.item);
-  if (item?.type === "collabAgentToolCall") {
+  if (item?.type === "collabAgentToolCall" || item?.type === "subAgentActivity") {
+    const agentThreadId = asTrimmedString(item.agentThreadId);
     return {
       item: {
         type: item.type,
-        ...(typeof item.tool === "string" ? { tool: item.tool } : {}),
+        ...(typeof item.tool === "string"
+          ? { tool: item.tool }
+          : item.type === "subAgentActivity"
+            ? { tool: "spawnAgent" }
+            : {}),
         ...(typeof item.prompt === "string" ? { prompt: item.prompt } : {}),
         ...(typeof item.model === "string" ? { model: item.model } : {}),
         ...(typeof item.reasoningEffort === "string"
           ? { reasoningEffort: item.reasoningEffort }
           : {}),
-        ...(typeof item.status === "string" ? { status: item.status } : {}),
+        ...(typeof item.status === "string"
+          ? { status: item.status }
+          : typeof lifecycleStatus === "string"
+            ? { status: lifecycleStatus }
+            : {}),
+        ...(agentThreadId ? { agentThreadId } : {}),
+        ...(typeof item.agentPath === "string" ? { agentPath: item.agentPath } : {}),
         ...(Array.isArray(item.receiverThreadIds)
           ? { receiverThreadIds: item.receiverThreadIds }
-          : {}),
+          : agentThreadId
+            ? { receiverThreadIds: [agentThreadId] }
+            : {}),
       },
     };
   }
@@ -208,7 +224,7 @@ export function projectActivityPayload(
 
   const projectedData: Record<string, unknown> = {};
   if (payload.itemType === "collab_agent_tool_call") {
-    const subagentData = projectSubagentData(data);
+    const subagentData = projectSubagentData(data, payload.status);
     return subagentData
       ? {
           ...activity,

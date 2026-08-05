@@ -53,6 +53,7 @@ import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
+  CODEX_SUBAGENT_STATUS_METHOD,
   CodexResumeCursorSchema,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
@@ -70,6 +71,16 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
+
+const CodexSubagentStatusPayload = Schema.Struct({
+  item: Schema.Struct({
+    type: Schema.Literal("subAgentActivity"),
+    id: Schema.String,
+    agentThreadId: Schema.String,
+    agentPath: Schema.optionalKey(Schema.String),
+    status: Schema.Literals(["inProgress", "completed", "failed"]),
+  }),
+});
 
 const CodexConversationBindingPayloadSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -273,6 +284,7 @@ function toCanonicalItemType(raw: string | undefined | null): CanonicalItemType 
   if (type.includes("mcp")) return "mcp_tool_call";
   if (type.includes("dynamic tool")) return "dynamic_tool_call";
   if (type.includes("collab")) return "collab_agent_tool_call";
+  if (type.includes("sub agent activity")) return "collab_agent_tool_call";
   if (type.includes("web search")) return "web_search";
   if (type.includes("image")) return "image_view";
   if (type.includes("review entered")) return "review_entered";
@@ -328,6 +340,7 @@ function itemDetail(itemType: CanonicalItemType, item: CodexLifecycleItem): stri
     "title" in item ? item.title : undefined,
     "summary" in item ? item.summary : undefined,
     "text" in item ? item.text : undefined,
+    "agentPath" in item ? item.agentPath : undefined,
     "path" in item ? item.path : undefined,
     "prompt" in item ? item.prompt : undefined,
   ];
@@ -524,11 +537,15 @@ function mapItemLifecycle(
 
   const detail = itemDetail(itemType, item);
   const status =
-    lifecycle === "item.started"
-      ? "inProgress"
-      : lifecycle === "item.completed"
-        ? "completed"
-        : undefined;
+    item.type === "subAgentActivity"
+      ? item.kind === "interrupted"
+        ? "failed"
+        : "inProgress"
+      : lifecycle === "item.started"
+        ? "inProgress"
+        : lifecycle === "item.completed"
+          ? "completed"
+          : undefined;
 
   return {
     ...runtimeEventBase(event, canonicalThreadId),
@@ -878,6 +895,26 @@ function mapToRuntimeEvents(
         type: "turn.diff.updated",
         payload: {
           unifiedDiff: payload.diff,
+        },
+      },
+    ];
+  }
+
+  if (event.method === CODEX_SUBAGENT_STATUS_METHOD) {
+    const payload = readPayload(CodexSubagentStatusPayload, event.payload);
+    if (!payload) {
+      return [];
+    }
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "item.updated",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          status: payload.item.status,
+          title: "Subagent task",
+          ...(payload.item.agentPath ? { detail: payload.item.agentPath } : {}),
+          ...(event.payload !== undefined ? { data: event.payload } : {}),
         },
       },
     ];

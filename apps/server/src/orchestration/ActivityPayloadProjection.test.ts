@@ -46,6 +46,44 @@ describe("projectActivityPayload", () => {
     expect(JSON.stringify(projected.payload)).not.toContain("large provider field");
   });
 
+  it("projects Codex v2 subagent activity into the shared subagent shape", () => {
+    const projected = projectActivityPayload({
+      ...makeSubagentActivity({
+        item: {
+          type: "subAgentActivity",
+          id: "spawn-1",
+          agentThreadId: "child-thread-1",
+          agentPath: "/root/reviewer",
+        },
+      }),
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "inProgress",
+        data: {
+          item: {
+            type: "subAgentActivity",
+            id: "spawn-1",
+            agentThreadId: "child-thread-1",
+            agentPath: "/root/reviewer",
+          },
+        },
+      },
+    });
+
+    expect(projected.payload).toMatchObject({
+      data: {
+        item: {
+          type: "subAgentActivity",
+          tool: "spawnAgent",
+          agentThreadId: "child-thread-1",
+          agentPath: "/root/reviewer",
+          receiverThreadIds: ["child-thread-1"],
+          status: "inProgress",
+        },
+      },
+    });
+  });
+
   it("preserves Claude Task model and effort metadata", () => {
     const projected = projectActivityPayload(
       makeSubagentActivity({
