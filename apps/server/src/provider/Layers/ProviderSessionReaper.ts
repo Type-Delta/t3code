@@ -1,4 +1,7 @@
+import { CommandId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -6,6 +9,7 @@ import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   ProviderSessionReaper,
@@ -26,6 +30,8 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     const providerService = yield* ProviderService;
     const directory = yield* ProviderSessionDirectory;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+    const orchestrationEngine = yield* OrchestrationEngineService;
+    const crypto = yield* Crypto.Crypto;
 
     const inactivityThresholdMs = Math.max(
       1,
@@ -35,6 +41,9 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
 
     const sweep = Effect.gen(function* () {
       const bindings = yield* directory.listBindings();
+      const liveThreadIds = new Set(
+        (yield* providerService.listSessions()).map((session) => session.threadId),
+      );
       const now = yield* Clock.currentTimeMillis;
       let reapedCount = 0;
 
@@ -62,11 +71,29 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           .getThreadShellById(binding.threadId)
           .pipe(Effect.map(Option.getOrUndefined));
         if (thread?.session?.activeTurnId != null) {
-          yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
+          if (liveThreadIds.has(binding.threadId)) {
+            yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
+              threadId: binding.threadId,
+              activeTurnId: thread.session.activeTurnId,
+              idleDurationMs,
+            });
+            continue;
+          }
+
+          const commandUuid = yield* crypto.randomUUIDv4;
+          const createdAt = DateTime.formatIso(yield* DateTime.now);
+          yield* orchestrationEngine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make(`server:provider-session-reaper:${commandUuid}`),
+            threadId: binding.threadId,
+            createdAt,
+          });
+          yield* Effect.logWarning("provider.session.reaper.stopped-orphaned-turn", {
             threadId: binding.threadId,
             activeTurnId: thread.session.activeTurnId,
             idleDurationMs,
           });
+          reapedCount += 1;
           continue;
         }
 

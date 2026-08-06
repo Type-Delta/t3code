@@ -810,6 +810,80 @@ describe("deriveWorkLogEntries", () => {
     ]);
   });
 
+  it("does not create a bogus run when a child interacts with the parent thread", () => {
+    const interaction = makeActivity({
+      id: "codex-v2-subagent-message",
+      kind: "tool.completed",
+      summary: "Subagent message",
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "inProgress",
+        data: {
+          item: {
+            type: "subAgentActivity",
+            tool: "sendInput",
+            kind: "interacted",
+            agentThreadId: "parent-thread-1",
+            agentPath: "/root",
+            receiverThreadIds: ["parent-thread-1"],
+            status: "inProgress",
+          },
+        },
+      },
+    });
+
+    expect(deriveSubagentRuns([interaction])).toEqual([]);
+    expect(deriveWorkLogEntries([interaction])[0]?.label).toBe("Subagent message");
+  });
+
+  it("keeps subagent start and finish as separate timeline events", () => {
+    const started = makeActivity({
+      id: "subagent-lifecycle-started",
+      kind: "tool.started",
+      summary: "Started subagent",
+      payload: {
+        itemType: "collab_agent_tool_call",
+        toolCallId: "spawn-1",
+        status: "inProgress",
+        title: "Started subagent",
+        data: {
+          item: {
+            type: "subAgentActivity",
+            tool: "spawnAgent",
+            kind: "started",
+            agentThreadId: "child-thread-1",
+            status: "inProgress",
+          },
+        },
+      },
+    });
+    const finished = makeActivity({
+      id: "subagent-lifecycle-finished",
+      kind: "tool.updated",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      summary: "Finished subagent",
+      payload: {
+        itemType: "collab_agent_tool_call",
+        toolCallId: "spawn-1",
+        status: "completed",
+        title: "Finished subagent",
+        data: {
+          item: {
+            type: "subAgentActivity",
+            tool: "spawnAgent",
+            agentThreadId: "child-thread-1",
+            status: "completed",
+          },
+        },
+      },
+    });
+
+    expect(deriveWorkLogEntries([started, finished]).map((entry) => entry.label)).toEqual([
+      "Started subagent",
+      "Finished subagent",
+    ]);
+  });
+
   it("uses the Claude tool id as the subagent run and keeps the exact prompt", () => {
     const prompt = "First line\n\nSecond line with  two spaces.";
     const activities = [

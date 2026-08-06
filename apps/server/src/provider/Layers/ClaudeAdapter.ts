@@ -876,7 +876,7 @@ function titleForTool(itemType: CanonicalItemType): string {
     case "mcp_tool_call":
       return "MCP tool call";
     case "collab_agent_tool_call":
-      return "Subagent task";
+      return "Started subagent";
     case "web_search":
       return "Web search";
     case "image_view":
@@ -2417,7 +2417,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: {
           itemType: tool.itemType,
           status: toolResult.isError ? "failed" : "inProgress",
-          title: tool.title,
+          title:
+            tool.itemType === "collab_agent_tool_call" && toolResult.isError
+              ? "Subagent failed"
+              : tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
           data: toolData,
         },
@@ -2471,7 +2474,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         payload: {
           itemType: tool.itemType,
           status: itemStatus,
-          title: tool.title,
+          title:
+            tool.itemType === "collab_agent_tool_call"
+              ? toolResult.isError
+                ? "Subagent failed"
+                : "Finished subagent"
+              : tool.title,
           ...(tool.detail ? { detail: tool.detail } : {}),
           data: toolData,
         },

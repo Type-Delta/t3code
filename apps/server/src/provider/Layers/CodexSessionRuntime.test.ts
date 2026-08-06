@@ -18,6 +18,7 @@ import {
   buildTurnStartParams,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
+  opensCodexSubagentRoute,
   openCodexThread,
   prepareCodexConversationCursor,
 } from "./CodexSessionRuntime.ts";
@@ -36,6 +37,32 @@ describe("CodexSessionRuntimeIdentifierGenerationError", () => {
     NodeAssert.equal(
       error.message,
       "Failed to generate Codex App Server identifier for provider-event.",
+    );
+  });
+});
+
+describe("opensCodexSubagentRoute", () => {
+  it("registers only spawn and resume lifecycle events as child routes", () => {
+    NodeAssert.equal(opensCodexSubagentRoute({ type: "subAgentActivity", kind: "started" }), true);
+    NodeAssert.equal(
+      opensCodexSubagentRoute({ type: "subAgentActivity", kind: "interacted" }),
+      false,
+    );
+    NodeAssert.equal(
+      opensCodexSubagentRoute({ type: "subAgentActivity", kind: "interrupted" }),
+      false,
+    );
+    NodeAssert.equal(
+      opensCodexSubagentRoute({ type: "collabAgentToolCall", tool: "spawnAgent" }),
+      true,
+    );
+    NodeAssert.equal(
+      opensCodexSubagentRoute({ type: "collabAgentToolCall", tool: "resumeAgent" }),
+      true,
+    );
+    NodeAssert.equal(
+      opensCodexSubagentRoute({ type: "collabAgentToolCall", tool: "sendInput" }),
+      false,
     );
   });
 });

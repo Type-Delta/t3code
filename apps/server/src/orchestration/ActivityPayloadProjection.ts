@@ -111,14 +111,21 @@ function projectSubagentData(
   const item = asRecord(data.item);
   if (item?.type === "collabAgentToolCall" || item?.type === "subAgentActivity") {
     const agentThreadId = asTrimmedString(item.agentThreadId);
+    const subagentActivityTool =
+      item.kind === "interacted"
+        ? "sendInput"
+        : item.kind === "interrupted"
+          ? "closeAgent"
+          : "spawnAgent";
     return {
       item: {
         type: item.type,
         ...(typeof item.tool === "string"
           ? { tool: item.tool }
           : item.type === "subAgentActivity"
-            ? { tool: "spawnAgent" }
+            ? { tool: subagentActivityTool }
             : {}),
+        ...(typeof item.kind === "string" ? { kind: item.kind } : {}),
         ...(typeof item.prompt === "string" ? { prompt: item.prompt } : {}),
         ...(typeof item.model === "string" ? { model: item.model } : {}),
         ...(typeof item.reasoningEffort === "string"

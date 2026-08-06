@@ -52,6 +52,7 @@ describe("projectActivityPayload", () => {
         item: {
           type: "subAgentActivity",
           id: "spawn-1",
+          kind: "started",
           agentThreadId: "child-thread-1",
           agentPath: "/root/reviewer",
         },
@@ -63,6 +64,7 @@ describe("projectActivityPayload", () => {
           item: {
             type: "subAgentActivity",
             id: "spawn-1",
+            kind: "started",
             agentThreadId: "child-thread-1",
             agentPath: "/root/reviewer",
           },
@@ -75,10 +77,35 @@ describe("projectActivityPayload", () => {
         item: {
           type: "subAgentActivity",
           tool: "spawnAgent",
+          kind: "started",
           agentThreadId: "child-thread-1",
           agentPath: "/root/reviewer",
           receiverThreadIds: ["child-thread-1"],
           status: "inProgress",
+        },
+      },
+    });
+  });
+
+  it("projects a Codex subagent interaction as a message rather than a spawn", () => {
+    const projected = projectActivityPayload(
+      makeSubagentActivity({
+        item: {
+          type: "subAgentActivity",
+          kind: "interacted",
+          agentThreadId: "parent-thread-1",
+          agentPath: "/root",
+        },
+      }),
+    );
+
+    expect(projected.payload).toMatchObject({
+      data: {
+        item: {
+          type: "subAgentActivity",
+          tool: "sendInput",
+          kind: "interacted",
+          agentThreadId: "parent-thread-1",
         },
       },
     });

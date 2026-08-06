@@ -713,6 +713,16 @@ function readRouteFields(notification: CodexServerNotification): {
   }
 }
 
+export function opensCodexSubagentRoute(item: {
+  readonly type: string;
+  readonly tool?: string;
+  readonly kind?: string;
+}): boolean {
+  return item.type === "collabAgentToolCall"
+    ? item.tool === "spawnAgent" || item.tool === "resumeAgent"
+    : item.type === "subAgentActivity" && item.kind === "started";
+}
+
 function rememberCollabReceiverRoutes(
   collabReceiverRoutes: Map<string, CodexCollabReceiverRoute>,
   notification: CodexServerNotification,
@@ -728,7 +738,13 @@ function rememberCollabReceiverRoutes(
 
   const item = notification.params.item;
   if (item.type === "collabAgentToolCall") {
+    if (!opensCodexSubagentRoute(item)) {
+      return;
+    }
     for (const receiverThreadId of item.receiverThreadIds) {
+      if (receiverThreadId === item.senderThreadId) {
+        continue;
+      }
       collabReceiverRoutes.set(receiverThreadId, {
         parentTurnId,
         itemId: ProviderItemId.make(item.id),
@@ -737,7 +753,7 @@ function rememberCollabReceiverRoutes(
     return;
   }
 
-  if (item.type === "subAgentActivity") {
+  if (item.type === "subAgentActivity" && opensCodexSubagentRoute(item)) {
     collabReceiverRoutes.set(item.agentThreadId, {
       parentTurnId,
       itemId: ProviderItemId.make(item.id),

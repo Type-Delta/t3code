@@ -298,6 +298,32 @@ function itemTitle(itemType: CanonicalItemType, item?: CodexLifecycleItem): stri
   if (itemType === "mcp_tool_call" && item?.type === "mcpToolCall") {
     return `${item.server} · ${item.tool}`;
   }
+  if (itemType === "collab_agent_tool_call") {
+    if (item?.type === "collabAgentToolCall") {
+      switch (item.tool) {
+        case "spawnAgent":
+          return "Started subagent";
+        case "sendInput":
+          return "Messaged subagent";
+        case "resumeAgent":
+          return "Resumed subagent";
+        case "wait":
+          return "Waited for subagent";
+        case "closeAgent":
+          return "Stopped subagent";
+      }
+    }
+    if (item?.type === "subAgentActivity") {
+      switch (item.kind) {
+        case "started":
+          return "Started subagent";
+        case "interacted":
+          return "Subagent message";
+        case "interrupted":
+          return "Interrupted subagent";
+      }
+    }
+  }
   switch (itemType) {
     case "assistant_message":
       return "Assistant message";
@@ -316,7 +342,7 @@ function itemTitle(itemType: CanonicalItemType, item?: CodexLifecycleItem): stri
     case "dynamic_tool_call":
       return "Tool call";
     case "collab_agent_tool_call":
-      return "Subagent task";
+      return "Subagent activity";
     case "web_search":
       return "Web search";
     case "image_view":
@@ -912,7 +938,12 @@ function mapToRuntimeEvents(
         payload: {
           itemType: "collab_agent_tool_call",
           status: payload.item.status,
-          title: "Subagent task",
+          title:
+            payload.item.status === "completed"
+              ? "Finished subagent"
+              : payload.item.status === "failed"
+                ? "Subagent failed"
+                : "Started subagent",
           ...(payload.item.agentPath ? { detail: payload.item.agentPath } : {}),
           ...(event.payload !== undefined ? { data: event.payload } : {}),
         },

@@ -647,7 +647,7 @@ export function deriveWorkLogEntries(
   });
 }
 
-function isSubagentToolActivity(activity: OrchestrationThreadActivity): boolean {
+export function isSubagentToolActivity(activity: OrchestrationThreadActivity): boolean {
   const payload = asRecord(activity.payload);
   return payload?.itemType === "collab_agent_tool_call";
 }
@@ -899,6 +899,11 @@ function deriveToolLifecycleCollapseKey(entry: DerivedWorkLogEntry): string | un
     return undefined;
   }
   if (entry.toolCallId) {
+    if (entry.itemType === "collab_agent_tool_call") {
+      return `tool:${entry.toolCallId}:${normalizeCompactToolLabel(
+        entry.toolTitle ?? entry.label,
+      )}`;
+    }
     return `tool:${entry.toolCallId}`;
   }
   const normalizedLabel = normalizeCompactToolLabel(entry.toolTitle ?? entry.label);
@@ -953,7 +958,7 @@ function extractSubagentToolData(
   if (
     item &&
     ((item.type === "collabAgentToolCall" && item.tool === "spawnAgent") ||
-      item.type === "subAgentActivity")
+      (item.type === "subAgentActivity" && item.kind !== "interacted"))
   ) {
     const receiverThreadIds = Array.isArray(item.receiverThreadIds)
       ? item.receiverThreadIds.filter(

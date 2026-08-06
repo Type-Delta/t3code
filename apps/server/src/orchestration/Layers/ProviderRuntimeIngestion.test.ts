@@ -2856,6 +2856,19 @@ describe("ProviderRuntimeIngestion", () => {
         detail: "/tmp/file.ts",
       },
     });
+    harness.emit({
+      type: "item.started",
+      eventId: asEventId("evt-subagent-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-9"),
+      payload: {
+        itemType: "collab_agent_tool_call",
+        status: "inProgress",
+        title: "Started subagent",
+      },
+    });
 
     const thread = await waitForThread(
       harness.readModel,
@@ -2864,6 +2877,9 @@ describe("ProviderRuntimeIngestion", () => {
         entry.session?.activeTurnId === null &&
         entry.activities.some(
           (activity: ProviderRuntimeTestActivity) => activity.kind === "tool.started",
+        ) &&
+        entry.activities.some(
+          (activity: ProviderRuntimeTestActivity) => activity.id === "evt-subagent-started",
         ),
     );
 
@@ -2873,6 +2889,14 @@ describe("ProviderRuntimeIngestion", () => {
         (activity: ProviderRuntimeTestActivity) => activity.kind === "tool.started",
       ),
     ).toBe(true);
+    expect(
+      thread.activities.find(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-subagent-started",
+      ),
+    ).toMatchObject({
+      summary: "Started subagent",
+      payload: { title: "Started subagent" },
+    });
   });
 
   it("consumes P1 runtime events into thread metadata, diff checkpoints, and activities", async () => {

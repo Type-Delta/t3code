@@ -40,6 +40,7 @@ import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
+  CODEX_SUBAGENT_STATUS_METHOD,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
@@ -721,7 +722,79 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
       NodeAssert.equal(firstEvent.value.payload.itemType, "collab_agent_tool_call");
       NodeAssert.equal(firstEvent.value.payload.status, "inProgress");
+      NodeAssert.equal(firstEvent.value.payload.title, "Started subagent");
       NodeAssert.equal(firstEvent.value.payload.detail, "/root/reviewer");
+    }),
+  );
+
+  it.effect("labels Codex v2 subagent messages without treating them as spawns", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-message"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "item/completed",
+        threadId: asThreadId("thread-1"),
+        subagentId: "child-thread-1",
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("message-1"),
+        payload: {
+          completedAtMs: 1_778_000_001_000,
+          threadId: "child-thread-1",
+          turnId: "child-turn-1",
+          item: {
+            type: "subAgentActivity",
+            id: "message-1",
+            kind: "interacted",
+            agentThreadId: "provider-thread-1",
+            agentPath: "/root",
+          },
+        },
+      });
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "item.completed") return;
+      NodeAssert.equal(firstEvent.value.payload.title, "Subagent message");
+      NodeAssert.equal(firstEvent.value.payload.status, "inProgress");
+    }),
+  );
+
+  it.effect("labels synthetic child completion as a finished subagent", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-subagent-finished"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        method: CODEX_SUBAGENT_STATUS_METHOD,
+        threadId: asThreadId("thread-1"),
+        subagentId: "child-thread-1",
+        turnId: asTurnId("turn-1"),
+        itemId: asItemId("spawn-1"),
+        payload: {
+          item: {
+            type: "subAgentActivity",
+            id: "spawn-1",
+            agentThreadId: "child-thread-1",
+            agentPath: "/root/reviewer",
+            status: "completed",
+          },
+        },
+      });
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "item.updated") return;
+      NodeAssert.equal(firstEvent.value.payload.title, "Finished subagent");
+      NodeAssert.equal(firstEvent.value.payload.status, "completed");
     }),
   );
 

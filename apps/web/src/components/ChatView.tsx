@@ -87,6 +87,7 @@ import {
   deriveWorkLogEntries,
   deriveSubagentRuns,
   hasActionableProposedPlan,
+  isSubagentToolActivity,
   isLatestTurnSettled,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
@@ -2087,26 +2088,28 @@ function ChatViewContent(props: ChatViewProps) {
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  const subagentRuns = useMemo(() => deriveSubagentRuns(threadActivities), [threadActivities]);
+  const subagentRunsById = useMemo(
+    () => new Map(subagentRuns.map((run) => [run.id, run])),
+    [subagentRuns],
+  );
   const mainThreadActivities = useMemo(
     () =>
       threadActivities.filter(
         (activity) =>
           activity.subagentId === undefined ||
+          !subagentRunsById.has(activity.subagentId) ||
+          isSubagentToolActivity(activity) ||
           activity.kind === "approval.requested" ||
           activity.kind === "approval.resolved" ||
           activity.kind === "user-input.requested" ||
           activity.kind === "user-input.resolved",
       ),
-    [threadActivities],
+    [subagentRunsById, threadActivities],
   );
   const workLogEntries = useMemo(
     () => deriveWorkLogEntries(mainThreadActivities),
     [mainThreadActivities],
-  );
-  const subagentRuns = useMemo(() => deriveSubagentRuns(threadActivities), [threadActivities]);
-  const subagentRunsById = useMemo(
-    () => new Map(subagentRuns.map((run) => [run.id, run])),
-    [subagentRuns],
   );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
@@ -2388,7 +2391,9 @@ function ChatViewContent(props: ChatViewProps) {
     };
   }, [attachmentPreviewHandoffByMessageId, clearAttachmentPreviewHandoff, displayServerMessages]);
   const timelineMessages = useMemo(() => {
-    const messages = displayServerMessages.filter((message) => message.subagentId === undefined);
+    const messages = displayServerMessages.filter(
+      (message) => message.subagentId === undefined || !subagentRunsById.has(message.subagentId),
+    );
     const serverMessagesWithPreviewHandoff =
       Object.keys(attachmentPreviewHandoffByMessageId).length === 0
         ? messages
@@ -2438,7 +2443,12 @@ function ChatViewContent(props: ChatViewProps) {
       return serverMessagesWithPreviewHandoff;
     }
     return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
-  }, [attachmentPreviewHandoffByMessageId, displayServerMessages, optimisticUserMessages]);
+  }, [
+    attachmentPreviewHandoffByMessageId,
+    displayServerMessages,
+    optimisticUserMessages,
+    subagentRunsById,
+  ]);
   const timelineEntries = useMemo(
     () =>
       deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),

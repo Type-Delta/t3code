@@ -176,9 +176,11 @@ The new-thread Workspace controls expose a neighboring Worktree selector in Curr
 
 Codex collaboration-agent output and Claude Task output are correlated with their native child or
 parent tool-use identifiers, persisted separately from the parent assistant stream, and omitted
-from the main transcript. The spawn remains visible as a tool call with a prompt preview; selecting
-it opens a normal chat transcript without a composer in the right panel. When the provider reports
-it, the complete, unchanged spawn prompt is synthesized as the transcript's first user message.
+from the main transcript. Unmatched historical correlations fall back to the main transcript so a
+provider routing defect cannot hide a parent response. The spawn remains visible as a tool call
+with a prompt preview; selecting it opens a normal chat transcript without a composer in the right
+panel. When the provider reports it, the complete, unchanged spawn prompt is synthesized as the
+transcript's first user message.
 Current Codex multi-agent v2 events expose the child thread and path but omit the spawn prompt,
 model, and reasoning effort, so the client labels that metadata unavailable instead of inventing
 it; Claude and legacy rich Codex collaboration events retain the complete metadata. Child plan
@@ -194,10 +196,16 @@ width. Claude output without a parent Task identifier remains in the main transc
 
 Projection migration `040_ProjectionSubagentIds` adds durable correlation columns for messages and
 activities. Codex v2 child-thread lifecycle events are converted into durable working/completed/
-failed status updates. Codex and Claude are supported; other provider adapters remain unchanged.
+failed status updates. The main timeline names started, messaged, resumed, waited, stopped,
+interrupted, failed, and finished subagent operations instead of grouping them under a generic
+task label. Only spawn/resume events can establish child routing, so a child message sent back to
+the parent cannot capture the parent thread or suppress its final completion. The stale-session
+reaper also settles an old active turn when no live provider session owns it, while preserving
+genuinely live long-running turns. Codex and Claude are supported; other provider adapters remain
+unchanged.
 
 **Implementation evidence:** `packages/contracts/src/{provider,providerRuntime,orchestration}.ts`,
-`apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter,ClaudeAdapter}.ts`,
+`apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter,ClaudeAdapter,ProviderSessionReaper}.ts`,
 `apps/server/src/orchestration/`, `apps/server/src/persistence/Migrations/040_ProjectionSubagentIds.ts`,
 and `apps/web/src/components/{BranchToolbar,ChatView,RightPanelTabs}.tsx`,
 `apps/web/src/components/BranchToolbar.logic.ts`,

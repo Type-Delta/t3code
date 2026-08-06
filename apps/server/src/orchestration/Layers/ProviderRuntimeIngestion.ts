@@ -671,17 +671,22 @@ export function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      const title = event.payload.title;
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.started",
-          summary: `${event.payload.title ?? "Tool"} started`,
+          summary:
+            event.payload.itemType === "collab_agent_tool_call"
+              ? (title ?? "Started subagent")
+              : `${title ?? "Tool"} started`,
           payload: {
             itemType: event.payload.itemType,
             ...(event.itemId ? { toolCallId: event.itemId } : {}),
             status: event.payload.status ?? "inProgress",
+            ...(title ? { title } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
           },

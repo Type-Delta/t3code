@@ -1389,7 +1389,7 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(toolStarted?.type, "item.started");
       if (toolStarted?.type === "item.started") {
         assert.equal(toolStarted.payload.itemType, "collab_agent_tool_call");
-        assert.equal(toolStarted.payload.title, "Subagent task");
+        assert.equal(toolStarted.payload.title, "Started subagent");
       }
       const childAssistantEvent = runtimeEvents.find(
         (event) =>
