@@ -6,7 +6,7 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Upstream sync — 2026-08-08
 
-Merged upstream `2c7267ad4287ecdf8cf9bc466724abbc6ac33eb0` into the fork while preserving durable checkpoints, existing-worktree selection, split workspaces, and read-only subagent transcripts. The integration adopts upstream native agent/workflow observability as the lifecycle authority and keeps transcript events agent-scoped outside the parent timeline: native child message completions finalize their matching transcript, persisted child rows enable transcript access from the matching agent row, transcript headers use native lifecycle metadata, child rows stay out of web and mobile parent feeds, and bounded thread-detail reads retain subagent identity. Paginated clients persist the requested user-turn width so checkpoint navigation refreshes the complete loaded window. Fork migrations remain `36`–`40`; upstream pinning and pagination migrations are assigned `41`–`43` to preserve deployed fork databases.
+Merged upstream `8101cd044911c7dc2a2adf7c7a9ba7962abf57b6` into the fork while preserving durable checkpoints, existing-worktree selection, split workspaces, and read-only subagent transcripts. The integration adopts upstream native agent/workflow observability as the lifecycle authority and keeps transcript events agent-scoped outside the parent timeline: native child message completions finalize their matching transcript, persisted child rows enable transcript access from the matching agent row, transcript headers use native lifecycle metadata, child rows stay out of web and mobile parent feeds, and bounded thread-detail reads retain subagent identity. Paginated clients persist the requested user-turn width so checkpoint navigation refreshes the complete loaded window. The latest upstream additions provide main-window desktop zoom controls, a consolidated mobile thread-settings sheet, and cross-environment provider transcript usage reporting; composite in-memory keys use printable source escapes so repository tools continue treating their TypeScript as text. Fork migrations remain `36`–`40`; upstream pinning and pagination migrations are assigned `41`–`43` to preserve deployed fork databases.
 
 ## Previous upstream sync — 2026-08-01
 
@@ -14,7 +14,7 @@ Merged upstream `0ad91b6e7fc1fcb6d5f4bc736d84c337e912bc62` into the fork without
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `2c7267ad43a05cf3e30343400c76fd9ac47698e7`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `8101cd044911c7dc2a2adf7c7a9ba7962abf57b6`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 

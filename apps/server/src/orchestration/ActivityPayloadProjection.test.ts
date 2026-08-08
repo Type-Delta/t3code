@@ -1,7 +1,15 @@
-import { EventId, type OrchestrationThreadActivity } from "@t3tools/contracts";
+import {
+  EventId,
+  TurnId,
+  type OrchestrationThreadActivity,
+  type OrchestrationThreadDetailSnapshot,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { projectActivityPayload } from "./ActivityPayloadProjection.js";
+import {
+  projectActivityPayload,
+  projectThreadDetailSnapshot,
+} from "./ActivityPayloadProjection.js";
 
 function makeSubagentActivity(data: Record<string, unknown>): OrchestrationThreadActivity {
   return {
@@ -243,5 +251,23 @@ describe("projectActivityPayload agent-field survival", () => {
     });
 
     expect(projectActivityPayload(source).payload).toEqual(source.payload);
+  });
+
+  it("matches superseded tool updates by their composite lifecycle key", () => {
+    const turnId = TurnId.make("turn-1");
+    const activity = (id: string, kind: "tool.updated" | "tool.completed") => ({
+      ...makeActivity({ itemType: "command_execution", title: "Run tests" }),
+      id: EventId.make(id),
+      kind,
+      turnId,
+    });
+    const projected = projectThreadDetailSnapshot({
+      snapshotSequence: 1,
+      thread: {
+        activities: [activity("update", "tool.updated"), activity("complete", "tool.completed")],
+      },
+    } as unknown as OrchestrationThreadDetailSnapshot);
+
+    expect(projected.thread.activities.map(({ id }) => id)).toEqual(["complete"]);
   });
 });

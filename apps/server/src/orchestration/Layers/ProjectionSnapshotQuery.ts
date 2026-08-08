@@ -1270,11 +1270,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // has applied (bounded by the global snapshot sequence read in the same
   // transaction). This is the thread-scoped watermark a windowed page carries
   // so clients can defer merging until their live subscription has caught up;
-  // the global sequence is not waitable per-thread. The event_type filter
-  // must match ws.ts's isThreadDetailEvent exactly: the subscription only
-  // delivers these types, so a watermark counting any other event could
-  // never be reached by the client and would park the page forever. Served
-  // by the event store's (aggregate_kind, stream_id, sequence) index.
+  // the global sequence is not waitable per-thread. The event_type filter is
+  // deliberately a subset of ws.ts's isThreadDetailEvent: every counted event
+  // must be delivered so the watermark is reachable. Checkpoint navigation
+  // notifications are excluded because clients invalidate and authoritatively
+  // refetch the window for them instead of merging against this watermark.
+  // Served by the event store's
+  // (aggregate_kind, stream_id, sequence) index.
   const getThreadEventWatermarkRow = SqlSchema.findOneOption({
     Request: Schema.Struct({ threadId: ThreadId, maxSequence: Schema.Number }),
     Result: Schema.Struct({ threadSequence: Schema.NullOr(Schema.Number) }),
