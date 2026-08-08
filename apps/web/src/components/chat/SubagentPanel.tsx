@@ -12,7 +12,7 @@ import { useMemo, useRef } from "react";
 import {
   deriveTimelineEntries,
   deriveWorkLogEntries,
-  type SubagentRunSummary,
+  type SubagentPanelRunSummary,
 } from "../../session-logic";
 import type { ChatMessage, TurnDiffSummary } from "../../types";
 import { cn } from "~/lib/utils";
@@ -20,7 +20,7 @@ import { cn } from "~/lib/utils";
 import { MessagesTimeline } from "./MessagesTimeline";
 
 interface SubagentPanelProps {
-  run: SubagentRunSummary;
+  run: SubagentPanelRunSummary;
   messages: ReadonlyArray<OrchestrationMessage>;
   activities: ReadonlyArray<OrchestrationThreadActivity>;
   environmentId: EnvironmentId;
@@ -36,39 +36,60 @@ const EMPTY_TURN_DIFF_SUMMARIES = new Map<MessageId, TurnDiffSummary>();
 const EMPTY_REVERT_COUNTS = new Map<MessageId, number>();
 const doNothing = () => {};
 
-function statusLabel(status: SubagentRunSummary["status"]): string {
+export function subagentPanelStatusLabel(status: SubagentPanelRunSummary["status"]): string {
   switch (status) {
+    case "pending":
+      return "Pending";
     case "inProgress":
+    case "running":
       return "Running";
+    case "waiting":
+      return "Waiting";
+    case "idle":
+      return "Idle";
     case "completed":
       return "Completed";
     case "failed":
       return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    case "interrupted":
+      return "Interrupted";
     case "stopped":
       return "Stopped";
   }
 }
 
+export function subagentPanelIsWorking(status: SubagentPanelRunSummary["status"]): boolean {
+  return status === "inProgress" || status === "running";
+}
+
 export function SubagentPanel(props: SubagentPanelProps) {
   const listRef = useRef<LegendListRef>(null);
   const timelineEntries = useMemo(() => {
-    const prompt: ChatMessage = {
-      id: MessageId.make(`subagent-prompt:${props.run.id}`),
-      role: "user",
-      text: props.run.prompt || "(Prompt unavailable)",
-      turnId: null,
-      streaming: false,
-      createdAt: props.run.createdAt,
-      updatedAt: props.run.createdAt,
-    };
     const messages = props.messages.filter(
       (message): message is ChatMessage => message.subagentId === props.run.id,
     );
     const activities = props.activities.filter((activity) => activity.subagentId === props.run.id);
-    return deriveTimelineEntries([prompt, ...messages], [], deriveWorkLogEntries(activities));
+    const prompt: ChatMessage | null = props.run.prompt
+      ? {
+          id: MessageId.make(`subagent-prompt:${props.run.id}`),
+          role: "user",
+          text: props.run.prompt,
+          turnId: null,
+          streaming: false,
+          createdAt: props.run.createdAt,
+          updatedAt: props.run.createdAt,
+        }
+      : null;
+    return deriveTimelineEntries(
+      prompt ? [prompt, ...messages] : messages,
+      [],
+      deriveWorkLogEntries(activities),
+    );
   }, [props.activities, props.messages, props.run]);
 
-  const isWorking = props.run.status === "inProgress";
+  const isWorking = subagentPanelIsWorking(props.run.status);
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-background">
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-3 text-xs text-muted-foreground">
@@ -85,7 +106,7 @@ export function SubagentPanel(props: SubagentPanelProps) {
           )}
           aria-hidden
         />
-        <span>{statusLabel(props.run.status)}</span>
+        <span>{subagentPanelStatusLabel(props.run.status)}</span>
       </div>
       <MessagesTimeline
         isWorking={isWorking}
@@ -109,8 +130,8 @@ export function SubagentPanel(props: SubagentPanelProps) {
         workspaceRoot={props.workspaceRoot}
         anchorMessageId={null}
         onAnchorReady={doNothing}
-        onAnchorSizeChanged={doNothing}
         contentInsetEndAdjustment={0}
+        liveFollowEnabled={isWorking}
         onIsAtEndChange={doNothing}
         onManualNavigation={doNothing}
         onOpenSubagent={props.onOpenSubagent}

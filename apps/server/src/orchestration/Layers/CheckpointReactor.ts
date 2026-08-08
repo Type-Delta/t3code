@@ -49,6 +49,7 @@ import {
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
+import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
@@ -59,7 +60,7 @@ import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const BASELINE_BOUNDARY = "pre-turn-baseline";
 const TURN_COMPLETION_BOUNDARY = "turn-completed";
 
@@ -1282,7 +1283,7 @@ const make = Effect.gen(function* () {
         Effect.asVoid,
       ),
     );
-    yield* Effect.forkScoped(
+    yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
         if (
           event.type !== "thread.created" &&
@@ -1297,7 +1298,7 @@ const make = Effect.gen(function* () {
       }),
     );
 
-    yield* Effect.forkScoped(
+    yield* forkParked(
       Stream.runForEach(providerService.streamEvents, (event) => {
         if (
           event.type !== "turn.started" &&

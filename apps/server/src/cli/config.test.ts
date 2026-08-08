@@ -1,8 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 
-// @effect-diagnostics nodeBuiltinImport:off
 import { assert, expect, it } from "@effect/vitest";
-import * as NodeFS from "node:fs";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -58,8 +58,10 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-", suffix: ".ndjson" });
     const encoded = yield* encodeDesktopBootstrap(payload);
     yield* fs.writeFileString(filePath, `${encoded}\n`);
-    // readBootstrapEnvelope owns the direct stream fd and closes it asynchronously.
-    return NodeFS.openSync(filePath, "r");
+    return yield* Effect.acquireRelease(
+      Effect.sync(() => NodeFS.openSync(filePath, "r")),
+      (fd) => Effect.sync(() => NodeFS.closeSync(fd)),
+    );
   });
 
   it.effect("falls back to effect/config values when flags are omitted", () =>

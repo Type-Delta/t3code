@@ -56,6 +56,37 @@ function makeThread(
 }
 
 describe("buildThreadFeed", () => {
+  it("keeps child transcript messages out of the parent feed", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-with-child"),
+      projectId: ProjectId.make("project-1"),
+      title: "Parent thread",
+      messages: [
+        {
+          id: MessageId.make("parent-message"),
+          role: "assistant",
+          text: "Parent answer",
+          turnId: TurnId.make("parent-turn"),
+          streaming: false,
+          createdAt: "2026-04-01T00:00:01.000Z",
+          updatedAt: "2026-04-01T00:00:01.000Z",
+        },
+        {
+          id: MessageId.make("child-message"),
+          role: "assistant",
+          text: "Child answer",
+          turnId: TurnId.make("child-turn"),
+          streaming: false,
+          createdAt: "2026-04-01T00:00:02.000Z",
+          updatedAt: "2026-04-01T00:00:02.000Z",
+          subagentId: "child-agent",
+        },
+      ],
+    });
+
+    expect(buildThreadFeed(thread).map((entry) => entry.id)).toEqual(["parent-message"]);
+  });
+
   it("keeps historic work entries attributed to their turns", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-1"),
@@ -530,5 +561,41 @@ describe("buildThreadFeed", () => {
       type: "work-toggle",
       expanded: true,
     });
+  });
+});
+
+describe("quiet timeline: nested agents", () => {
+  it("keeps a nested agent's terminal row but hides its background work", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-nested"),
+      projectId: ProjectId.make("project-1"),
+      title: "Nested agents",
+      activities: [
+        // A subagent's own shell: internal, covered by the owner's liveness.
+        makeActivity({
+          id: EventId.make("shell-done"),
+          kind: "task.completed",
+          summary: "Task completed",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: { taskId: "sh-1", agentId: "owner", agentKind: "background" },
+        }),
+        // A nested AGENT's completion: mobile has no Agents sheet, so this
+        // terminal row is the only signal it ever finished.
+        makeActivity({
+          id: EventId.make("nested-done"),
+          kind: "task.completed",
+          summary: "Task completed",
+          createdAt: "2026-04-01T00:00:03.000Z",
+          payload: { taskId: "n-1", agentId: "owner", agentKind: "agent" },
+        }),
+      ],
+    });
+
+    const feed = buildThreadFeed(thread);
+    const ids = feed.flatMap((entry) =>
+      entry.type === "activity-group" ? entry.activities.map((row) => row.id) : [],
+    );
+    expect(ids).toContain("nested-done");
+    expect(ids).not.toContain("shell-done");
   });
 });

@@ -9,8 +9,8 @@
  */
 
 import * as Migrator from "effect/unstable/sql/Migrator";
-import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -53,6 +53,9 @@ import Migration0037 from "./Migrations/037_CheckpointLegacyMigration.ts";
 import Migration0038 from "./Migrations/038_CheckpointCaptureProviderMetadata.ts";
 import Migration0039 from "./Migrations/039_ReconcileCheckpointAndTitleHistory.ts";
 import Migration0040 from "./Migrations/040_ProjectionSubagentIds.ts";
+import Migration0041 from "./Migrations/041_ProjectionThreadsPinned.ts";
+import Migration0042 from "./Migrations/042_ProjectionTurnsKeysetIndex.ts";
+import Migration0043 from "./Migrations/043_ProjectionThreadsPinOrderKey.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -105,7 +108,12 @@ export const migrationEntries = [
   [38, "CheckpointCaptureProviderMetadata", Migration0038],
   [39, "ReconcileCheckpointAndTitleHistory", Migration0039],
   [40, "ProjectionSubagentIds", Migration0040],
+  [41, "ProjectionThreadsPinned", Migration0041],
+  [42, "ProjectionTurnsKeysetIndex", Migration0042],
+  [43, "ProjectionThreadsPinOrderKey", Migration0043],
 ] as const;
+
+export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
 
 export const makeMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(

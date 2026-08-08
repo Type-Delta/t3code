@@ -1,9 +1,22 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import checkpointDurableState from "./036_CheckpointDurableState.ts";
+import checkpointLegacyMigration from "./037_CheckpointLegacyMigration.ts";
+import checkpointCaptureProviderMetadata from "./038_CheckpointCaptureProviderMetadata.ts";
+
 /** Reconciles databases that ran either the fork or upstream 33-38 history. */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+
+  // Upstream releases used ledger ids 36-38 for pinning and pagination.
+  // Those ids cause the fork's checkpoint migrations to be skipped on a
+  // cross-install upgrade, so repair their idempotent schema here before
+  // reconciling columns that depend on it.
+  yield* checkpointDurableState;
+  yield* checkpointLegacyMigration;
+  yield* checkpointCaptureProviderMetadata;
+
   const navigationColumns = yield* sql<{ readonly name: string }>`
     PRAGMA table_info(checkpoint_navigation_operations)
   `;

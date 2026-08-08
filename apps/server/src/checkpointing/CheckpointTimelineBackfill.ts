@@ -17,7 +17,7 @@ export class CheckpointTimelineBackfill extends Context.Service<
   { readonly run: () => Effect.Effect<number> }
 >()("t3/checkpointing/CheckpointTimelineBackfill") {}
 
-const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 const make = Effect.gen(function* () {
   const projections = yield* ProjectionSnapshotQuery;

@@ -5,9 +5,15 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
+import projectionThreadsSettled from "./033_ProjectionThreadsSettled.ts";
+import projectionThreadsSnoozed from "./034_ProjectionThreadsSnoozed.ts";
+import projectionThreadTitleRegeneration from "./035_ProjectionThreadTitleRegeneration.ts";
 import checkpointDurableState from "./036_CheckpointDurableState.ts";
 import checkpointLegacyMigration from "./037_CheckpointLegacyMigration.ts";
 import checkpointCaptureProviderMetadata from "./038_CheckpointCaptureProviderMetadata.ts";
+import projectionThreadsPinned from "./041_ProjectionThreadsPinned.ts";
+import projectionTurnsKeysetIndex from "./042_ProjectionTurnsKeysetIndex.ts";
+import projectionThreadsPinOrderKey from "./043_ProjectionThreadsPinOrderKey.ts";
 
 const assertReconciledColumns = Effect.fn("assertReconciledColumns")(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -92,6 +98,37 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
           (37, 'ProjectionThreadsSettled'),
           (38, 'ProjectionThreadsSnoozed')
       `;
+
+        yield* runMigrations({ toMigrationInclusive: 39 });
+        yield* assertReconciledColumns();
+      }),
+    );
+  },
+);
+
+it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
+  "039_ReconcileCheckpointAndTitleHistory upstream 38 ledger",
+  (it) => {
+    it.effect("repairs checkpoint schema skipped by upstream-numbered migrations", () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 32 });
+        yield* projectionThreadsSettled;
+        yield* projectionThreadsSnoozed;
+        yield* projectionThreadTitleRegeneration;
+        yield* projectionThreadsPinned;
+        yield* projectionTurnsKeysetIndex;
+        yield* projectionThreadsPinOrderKey;
+        yield* sql`
+          INSERT INTO effect_sql_migrations (migration_id, name)
+          VALUES
+            (33, 'ProjectionThreadsSettled'),
+            (34, 'ProjectionThreadsSnoozed'),
+            (35, 'ProjectionThreadTitleRegeneration'),
+            (36, 'ProjectionThreadsPinned'),
+            (37, 'ProjectionTurnsKeysetIndex'),
+            (38, 'ProjectionThreadsPinOrderKey')
+        `;
 
         yield* runMigrations({ toMigrationInclusive: 39 });
         yield* assertReconciledColumns();

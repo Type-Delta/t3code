@@ -4,13 +4,17 @@ This fork keeps the Windows reliability, durable checkpointing, and workspace ca
 
 Git repository cache keys use Node's native `realpath` so Windows long paths and their 8.3 aliases share one VCS snapshot and refresh history.
 
-## Upstream sync — 2026-08-01
+## Upstream sync — 2026-08-08
+
+Merged upstream `2c7267ad4287ecdf8cf9bc466724abbc6ac33eb0` into the fork while preserving durable checkpoints, existing-worktree selection, split workspaces, and read-only subagent transcripts. The integration adopts upstream native agent/workflow observability as the lifecycle authority and keeps transcript events agent-scoped outside the parent timeline: native child message completions finalize their matching transcript, persisted child rows enable transcript access from the matching agent row, transcript headers use native lifecycle metadata, child rows stay out of web and mobile parent feeds, and bounded thread-detail reads retain subagent identity. Paginated clients persist the requested user-turn width so checkpoint navigation refreshes the complete loaded window. Fork migrations remain `36`–`40`; upstream pinning and pagination migrations are assigned `41`–`43` to preserve deployed fork databases.
+
+## Previous upstream sync — 2026-08-01
 
 Merged upstream `0ad91b6e7fc1fcb6d5f4bc736d84c337e912bc62` into the fork without dropping checkpoint navigation, split workspaces, existing-worktree selection, preview recovery, provider usage, Claude Windows packaging, or stale-mutation retry/drafts. The integration adopts upstream title regeneration, branch-drift handling, sidebar search and shell loading, preview PiP/runtime identities, telemetry/compression, and VCS cache invalidation. Migration IDs `33`–`35` remain upstream-compatible; checkpoint migrations now occupy `36`–`38`, and idempotent migration `39` reconciles both previously deployed histories.
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `23b55022175e69938514934f65c5a607d38f1e47`, tracked with `base` tag). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `2c7267ad43a05cf3e30343400c76fd9ac47698e7`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -80,7 +84,7 @@ Checkpoint capture and navigation are durable server services. Private bare-Git 
 
 SQLite persists capture jobs, immutable checkpoint entries, timeline generations and cursors, provider bindings, retention data, and restart-recoverable navigation journals. Undo, redo, and rewind share a compensating navigation saga; providers without a verified non-destructive branch capability are explicitly limited, and filesystem-only rollback requires confirmation without moving the provider conversation cursor.
 
-Fork migrations `036`–`038` establish the durable checkpoint state (`036_CheckpointDurableState`, `037_CheckpointLegacyMigration`, and `038_CheckpointCaptureProviderMetadata`). Upstream lifecycle and title-regeneration migrations retain canonical IDs `033`–`035`; idempotent migration `039_ReconcileCheckpointAndTitleHistory` supplies checkpoint navigation mode and title-regeneration columns for databases that already ran either historical numbering scheme.
+Fork migrations `036`–`038` establish the durable checkpoint state (`036_CheckpointDurableState`, `037_CheckpointLegacyMigration`, and `038_CheckpointCaptureProviderMetadata`). Upstream lifecycle and title-regeneration migrations retain canonical IDs `033`–`035`; idempotent migration `039_ReconcileCheckpointAndTitleHistory` replays the `036`–`038` checkpoint schema before supplying checkpoint navigation mode and title-regeneration columns for upstream-ledger databases that skipped those fork migrations.
 
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
@@ -177,9 +181,11 @@ The new-thread Workspace controls expose a neighboring Worktree selector in Curr
 Codex collaboration-agent output and Claude Task output are correlated with their native child or
 parent tool-use identifiers, persisted separately from the parent assistant stream, and omitted
 from the main transcript. Unmatched historical correlations fall back to the main transcript so a
-provider routing defect cannot hide a parent response. The spawn remains visible as a tool call
-with a prompt preview; selecting it opens a normal chat transcript without a composer in the right
-panel. When the provider reports it, the complete, unchanged spawn prompt is synthesized as the
+provider routing defect cannot hide a parent response. The spawn remains visible as one native
+task lifecycle row; selecting that row or its authoritative Agents-panel entry opens a normal chat
+transcript without a composer in the right panel. The provider item remains persisted only for
+transcript correlation and does not create a duplicate spawn row. When the provider reports it,
+the complete, unchanged spawn prompt is synthesized as the
 transcript's first user message.
 Current Codex multi-agent v2 events expose the child thread and path but omit the spawn prompt,
 model, and reasoning effort, so the client labels that metadata unavailable instead of inventing
@@ -195,8 +201,10 @@ the same left-aligned workspace group and right-aligned subagent/branch group at
 width. Claude output without a parent Task identifier remains in the main transcript.
 
 Projection migration `040_ProjectionSubagentIds` adds durable correlation columns for messages and
-activities. Codex v2 child-thread lifecycle events are converted into durable working/completed/
-failed status updates. The main timeline names started, messaged, resumed, waited, stopped,
+activities. Upstream native `task.*` events remain the sole Codex lifecycle and Agents-panel status
+authority; child message deltas use the same native agent/thread identity only to populate the
+separate transcript. Child thread, turn, name, token, and plan chatter cannot mutate the parent.
+The main timeline names started, messaged, resumed, waited, stopped,
 interrupted, failed, and finished subagent operations instead of grouping them under a generic
 task label. Only spawn/resume events can establish child routing, so a child message sent back to
 the parent cannot capture the parent thread or suppress its final completion. The stale-session
@@ -222,7 +230,7 @@ status,
 status-aware dropdown, invariant context-strip grouping across the former mobile breakpoint, and
 absent composer were confirmed in the live client.
 
-**Last updated:** 2026-08-05
+**Last updated:** 2026-08-08
 
 ## Merge History
 

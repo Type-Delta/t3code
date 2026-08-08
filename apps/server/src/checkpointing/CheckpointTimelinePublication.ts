@@ -19,7 +19,7 @@ export class CheckpointTimelinePublicationError extends Schema.TaggedErrorClass<
   },
 ) {}
 
-const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 export const checkpointEntryIdFor = (snapshotId: string) =>
   `snapshot-${NodeCrypto.createHash("sha256").update(`entry\0${snapshotId}`).digest("hex")}`;

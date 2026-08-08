@@ -123,8 +123,9 @@ export class CheckpointNavigationService extends Context.Service<
 const navigationError = (code: string, detail: string, operationId: string | null = null) =>
   new CheckpointNavigationError({ code, detail, operationId });
 
-const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
-const decodeOpaqueJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const UnknownFromJsonString = Schema.fromJsonString(Schema.Unknown);
+const encodeOpaqueJson = Schema.encodeUnknownEffect(UnknownFromJsonString);
+const decodeOpaqueJson = Schema.decodeUnknownEffect(UnknownFromJsonString);
 
 const stringifyOpaque = (value: unknown, operationId: string | null) =>
   encodeOpaqueJson(value).pipe(

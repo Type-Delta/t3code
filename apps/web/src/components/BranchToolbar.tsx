@@ -1,17 +1,30 @@
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { BotIcon, ChevronDownIcon } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  BotIcon,
+  ChevronDownIcon,
+  CloudIcon,
+  FolderGit2Icon,
+  FolderGitIcon,
+  FolderIcon,
+  HistoryIcon,
+  MonitorIcon,
+} from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import type { SubagentRunSummary } from "../session-logic";
 import { useProject, useThread, useThreadShellsForProjectRefs } from "../state/entities";
+import { useIsMobile } from "../hooks/useMediaQuery";
 import { useWorktrees, useWorktreesOnce } from "../state/queries";
 import {
   type EnvMode,
   type EnvironmentOption,
   resolveDraftWorktreeContext,
+  resolveCurrentWorkspaceLabel,
+  resolveEnvModeLabel,
   resolveEffectiveEnvMode,
+  resolveLockedWorkspaceLabel,
   resolveLockedWorktreeDisplay,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
@@ -25,12 +38,23 @@ import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSele
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
 import { BranchToolbarWorktreeSelector } from "./BranchToolbarWorktreeSelector";
 import { Button } from "./ui/button";
-import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
+import {
+  Menu,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuPopup,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuTrigger,
+} from "./ui/menu";
 import { Separator } from "./ui/separator";
 
 interface BranchToolbarProps {
   environmentId: EnvironmentId;
   threadId: ThreadId;
+  showGitControls: boolean;
   draftId?: DraftId;
   onEnvModeChange: (mode: EnvMode) => void;
   effectiveEnvModeOverride?: EnvMode;
@@ -58,6 +82,160 @@ function subagentMenuMetadata(run: SubagentRunSummary): string {
   );
   return values.length > 0 ? values.join(" · ") : "Model and effort unavailable";
 }
+
+interface MobileRunContextSelectorProps {
+  envLocked: boolean;
+  envModeLocked: boolean;
+  environmentId: EnvironmentId;
+  availableEnvironments: readonly EnvironmentOption[] | undefined;
+  showEnvironmentPicker: boolean;
+  showEnvironmentIndicator: boolean;
+  onEnvironmentChange: ((environmentId: EnvironmentId) => void) | undefined;
+  effectiveEnvMode: EnvMode;
+  activeWorktreePath: string | null;
+  onEnvModeChange: (mode: EnvMode) => void;
+  previousWorktreeLabel: string | null;
+  onUsePreviousWorktree: () => void;
+}
+
+const MobileRunContextSelector = memo(function MobileRunContextSelector({
+  envLocked,
+  envModeLocked,
+  environmentId,
+  availableEnvironments,
+  showEnvironmentPicker,
+  showEnvironmentIndicator,
+  onEnvironmentChange,
+  effectiveEnvMode,
+  activeWorktreePath,
+  onEnvModeChange,
+  previousWorktreeLabel,
+  onUsePreviousWorktree,
+}: MobileRunContextSelectorProps) {
+  const activeEnvironment = useMemo(
+    () => availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null,
+    [availableEnvironments, environmentId],
+  );
+  const WorkspaceIcon =
+    effectiveEnvMode === "worktree"
+      ? FolderGit2Icon
+      : activeWorktreePath
+        ? FolderGitIcon
+        : FolderIcon;
+  const workspaceLabel = envModeLocked
+    ? resolveLockedWorkspaceLabel(activeWorktreePath)
+    : effectiveEnvMode === "worktree"
+      ? resolveEnvModeLabel("worktree")
+      : resolveCurrentWorkspaceLabel(activeWorktreePath);
+  const isLocked = envLocked || envModeLocked;
+  const EnvironmentIcon = activeEnvironment?.isPrimary ? MonitorIcon : CloudIcon;
+  const icon = showEnvironmentIndicator ? (
+    <span className="inline-flex shrink-0 items-center gap-0.5">
+      <EnvironmentIcon className="size-3 shrink-0 mx-0!" />
+      <WorkspaceIcon className="size-3 shrink-0 mx-0!" />
+    </span>
+  ) : (
+    <WorkspaceIcon className="size-3 shrink-0" />
+  );
+  const triggerContent = (
+    <>
+      {icon}
+      <span className="min-w-0 truncate">
+        {showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel}
+      </span>
+    </>
+  );
+
+  if (isLocked) {
+    return (
+      <span className="inline-flex h-7 min-w-0 max-w-[48%] flex-1 items-center justify-start gap-1 rounded-md border border-transparent px-[calc(--spacing(2)-1px)] text-sm font-medium text-muted-foreground/70 sm:h-6 md:hidden">
+        {triggerContent}
+      </span>
+    );
+  }
+
+  return (
+    <Menu>
+      <MenuTrigger
+        render={<Button variant="ghost" size="xs" />}
+        className="min-w-0 max-w-[48%] flex-1 justify-start text-muted-foreground/70 hover:text-foreground/80 md:hidden"
+      >
+        {triggerContent}
+        <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
+      </MenuTrigger>
+      <MenuPopup align="start" side="top" className="w-64">
+        {showEnvironmentPicker && availableEnvironments && onEnvironmentChange ? (
+          <>
+            <MenuGroup>
+              <MenuGroupLabel>Run on</MenuGroupLabel>
+              <MenuRadioGroup
+                value={environmentId}
+                onValueChange={(value) => onEnvironmentChange(value as EnvironmentId)}
+              >
+                {availableEnvironments.map((env) => {
+                  const Icon = env.isPrimary ? MonitorIcon : CloudIcon;
+                  return (
+                    <MenuRadioItem
+                      key={env.environmentId}
+                      disabled={envLocked}
+                      value={env.environmentId}
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <Icon className="size-3" />
+                        <span className="min-w-0 truncate">{env.label}</span>
+                      </span>
+                    </MenuRadioItem>
+                  );
+                })}
+              </MenuRadioGroup>
+            </MenuGroup>
+            <MenuSeparator />
+          </>
+        ) : null}
+        <MenuGroup>
+          <MenuGroupLabel>Workspace</MenuGroupLabel>
+          <MenuRadioGroup
+            value={effectiveEnvMode}
+            onValueChange={(value) => {
+              if (value === "previous-worktree") {
+                onUsePreviousWorktree();
+                return;
+              }
+              onEnvModeChange(value as EnvMode);
+            }}
+          >
+            <MenuRadioItem disabled={envModeLocked} value="local">
+              <span className="flex min-w-0 items-center gap-1.5">
+                {activeWorktreePath ? (
+                  <FolderGitIcon className="size-3" />
+                ) : (
+                  <FolderIcon className="size-3" />
+                )}
+                <span className="min-w-0 truncate">
+                  {resolveCurrentWorkspaceLabel(activeWorktreePath)}
+                </span>
+              </span>
+            </MenuRadioItem>
+            <MenuRadioItem disabled={envModeLocked} value="worktree">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <FolderGit2Icon className="size-3" />
+                <span className="min-w-0 truncate">{resolveEnvModeLabel("worktree")}</span>
+              </span>
+            </MenuRadioItem>
+            {previousWorktreeLabel ? (
+              <MenuRadioItem disabled={envModeLocked} value="previous-worktree">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <HistoryIcon className="size-3" />
+                  <span className="min-w-0 truncate">{previousWorktreeLabel}</span>
+                </span>
+              </MenuRadioItem>
+            ) : null}
+          </MenuRadioGroup>
+        </MenuGroup>
+      </MenuPopup>
+    </Menu>
+  );
+});
 
 const SUBAGENT_STATUS_LABEL = {
   inProgress: "Working",
@@ -141,9 +319,102 @@ const BranchToolbarSubagentSelector = memo(function BranchToolbarSubagentSelecto
   );
 });
 
+/**
+ * Collapse the strip's labels to icons only when the text no longer fits.
+ *
+ * Hidden labels stay measurable (they collapse to invisible absolute boxes,
+ * which keep their natural width), so the required width can be recomputed in
+ * either state on every pass - no remembered widths that could go stale or
+ * latch the strip compact. A small hysteresis keeps the boundary from
+ * flapping between states.
+ */
+const COMPACT_EXPAND_HYSTERESIS_PX = 16;
+
+function useLabelsOverflow(element: HTMLDivElement | null): boolean {
+  const [overflows, setOverflows] = useState(false);
+  // A render-synced mirror instead of useEffectEvent: the compiler memoizes
+  // the event callback, which left observers reading the first render's null
+  // element forever.
+  const stateRef = useRef({ element, overflows });
+  stateRef.current = { element, overflows };
+
+  const measure = useCallback(() => {
+    const { element: current, overflows: compact } = stateRef.current;
+    if (!current) return;
+    const available = current.clientWidth;
+    if (available === 0) return;
+    // flex-1 stretches the groups to fill the strip, so their own boxes always
+    // measure "full". Sum the laid-out content instead, skipping hidden form
+    // artifacts and absolutely-positioned nodes (the compact-hidden labels).
+    const contentWidth = (parent: Element): number => {
+      const gap = Number.parseFloat(getComputedStyle(parent).columnGap) || 0;
+      let width = 0;
+      let counted = 0;
+      for (const child of parent.children) {
+        if (!(child instanceof HTMLElement)) continue;
+        if (child.offsetWidth <= 1) continue;
+        const position = getComputedStyle(child).position;
+        if (position === "absolute" || position === "fixed") continue;
+        width += child.offsetWidth;
+        counted += 1;
+      }
+      return width + gap * Math.max(0, counted - 1);
+    };
+    const stripGap = Number.parseFloat(getComputedStyle(current).columnGap) || 0;
+    let needed = 0;
+    let groups = 0;
+    for (const child of current.children) {
+      if (!(child instanceof HTMLElement) || child.offsetWidth <= 1) continue;
+      needed += contentWidth(child);
+      groups += 1;
+    }
+    needed += stripGap * Math.max(0, groups - 1);
+    for (const label of current.querySelectorAll<HTMLElement>("[data-composer-label]")) {
+      // The clipping can happen below the marker (SelectValue truncates
+      // internally), where the outer span's scrollWidth matches its clipped
+      // box. The text's real width is the largest scrollWidth in the subtree.
+      let textWidth = label.scrollWidth;
+      for (const inner of label.querySelectorAll<HTMLElement>("*")) {
+        textWidth = Math.max(textWidth, inner.scrollWidth);
+      }
+      if (compact) {
+        // Compact: the label is squeezed to zero width but keeps reporting
+        // the full width it would need when expanded.
+        needed += textWidth;
+      } else {
+        // Expanded: the label is in flow; only the clipped remainder is
+        // missing from the content sum.
+        needed += Math.max(0, textWidth - label.clientWidth);
+      }
+    }
+    setOverflows(compact ? needed > available - COMPACT_EXPAND_HYSTERESIS_PX : needed > available);
+  }, []);
+
+  // Label widths can change without the strip box moving (font family or
+  // size preferences), so re-measure on every render as well as on resize
+  // and font loads.
+  useEffect(() => {
+    measure();
+  });
+
+  useEffect(() => {
+    if (!element) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    document.fonts.addEventListener("loadingdone", measure);
+    return () => {
+      observer.disconnect();
+      document.fonts.removeEventListener("loadingdone", measure);
+    };
+  }, [element, measure]);
+
+  return overflows;
+}
+
 export const BranchToolbar = memo(function BranchToolbar({
   environmentId,
   threadId,
+  showGitControls,
   draftId,
   onEnvModeChange,
   effectiveEnvModeOverride,
@@ -349,56 +620,89 @@ export const BranchToolbar = memo(function BranchToolbar({
     activeEnvironment: activeEnvironmentOption,
     canPickEnvironment: showEnvironmentPicker,
   });
+  const isMobile = useIsMobile();
+  const [stripElement, setStripElement] = useState<HTMLDivElement | null>(null);
+  const labelsOverflow = useLabelsOverflow(stripElement);
+
   if (!hasActiveThread || !activeProject) return null;
 
   return (
-    <div className="chat-composer-context-strip @container/composer-strip -mt-4 mx-auto flex w-[calc(100%-2.75rem)] max-w-[calc(48rem-2.75rem)] items-center gap-2 px-1 pt-5 pb-1">
-      <div className="flex min-w-0 flex-1 items-center gap-1">
-        {showEnvironmentIndicator && availableEnvironments && (
-          <>
-            <BranchToolbarEnvironmentSelector
-              envLocked={envLocked}
-              environmentId={environmentId}
-              availableEnvironments={availableEnvironments}
-              {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
-            />
-            <Separator orientation="vertical" className="mx-0.5 h-3.5!" />
-          </>
-        )}
-        <BranchToolbarEnvModeSelector
-          envLocked={envModeLocked}
+    <div
+      ref={setStripElement}
+      data-compact={labelsOverflow ? "" : undefined}
+      className="chat-composer-context-strip group/composer-context @container/composer-strip -mt-4 mx-auto flex w-[calc(100%-2.75rem)] max-w-[calc(48rem-2.75rem)] items-center gap-2 ps-1 pe-2 pt-5 pb-1"
+    >
+      {isMobile && showGitControls ? (
+        <MobileRunContextSelector
+          envLocked={envLocked}
+          envModeLocked={envModeLocked}
+          environmentId={environmentId}
+          availableEnvironments={availableEnvironments}
+          showEnvironmentPicker={showEnvironmentPicker}
+          showEnvironmentIndicator={showEnvironmentIndicator}
+          onEnvironmentChange={onEnvironmentChange}
           effectiveEnvMode={effectiveEnvMode}
           activeWorktreePath={activeWorktreePath}
           onEnvModeChange={onEnvModeChange}
           previousWorktreeLabel={previousWorktreeLabel}
           onUsePreviousWorktree={onUsePreviousWorktree}
         />
-        {worktreeControlModel || lockedWorktreeDisplay ? (
-          <BranchToolbarWorktreeSelector
-            model={worktreeControlModel}
-            locked={serverThread !== null}
-            lockedDisplay={lockedWorktreeDisplay}
-            onWorktreeChange={onWorktreeChange}
-          />
-        ) : null}
-      </div>
+      ) : (
+        <div className="flex min-w-0 flex-1 items-center gap-1">
+          {showEnvironmentIndicator && availableEnvironments && (
+            <>
+              <BranchToolbarEnvironmentSelector
+                envLocked={envLocked}
+                environmentId={environmentId}
+                availableEnvironments={availableEnvironments}
+                {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
+              />
+              {showGitControls ? (
+                <Separator orientation="vertical" className="mx-0.5 h-3.5!" />
+              ) : null}
+            </>
+          )}
+          {showGitControls ? (
+            <>
+              <BranchToolbarEnvModeSelector
+                envLocked={envModeLocked}
+                effectiveEnvMode={effectiveEnvMode}
+                activeWorktreePath={activeWorktreePath}
+                onEnvModeChange={onEnvModeChange}
+                previousWorktreeLabel={previousWorktreeLabel}
+                onUsePreviousWorktree={onUsePreviousWorktree}
+              />
+              {worktreeControlModel || lockedWorktreeDisplay ? (
+                <BranchToolbarWorktreeSelector
+                  model={worktreeControlModel}
+                  locked={serverThread !== null}
+                  lockedDisplay={lockedWorktreeDisplay}
+                  onWorktreeChange={onWorktreeChange}
+                />
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      )}
 
       <BranchToolbarSubagentSelector runs={subagentRuns} onOpenSubagent={onOpenSubagent} />
 
-      <BranchToolbarBranchSelector
-        className="ml-auto min-w-0 flex-none justify-end"
-        environmentId={environmentId}
-        threadId={threadId}
-        {...(draftId ? { draftId } : {})}
-        envLocked={envLocked}
-        {...(effectiveEnvModeOverride ? { effectiveEnvModeOverride } : {})}
-        {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
-        {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}
-        startFromOrigin={startFromOrigin}
-        onStartFromOriginChange={onStartFromOriginChange}
-        {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
-        {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
-      />
+      {showGitControls ? (
+        <BranchToolbarBranchSelector
+          className="min-w-0 flex-1 justify-end md:ml-auto md:flex-none"
+          environmentId={environmentId}
+          threadId={threadId}
+          {...(draftId ? { draftId } : {})}
+          envLocked={envLocked}
+          {...(effectiveEnvModeOverride ? { effectiveEnvModeOverride } : {})}
+          {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
+          {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}
+          startFromOrigin={startFromOrigin}
+          onStartFromOriginChange={onStartFromOriginChange}
+          {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
+          {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
+        />
+      ) : null}
     </div>
   );
 });

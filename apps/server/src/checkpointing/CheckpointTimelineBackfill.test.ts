@@ -28,7 +28,7 @@ const snapshotId = "legacy-ready-snapshot";
 const now = "2026-07-16T00:00:00.000Z";
 const threadId = ThreadId.make("backfill-thread");
 let bindingUnavailable = false;
-const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+const encodeOpaqueJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 const persistence = Layer.mergeAll(
   CheckpointCaptureJobRepositoryLive,

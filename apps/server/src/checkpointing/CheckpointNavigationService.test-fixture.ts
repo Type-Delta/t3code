@@ -38,7 +38,7 @@ const providerInstanceId = ProviderInstanceId.make("codex-local");
 export const repositoryKey = "a".repeat(64);
 export const worktreeKey = "b".repeat(64);
 export const unrelatedWorktreeKey = "e".repeat(64);
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 export const testBinding = (value: string): ProviderConversationBinding => ({
   schemaVersion: 1,

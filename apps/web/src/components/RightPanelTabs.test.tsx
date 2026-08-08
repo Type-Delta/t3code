@@ -24,6 +24,7 @@ describe("RightPanelTabs", () => {
         onAddTerminal={() => {}}
         onAddDiff={() => {}}
         onAddFiles={() => {}}
+        onAddAgents={() => {}}
         browserAvailable
         diffAvailable
         filesAvailable
