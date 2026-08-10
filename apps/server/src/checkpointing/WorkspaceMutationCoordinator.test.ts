@@ -149,6 +149,34 @@ it.layer(WorkspaceMutationCoordinatorLive)("WorkspaceMutationCoordinator", (it) 
     }),
   );
 
+  it.effect("shares one stable capture boundary across overlapping provider turns", () =>
+    Effect.gen(function* () {
+      const coordinator = yield* WorkspaceMutationCoordinator;
+      assert.isTrue(
+        yield* coordinator.prepareProviderMutation("thread-a", "worktree-shared-cohort"),
+      );
+      assert.isTrue(
+        yield* coordinator.prepareProviderMutation("thread-b", "worktree-shared-cohort"),
+      );
+      assert.isTrue(yield* coordinator.bindProviderMutation("thread-a", "turn-a"));
+      assert.isTrue(yield* coordinator.bindProviderMutation("thread-b", "turn-b"));
+
+      const captureFiber = yield* Effect.forkChild(
+        coordinator.beginCapture("worktree-shared-cohort"),
+      );
+      yield* Effect.yieldNow;
+      assert.isUndefined(captureFiber.pollUnsafe());
+
+      assert.isTrue(yield* coordinator.completeProviderMutation("thread-a", "turn-a"));
+      yield* Effect.yieldNow;
+      assert.isUndefined(captureFiber.pollUnsafe());
+
+      assert.isTrue(yield* coordinator.completeProviderMutation("thread-b", "turn-b"));
+      const capture = yield* Fiber.join(captureFiber);
+      assert.isTrue(yield* coordinator.completeCapture(capture));
+    }),
+  );
+
   it.effect("does not release a provider mutation for another turn", () =>
     Effect.gen(function* () {
       const coordinator = yield* WorkspaceMutationCoordinator;

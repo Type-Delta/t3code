@@ -86,7 +86,7 @@ SQLite persists capture jobs, immutable checkpoint entries, timeline generations
 
 Fork migrations `036`–`038` establish the durable checkpoint state (`036_CheckpointDurableState`, `037_CheckpointLegacyMigration`, and `038_CheckpointCaptureProviderMetadata`). Upstream lifecycle and title-regeneration migrations retain canonical IDs `033`–`035`; idempotent migration `039_ReconcileCheckpointAndTitleHistory` replays the `036`–`038` checkpoint schema before supplying checkpoint navigation mode and title-regeneration columns for upstream-ledger databases that skipped those fork migrations.
 
-Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
+Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
@@ -94,7 +94,7 @@ Capture jobs that first lose the workspace-mutation race or fail can be re-enque
 
 **Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
 
-**Last updated:** 2026-08-01
+**Last updated:** 2026-08-10
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -110,13 +110,13 @@ Split membership is persisted as multiple ordered local groups with active state
 
 ### DL012 — Prompt preservation during draft promotion
 
-The initial optimistic prompt remains visible while a draft route becomes its server-backed thread. Chat timeline state resets only when the scoped thread identity changes, so the projected `thread.message-sent` event replaces the prompt instead of briefly erasing it.
+The initial optimistic prompt remains visible while a draft route becomes its server-backed thread. Chat timeline state resets only when the scoped thread identity changes, so the projected `thread.message-sent` event replaces the prompt instead of briefly erasing it. Orchestration commands require an acknowledgement within ten seconds; a lost WebSocket reply therefore enters the existing visible failure path and restores the durable composer draft instead of leaving a refresh-only optimistic message indefinitely.
 
-**Implementation evidence:** `apps/web/src/components/ChatView.tsx`.
+**Implementation evidence:** `apps/web/src/components/ChatView.tsx` and `packages/client-runtime/src/operations/commands.ts`.
 
 **Recorded validation:** `vp check`, `vp run typecheck`, and the repository `dev` startup smoke test.
 
-**Last updated:** 2026-07-22
+**Last updated:** 2026-08-10
 
 ### DL013 — Codex availability through catalog and turn failures
 

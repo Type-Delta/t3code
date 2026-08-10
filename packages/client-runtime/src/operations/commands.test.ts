@@ -1,18 +1,23 @@
 import {
   CommandId,
   EnvironmentId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
+  ProviderInstanceId,
   ThreadId,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
+import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
@@ -27,6 +32,7 @@ import {
   jumpThreadCheckpoint,
   redoThreadCheckpoint,
   settleThread,
+  startThreadTurn,
   stopThreadSession,
   undoThreadCheckpoint,
   unsettleThread,
@@ -121,6 +127,47 @@ describe("environment commands", () => {
           createdAt: "2026-06-06T00:01:00.000Z",
         },
       ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("fails an unacknowledged turn start instead of leaving it optimistic forever", () =>
+    Effect.gen(function* () {
+      const supervisor = yield* makeSupervisor([]);
+      const stalledSupervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        ...supervisor,
+        session: yield* SubscriptionRef.make(
+          Option.some({
+            ...(yield* SubscriptionRef.get(supervisor.session).pipe(Effect.map(Option.getOrThrow))),
+            client: {
+              [ORCHESTRATION_WS_METHODS.dispatchCommand]: () => Effect.never,
+            } as unknown as WsRpcProtocolClient,
+          }),
+        ),
+      });
+      const fiber = yield* Effect.forkChild(
+        startThreadTurn({
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-1"),
+            role: "user",
+            text: "do not disappear",
+            attachments: [],
+          },
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.6-sol",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, stalledSupervisor),
+          Effect.flip,
+        ),
+      );
+
+      yield* TestClock.adjust("10 seconds");
+      const error = yield* Fiber.join(fiber);
+      expect(error).toBeInstanceOf(EnvironmentRpcUnavailableError);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 

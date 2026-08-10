@@ -5,13 +5,14 @@ import {
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 
-import type { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import {
   type EnvironmentRpcFailure,
   type EnvironmentRpcSuccess,
-  type EnvironmentRpcUnavailableError,
+  EnvironmentRpcUnavailableError,
   request,
 } from "../rpc/client.ts";
 
@@ -85,9 +86,25 @@ function timestampedCommandMetadata(input: {
   });
 }
 
-function dispatch(command: ClientOrchestrationCommand) {
-  return request(ORCHESTRATION_WS_METHODS.dispatchCommand, command);
-}
+const ORCHESTRATION_DISPATCH_TIMEOUT = Duration.seconds(10);
+
+const dispatch = Effect.fn("EnvironmentCommands.dispatch")(function* (
+  command: ClientOrchestrationCommand,
+) {
+  const supervisor = yield* EnvironmentSupervisor;
+  return yield* request(ORCHESTRATION_WS_METHODS.dispatchCommand, command).pipe(
+    Effect.timeoutOrElse({
+      duration: ORCHESTRATION_DISPATCH_TIMEOUT,
+      orElse: () =>
+        Effect.fail(
+          new EnvironmentRpcUnavailableError({
+            environmentId: supervisor.target.environmentId,
+            message: `${supervisor.target.label} did not acknowledge the command within 10 seconds.`,
+          }),
+        ),
+    }),
+  );
+});
 
 export const createProject: (input: CreateProjectInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.createProject",

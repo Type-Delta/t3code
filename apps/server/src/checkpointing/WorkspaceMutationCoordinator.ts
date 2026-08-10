@@ -184,16 +184,19 @@ const make = Effect.gen(function* () {
       );
 
   const beginCapture: WorkspaceMutationCoordinatorShape["beginCapture"] = (worktreeKey) =>
-    Effect.flatMap(getMutationGate(worktreeKey), (gate) =>
-      gate.withPermits(1)(
-        Effect.gen(function* () {
-          const mutationIdle = yield* locked(
-            Effect.sync(() => mutationIdleSignals.get(worktreeKey)),
-          );
-          if (mutationIdle) yield* Deferred.await(mutationIdle);
-          return yield* locked(
+    Effect.gen(function* () {
+      const gate = yield* getMutationGate(worktreeKey);
+      while (true) {
+        const attempt = yield* gate.withPermits(1)(
+          locked(
             Effect.gen(function* () {
               const current = yield* Ref.get(state);
+              if ((current.mutationDepths.get(worktreeKey) ?? 0) > 0) {
+                return {
+                  ticket: undefined,
+                  mutationIdle: mutationIdleSignals.get(worktreeKey),
+                } as const;
+              }
               const ticketId = current.nextTicketId;
               const controller = new AbortController();
               const captures = copyMap(current.captures);
@@ -207,12 +210,18 @@ const make = Effect.gen(function* () {
                 nextTicketId: ticketId + 1,
                 captures,
               });
-              return { ticketId, worktreeKey, generation, signal: controller.signal };
+              return {
+                ticket: { ticketId, worktreeKey, generation, signal: controller.signal },
+                mutationIdle: undefined,
+              } as const;
             }),
-          );
-        }),
-      ),
-    );
+          ),
+        );
+        if (attempt.ticket) return attempt.ticket;
+        if (attempt.mutationIdle) yield* Deferred.await(attempt.mutationIdle);
+        else yield* Effect.yieldNow;
+      }
+    });
 
   const completeCapture: WorkspaceMutationCoordinatorShape["completeCapture"] = (ticket) =>
     Effect.gen(function* () {
