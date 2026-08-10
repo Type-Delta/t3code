@@ -70,7 +70,14 @@ export function SubagentPanel(props: SubagentPanelProps) {
     const messages = props.messages.filter(
       (message): message is ChatMessage => message.subagentId === props.run.id,
     );
-    const activities = props.activities.filter((activity) => activity.subagentId === props.run.id);
+    const activities = props.activities.filter((activity) => {
+      if (activity.subagentId === props.run.id) return true;
+      const payload =
+        activity.payload && typeof activity.payload === "object"
+          ? (activity.payload as Record<string, unknown>)
+          : null;
+      return payload?.agentId === props.run.id;
+    });
     const prompt: ChatMessage | null = props.run.prompt
       ? {
           id: MessageId.make(`subagent-prompt:${props.run.id}`),
@@ -85,7 +92,7 @@ export function SubagentPanel(props: SubagentPanelProps) {
     return deriveTimelineEntries(
       prompt ? [prompt, ...messages] : messages,
       [],
-      deriveWorkLogEntries(activities),
+      deriveWorkLogEntries(activities, { includeAgentInternal: true }),
     );
   }, [props.activities, props.messages, props.run]);
 

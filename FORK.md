@@ -198,7 +198,9 @@ transcript directly. Its label contracts from `N Subagents` to `N Sub` with the 
 width. The aggregate label and each menu item's bot icon reflect completed, working, and failed
 states; active work breathes, while terminal errors remain static. The composer context strip keeps
 the same left-aligned workspace group and right-aligned subagent/branch group at every viewport
-width. Claude output without a parent Task identifier remains in the main transcript.
+width. Native lifecycle-only agents are merged into the same dropdown, and native tool rows
+attributed through `agentId` render inside their subagent transcript while remaining hidden from
+the parent timeline. Claude output without a parent Task identifier remains in the main transcript.
 
 Projection migration `040_ProjectionSubagentIds` adds durable correlation columns for messages and
 activities. Upstream native `task.*` events remain the sole Codex lifecycle and Agents-panel status
@@ -230,7 +232,7 @@ status,
 status-aware dropdown, invariant context-strip grouping across the former mobile breakpoint, and
 absent composer were confirmed in the live client.
 
-**Last updated:** 2026-08-08
+**Last updated:** 2026-08-10
 
 ## Merge History
 

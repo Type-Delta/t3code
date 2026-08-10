@@ -753,6 +753,7 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
 
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
+  options?: { readonly includeAgentInternal?: boolean },
 ): WorkLogEntry[] {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   const authoritativeAgentTaskIds = new Set(
@@ -792,7 +793,7 @@ export function deriveWorkLogEntries(
     if (activity.kind === "context-window.updated") continue;
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
-    if (isAgentInternalActivity(activity)) continue;
+    if (!options?.includeAgentInternal && isAgentInternalActivity(activity)) continue;
     entries.push(toDerivedWorkLogEntry(activity));
   }
   return collapseDerivedWorkLogEntries(entries).map((entry) => {
@@ -1369,6 +1370,47 @@ export function deriveSubagentRuns(
       });
     }
   }
+  return [...runs.values()];
+}
+
+function toLegacySubagentStatus(status: RuntimeSubagentStatus): SubagentRunSummary["status"] {
+  if (status === "pending" || status === "running" || status === "waiting") return "inProgress";
+  if (status === "completed" || status === "failed") return status;
+  return "stopped";
+}
+
+export function mergeSubagentRuns(
+  legacyRuns: ReadonlyArray<SubagentRunSummary>,
+  model: AgentPanelModel,
+): SubagentRunSummary[] {
+  const runs = new Map(legacyRuns.map((run) => [run.id, run]));
+  const nativeAgents: RuntimeSubagent[] = [
+    ...model.directAgents,
+    ...model.workflows.flatMap((group) => [
+      group.workflow,
+      ...group.phases.flatMap((phase) => phase.members),
+      ...group.unphasedMembers,
+    ]),
+  ];
+
+  for (const agent of nativeAgents) {
+    const previous = runs.get(agent.id);
+    runs.set(agent.id, {
+      id: agent.id,
+      title: agent.title,
+      prompt: previous?.prompt ?? "",
+      ...(agent.model ? { model: agent.model } : previous?.model ? { model: previous.model } : {}),
+      ...(agent.effort
+        ? { reasoningEffort: agent.effort }
+        : previous?.reasoningEffort
+          ? { reasoningEffort: previous.reasoningEffort }
+          : {}),
+      status: toLegacySubagentStatus(agent.status),
+      createdAt: agent.startedAt ?? agent.firstSeenAt,
+      updatedAt: agent.updatedAt,
+    });
+  }
+
   return [...runs.values()];
 }
 

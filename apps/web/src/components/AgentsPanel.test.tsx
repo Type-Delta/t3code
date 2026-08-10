@@ -8,6 +8,7 @@ import { subagentPanelIsWorking, subagentPanelStatusLabel } from "./chat/Subagen
 import {
   deriveSubagentTranscriptIds,
   findSubagentInPanelModel,
+  mergeSubagentRuns,
   resolveSubagentPanelRun,
 } from "../session-logic";
 
@@ -54,6 +55,16 @@ const model: AgentPanelModel = {
 };
 
 describe("AgentsPanel", () => {
+  it("exposes native agents to the composer dropdown", () => {
+    expect(mergeSubagentRuns([], model)[0]).toMatchObject({
+      id: "child-thread-1",
+      title: "Reviewer",
+      model: "gpt-5.6",
+      reasoningEffort: "high",
+      status: "completed",
+    });
+  });
+
   it("uses native agent metadata for a transcript-backed surface", () => {
     const nativeAgent = findSubagentInPanelModel(model, "child-thread-1");
     const run = resolveSubagentPanelRun({

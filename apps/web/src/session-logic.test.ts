@@ -2033,6 +2033,19 @@ describe("deriveWorkLogEntries quiet-timeline guarantee", () => {
     expect(entries.some((entry) => entry.sourceActivityKind?.startsWith("tool."))).toBe(false);
   });
 
+  it("shows attributed tool rows inside their subagent transcript", () => {
+    const activity = makeActivity({
+      kind: "tool.completed",
+      summary: "Read file",
+      payload: { itemType: "dynamic_tool_call", agentId: "task-1" },
+    });
+
+    expect(deriveWorkLogEntries([activity])).toEqual([]);
+    expect(deriveWorkLogEntries([activity], { includeAgentInternal: true })[0]?.label).toBe(
+      "Read file",
+    );
+  });
+
   it("a workflow run and its members collapse into one CTA row keyed to the coordinator", () => {
     const entries = deriveWorkLogEntries([
       makeActivity({

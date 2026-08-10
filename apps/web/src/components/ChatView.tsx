@@ -92,6 +92,7 @@ import {
   deriveWorkLogEntries,
   deriveSubagentTranscriptIds,
   deriveSubagentRuns,
+  mergeSubagentRuns,
   findSubagentInPanelModel,
   hasActionableProposedPlan,
   isSubagentToolActivity,
@@ -2179,10 +2180,9 @@ function ChatViewContent(props: ChatViewProps) {
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const threadMessages = activeThread?.messages ?? EMPTY_MESSAGES;
-  const subagentRuns = useMemo(() => deriveSubagentRuns(threadActivities), [threadActivities]);
-  const subagentRunsById = useMemo(
-    () => new Map(subagentRuns.map((run) => [run.id, run])),
-    [subagentRuns],
+  const legacySubagentRuns = useMemo(
+    () => deriveSubagentRuns(threadActivities),
+    [threadActivities],
   );
   const subagentTranscriptIds = useMemo(
     () => deriveSubagentTranscriptIds(threadMessages, threadActivities),
@@ -2218,6 +2218,14 @@ function ChatViewContent(props: ChatViewProps) {
         agents: foldSubagentActivities(threadActivities, { sessionLive: agentSessionLive }),
       }),
     [agentSessionLive, threadActivities],
+  );
+  const subagentRuns = useMemo(
+    () => mergeSubagentRuns(legacySubagentRuns, agentPanelModel),
+    [agentPanelModel, legacySubagentRuns],
+  );
+  const subagentRunsById = useMemo(
+    () => new Map(subagentRuns.map((run) => [run.id, run])),
+    [subagentRuns],
   );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
