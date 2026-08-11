@@ -246,6 +246,16 @@ On Windows, the standalone service launcher terminates the known server PID and 
 
 **Last updated:** 2026-08-10
 
+### DL020 — Provider turns bypass stalled checkpoint captures
+
+Starting a provider turn no longer waits indefinitely when the previous turn has finished but its post-turn checkpoint capture is still pending. In that state, the server dispatches the next turn without a checkpoint mutation so authentication failures and stalled captures cannot freeze the thread. Active provider mutations retain their existing brief handoff grace period. This behavior applies to every provider through the shared command reactor.
+
+**Implementation evidence:** `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` and `apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts`.
+
+**Recorded validation:** focused provider command reactor regression test, `vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-08-11
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

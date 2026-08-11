@@ -1017,18 +1017,12 @@ const make = Effect.gen(function* () {
       identity.worktreeKey,
     );
     if (!prepared) {
-      const released = yield* mutationCoordinator
-        .awaitProviderMutationRelease(threadId)
-        .pipe(Effect.timeoutOption(PROVIDER_MUTATION_RELEASE_GRACE));
-      if (Option.isSome(released)) {
-        prepared = yield* mutationCoordinator.prepareProviderMutation(
-          threadId,
-          identity.worktreeKey,
-        );
-      } else {
-        const capturePending = yield* mutationCoordinator.isProviderCapturePending(threadId);
-        if (capturePending) {
-          yield* mutationCoordinator.awaitProviderMutationRelease(threadId);
+      const capturePending = yield* mutationCoordinator.isProviderCapturePending(threadId);
+      if (!capturePending) {
+        const released = yield* mutationCoordinator
+          .awaitProviderMutationRelease(threadId)
+          .pipe(Effect.timeoutOption(PROVIDER_MUTATION_RELEASE_GRACE));
+        if (Option.isSome(released)) {
           prepared = yield* mutationCoordinator.prepareProviderMutation(
             threadId,
             identity.worktreeKey,

@@ -861,6 +861,58 @@ describe("ProviderCommandReactor", () => {
     ).toBe(false);
   });
 
+  it("does not block a provider turn on a stalled checkpoint capture", async () => {
+    const harness = await createHarness({ autoCompleteTurns: false });
+    const sent = Effect.runSync(Deferred.make<void>());
+    harness.sendTurn.mockImplementation(() =>
+      Deferred.succeed(sent, undefined).pipe(
+        Effect.as({ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-2") }),
+      ),
+    );
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.prepareProviderMutation(
+          "thread-1",
+          "provider-command-worktree:/tmp/provider-project",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.bindProviderMutation("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(
+        harness.mutationCoordinator.completeProviderMutationForCapture("thread-1", "turn-1"),
+      ),
+    ).toBe(true);
+    expect(
+      await runtime!.runPromise(harness.mutationCoordinator.isProviderCapturePending("thread-1")),
+    ).toBe(true);
+
+    try {
+      await harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-capture-retry"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-capture-retry"),
+          role: "user",
+          text: "retry",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      await runtime!.runPromise(Deferred.await(sent));
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    } finally {
+      await runtime!.runPromise(harness.mutationCoordinator.releaseProviderMutation("thread-1"));
+    }
+  });
+
   it("continues without checkpointing when an active mutation cannot be handed off", async () => {
     const harness = await createHarness({ autoCompleteTurns: false });
     const createdAt = "2026-01-01T00:00:00.000Z";
@@ -3340,22 +3392,20 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-stale"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-stale"),
-          role: "user",
-          text: "resume codex",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-stale"),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId("user-message-stale"),
+        role: "user",
+        text: "resume codex",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
