@@ -15,14 +15,18 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 
 describe("DesktopLifecycle", () => {
   for (const platform of ["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>) {
-    it.effect(`lets the updater's quit event proceed on ${platform}`, () => {
+    it.effect(`keeps UI restarts available and lets updates quit on ${platform}`, () => {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      let quitCount = 0;
+      let activateCount = 0;
 
       const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
         metadata: Effect.die("unexpected metadata read"),
         name: Effect.succeed("T3 Code"),
         whenReady: Effect.void,
-        quit: Effect.void,
+        quit: Effect.sync(() => {
+          quitCount += 1;
+        }),
         exit: () => Effect.void,
         relaunch: () => Effect.void,
         setPath: () => Effect.void,
@@ -71,7 +75,9 @@ describe("DesktopLifecycle", () => {
         createMain: Effect.die("unexpected window creation"),
         ensureMain: Effect.die("unexpected window creation"),
         revealOrCreateMain: Effect.die("unexpected window creation"),
-        activate: Effect.void,
+        activate: Effect.sync(() => {
+          activateCount += 1;
+        }),
         createMainIfBackendReady: Effect.void,
         showConnectingSplash: Effect.void,
         handleBackendReady: () => Effect.void,
@@ -100,6 +106,17 @@ describe("DesktopLifecycle", () => {
         Effect.gen(function* () {
           const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
           yield* lifecycle.register;
+
+          appListeners.get("window-all-closed")?.();
+          assert.equal(quitCount, 0, "closing the UI must not stop the desktop backend");
+
+          appListeners.get("second-instance")?.();
+          yield* Effect.promise(() => Promise.resolve());
+          assert.equal(
+            activateCount,
+            1,
+            "a new desktop UI instance must reopen the existing window",
+          );
 
           appListeners.get("before-quit-for-update")?.();
 

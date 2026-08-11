@@ -1,10 +1,19 @@
+// @effect-diagnostics nodeBuiltinImport:off - integration test exercises the Windows process-tree boundary.
+import * as NodeChildProcess from "node:child_process";
+import * as NodePath from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { Launcher, readServiceState, writeServiceState } from "./serviceLauncher.ts";
+import {
+  Launcher,
+  readServiceState,
+  terminateChild,
+  writeServiceState,
+} from "./serviceLauncher.ts";
 import {
   compareExactServiceVersions,
   decodeServiceState,
@@ -31,6 +40,36 @@ it("orders exact semantic versions without treating build metadata as precedence
   assert.equal(compareExactServiceVersions("2.0.0", "2.0.0-rc.1"), 1);
   assert.equal(compareExactServiceVersions("2.0.0+one", "2.0.0+two"), 0);
 });
+
+it.skipIf(NodePath.sep !== "\\")(
+  "terminates the known server process tree on Windows",
+  async () => {
+    const parent = NodeChildProcess.spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+          const { spawn } = require("node:child_process");
+          const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], {
+            stdio: "ignore",
+          });
+          process.send({ pid: child.pid });
+          setInterval(() => {}, 1_000);
+        `,
+      ],
+      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+    );
+    try {
+      const message = await new Promise<{ readonly pid: number }>((resolve) => {
+        parent.once("message", (value) => resolve(value as { readonly pid: number }));
+      });
+      await terminateChild(parent);
+      assert.throws(() => process.kill(message.pid, 0));
+    } finally {
+      await terminateChild(parent);
+    }
+  },
+);
 
 it("rejects contradictory service state", () => {
   assert.isUndefined(

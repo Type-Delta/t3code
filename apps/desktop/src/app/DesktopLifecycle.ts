@@ -206,17 +206,14 @@ export const make = DesktopLifecycle.of({
     yield* electronApp.on("activate", () => {
       void runEffect(desktopWindow.activate.pipe(Effect.withSpan("desktop.lifecycle.activate")));
     });
-    yield* electronApp.on("window-all-closed", () => {
+    yield* electronApp.on("second-instance", () => {
       void runEffect(
-        Effect.gen(function* () {
-          const app = yield* ElectronApp.ElectronApp;
-          const state = yield* DesktopState.DesktopState;
-          if (environment.platform !== "darwin" && !(yield* Ref.get(state.quitting))) {
-            yield* app.quit;
-          }
-        }).pipe(Effect.withSpan("desktop.lifecycle.windowAllClosed")),
+        desktopWindow.activate.pipe(Effect.withSpan("desktop.lifecycle.secondInstance")),
       );
     });
+    // Subscribe without quitting so closing the last renderer window leaves
+    // the local backend available for the next desktop UI instance.
+    yield* electronApp.on("window-all-closed", () => undefined);
 
     if (environment.platform !== "win32") {
       yield* addScopedListener(process, "SIGINT", () => {

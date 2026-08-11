@@ -52,6 +52,7 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+const CODEX_COLLAB_WAIT_TIMEOUT = "30 minutes" as const;
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
   "no rollout found",
@@ -739,6 +740,12 @@ interface CollabChildAgentState {
   readonly spawnTurnId: TurnId | undefined;
 }
 
+interface PendingCollabWait {
+  readonly itemId: string;
+  readonly turnId: TurnId;
+  readonly completed: Deferred.Deferred<void>;
+}
+
 function readThreadSpawnSource(thread: { readonly source: unknown }):
   | {
       nickname: string | undefined;
@@ -974,6 +981,7 @@ export const makeCodexSessionRuntime = (
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
+    const pendingCollabWaitRef = yield* Ref.make<PendingCollabWait | undefined>(undefined);
     const closedRef = yield* Ref.make(false);
 
     // `~` is not shell-expanded when env vars are set via
@@ -1064,6 +1072,118 @@ export const makeCodexSessionRuntime = (
         threadId: options.threadId,
         method,
         message,
+      });
+
+    const completeCollabWait = (matches: (pending: PendingCollabWait) => boolean) =>
+      Ref.modify(pendingCollabWaitRef, (pending) =>
+        pending && matches(pending) ? [pending, undefined] : [undefined, pending],
+      ).pipe(
+        Effect.flatMap((pending) =>
+          pending
+            ? Deferred.succeed(pending.completed, undefined).pipe(Effect.ignore)
+            : Effect.void,
+        ),
+      );
+
+    const interruptCollabChildren = Effect.gen(function* () {
+      const liveChildTurns = yield* Ref.get(collabChildLiveTurnsRef);
+      yield* Effect.forEach(
+        Array.from(liveChildTurns.entries()),
+        ([childThreadId, childTurnId]) =>
+          client
+            .request("turn/interrupt", { threadId: childThreadId, turnId: childTurnId })
+            .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
+        { concurrency: 8, discard: true },
+      ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
+    });
+
+    const timeOutCollabWait = (pending: PendingCollabWait) =>
+      Effect.gen(function* () {
+        const active = yield* Ref.get(pendingCollabWaitRef);
+        if (active !== pending) {
+          return;
+        }
+        yield* Ref.set(pendingCollabWaitRef, undefined);
+        const session = yield* Ref.get(sessionRef);
+        const providerThreadId = currentProviderThreadId(session);
+        if (session.activeTurnId !== pending.turnId || !providerThreadId) {
+          return;
+        }
+
+        const message = "Codex collaboration wait timed out after 30 minutes.";
+        yield* interruptCollabChildren;
+        yield* client
+          .request("turn/interrupt", { threadId: providerThreadId, turnId: pending.turnId })
+          .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore);
+        yield* updateSession(sessionRef, {
+          status: "error",
+          activeTurnId: undefined,
+          lastError: message,
+        });
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          turnId: pending.turnId,
+          method: "error",
+          payload: {
+            threadId: providerThreadId,
+            turnId: pending.turnId,
+            error: { message, codexErrorInfo: "other" },
+            willRetry: false,
+          },
+        });
+      });
+
+    const trackCollabWait = (notification: CodexServerNotification) =>
+      Effect.gen(function* () {
+        const rootProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+        if (!rootProviderThreadId) {
+          return;
+        }
+        if (notification.method === "turn/completed") {
+          if (notification.params.threadId === rootProviderThreadId) {
+            yield* completeCollabWait((pending) => pending.turnId === notification.params.turn.id);
+          }
+          return;
+        }
+        if (notification.method === "error") {
+          if (
+            notification.params.threadId === rootProviderThreadId &&
+            notification.params.willRetry === false
+          ) {
+            yield* completeCollabWait((pending) => pending.turnId === notification.params.turnId);
+          }
+          return;
+        }
+        if (
+          (notification.method !== "item/started" && notification.method !== "item/completed") ||
+          notification.params.threadId !== rootProviderThreadId ||
+          notification.params.item.type !== "collabAgentToolCall" ||
+          notification.params.item.tool !== "wait"
+        ) {
+          return;
+        }
+
+        const item = notification.params.item;
+        if (notification.method === "item/completed" || item.status !== "inProgress") {
+          yield* completeCollabWait((pending) => pending.itemId === item.id);
+          return;
+        }
+
+        const completed = yield* Deferred.make<void>();
+        const pending = {
+          itemId: item.id,
+          turnId: TurnId.make(notification.params.turnId),
+          completed,
+        };
+        const previous = yield* Ref.getAndSet(pendingCollabWaitRef, pending);
+        if (previous) {
+          yield* Deferred.succeed(previous.completed, undefined).pipe(Effect.ignore);
+        }
+        yield* Effect.raceFirst(
+          Effect.sleep(CODEX_COLLAB_WAIT_TIMEOUT).pipe(Effect.andThen(timeOutCollabWait(pending))),
+          Deferred.await(completed),
+        ).pipe(Effect.forkIn(runtimeScope));
       });
 
     const settlePendingApprovals = (decision: ProviderApprovalDecision) =>
@@ -1368,6 +1488,7 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        yield* trackCollabWait(notification);
         const payload = notification.params;
         const route = readRouteFields(notification);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
@@ -1556,10 +1677,18 @@ export const makeCodexSessionRuntime = (
           }
           const errorMessage = payload.error.message;
           const willRetry = payload.willRetry;
-          return updateSession(sessionRef, {
-            status: willRetry ? "running" : "error",
-            ...(errorMessage ? { lastError: errorMessage } : {}),
-          });
+          const clearWait = willRetry
+            ? Effect.void
+            : completeCollabWait((pending) => pending.turnId === payload.turnId);
+          return clearWait.pipe(
+            Effect.andThen(
+              updateSession(sessionRef, {
+                status: willRetry ? "running" : "error",
+                ...(!willRetry ? { activeTurnId: undefined } : {}),
+                ...(errorMessage ? { lastError: errorMessage } : {}),
+              }),
+            ),
+          );
         }),
       ),
     );
@@ -1939,18 +2068,7 @@ export const makeCodexSessionRuntime = (
           // exactly during the runaway fleet where Stop matters most
           // (review finding). Per-child and overall deadlines guarantee the
           // parent interrupt below always runs.
-          const liveChildTurns = yield* Ref.get(collabChildLiveTurnsRef);
-          yield* Effect.forEach(
-            Array.from(liveChildTurns.entries()),
-            ([childThreadId, childTurnId]) =>
-              client
-                .request("turn/interrupt", {
-                  threadId: childThreadId,
-                  turnId: childTurnId,
-                })
-                .pipe(Effect.timeoutOption("3 seconds"), Effect.ignore),
-            { concurrency: 8, discard: true },
-          ).pipe(Effect.timeoutOption("10 seconds"), Effect.ignore);
+          yield* interruptCollabChildren;
           const effectiveTurnId = turnId ?? session.activeTurnId;
           if (!effectiveTurnId) {
             return;

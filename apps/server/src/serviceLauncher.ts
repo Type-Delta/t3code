@@ -245,11 +245,29 @@ function waitForExit(child: NodeChildProcess.ChildProcess): Promise<void> {
   return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
-async function terminateChild(
+async function terminateWindowsProcessTree(child: NodeChildProcess.ChildProcess): Promise<boolean> {
+  if (child.pid === undefined) return false;
+  return new Promise((resolve) => {
+    // The launcher owns this server PID. `/T` therefore terminates only its
+    // descendants, including provider app-server children, without a scan.
+    NodeChildProcess.execFile(
+      "taskkill",
+      ["/pid", String(child.pid), "/T", "/F"],
+      { windowsHide: true },
+      (error) => resolve(error === null),
+    );
+  });
+}
+
+export async function terminateChild(
   child: NodeChildProcess.ChildProcess,
   signal: NodeJS.Signals = "SIGTERM",
 ): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
+  if (NodePath.sep === "\\" && (await terminateWindowsProcessTree(child))) {
+    await waitForExit(child);
+    return;
+  }
   child.kill(signal);
   const force = setTimeout(() => child.kill("SIGKILL"), TERMINATE_GRACE_MS);
   try {

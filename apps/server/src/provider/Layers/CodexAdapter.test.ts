@@ -1007,10 +1007,13 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("keeps non-retryable Codex turn errors distinct from session failures", () =>
+  it.effect("settles non-retryable Codex turn errors while retaining their runtime activity", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
-      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
 
       yield* runtime.emit({
         id: asEventId("evt-turn-error"),
@@ -1028,10 +1031,17 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         },
       } satisfies ProviderEvent);
 
-      const firstEvent = yield* Fiber.join(firstEventFiber);
-      NodeAssert.equal(firstEvent._tag, "Some");
-      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "runtime.error") return;
-      NodeAssert.equal(firstEvent.value.payload.class, "turn_error");
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events[0]?.type, "runtime.error");
+      if (events[0]?.type === "runtime.error") {
+        NodeAssert.equal(events[0].payload.class, "turn_error");
+      }
+      NodeAssert.equal(events[1]?.type, "turn.completed");
+      if (events[1]?.type === "turn.completed") {
+        NodeAssert.equal(events[1].turnId, "turn-1");
+        NodeAssert.equal(events[1].payload.state, "failed");
+        NodeAssert.equal(events[1].payload.errorMessage, "Turn exceeded its context window");
+      }
     }),
   );
 
@@ -1103,7 +1113,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps fatal websocket stderr notifications to runtime.error", () =>
+  it.effect("keeps websocket retry stderr notifications non-terminal", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
       const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
@@ -1115,7 +1125,6 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         threadId: asThreadId("thread-1"),
         createdAt: "2026-01-01T00:00:00.000Z",
         method: "process/stderr",
-        turnId: asTurnId("turn-1"),
         message:
           "2026-03-31T18:14:06.833399Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 503 Service Unavailable, url: wss://chatgpt.com/backend-api/codex/responses",
       } satisfies ProviderEvent);
@@ -1126,12 +1135,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       if (firstEvent._tag !== "Some") {
         return;
       }
-      NodeAssert.equal(firstEvent.value.type, "runtime.error");
-      if (firstEvent.value.type !== "runtime.error") {
+      NodeAssert.equal(firstEvent.value.type, "runtime.warning");
+      if (firstEvent.value.type !== "runtime.warning") {
         return;
       }
-      NodeAssert.equal(firstEvent.value.turnId, "turn-1");
-      NodeAssert.equal(firstEvent.value.payload.class, "provider_error");
+      NodeAssert.equal(firstEvent.value.turnId, undefined);
       NodeAssert.equal(
         firstEvent.value.payload.message,
         "2026-03-31T18:14:06.833399Z ERROR codex_api::endpoint::responses_websocket: failed to connect to websocket: HTTP error: 503 Service Unavailable, url: wss://chatgpt.com/backend-api/codex/responses",

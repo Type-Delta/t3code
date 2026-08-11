@@ -122,15 +122,15 @@ The initial optimistic prompt remains visible while a draft route becomes its se
 
 Codex model and skill discovery is bounded, optional catalog enrichment after a healthy authenticated app-server session starts. Catalog failure cannot replace that healthy snapshot with a provider-status error.
 
-App-server errors are classified by scope: non-retryable turn errors remain visible on the turn while the session stays available for a follow-up message; actual process or transport failure still marks the session unavailable.
+App-server errors are classified by scope: retryable transport errors remain warnings, while a typed non-retryable turn error emits the terminal failed-turn lifecycle needed to release the thread for a follow-up message. A root Codex collaboration `wait` that remains open for 30 minutes is failed explicitly after bounded child-then-parent interruption; matching item or turn completion cancels that deadline. Actual process or transport failure still marks the session unavailable.
 
 A missing Codex rollout is treated as a recoverable stale resume cursor, so T3 falls back to a fresh provider thread instead of stopping a newly created thread.
 
 **Implementation evidence:** `apps/server/src/provider/Layers/{CodexProvider,CodexSessionRuntime,CodexAdapter}.ts`, `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`, and `packages/contracts/src/providerRuntime.ts`.
 
-**Recorded validation:** focused Codex adapter and provider-runtime ingestion tests, `vp check`, and `vp run typecheck`.
+**Recorded validation:** focused Codex adapter, collaboration-runtime, and provider-runtime ingestion tests, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-08-03
+**Last updated:** 2026-08-10
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 
@@ -231,6 +231,18 @@ transition. The spawn row, complete prompt where supplied, separate child transc
 status,
 status-aware dropdown, invariant context-strip grouping across the former mobile breakpoint, and
 absent composer were confirmed in the live client.
+
+**Last updated:** 2026-08-10
+
+### DL019 — Desktop backend continuity and owned process-tree cleanup
+
+Closing the last desktop window leaves Electron's main process and local T3 backend running. Launching the desktop app again activates or recreates the window against that existing backend, while explicit quit, update, and signal shutdown paths retain their normal cleanup semantics. This is intentionally process-local continuity rather than a detached provider daemon: an Electron main-process crash or OS-forced termination still ends the backend.
+
+On Windows, the standalone service launcher terminates the known server PID and its descendants during stop, update, and fatal shutdown. This prevents launcher-owned provider processes from surviving as orphaned Codex writers without scanning or killing processes by name; direct-child signaling remains the fallback when process-tree termination fails.
+
+**Implementation evidence:** `apps/desktop/src/app/DesktopLifecycle.ts` and `apps/server/src/serviceLauncher.ts`.
+
+**Recorded validation:** focused desktop lifecycle and Windows process-tree integration tests, `vp check`, `vp run typecheck`, and `git diff --check`.
 
 **Last updated:** 2026-08-10
 

@@ -195,13 +195,6 @@ function trimText(value: string | undefined | null): string | undefined {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
-const FATAL_CODEX_STDERR_SNIPPETS = ["failed to connect to websocket"];
-
-function isFatalCodexProcessStderrMessage(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return FATAL_CODEX_STDERR_SNIPPETS.some((snippet) => normalized.includes(snippet));
-}
-
 function normalizeCodexTokenUsage(
   usage: EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification["tokenUsage"],
 ): ThreadTokenUsageSnapshot | undefined {
@@ -857,6 +850,26 @@ function mapCollabAgentEvent(
     default:
       return [];
   }
+}
+
+function failedTurnCompletion(
+  event: ProviderEvent,
+  canonicalThreadId: ThreadId,
+  errorMessage: string,
+): ReadonlyArray<ProviderRuntimeEvent> {
+  if (!event.turnId) {
+    return [];
+  }
+  return [
+    {
+      ...runtimeEventBase(event, canonicalThreadId),
+      type: "turn.completed",
+      payload: {
+        state: "failed",
+        errorMessage,
+      },
+    },
+  ];
 }
 
 function mapToRuntimeEvents(
@@ -1632,31 +1645,21 @@ function mapToRuntimeEvents(
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },
+      ...(!willRetry && payload ? failedTurnCompletion(event, canonicalThreadId, message) : []),
     ];
   }
 
   if (event.method === "process/stderr") {
     const message = event.message ?? "Codex process stderr";
-    const isFatal = isFatalCodexProcessStderrMessage(message);
     return [
-      isFatal
-        ? {
-            type: "runtime.error",
-            ...runtimeEventBase(event, canonicalThreadId),
-            payload: {
-              message,
-              class: "provider_error" as const,
-              ...(event.payload !== undefined ? { detail: event.payload } : {}),
-            },
-          }
-        : {
-            type: "runtime.warning",
-            ...runtimeEventBase(event, canonicalThreadId),
-            payload: {
-              message,
-              ...(event.payload !== undefined ? { detail: event.payload } : {}),
-            },
-          },
+      {
+        type: "runtime.warning",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          message,
+          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+        },
+      },
     ];
   }
 

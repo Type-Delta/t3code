@@ -14,9 +14,11 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { ThreadId } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { assert, describe } from "vite-plus/test";
 
 import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
@@ -104,6 +106,202 @@ const scriptPath = NodePath.join(import.meta.dirname, "../testFixtures/.collab-s
 const peerPath = NodePath.join(import.meta.dirname, "../testFixtures/codexCollabMockPeer.sh");
 
 describe("CodexSessionRuntime collab integration", () => {
+  it.effect("settles a root collaboration wait that never completes", () =>
+    Effect.gen(function* () {
+      const waitStarted = wireFixture.notifications.find((entry) => {
+        const item = (entry.params as { item?: { type?: string; tool?: string } }).item;
+        return (
+          entry.method === "item/started" &&
+          item?.type === "collabAgentToolCall" &&
+          item.tool === "wait"
+        );
+      });
+      assert.isDefined(waitStarted, "fixture must contain a root collaboration wait start");
+      const waitItemId = (waitStarted.params as { item: { id: string } }).item.id;
+      const turnId = (waitStarted.params as { turnId: string }).turnId;
+      const isTurnStarted = (entry: (typeof wireFixture.notifications)[number], child: string) =>
+        entry.method === "turn/started" &&
+        (entry.params as { threadId?: string }).threadId === child;
+      const isRegistration = (entry: (typeof wireFixture.notifications)[number], child: string) => {
+        const item = (entry.params as { item?: { type?: string; agentThreadId?: string } }).item;
+        return item?.type === "subAgentActivity" && item.agentThreadId === child;
+      };
+      const turnStartedA = wireFixture.notifications.find((entry) => isTurnStarted(entry, CHILD_A));
+      const turnStartedB = wireFixture.notifications.find((entry) => isTurnStarted(entry, CHILD_B));
+      const registrationA = wireFixture.notifications.find((entry) =>
+        isRegistration(entry, CHILD_A),
+      );
+      const registrationB = wireFixture.notifications.find((entry) =>
+        isRegistration(entry, CHILD_B),
+      );
+      assert.isDefined(turnStartedA);
+      assert.isDefined(turnStartedB);
+      assert.isDefined(registrationA);
+      assert.isDefined(registrationB);
+      const interruptsPath = `${scriptPath}.interrupts`;
+      NodeFS.rmSync(interruptsPath, { force: true });
+      NodeFS.writeFileSync(
+        scriptPath,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        JSON.stringify({
+          rootThreadId: ROOT,
+          holdTurnOpen: true,
+          notifications: [turnStartedA, registrationA, registrationB, turnStartedB, waitStarted],
+        }),
+        "utf8",
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          NodeFS.rmSync(scriptPath, { force: true });
+          NodeFS.rmSync(interruptsPath, { force: true });
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-collab-wait-timeout"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const observedWait = yield* Deferred.make<void>();
+      const terminalError = yield* Deferred.make<{ readonly payload: unknown }>();
+      const eventsFiber = yield* runtime.events.pipe(
+        Stream.runForEach((event) => {
+          if (event.method === "item/started" && event.itemId === waitItemId) {
+            return Deferred.succeed(observedWait, undefined).pipe(Effect.ignore);
+          }
+          if (event.method === "error" && event.turnId === turnId) {
+            return Deferred.succeed(terminalError, { payload: event.payload }).pipe(Effect.ignore);
+          }
+          return Effect.void;
+        }),
+        Effect.forkScoped,
+      );
+
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "wait forever" });
+      yield* Deferred.await(observedWait);
+      yield* TestClock.adjust("30 minutes");
+      yield* Effect.yieldNow;
+
+      const error = yield* Deferred.await(terminalError);
+      const payload = error.payload as { error?: { message?: string }; willRetry?: boolean };
+      assert.strictEqual(
+        payload.error?.message,
+        "Codex collaboration wait timed out after 30 minutes.",
+      );
+      assert.isFalse(payload.willRetry);
+      const session = yield* runtime.getSession;
+      assert.strictEqual(session.status, "error");
+      assert.isUndefined(session.activeTurnId);
+      assert.strictEqual(session.lastError, "Codex collaboration wait timed out after 30 minutes.");
+      const interrupted = NodeFS.readFileSync(interruptsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { readonly threadId?: string });
+      const interruptedThreads = new Set(interrupted.map((entry) => entry.threadId));
+      assert.isTrue(interruptedThreads.has(CHILD_A), "timed-out wait must interrupt child A");
+      assert.isTrue(interruptedThreads.has(CHILD_B), "timed-out wait must interrupt child B");
+      assert.isTrue(interruptedThreads.has(ROOT), "timed-out wait must interrupt the root turn");
+
+      yield* runtime.close;
+      yield* Fiber.interrupt(eventsFiber);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  for (const completionMethod of ["item/completed", "turn/completed"] as const) {
+    it.effect(`cancels the collaboration wait timeout on ${completionMethod}`, () =>
+      Effect.gen(function* () {
+        const waitStarted = wireFixture.notifications.find((entry) => {
+          const item = (entry.params as { item?: { type?: string; tool?: string } }).item;
+          return (
+            entry.method === "item/started" &&
+            item?.type === "collabAgentToolCall" &&
+            item.tool === "wait"
+          );
+        });
+        const waitCompleted = wireFixture.notifications.find((entry) => {
+          const item = (entry.params as { item?: { type?: string; tool?: string } }).item;
+          return (
+            entry.method === "item/completed" &&
+            item?.type === "collabAgentToolCall" &&
+            item.tool === "wait"
+          );
+        });
+        assert.isDefined(waitStarted);
+        assert.isDefined(waitCompleted);
+        const turnId = (waitStarted.params as { turnId: string }).turnId;
+        const completion =
+          completionMethod === "item/completed"
+            ? waitCompleted
+            : {
+                method: "turn/completed",
+                params: {
+                  threadId: ROOT,
+                  turn: {
+                    ...wireFixture.responses.turnStart.turn,
+                    id: turnId,
+                    status: "completed",
+                  },
+                },
+              };
+        NodeFS.writeFileSync(
+          scriptPath,
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          JSON.stringify({
+            rootThreadId: ROOT,
+            holdTurnOpen: true,
+            notifications: [waitStarted, completion],
+          }),
+          "utf8",
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            NodeFS.rmSync(scriptPath, { force: true });
+            NodeFS.rmSync(`${scriptPath}.interrupts`, { force: true });
+          }),
+        );
+
+        const runtime = yield* makeCodexSessionRuntime({
+          threadId: ThreadId.make(`thread-collab-wait-${completionMethod}`),
+          binaryPath: peerPath,
+          cwd: "/tmp",
+          runtimeMode: "full-access",
+          environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+        });
+        const observedCompletion = yield* Deferred.make<void>();
+        let timedOut = false;
+        const eventsFiber = yield* runtime.events.pipe(
+          Stream.runForEach((event) => {
+            if (event.method === completionMethod && event.turnId === turnId) {
+              return Deferred.succeed(observedCompletion, undefined).pipe(Effect.ignore);
+            }
+            if (
+              event.method === "error" &&
+              (event.payload as { error?: { message?: string } }).error?.message ===
+                "Codex collaboration wait timed out after 30 minutes."
+            ) {
+              timedOut = true;
+            }
+            return Effect.void;
+          }),
+          Effect.forkScoped,
+        );
+
+        yield* runtime.start();
+        yield* runtime.sendTurn({ input: "complete normally" });
+        yield* Deferred.await(observedCompletion);
+        yield* TestClock.adjust("30 minutes");
+        yield* Effect.yieldNow;
+        assert.isFalse(timedOut);
+
+        yield* runtime.close;
+        yield* Fiber.interrupt(eventsFiber);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
   it.effect("replays the captured fan-out into synthetic agent events without child leaks", () =>
     Effect.gen(function* () {
       // @effect-diagnostics-next-line preferSchemaOverJson:off
