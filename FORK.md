@@ -246,13 +246,15 @@ On Windows, the standalone service launcher terminates the known server PID and 
 
 **Last updated:** 2026-08-10
 
-### DL020 — Provider turns bypass stalled checkpoint captures
+### DL020 — Provider turns survive stalled checkpoint captures
 
 Starting a provider turn no longer waits indefinitely when the previous turn has finished but its post-turn checkpoint capture is still pending. In that state, the server dispatches the next turn without a checkpoint mutation so authentication failures and stalled captures cannot freeze the thread. Active provider mutations retain their existing brief handoff grace period. This behavior applies to every provider through the shared command reactor.
 
-**Implementation evidence:** `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` and `apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts`.
+Checkpoint workers also reclaim expired leases while the server remains running, retry transient capture errors up to three times, and terminate an executor that exceeds five minutes. Structured lifecycle logs identify the job, thread, boundary, durable attempt, execution attempt, result, and recovery action so capture failures can be diagnosed without inspecting SQLite.
 
-**Recorded validation:** focused provider command reactor regression test, `vp check`, and `vp run typecheck`.
+**Implementation evidence:** `apps/server/src/checkpointing/CheckpointCaptureQueue.ts`, `apps/server/src/checkpointing/CheckpointCaptureQueue.test.ts`, `apps/server/src/orchestration/Layers/CheckpointReactor.ts`, `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts`, and `apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts`.
+
+**Recorded validation:** focused checkpoint queue recovery, retry, timeout, and provider command barrier regressions; `vp check`; and `vp run typecheck`.
 
 **Last updated:** 2026-08-11
 

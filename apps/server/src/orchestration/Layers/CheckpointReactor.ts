@@ -157,8 +157,8 @@ export const makeCaptureExecutor = Effect.gen(function* () {
 
   const execute: CheckpointCaptureExecutor["Service"]["execute"] = Effect.fn(
     "CheckpointCaptureExecutor.execute",
-  )(
-    function* (job, signal) {
+  )(function* (job, signal) {
+    return yield* Effect.gen(function* () {
       const context = yield* resolveCwd(ThreadId.make(job.threadId), true);
       if (!context) {
         return { state: "error", errorCode: "workspace-unavailable" } as const;
@@ -192,13 +192,18 @@ export const makeCaptureExecutor = Effect.gen(function* () {
         ),
         awaitCaptureAbort(signal),
       );
-    },
-    Effect.catchCause((cause) =>
-      Effect.logWarning("Sidecar checkpoint capture failed", {
-        cause: Cause.pretty(cause),
-      }).pipe(Effect.as({ state: "error" as const, errorCode: "capture-failed" })),
-    ),
-  );
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Sidecar checkpoint capture failed", {
+          jobId: job.jobId,
+          threadId: job.threadId,
+          requestedBoundary: job.requestedBoundary,
+          durableAttempt: job.attemptCount,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as({ state: "error" as const, errorCode: "capture-failed" })),
+      ),
+    );
+  });
 
   return CheckpointCaptureExecutor.of({ execute });
 });

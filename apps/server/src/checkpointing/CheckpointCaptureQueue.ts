@@ -1,6 +1,7 @@
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -67,6 +68,8 @@ export interface CheckpointCaptureQueueOptions {
   readonly workerId: string;
   readonly concurrency?: number;
   readonly leaseDuration?: Duration.Input;
+  readonly executionTimeout?: Duration.Input;
+  readonly maxExecutionAttempts?: number;
 }
 
 const isoNow = Effect.map(DateTime.now, DateTime.formatIso);
@@ -93,6 +96,10 @@ export const makeCheckpointCaptureQueueLayer = (
       const leaseDuration = Duration.fromInputUnsafe(options.leaseDuration ?? Duration.minutes(2));
       const leaseMillis = Duration.toMillis(leaseDuration);
       const heartbeatDelay = Duration.millis(Math.max(250, Math.floor(leaseMillis / 3)));
+      const executionTimeout = Duration.fromInputUnsafe(
+        options.executionTimeout ?? Duration.minutes(5),
+      );
+      const maxExecutionAttempts = Math.max(1, Math.floor(options.maxExecutionAttempts ?? 3));
       const leaseWindow = Effect.map(DateTime.now, (now) => ({
         now: DateTime.formatIso(now),
         leaseExpiresAt: DateTime.formatIso(DateTime.add(now, { milliseconds: leaseMillis })),
@@ -101,6 +108,7 @@ export const makeCheckpointCaptureQueueLayer = (
       const processJob = Effect.fn("CheckpointCaptureQueue.processJob")(
         function* (job: CheckpointCaptureJob, leaseOwner: string) {
           const ticket = yield* mutationCoordinator.beginCapture(job.worktreeKey);
+          const leaseLost = yield* Deferred.make<void>();
           const heartbeat = Effect.forever(
             Effect.sleep(heartbeatDelay).pipe(
               Effect.flatMap(() => leaseWindow),
@@ -112,18 +120,77 @@ export const makeCheckpointCaptureQueueLayer = (
                   leaseExpiresAt,
                 }),
               ),
-              Effect.orElseSucceed(() => false),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Checkpoint capture lease renewal failed", {
+                  jobId: job.jobId,
+                  threadId: job.threadId,
+                  leaseOwner,
+                  cause: Cause.pretty(cause),
+                }).pipe(Effect.as(true)),
+              ),
+              Effect.flatMap((renewed) =>
+                renewed
+                  ? Effect.void
+                  : Effect.logWarning("Checkpoint capture lease ownership was lost", {
+                      jobId: job.jobId,
+                      threadId: job.threadId,
+                      leaseOwner,
+                    }).pipe(
+                      Effect.andThen(Deferred.succeed(leaseLost, undefined)),
+                      Effect.andThen(Effect.interrupt),
+                    ),
+              ),
             ),
           );
-          const result = yield* Effect.scoped(
-            Effect.gen(function* () {
-              yield* Effect.forkScoped(heartbeat);
-              return yield* executor.execute(job, ticket.signal).pipe(
+          const execute = Effect.gen(function* () {
+            let executionAttempt = 1;
+            while (true) {
+              const result = yield* executor.execute(job, ticket.signal).pipe(
                 Effect.catchCause((cause) =>
                   Effect.logWarning("Checkpoint capture executor failed", {
                     jobId: job.jobId,
+                    threadId: job.threadId,
+                    requestedBoundary: job.requestedBoundary,
+                    executionAttempt,
                     cause: Cause.pretty(cause),
                   }).pipe(Effect.as({ state: "error" as const, errorCode: "capture-failed" })),
+                ),
+              );
+              if (result.state !== "error" || executionAttempt >= maxExecutionAttempts) {
+                return result;
+              }
+              yield* Effect.logWarning("Checkpoint capture will retry", {
+                jobId: job.jobId,
+                threadId: job.threadId,
+                requestedBoundary: job.requestedBoundary,
+                executionAttempt,
+                errorCode: result.errorCode,
+              });
+              executionAttempt += 1;
+            }
+          });
+          yield* Effect.logInfo("Checkpoint capture started", {
+            jobId: job.jobId,
+            threadId: job.threadId,
+            requestedBoundary: job.requestedBoundary,
+            durableAttempt: job.attemptCount,
+            leaseOwner,
+          });
+          const result = yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* Effect.forkScoped(heartbeat);
+              return yield* Effect.raceFirst(
+                execute.pipe(
+                  Effect.timeoutOption(executionTimeout),
+                  Effect.map(
+                    Option.getOrElse(() => ({
+                      state: "error" as const,
+                      errorCode: "capture-timeout",
+                    })),
+                  ),
+                ),
+                Deferred.await(leaseLost).pipe(
+                  Effect.as({ state: "contended" as const, errorCode: "lease-lost" }),
                 ),
               );
             }),
@@ -144,6 +211,17 @@ export const makeCheckpointCaptureQueueLayer = (
             completedAt,
           });
           if (completed) {
+            yield* (finalResult.state === "ready" ? Effect.logInfo : Effect.logWarning)(
+              "Checkpoint capture completed",
+              {
+                jobId: job.jobId,
+                threadId: job.threadId,
+                requestedBoundary: job.requestedBoundary,
+                durableAttempt: job.attemptCount,
+                state: finalResult.state,
+                errorCode: finalResult.state === "ready" ? null : finalResult.errorCode,
+              },
+            );
             yield* observer.onCompleted(job, finalResult).pipe(
               Effect.catchCause((cause) =>
                 Effect.logError("Checkpoint capture completion observer failed", {
@@ -152,6 +230,12 @@ export const makeCheckpointCaptureQueueLayer = (
                 }),
               ),
             );
+          } else {
+            yield* Effect.logWarning("Checkpoint capture completion skipped after lease loss", {
+              jobId: job.jobId,
+              threadId: job.threadId,
+              leaseOwner,
+            });
           }
         },
         Effect.catchCause((cause) => Effect.logError("Checkpoint capture worker failed", cause)),
@@ -185,6 +269,9 @@ export const makeCheckpointCaptureQueueLayer = (
       const recover = Effect.gen(function* () {
         const now = yield* isoNow;
         const count = yield* repository.reclaimExpired({ now });
+        if (count > 0) {
+          yield* Effect.logWarning("Recovered expired checkpoint capture leases", { count });
+        }
         yield* Queue.offerAll(
           wakeups,
           Array.from({ length: concurrency }, () => undefined),
@@ -194,9 +281,30 @@ export const makeCheckpointCaptureQueueLayer = (
       yield* recover.pipe(
         Effect.catchCause((cause) => Effect.logError("Checkpoint recovery failed", cause)),
       );
+      yield* Effect.forkScoped(
+        Effect.forever(
+          Effect.sleep(heartbeatDelay).pipe(
+            Effect.andThen(recover),
+            Effect.catchCause((cause) =>
+              Effect.logError("Periodic checkpoint recovery failed", cause),
+            ),
+          ),
+        ),
+      );
 
       const enqueue: CheckpointCaptureQueueShape["enqueue"] = (input) =>
-        repository.enqueue(input).pipe(Effect.tap(() => notify));
+        repository.enqueue(input).pipe(
+          Effect.tap((job) =>
+            Effect.logInfo("Checkpoint capture requested", {
+              jobId: job.jobId,
+              threadId: job.threadId,
+              requestedBoundary: job.requestedBoundary,
+              durableState: job.state,
+              durableAttempt: job.attemptCount,
+            }),
+          ),
+          Effect.tap(() => notify),
+        );
 
       return CheckpointCaptureQueue.of({ enqueue, notify, recover });
     }),
