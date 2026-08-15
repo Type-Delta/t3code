@@ -258,6 +258,16 @@ Checkpoint workers also reclaim expired leases while the server remains running,
 
 **Last updated:** 2026-08-11
 
+### DL021 — Clickable Windows file links in thread Markdown
+
+Thread Markdown preserves local Windows drive-letter destinations through URL sanitization and resolves the encoded backslash form emitted by the Markdown parser. These links open through the existing file chip behavior instead of rendering as inert anchors.
+
+**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx` and `apps/web/src/markdown-links.test.ts`.
+
+**Recorded validation:** focused Markdown link tests, an isolated paired web-client pass with a drive-letter link in both user and assistant messages, `vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-08-15
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

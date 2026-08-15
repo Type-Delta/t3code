@@ -124,6 +124,12 @@ describe("resolveMarkdownFileLinkTarget", () => {
     ).toBe("D:/Programme/t3code/apps/web/src/components/ChatMarkdown.tsx:1");
   });
 
+  it("resolves encoded windows paths emitted by the markdown parser", () => {
+    expect(resolveMarkdownFileLinkTarget("C:%5Crepo%5Csrc%5Cmain.ts:12")).toBe(
+      "C:\\repo\\src\\main.ts:12",
+    );
+  });
+
   it("does not treat app routes as file links", () => {
     expect(resolveMarkdownFileLinkTarget("/chat/settings")).toBeNull();
   });
