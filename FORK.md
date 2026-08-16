@@ -268,6 +268,20 @@ Thread Markdown preserves local Windows drive-letter destinations through URL sa
 
 **Last updated:** 2026-08-15
 
+### DL022 — Ephemeral zrok public sharing from Connection Settings
+
+The server owns an in-memory, ephemeral zrok share service. Starting a share prefers the current v2 `zrok2` command and uses legacy v1 `zrok` only when `zrok2` cannot be resolved; it does not fall back after a resolved v2 command fails. It launches `share public --headless --force-local` against a bind-host-aware backend URL: wildcard binds map to loopback while specific IPv4 and IPv6 binds are preserved. It parses zrok's announced HTTP(S) endpoint from either plain or JSON-formatted headless logs and exposes a public endpoint with matching `ws:`/`wss:` access and hosted-HTTPS compatibility. Starts are single-flight and cancellation-safe; launch and stop are serialized in order, readiness has a bounded timeout, unexpected exit becomes a failed status, and stopping or server shutdown terminates the child with signal cleanup. The share is not persisted, and zrok must be available on this server's `PATH`, already authenticated, and enabled. An unavailable state is retryable after the executable or authentication is fixed.
+
+Three environment RPCs expose status, start, and stop. Status observation uses `orchestration:read`; start and stop require `access:write`. Connection Settings shows the share control only when status can be observed, and enables mutation only when both the read and access-write scopes are present. Its access-scope disclosure identifies Manage access as the permission for starting or stopping public zrok exposure; unavailable or failed starts report the PATH/authentication requirement, and stopping requires confirmation because the public URL and dependent pairing links will stop working.
+
+An active zrok endpoint is merged into the advertised endpoint list and is the automatic reachable URL and QR preference, while an explicit user endpoint selection still wins. Pairing URLs preserve the complete token for the zrok HTTPS host; when local network access is unavailable, the zrok endpoint remains available as the remote share route.
+
+**Implementation evidence:** `apps/server/src/remoteAccess/ZrokShare.ts`, `apps/server/src/remoteAccess/ZrokShare.test.ts`, `apps/server/src/startupAccess.ts`, `apps/server/src/{server,ws}.ts`, `apps/server/src/auth/{RpcAuthorization,RpcAuthorization.test}.ts`, `packages/contracts/src/{remoteAccess,rpc}.ts`, `packages/contracts/src/rpc.zrok.test.ts`, `apps/web/src/state/zrokShare.ts`, `apps/web/src/components/settings/ConnectionsSettings.tsx`, `apps/web/src/components/settings/ConnectionsSettings.logic.ts`, and the focused settings/pairing tests.
+
+**Recorded validation:** 38 focused tests cover bind-host targeting, zrok v2/v1 resolution, plain and JSON headless logs, lifecycle ordering, concurrency, cancellation, cleanup, RPC scopes/contracts, endpoint and QR preference, reachable-rail visibility, permission gating, and pairing URLs. An isolated paired web-client pass with an authenticated zrok installation verified start, public reachability, hosted pairing and QR selection, and confirmed stop. Repository-wide `vp check` and `vp run typecheck` pass.
+
+**Last updated:** 2026-08-16
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

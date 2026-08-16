@@ -21,12 +21,15 @@ export type QrEndpointOption = {
   readonly preferenceKey: string;
   /** False for endpoints that stay copyable but must never render as a QR. */
   readonly qrShareable: boolean;
+  /** An active zrok public endpoint is the automatic sharing preference. */
+  readonly preferred?: boolean;
 };
 
 /**
  * Resolves which endpoint the share panel shows: the user's explicit pick,
- * else the saved default endpoint, else the first QR-shareable option (so the
- * panel never opens on a loopback QR), else the first option. A stale
+ * else the active public-share preference, else the saved default endpoint,
+ * else the first QR-shareable option (so the panel never opens on a loopback
+ * QR), else the first option. A stale
  * selectedId (endpoint disappeared) falls back rather than blanking the panel.
  */
 export function selectQrEndpointOption<T extends QrEndpointOption>(
@@ -36,6 +39,7 @@ export function selectQrEndpointOption<T extends QrEndpointOption>(
 ): T | null {
   return (
     (selectedId !== null ? options.find((option) => option.id === selectedId) : undefined) ??
+    options.find((option) => option.preferred) ??
     (defaultPreferenceKey !== null
       ? options.find((option) => option.preferenceKey === defaultPreferenceKey)
       : undefined) ??
@@ -43,6 +47,50 @@ export function selectQrEndpointOption<T extends QrEndpointOption>(
     options[0] ??
     null
   );
+}
+
+export function isZrokEndpoint(endpoint: AdvertisedEndpoint): boolean {
+  return endpoint.id === "zrok" || endpoint.provider.id === "zrok";
+}
+
+/** Adds the active zrok URL to the normal endpoint list only once. */
+export function mergeZrokEndpoint(
+  endpoints: ReadonlyArray<AdvertisedEndpoint>,
+  zrokEndpoint: AdvertisedEndpoint | null,
+): ReadonlyArray<AdvertisedEndpoint> {
+  if (
+    zrokEndpoint === null ||
+    endpoints.some(
+      (endpoint) =>
+        endpoint.id === zrokEndpoint.id || endpoint.httpBaseUrl === zrokEndpoint.httpBaseUrl,
+    )
+  ) {
+    return endpoints;
+  }
+  return [...endpoints, zrokEndpoint];
+}
+
+/** Keeps an active public zrok endpoint visible before the endpoint list expands. */
+export function selectVisibleReachableEndpointRows(
+  endpoints: ReadonlyArray<AdvertisedEndpoint>,
+  expanded: boolean,
+): ReadonlyArray<AdvertisedEndpoint> {
+  return expanded ? endpoints : endpoints.filter(isZrokEndpoint);
+}
+
+export function canControlZrokShare(
+  canObserveZrokShare: boolean,
+  canManageAccess: boolean,
+): boolean {
+  return canObserveZrokShare && canManageAccess;
+}
+
+export function isZrokShareControlDisabled(
+  canControlZrokShare: boolean,
+  isLoading: boolean,
+  isTransitioning: boolean,
+): boolean {
+  return !canControlZrokShare || isLoading || isTransitioning;
 }
 
 export async function applyWslEnableSelection(input: {

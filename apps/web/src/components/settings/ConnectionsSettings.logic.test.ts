@@ -2,8 +2,13 @@ import type { AdvertisedEndpoint, DesktopWslState } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import {
   applyWslEnableSelection,
+  canControlZrokShare,
   isQrShareableEndpoint,
+  isZrokShareControlDisabled,
+  isZrokEndpoint,
+  mergeZrokEndpoint,
   selectQrEndpointOption,
+  selectVisibleReachableEndpointRows,
 } from "./ConnectionsSettings.logic";
 
 const baseWslState: DesktopWslState = {
@@ -151,6 +156,24 @@ describe("selectQrEndpointOption", () => {
     );
   });
 
+  it("prefers an active zrok endpoint over a saved default, but keeps a manual share selection", () => {
+    const withZrok = [
+      ...options,
+      {
+        id: "zrok",
+        preferenceKey: "zrok:public:https",
+        qrShareable: true,
+        preferred: true,
+      },
+    ];
+
+    expect(selectQrEndpointOption(withZrok, null, "desktop-core:lan:http")?.id).toBe("zrok");
+    expect(
+      selectQrEndpointOption(withZrok, "desktop-lan:http://192.168.1.42:4780", "zrok:public:https")
+        ?.id,
+    ).toBe("desktop-lan:http://192.168.1.42:4780");
+  });
+
   it("skips non-QR-shareable options in the fallback so the panel never opens on loopback", () => {
     expect(selectQrEndpointOption(options, "tailscale-ip:gone", "nope")?.id).toBe(
       "tailscale-ip:http://100.84.12.7:4780",
@@ -161,5 +184,43 @@ describe("selectQrEndpointOption", () => {
     const loopbackOnly = options.slice(0, 1);
     expect(selectQrEndpointOption(loopbackOnly, null, null)?.id).toBe("desktop-loopback:4780");
     expect(selectQrEndpointOption([], "anything", "anything")).toBeNull();
+  });
+});
+
+describe("zrok endpoint helpers", () => {
+  const zrok = makeEndpoint({
+    id: "zrok",
+    label: "zrok",
+    provider: { id: "zrok", label: "zrok", kind: "tunnel", isAddon: false },
+    httpBaseUrl: "https://green-mouse.share.zrok.io",
+    wsBaseUrl: "wss://green-mouse.share.zrok.io",
+    reachability: "public",
+  });
+
+  it("identifies zrok and merges its endpoint into the normal share list once", () => {
+    const local = makeEndpoint({});
+
+    expect(isZrokEndpoint(zrok)).toBe(true);
+    expect(mergeZrokEndpoint([local], zrok)).toEqual([local, zrok]);
+    expect(mergeZrokEndpoint([local, zrok], zrok)).toEqual([local, zrok]);
+  });
+
+  it("keeps zrok visible in the reachable endpoint rail before it expands", () => {
+    const local = makeEndpoint({});
+
+    expect(selectVisibleReachableEndpointRows([local, zrok], false)).toEqual([zrok]);
+    expect(selectVisibleReachableEndpointRows([local, zrok], true)).toEqual([local, zrok]);
+  });
+
+  it("requires both status visibility and access management for zrok mutations", () => {
+    expect(canControlZrokShare(true, true)).toBe(true);
+    expect(canControlZrokShare(true, false)).toBe(false);
+    expect(canControlZrokShare(false, true)).toBe(false);
+  });
+
+  it("keeps unavailable shares retryable once zrok is installed or authenticated", () => {
+    expect(isZrokShareControlDisabled(true, false, false)).toBe(false);
+    expect(isZrokShareControlDisabled(true, true, false)).toBe(true);
+    expect(isZrokShareControlDisabled(true, false, true)).toBe(true);
   });
 });

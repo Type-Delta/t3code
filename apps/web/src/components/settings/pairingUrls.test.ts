@@ -21,4 +21,12 @@ describe("settings pairing URL helpers", () => {
       "https://preview.t3.codes/pair?host=https%3A%2F%2Fhost.tailnet.example.ts.net%3A3773#token=PAIRCODE",
     );
   });
+
+  it("keeps the full pairing token when generating a zrok HTTPS pairing URL", () => {
+    vi.stubEnv("VITE_HOSTED_APP_URL", "https://preview.t3.codes");
+
+    expect(resolveHostedPairingUrl("https://green-mouse.share.zrok.io", "PAIRCODE")).toBe(
+      "https://preview.t3.codes/pair?host=https%3A%2F%2Fgreen-mouse.share.zrok.io#token=PAIRCODE",
+    );
+  });
 });

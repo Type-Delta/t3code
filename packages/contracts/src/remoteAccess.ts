@@ -66,3 +66,20 @@ export const AdvertisedEndpoint = Schema.Struct({
   description: Schema.optional(TrimmedNonEmptyString),
 });
 export type AdvertisedEndpoint = typeof AdvertisedEndpoint.Type;
+
+export const ZrokShareState = Schema.Literals([
+  "stopped",
+  "starting",
+  "running",
+  "failed",
+  "unavailable",
+]);
+export type ZrokShareState = typeof ZrokShareState.Type;
+
+export const ZrokShareStatus = Schema.Struct({
+  state: ZrokShareState,
+  publicUrl: Schema.NullOr(TrimmedNonEmptyString),
+  message: Schema.NullOr(TrimmedNonEmptyString),
+  endpoint: Schema.NullOr(AdvertisedEndpoint),
+});
+export type ZrokShareStatus = typeof ZrokShareStatus.Type;

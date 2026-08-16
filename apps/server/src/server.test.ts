@@ -142,6 +142,7 @@ import * as SourceControlRepositoryService from "./sourceControl/SourceControlRe
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
+import * as ZrokShare from "./remoteAccess/ZrokShare.ts";
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
@@ -921,6 +922,26 @@ const buildAppUnderTest = (options?: {
           CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
             applyConfig: () => Effect.succeed({ status: "disabled" }),
             ...options?.layers?.cloudManagedEndpointRuntime,
+          }),
+        ),
+      ),
+      Layer.provide(
+        Layer.succeed(
+          ZrokShare.ZrokShare,
+          ZrokShare.ZrokShare.of({
+            getStatus: Effect.succeed({
+              state: "stopped",
+              publicUrl: null,
+              message: null,
+              endpoint: null,
+            }),
+            start: Effect.die("Unexpected zrok start request."),
+            stop: Effect.succeed({
+              state: "stopped",
+              publicUrl: null,
+              message: null,
+              endpoint: null,
+            }),
           }),
         ),
       ),

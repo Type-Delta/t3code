@@ -107,6 +107,7 @@ import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as ZrokShare from "./remoteAccess/ZrokShare.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
@@ -423,6 +424,7 @@ const makeWsRpcLayer = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const usage = yield* UsageService.UsageService;
+      const zrokShare = yield* ZrokShare.ZrokShare;
       const relayClient = yield* RelayClient.RelayClient;
       const authorizationError = (requiredScope: AuthEnvironmentScope) =>
         new EnvironmentAuthorizationError({
@@ -1413,6 +1415,18 @@ const makeWsRpcLayer = (
           }),
         [WS_METHODS.serverGetConfig]: (_input) =>
           observeRpcEffect(WS_METHODS.serverGetConfig, loadServerConfig, {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverGetZrokShareStatus]: (_input) =>
+          observeRpcEffect(WS_METHODS.serverGetZrokShareStatus, zrokShare.getStatus, {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverStartZrokShare]: (_input) =>
+          observeRpcEffect(WS_METHODS.serverStartZrokShare, zrokShare.start, {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverStopZrokShare]: (_input) =>
+          observeRpcEffect(WS_METHODS.serverStopZrokShare, zrokShare.stop, {
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.serverRefreshProviders]: (input) =>

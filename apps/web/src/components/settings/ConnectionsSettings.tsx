@@ -42,8 +42,13 @@ import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestam
 import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
 import {
   applyWslEnableSelection,
+  canControlZrokShare as canControlZrokShareWithScopes,
   isQrShareableEndpoint,
+  isZrokShareControlDisabled,
+  isZrokEndpoint,
+  mergeZrokEndpoint,
   selectQrEndpointOption,
+  selectVisibleReachableEndpointRows,
 } from "./ConnectionsSettings.logic";
 import {
   SettingsPageContainer,
@@ -119,6 +124,7 @@ import {
 } from "~/state/desktopNetworkAccess";
 import { desktopSshHostsStateAtom } from "~/state/desktopSshHosts";
 import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
+import { zrokShare } from "~/state/zrokShare";
 import {
   type EnvironmentPresentation,
   useEnvironments,
@@ -134,6 +140,8 @@ import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
 const EMPTY_DISCOVERED_SSH_HOSTS: ReadonlyArray<DesktopDiscoveredSshHost> = [];
+const ZROK_REQUIREMENTS =
+  "This server needs an authenticated zrok2, or legacy zrok when zrok2 is not on PATH.";
 
 // Sentinels for the consolidated WSL backend picker. The colon is
 // rejected by DISTRO_NAME_PATTERN (validated on the desktop side) so
@@ -187,7 +195,7 @@ const PAIRING_SCOPE_OPTIONS: ReadonlyArray<{
   {
     scope: AuthAccessWriteScope,
     title: "Manage access",
-    description: "Issue and revoke credentials for other clients.",
+    description: "Manage pairing credentials and start or stop public zrok exposure.",
   },
   {
     scope: AuthRelayReadScope,
@@ -427,6 +435,10 @@ function selectPairingEndpoint(
   defaultEndpointKey?: string | null,
 ): AdvertisedEndpoint | null {
   const availableEndpoints = endpoints.filter((endpoint) => endpoint.status !== "unavailable");
+  const zrokEndpoint = availableEndpoints.find(isZrokEndpoint);
+  if (zrokEndpoint) {
+    return zrokEndpoint;
+  }
   if (defaultEndpointKey) {
     const selectedEndpoint = availableEndpoints.find(
       (endpoint) => endpointDefaultPreferenceKey(endpoint) === defaultEndpointKey,
@@ -568,6 +580,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
       readonly url: string;
       readonly detail: string;
       readonly qrShareable: boolean;
+      readonly preferred: boolean;
     }> = [];
     for (const endpoint of endpoints) {
       if (endpoint.status === "unavailable") {
@@ -581,6 +594,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         url,
         detail: endpointShareHint(endpoint, url),
         qrShareable: isQrShareableEndpoint(endpoint),
+        preferred: isZrokEndpoint(endpoint),
       });
     }
     return options;
@@ -1111,7 +1125,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
                 <p className="text-xs text-destructive">Select at least one permission.</p>
               ) : pairingScopes.includes(AuthAccessWriteScope) ? (
                 <p className="text-xs text-warning">
-                  This client can create or revoke access for other devices.
+                  This client can manage pairing credentials and start or stop public zrok exposure.
                 </p>
               ) : null}
             </section>
@@ -1732,6 +1746,8 @@ export function ConnectionsSettings() {
   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
     reportFailure: false,
   });
+  const startZrokShare = useAtomCommand(zrokShare.start, { reportFailure: false });
+  const stopZrokShare = useAtomCommand(zrokShare.stop, { reportFailure: false });
   const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
@@ -1814,6 +1830,9 @@ export function ConnectionsSettings() {
   const [isUpdatingDesktopServerExposure, setIsUpdatingDesktopServerExposure] = useState(false);
   const [isDesktopServerExposureDialogOpen, setIsDesktopServerExposureDialogOpen] = useState(false);
   const [isUpdatingTailscaleServe, setIsUpdatingTailscaleServe] = useState(false);
+  const [zrokShareMutationError, setZrokShareMutationError] = useState<string | null>(null);
+  const [zrokShareAction, setZrokShareAction] = useState<"starting" | "stopping" | null>(null);
+  const [isStopZrokShareDialogOpen, setIsStopZrokShareDialogOpen] = useState(false);
   const [isUpdatingWslBackend, setIsUpdatingWslBackend] = useState(false);
   const [desktopWslMutationError, setDesktopWslMutationError] = useState<string | null>(null);
   // Pending WSL setting change waiting on user confirmation. Set when
@@ -1861,12 +1880,23 @@ export function ConnectionsSettings() {
   );
   const canManageLocalBackend = currentSessionScopes?.includes(AuthAccessWriteScope) ?? false;
   const canManageRelay = currentSessionScopes?.includes(AuthRelayWriteScope) ?? false;
+  const canObserveZrokShare = currentSessionScopes?.includes(AuthOrchestrationReadScope) ?? false;
+  const canControlZrokShare = canControlZrokShareWithScopes(
+    canObserveZrokShare,
+    currentSessionScopes?.includes(AuthAccessWriteScope) ?? false,
+  );
+  const canShowZrokShare = canObserveZrokShare;
   const authAccessChanges = useEnvironmentQuery(
     canManageLocalBackend && primaryEnvironmentId !== null
       ? authEnvironment.accessChanges({
           environmentId: primaryEnvironmentId,
           input: null,
         })
+      : null,
+  );
+  const zrokShareStatus = useEnvironmentQuery(
+    canObserveZrokShare && primaryEnvironmentId !== null
+      ? zrokShare.status({ environmentId: primaryEnvironmentId, input: {} })
       : null,
   );
   const desktopNetworkAccess = useEnvironmentQuery(
@@ -1902,6 +1932,12 @@ export function ConnectionsSettings() {
   const desktopServerExposureState = desktopNetworkAccess.data?.serverExposureState ?? null;
   const desktopAdvertisedEndpoints =
     desktopNetworkAccess.data?.advertisedEndpoints ?? EMPTY_ADVERTISED_ENDPOINTS;
+  const zrokEndpoint =
+    zrokShareStatus.data?.state === "running" ? zrokShareStatus.data.endpoint : null;
+  const advertisedEndpoints = useMemo(
+    () => mergeZrokEndpoint(desktopAdvertisedEndpoints, zrokEndpoint),
+    [desktopAdvertisedEndpoints, zrokEndpoint],
+  );
   const desktopServerExposureError =
     desktopServerExposureMutationError ?? desktopNetworkAccess.error;
   const desktopAccessManagementError =
@@ -2053,6 +2089,59 @@ export function ConnectionsSettings() {
   const handleStartTailscaleServeDisable = useCallback((_endpoint: AdvertisedEndpoint) => {
     setDisableTailscaleServeDialogOpen(true);
   }, []);
+
+  const reportZrokShareFailure = useCallback((action: "start" | "stop") => {
+    const message =
+      action === "start"
+        ? `Could not start the zrok public share. ${ZROK_REQUIREMENTS}`
+        : "Could not stop the zrok public share. Try again.";
+    setZrokShareMutationError(message);
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title:
+          action === "start"
+            ? "Could not start zrok public share"
+            : "Could not stop zrok public share",
+        description: message,
+      }),
+    );
+  }, []);
+
+  const handleStartZrokShare = useCallback(async () => {
+    if (primaryEnvironmentId === null) return;
+    setZrokShareAction("starting");
+    setZrokShareMutationError(null);
+    try {
+      const result = await startZrokShare({ environmentId: primaryEnvironmentId, input: {} });
+      if (result._tag === "Success") {
+        if (result.value.state === "failed" || result.value.state === "unavailable") {
+          reportZrokShareFailure("start");
+        }
+      } else if (!isAtomCommandInterrupted(result)) {
+        reportZrokShareFailure("start");
+      }
+    } finally {
+      setZrokShareAction(null);
+    }
+  }, [primaryEnvironmentId, reportZrokShareFailure, startZrokShare]);
+
+  const handleConfirmStopZrokShare = useCallback(async () => {
+    if (primaryEnvironmentId === null) return;
+    setZrokShareAction("stopping");
+    setZrokShareMutationError(null);
+    try {
+      const result = await stopZrokShare({ environmentId: primaryEnvironmentId, input: {} });
+      if (result._tag !== "Success" && !isAtomCommandInterrupted(result)) {
+        reportZrokShareFailure("stop");
+      }
+      if (result._tag === "Success") {
+        setIsStopZrokShareDialogOpen(false);
+      }
+    } finally {
+      setZrokShareAction(null);
+    }
+  }, [primaryEnvironmentId, reportZrokShareFailure, stopZrokShare]);
 
   const handleRevokeDesktopPairingLink = useCallback(async (id: string) => {
     setRevokingDesktopPairingLinkId(id);
@@ -2310,15 +2399,15 @@ export function ConnectionsSettings() {
 
   const visibleDesktopPairingLinks = desktopPairingLinks;
   const tailscaleHttpsEndpoint = useMemo(
-    () => desktopAdvertisedEndpoints.find(isTailscaleHttpsEndpoint) ?? null,
-    [desktopAdvertisedEndpoints],
+    () => advertisedEndpoints.find(isTailscaleHttpsEndpoint) ?? null,
+    [advertisedEndpoints],
   );
   const visibleDesktopNetworkAdvertisedEndpoints = useMemo(
     () =>
       isLocalBackendNetworkAccessible
-        ? desktopAdvertisedEndpoints.filter((endpoint) => !isTailscaleHttpsEndpoint(endpoint))
-        : [],
-    [desktopAdvertisedEndpoints, isLocalBackendNetworkAccessible],
+        ? advertisedEndpoints.filter((endpoint) => !isTailscaleHttpsEndpoint(endpoint))
+        : advertisedEndpoints.filter(isZrokEndpoint),
+    [advertisedEndpoints, isLocalBackendNetworkAccessible],
   );
   const visibleDesktopAdvertisedEndpoints = useMemo(
     () =>
@@ -2328,20 +2417,50 @@ export function ConnectionsSettings() {
     [tailscaleHttpsEndpoint, visibleDesktopNetworkAdvertisedEndpoints],
   );
   const isLocalBackendRemotelyReachable =
-    isLocalBackendNetworkAccessible || tailscaleHttpsEndpoint?.status === "available";
+    isLocalBackendNetworkAccessible ||
+    tailscaleHttpsEndpoint?.status === "available" ||
+    zrokEndpoint?.status === "available";
+  const isZrokSharePublic = zrokEndpoint?.status === "available";
+  const zrokShareState = zrokShareStatus.data?.state ?? null;
+  const isZrokShareLoading = zrokShareStatus.isPending && zrokShareStatus.data === null;
+  const isZrokShareTransitioning = zrokShareAction !== null || zrokShareState === "starting";
+  const zrokShareError =
+    zrokShareMutationError ??
+    (zrokShareStatus.error
+      ? "Could not check the zrok public share. Try again."
+      : zrokShareState === "failed"
+        ? `zrok could not start the public share. ${ZROK_REQUIREMENTS}`
+        : zrokShareState === "unavailable"
+          ? `zrok is unavailable. ${ZROK_REQUIREMENTS}`
+          : null);
+  const zrokPublicUrl = zrokShareStatus.data?.publicUrl ?? zrokEndpoint?.httpBaseUrl ?? null;
+  const zrokShareDescription =
+    zrokShareAction === "stopping"
+      ? "Stopping the public share…"
+      : zrokShareAction === "starting" || zrokShareState === "starting"
+        ? `Starting the public share… ${ZROK_REQUIREMENTS}`
+        : zrokShareState === "running"
+          ? zrokPublicUrl
+            ? `Public share is running at ${zrokPublicUrl}. ${ZROK_REQUIREMENTS}`
+            : `Public share is running. ${ZROK_REQUIREMENTS}`
+          : zrokShareState === "failed"
+            ? `Public share failed to start. ${ZROK_REQUIREMENTS}`
+            : zrokShareState === "unavailable"
+              ? `Public share is unavailable. ${ZROK_REQUIREMENTS}`
+              : isZrokShareLoading
+                ? "Checking the zrok public share…"
+                : `Public share is off. ${ZROK_REQUIREMENTS}`;
   const defaultDesktopNetworkAdvertisedEndpoint = useMemo(
     () =>
-      selectPairingEndpoint(visibleDesktopNetworkAdvertisedEndpoints, defaultAdvertisedEndpointKey),
+      selectPairingEndpoint(
+        visibleDesktopNetworkAdvertisedEndpoints.filter((endpoint) => !isZrokEndpoint(endpoint)),
+        defaultAdvertisedEndpointKey,
+      ),
     [defaultAdvertisedEndpointKey, visibleDesktopNetworkAdvertisedEndpoints],
   );
   const defaultDesktopAdvertisedEndpoint = useMemo(
-    () =>
-      defaultDesktopNetworkAdvertisedEndpoint ??
-      selectPairingEndpoint(
-        tailscaleHttpsEndpoint ? [tailscaleHttpsEndpoint] : [],
-        defaultAdvertisedEndpointKey,
-      ),
-    [defaultAdvertisedEndpointKey, defaultDesktopNetworkAdvertisedEndpoint, tailscaleHttpsEndpoint],
+    () => selectPairingEndpoint(visibleDesktopAdvertisedEndpoints, defaultAdvertisedEndpointKey),
+    [defaultAdvertisedEndpointKey, visibleDesktopAdvertisedEndpoints],
   );
   const defaultDesktopAdvertisedEndpointKey = defaultDesktopAdvertisedEndpoint
     ? endpointDefaultPreferenceKey(defaultDesktopAdvertisedEndpoint)
@@ -2557,23 +2676,24 @@ export function ConnectionsSettings() {
     />
   );
   const renderEndpointRows = (presentation: AccessSectionPresentation) =>
-    isAdvertisedEndpointListExpanded
-      ? visibleDesktopNetworkAdvertisedEndpoints.map((endpoint) => {
-          const endpointKey = endpointDefaultPreferenceKey(endpoint);
-          return (
-            <AdvertisedEndpointListRow
-              key={endpoint.id}
-              endpoint={endpoint}
-              isDefault={endpointKey === defaultDesktopAdvertisedEndpointKey}
-              presentation={presentation}
-              onSetDefault={handleSetDefaultAdvertisedEndpoint}
-              onSetupTailscaleServe={handleStartTailscaleServeSetup}
-              onDisableTailscaleServe={handleStartTailscaleServeDisable}
-              isUpdatingTailscaleServe={isUpdatingTailscaleServe}
-            />
-          );
-        })
-      : null;
+    selectVisibleReachableEndpointRows(
+      visibleDesktopNetworkAdvertisedEndpoints,
+      isAdvertisedEndpointListExpanded,
+    ).map((endpoint) => {
+      const endpointKey = endpointDefaultPreferenceKey(endpoint);
+      return (
+        <AdvertisedEndpointListRow
+          key={endpoint.id}
+          endpoint={endpoint}
+          isDefault={endpointKey === defaultDesktopAdvertisedEndpointKey}
+          presentation={presentation}
+          onSetDefault={handleSetDefaultAdvertisedEndpoint}
+          onSetupTailscaleServe={handleStartTailscaleServeSetup}
+          onDisableTailscaleServe={handleStartTailscaleServeDisable}
+          isUpdatingTailscaleServe={isUpdatingTailscaleServe}
+        />
+      );
+    });
   // Apply a setting change immediately. The orchestrator reconciles the
   // pool in the background and the primary backend is untouched, so we
   // don't gate this behind a confirmation dialog. After the desktop
@@ -2909,6 +3029,33 @@ export function ConnectionsSettings() {
       }
     />
   );
+  const renderZrokShareRow = () => (
+    <SettingsRow
+      title="zrok public share"
+      description={zrokShareDescription}
+      status={
+        zrokShareError ? <span className="block text-destructive">{zrokShareError}</span> : null
+      }
+      control={
+        <Switch
+          checked={zrokShareState === "running" || zrokShareState === "starting"}
+          disabled={isZrokShareControlDisabled(
+            canControlZrokShare,
+            isZrokShareLoading,
+            isZrokShareTransitioning,
+          )}
+          onCheckedChange={(checked) => {
+            if (checked) {
+              void handleStartZrokShare();
+              return;
+            }
+            setIsStopZrokShareDialogOpen(true);
+          }}
+          aria-label="Enable zrok public share"
+        />
+      }
+    />
+  );
   const renderAuthorizedClients = (presentation: AccessSectionPresentation) => (
     <>
       {desktopAccessManagementError ? (
@@ -2949,6 +3096,8 @@ export function ConnectionsSettings() {
                   : "Exposed on all interfaces."
             }
           />
+        ) : isZrokSharePublic && zrokPublicUrl ? (
+          `Reachable publicly at ${zrokPublicUrl}.`
         ) : desktopServerExposureState ? (
           "Limited to this machine."
         ) : (
@@ -2967,9 +3116,11 @@ export function ConnectionsSettings() {
     <SettingsRow
       title="Network access"
       description={
-        currentAuthPolicy === "remote-reachable"
-          ? "This backend is already configured for remote access. Network exposure changes must be made where the server is launched."
-          : "This backend is only reachable on this machine. Restart it with a non-loopback host to enable remote pairing."
+        isZrokSharePublic && zrokPublicUrl
+          ? `Reachable publicly at ${zrokPublicUrl}.`
+          : currentAuthPolicy === "remote-reachable"
+            ? "This backend is already configured for remote access. Network exposure changes must be made where the server is launched."
+            : "This backend is only reachable on this machine. Restart it with a non-loopback host to enable remote pairing."
       }
       control={
         <Tooltip>
@@ -3046,12 +3197,15 @@ export function ConnectionsSettings() {
                 {renderNetworkAccessRow()}
                 {renderEndpointRows("endpoint-rail")}
                 {renderTailscaleRow()}
+                {canShowZrokShare ? renderZrokShareRow() : null}
                 {renderWslRow()}
                 <CloudLinkRow canManageRelay={canManageRelay} />
               </>
             ) : (
               <>
                 {renderDisabledNetworkAccessRow()}
+                {renderEndpointRows("endpoint-rail")}
+                {canShowZrokShare ? renderZrokShareRow() : null}
                 <CloudLinkRow canManageRelay={canManageRelay} />
               </>
             )}
@@ -3345,13 +3499,54 @@ export function ConnectionsSettings() {
         </>
       ) : (
         <SettingsSection title="This environment">
+          {canShowZrokShare ? renderZrokShareRow() : null}
+          {renderEndpointRows("endpoint-rail")}
           <SettingsRow
             title="Administrative access"
-            description="Pairing links and client-session management require the access:write scope for this backend."
+            description="Pairing credentials, client sessions, and public zrok shares require the access:write scope for this backend."
           />
           <CloudLinkRow canManageRelay={canManageRelay} />
         </SettingsSection>
       )}
+
+      <AlertDialog
+        open={isStopZrokShareDialogOpen}
+        onOpenChange={(open) => {
+          if (isZrokShareTransitioning) return;
+          setIsStopZrokShareDialogOpen(open);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Stop zrok public share?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The active public URL and any QR or pairing links that use it will stop working.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose
+              disabled={isZrokShareTransitioning}
+              render={<Button variant="outline" disabled={isZrokShareTransitioning} />}
+            >
+              Cancel
+            </AlertDialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => void handleConfirmStopZrokShare()}
+              disabled={isZrokShareTransitioning}
+            >
+              {zrokShareAction === "stopping" ? (
+                <>
+                  <Spinner className="size-3.5" />
+                  Stopping…
+                </>
+              ) : (
+                "Stop public share"
+              )}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
 
       <SettingsSection
         {...searchableSetting("remote-environments")}
