@@ -329,6 +329,7 @@ export function useThreadActions() {
               "",
               "Delete the worktree too?",
             ].join("\n"),
+            { variant: "destructive" },
           ),
         );
         if (confirmationResult._tag === "Failure") {
@@ -684,6 +685,7 @@ export function useThreadActions() {
               `Delete thread "${title}"?`,
               "This permanently clears conversation history for this thread.",
             ].join("\n"),
+            { variant: "destructive" },
           ),
         );
         if (confirmationResult._tag === "Failure") {

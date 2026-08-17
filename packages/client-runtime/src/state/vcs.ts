@@ -289,29 +289,32 @@ export function vcsWorktreesRevisionAtom(environmentId: EnvironmentId) {
 export function createVcsEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | EnvironmentCacheStore | R, E>,
 ) {
-  const listRefsByEnvironment = Atom.family((environmentId: EnvironmentId) =>
-    Atom.family((inputKey: string) => {
-      const input = JSON.parse(inputKey) as VcsListRefsInput;
-      return runtime
-        .atom((get) => {
-          const state = get(vcsRefsCacheStateAtom({ environmentId }));
-          return cachedVcsRefsChanges(
-            environmentId,
-            input,
-            state.revision,
-            state.persistedCacheReadable,
-          );
-        })
-        .pipe(
-          Atom.setIdleTTL(VCS_REFS_IDLE_TTL_MS),
-          Atom.withLabel(`environment-data:vcs:list-refs:${environmentId}:${inputKey}`),
+  /**
+   * One flat family on purpose: families hold entries via WeakRef, so a nested
+   * per-environment family can be collected between lookups, dropping every
+   * cached page atom and collapsing paginated ref lists mid-scroll.
+   */
+  const listRefsFamily = Atom.family((key: string) => {
+    const [environmentId, input] = JSON.parse(key) as [EnvironmentId, VcsListRefsInput];
+    return runtime
+      .atom((get) => {
+        const state = get(vcsRefsCacheStateAtom({ environmentId }));
+        return cachedVcsRefsChanges(
+          environmentId,
+          input,
+          state.revision,
+          state.persistedCacheReadable,
         );
-    }),
-  );
+      })
+      .pipe(
+        Atom.setIdleTTL(VCS_REFS_IDLE_TTL_MS),
+        Atom.withLabel(`environment-data:vcs:list-refs:${key}`),
+      );
+  });
   const listRefs = (target: {
     readonly environmentId: EnvironmentId;
     readonly input: VcsListRefsInput;
-  }) => listRefsByEnvironment(target.environmentId)(JSON.stringify(target.input));
+  }) => listRefsFamily(JSON.stringify([target.environmentId, target.input]));
   const listWorktreesByEnvironment = Atom.family((environmentId: EnvironmentId) =>
     Atom.family((inputKey: string) => {
       const input = JSON.parse(inputKey) as VcsListWorktreesInput;

@@ -1,13 +1,13 @@
-import { ClaudeSettings, ProviderInstanceId } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import { ClaudeSettings, ProviderInstanceId } from "@t3tools/contracts";
+import { isHostWindows } from "@t3tools/shared/hostProcess";
+import { createModelSelection } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { createModelSelection } from "@t3tools/shared/model";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { expect } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
@@ -24,58 +24,81 @@ function makeFakeClaudeBinary(dir: string) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const platform = yield* HostProcessPlatform;
+    const isWindows = yield* isHostWindows;
     const binDir = path.join(dir, "bin");
-    const scriptPath = path.join(binDir, "fake-claude.cjs");
-    const claudePath = path.join(binDir, platform === "win32" ? "claude.cmd" : "claude");
+    const stubPath = path.join(binDir, "claude-stub.mjs");
     yield* fs.makeDirectory(binDir, { recursive: true });
 
+    // The stub behaviour lives in Node rather than a `#!/bin/sh` script so the
+    // same implementation is usable on Windows, where a shebang file is not
+    // executable and would fall through to the real Claude CLI on PATH.
     yield* fs.writeFileString(
-      scriptPath,
+      stubPath,
       [
-        '"use strict";',
         'const args = process.argv.slice(2).join(" ");',
+        "",
+        "function fail(message, code) {",
+        '  process.stderr.write(message + "\\n");',
+        "  process.exit(code);",
+        "}",
+        "",
         'let stdinContent = "";',
-        'process.stdin.setEncoding("utf8");',
-        'process.stdin.on("data", (chunk) => { stdinContent += chunk; });',
-        'process.stdin.on("end", () => {',
-        "  const env = process.env;",
-        "  if (env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN && !args.includes(env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN)) {",
-        '    process.stderr.write("args missing expected content\\n");',
-        "    process.exit(2);",
+        "if (!process.stdin.isTTY) {",
+        "  const chunks = [];",
+        "  for await (const chunk of process.stdin) {",
+        "    chunks.push(chunk);",
         "  }",
-        "  if (env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN && args.includes(env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN)) {",
-        '    process.stderr.write("args contained forbidden content\\n");',
-        "    process.exit(3);",
-        "  }",
-        "  if (env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN && !stdinContent.includes(env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN)) {",
-        '    process.stderr.write("stdin missing expected content\\n");',
-        "    process.exit(4);",
-        "  }",
-        "  if (env.T3_FAKE_CLAUDE_CONFIG_DIR_MUST_BE && env.CLAUDE_CONFIG_DIR !== env.T3_FAKE_CLAUDE_CONFIG_DIR_MUST_BE) {",
-        '    process.stderr.write(`CLAUDE_CONFIG_DIR was ${env.CLAUDE_CONFIG_DIR ?? ""}\\n`);',
-        "    process.exit(5);",
-        "  }",
-        "  if (env.T3_FAKE_CLAUDE_STDERR) process.stderr.write(`${env.T3_FAKE_CLAUDE_STDERR}\\n`);",
-        '  process.stdout.write(env.T3_FAKE_CLAUDE_OUTPUT ?? "");',
-        '  process.exit(Number(env.T3_FAKE_CLAUDE_EXIT_CODE ?? "0"));',
-        "});",
+        '  stdinContent = Buffer.concat(chunks).toString("utf8");',
+        "}",
+        "",
+        "const argsMustContain = process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN;",
+        "if (argsMustContain && !args.includes(argsMustContain)) {",
+        '  fail("args missing expected content", 2);',
+        "}",
+        "",
+        "const argsMustNotContain = process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;",
+        "if (argsMustNotContain && args.includes(argsMustNotContain)) {",
+        '  fail("args contained forbidden content", 3);',
+        "}",
+        "",
+        "const stdinMustContain = process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;",
+        "if (stdinMustContain && !stdinContent.includes(stdinMustContain)) {",
+        '  fail("stdin missing expected content", 4);',
+        "}",
+        "",
+        "const configDirMustBe = process.env.T3_FAKE_CLAUDE_CONFIG_DIR_MUST_BE;",
+        "if (configDirMustBe && process.env.CLAUDE_CONFIG_DIR !== configDirMustBe) {",
+        '  fail("CLAUDE_CONFIG_DIR was " + (process.env.CLAUDE_CONFIG_DIR ?? ""), 5);',
+        "}",
+        "",
+        "const stderrText = process.env.T3_FAKE_CLAUDE_STDERR;",
+        "if (stderrText) {",
+        '  process.stderr.write(stderrText + "\\n");',
+        "}",
+        "",
+        'process.stdout.write(process.env.T3_FAKE_CLAUDE_OUTPUT ?? "");',
+        "process.exitCode = Number(process.env.T3_FAKE_CLAUDE_EXIT_CODE ?? 0);",
         "",
       ].join("\n"),
     );
-    if (platform === "win32") {
+
+    if (isWindows) {
+      // Windows resolves executables through PATHEXT, so the entry point has to
+      // carry a real extension. `resolveSpawnCommand` spawns `.cmd` via a shell.
       yield* fs.writeFileString(
-        claudePath,
-        `@echo off\r\n"${process.execPath}" "${scriptPath}" %*\r\n`,
+        path.join(binDir, "claude.cmd"),
+        ["@echo off", 'node "%~dp0claude-stub.mjs" %*', "exit /b %ERRORLEVEL%", ""].join("\r\n"),
       );
     } else {
+      const claudePath = path.join(binDir, "claude");
       yield* fs.writeFileString(
         claudePath,
-        `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}" "$@"\n`,
+        ["#!/bin/sh", 'exec node "$(dirname "$0")/claude-stub.mjs" "$@"', ""].join("\n"),
       );
       yield* fs.chmod(claudePath, 0o755);
     }
-    return claudePath;
+
+    return binDir;
   });
 }
 
@@ -95,7 +118,9 @@ function withFakeClaudeEnv<A, E, R>(
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-claude-text-" });
-    const claudePath = yield* makeFakeClaudeBinary(tempDir);
+    const binDir = yield* makeFakeClaudeBinary(tempDir);
+    const pathDelimiter = (yield* isHostWindows) ? ";" : ":";
+    const previousPath = process.env.PATH;
     const previousOutput = process.env.T3_FAKE_CLAUDE_OUTPUT;
     const previousExitCode = process.env.T3_FAKE_CLAUDE_EXIT_CODE;
     const previousStderr = process.env.T3_FAKE_CLAUDE_STDERR;
@@ -106,6 +131,7 @@ function withFakeClaudeEnv<A, E, R>(
 
     yield* Effect.acquireRelease(
       Effect.sync(() => {
+        process.env.PATH = `${binDir}${pathDelimiter}${previousPath ?? ""}`;
         process.env.T3_FAKE_CLAUDE_OUTPUT = input.output;
 
         if (input.exitCode !== undefined) {
@@ -146,6 +172,8 @@ function withFakeClaudeEnv<A, E, R>(
       }),
       () =>
         Effect.sync(() => {
+          process.env.PATH = previousPath;
+
           if (previousOutput === undefined) {
             delete process.env.T3_FAKE_CLAUDE_OUTPUT;
           } else {
@@ -190,7 +218,7 @@ function withFakeClaudeEnv<A, E, R>(
         }),
     );
 
-    const config = decodeClaudeSettings({ ...input.claudeConfig, binaryPath: claudePath });
+    const config = decodeClaudeSettings(input.claudeConfig ?? {});
     const textGeneration = yield* makeClaudeTextGeneration(config);
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);

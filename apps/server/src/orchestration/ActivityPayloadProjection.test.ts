@@ -180,7 +180,60 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(data.somethingClientNeverReads).toBeUndefined();
   });
 
-  it("slims Codex-shaped mcp_tool_call items", () => {
+  it("keeps a bounded Codex command output summary", () => {
+    const projected = projectActivityPayload(
+      makeActivity({
+        itemType: "command_execution",
+        data: {
+          item: {
+            command: "/bin/zsh -lc 'printf hello'",
+            aggregatedOutput: `hello from codex\n${"x".repeat(5000)}`,
+          },
+        },
+      }),
+    );
+    const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
+    expect(data.item).toEqual({
+      command: "/bin/zsh -lc 'printf hello'",
+      aggregatedOutput: "hello from codex",
+    });
+    expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
+  });
+
+  it("keeps bounded Claude and ACP command output summaries", () => {
+    const claude = projectActivityPayload(
+      makeActivity({
+        itemType: "command_execution",
+        data: {
+          command: "printf hello",
+          rawOutput: { stdout: `hello from claude\n${"y".repeat(5000)}` },
+        },
+      }),
+    );
+    const acp = projectActivityPayload(
+      makeActivity({
+        itemType: "command_execution",
+        data: {
+          command: "printf hello",
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: `hello from acp\n${"z".repeat(5000)}` },
+            },
+          ],
+        },
+      }),
+    );
+
+    const claudeData = (claude.payload as Record<string, unknown>).data as Record<string, unknown>;
+    const acpData = (acp.payload as Record<string, unknown>).data as Record<string, unknown>;
+    expect(claudeData.rawOutput).toEqual({ content: "hello from claude" });
+    expect(acpData.rawOutput).toEqual({ content: "hello from acp" });
+    expect(JSON.stringify(claude.payload).length).toBeLessThan(500);
+    expect(JSON.stringify(acp.payload).length).toBeLessThan(500);
+  });
+
+  it("slims Codex-shaped mcp_tool_call items to rendered fields plus a result summary", () => {
     const projected = projectActivityPayload(
       makeActivity({
         itemType: "mcp_tool_call",

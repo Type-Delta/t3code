@@ -4,17 +4,21 @@ This fork keeps the Windows reliability, durable checkpointing, and workspace ca
 
 Git repository cache keys use Node's native `realpath` so Windows long paths and their 8.3 aliases share one VCS snapshot and refresh history.
 
-## Upstream sync — 2026-08-08
+## Upstream sync — 2026-08-17
+
+Merged upstream `cd096b9ad5a4156ffeab85de617cbb219057007f` into the fork while preserving durable checkpoints, split workspaces, existing-worktree selection, read-only subagent transcripts, preview recovery, zrok sharing, subscription usage, Windows portability, and desktop backend continuity. The integration adopts upstream pull-request and remote-editor services, project access controls, right-panel maximization and file drops, project favicons, default thread environment modes, usage-resolution changes, and the latest web/mobile/desktop refinements. Fork migrations `036`–`043` remain deployed in place; upstream default-thread-environment and favicon migrations are assigned `044`–`045`. The right-panel store advances to version `12` so pull-request surfaces and fork subagent transcript surfaces coexist, and hourly usage aggregation retains a printable `\u001f` four-part key. Upstream's Codex missing-rollout recovery and hermetic Claude text-generation fixture replace their fork equivalents while the fork's additional assertions and provider behavior remain.
+
+## Previous upstream sync — 2026-08-08
 
 Merged upstream `8101cd044911c7dc2a2adf7c7a9ba7962abf57b6` into the fork while preserving durable checkpoints, existing-worktree selection, split workspaces, and read-only subagent transcripts. The integration adopts upstream native agent/workflow observability as the lifecycle authority and keeps transcript events agent-scoped outside the parent timeline: native child message completions finalize their matching transcript, persisted child rows enable transcript access from the matching agent row, transcript headers use native lifecycle metadata, child rows stay out of web and mobile parent feeds, and bounded thread-detail reads retain subagent identity. Paginated clients persist the requested user-turn width so checkpoint navigation refreshes the complete loaded window. The latest upstream additions provide main-window desktop zoom controls, a consolidated mobile thread-settings sheet, and cross-environment provider transcript usage reporting; composite in-memory keys use printable source escapes so repository tools continue treating their TypeScript as text. Fork migrations remain `36`–`40`; upstream pinning and pagination migrations are assigned `41`–`43` to preserve deployed fork databases.
 
-## Previous upstream sync — 2026-08-01
+## Earlier upstream sync — 2026-08-01
 
 Merged upstream `0ad91b6e7fc1fcb6d5f4bc736d84c337e912bc62` into the fork without dropping checkpoint navigation, split workspaces, existing-worktree selection, preview recovery, provider usage, Claude Windows packaging, or stale-mutation retry/drafts. The integration adopts upstream title regeneration, branch-drift handling, sidebar search and shell loading, preview PiP/runtime identities, telemetry/compression, and VCS cache invalidation. Migration IDs `33`–`35` remain upstream-compatible; checkpoint migrations now occupy `36`–`38`, and idempotent migration `39` reconciles both previously deployed histories.
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `8101cd044911c7dc2a2adf7c7a9ba7962abf57b6`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `cd096b9ad5a4156ffeab85de617cbb219057007f`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -100,13 +104,13 @@ Capture jobs that first lose the workspace-mutation race or fail can be re-enque
 
 The fork supports up to four visible thread panes in an equal full-height grid, with focused-pane routing, a shared toolbar, one right panel, and controlled ownership of global keyboard, preview, and composer behavior. Panes can be opened or detached from the sidebar, safely reconcile draft promotion/archive/deletion, and animate layout changes without leaving stale portals or listeners.
 
-Split membership is persisted as multiple ordered local groups with active state and stable group colors. Selecting any member restores its group; both sidebar versions preserve group tinting, support pane and thread drag placement, and show complete left/right drop intent. The group tint is textured with an inline desaturated SVG grain so the color-coded row reads as a surface rather than a flat slab. The grain is a masked pseudo-element rather than a second background layer, because background layers cannot carry their own mask and unmasked grain also covers the gradient's faded tail, flattening the row back into a uniform slab; the overlay shares the tint's fade axis and stops short of its extent so the texture is gone before the color is. Group hues carry a hue-dependent chroma: a flat chroma across the wheel does not read as a flat saturation, since yellow-green renders at full strength while red and blue are gamut-clipped, so chroma eases down around yellow-green. Rows supply only the hue and that chroma, leaving the stylesheet to compose per-theme lightness and strength — light mode takes a deeper, less translucent tint because the translucency that reads as a clear band on the near-black sidebar washes out against zinc-50. Sidebar V2 also names the other panes in each grouped thread's details tooltip. Right-panel ownership remains useful when focus moves to a pane with no surface of its own. Integration with Sidebar V2 keeps displayed panes visible when settled or snoozed shelves are collapsed and preserves split actions in its context menu.
+Split membership is persisted as multiple ordered local groups with active state and stable group colors. Selecting any member restores its group; the current and legacy sidebars preserve group tinting, support pane and thread drag placement, and show complete left/right drop intent. The group tint is textured with an inline desaturated SVG grain so the color-coded row reads as a surface rather than a flat slab. The grain is a masked pseudo-element rather than a second background layer, because background layers cannot carry their own mask and unmasked grain also covers the gradient's faded tail, flattening the row back into a uniform slab; the overlay shares the tint's fade axis and stops short of its extent so the texture is gone before the color is. Group hues carry a hue-dependent chroma: a flat chroma across the wheel does not read as a flat saturation, since yellow-green renders at full strength while red and blue are gamut-clipped, so chroma eases down around yellow-green. Rows supply only the hue and that chroma, leaving the stylesheet to compose per-theme lightness and strength — light mode takes a deeper, less translucent tint because the translucency that reads as a clear band on the near-black sidebar washes out against zinc-50. The current sidebar also names the other panes in each grouped thread's details tooltip, keeps displayed panes visible when settled or snoozed shelves are collapsed, and preserves split actions in its context menu. Right-panel ownership remains useful when focus moves to a pane with no surface of its own.
 
-**Implementation evidence:** `apps/web/src/splitViewStore.ts`, `apps/web/src/splitViewDrag.ts`, `apps/web/src/components/{SplitThreadWorkspace,SplitPaneDropHint,Sidebar,SidebarV2,RightPanelTabs,ChatView}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
+**Implementation evidence:** `apps/web/src/splitViewStore.ts`, `apps/web/src/splitViewDrag.ts`, `apps/web/src/components/{SplitThreadWorkspace,SplitPaneDropHint,Sidebar,LegacySidebar,RightPanelTabs,ChatView}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
 
 **Recorded validation:** split-store, sidebar, workspace, right-panel, and drag/drop tests; web typecheck; `vp check`; `git diff --check`; and Electron runtime verification of context menus, routing, pane layout, persistent groups, and right-panel attribution.
 
-**Last updated:** 2026-07-30
+**Last updated:** 2026-08-17
 
 ### DL012 — Prompt preservation during draft promotion
 
@@ -124,13 +128,11 @@ Codex model and skill discovery is bounded, optional catalog enrichment after a 
 
 App-server errors are classified by scope: retryable transport errors remain warnings, while a typed non-retryable turn error emits the terminal failed-turn lifecycle needed to release the thread for a follow-up message. A root Codex collaboration `wait` that remains open for 30 minutes is failed explicitly after bounded child-then-parent interruption; matching item or turn completion cancels that deadline. Actual process or transport failure still marks the session unavailable.
 
-A missing Codex rollout is treated as a recoverable stale resume cursor, so T3 falls back to a fresh provider thread instead of stopping a newly created thread.
-
 **Implementation evidence:** `apps/server/src/provider/Layers/{CodexProvider,CodexSessionRuntime,CodexAdapter}.ts`, `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`, and `packages/contracts/src/providerRuntime.ts`.
 
 **Recorded validation:** focused Codex adapter, collaboration-runtime, and provider-runtime ingestion tests, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-08-10
+**Last updated:** 2026-08-17
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 
@@ -287,6 +289,22 @@ An active zrok endpoint is merged into the advertised endpoint list and is the a
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-08-17 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `76b158036c279fe49141c74c072ac18a48a61795` (fork) and `cd096b9ad5a4156ffeab85de617cbb219057007f` (upstream/main)
+
+The integration made these semantic choices:
+
+- **Persistence migrations:** preserved deployed fork migrations `039`–`043` and assigned upstream project default-environment and favicon migrations to `044`–`045`, including their loader, ledger, and focused test references.
+- **Providers:** adopted upstream's Codex missing-rollout recovery and hermetic Claude fixture while retaining fork collaboration wait handling, subagent routing assertions, patched Claude SDK resolution, and subscription usage.
+- **Right panel and workspaces:** retained split-pane ownership, pane-local composer routing, checkpoint navigation, and subagent source attribution while adding upstream pull-request surfaces, file drops, maximization, favicons, and sidebar behavior. Persisted right-panel state now uses version `12`.
+- **Remote access and authorization:** kept the zrok service and its RPC scopes alongside upstream remote-open targets, pull-request services, project access controls, and permission-aware UI.
+- **Preview:** adopted upstream browser-default/open behavior and favicon lifecycle while retaining navigation readiness, `LoadFailed` propagation, stale-host recovery, and diagnostics reset on navigation.
+- **Usage and packaging:** retained printable `\u001f` usage keys with upstream hourly four-part buckets, preserved fork Claude/mobile patches with upstream Clerk and dependency updates, and kept patched-version pinning inside upstream's split desktop staging sets.
+- **Agent policy:** adopted upstream's removal of the rebase-before-PR rule while preserving this fork's explicit-consent and semantic-sync requirements.
+- **Post-merge QA:** passed `vp check`, `vp run typecheck`, the mobile native static-check wrapper, focused server/web/desktop suites, and a fresh isolated migration through `045`. The authenticated web shell rendered, but interactive web automation was unavailable after the T3 preview host detached; mobile emulator verification and platform-native linters were unavailable on this Windows host because the Android SDK and native lint tools are not installed.
 
 ### 2026-08-08 — Merge upstream/main into main
 

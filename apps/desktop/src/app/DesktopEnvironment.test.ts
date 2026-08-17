@@ -87,6 +87,7 @@ describe("DesktopEnvironment", () => {
         NodePath.resolve("/repo", "apps", "server", "dist", "bin.mjs"),
       );
       assert.equal(environment.backendCwd, NodePath.resolve("/repo"));
+      assert.equal(environment.serverRoot, NodePath.resolve("/repo"));
       assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev");
       assert.equal(environment.linuxWmClass, "t3code-dev");
       assert.deepEqual(
@@ -120,6 +121,24 @@ describe("DesktopEnvironment", () => {
       assert.equal(
         environment.serverSettingsPath,
         NodePath.join("/tmp/t3", "userdata", "settings.json"),
+      );
+    }),
+  );
+
+  it.effect("uses the packaged Windows server sidecar as the backend root", () =>
+    Effect.gen(function* () {
+      const environment = yield* makeEnvironment({
+        platform: "win32",
+        isPackaged: true,
+        appPath: "/install/resources/app.asar",
+        resourcesPath: "/install/resources",
+      });
+
+      assert.equal(environment.appRoot, "/install/resources/app.asar");
+      assert.equal(environment.serverRoot, "/install/resources/server.asar");
+      assert.equal(
+        environment.backendEntryPath,
+        "/install/resources/server.asar/apps/server/dist/bin.mjs",
       );
     }),
   );
