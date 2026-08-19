@@ -27,6 +27,7 @@ import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
 const ROOT = wireFixture.rootThreadId;
 const [CHILD_A, CHILD_B] = wireFixture.childThreadIds as [string, string];
 const MEMORY = "memory-consolidation-thread";
+const PROVISIONAL_CHILD = "provisional-child-thread";
 
 /**
  * The captured sequence, extended with the shapes the live capture didn't
@@ -302,6 +303,262 @@ describe("CodexSessionRuntime collab integration", () => {
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
   }
+
+  it.effect("registers a receiver-only spawn before routing its child transcript", () =>
+    Effect.gen(function* () {
+      const turnId = wireFixture.responses.turnStart.turn.id;
+      const spawnItem = {
+        type: "collabAgentToolCall",
+        id: "call_receiver_only_spawn",
+        tool: "spawnAgent",
+        status: "completed",
+        senderThreadId: ROOT,
+        receiverThreadIds: [ROOT, PROVISIONAL_CHILD],
+        prompt: "Inspect the implementation",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        agentsStates: {},
+      };
+      const commandStarted = {
+        type: "commandExecution",
+        id: "child-command",
+        command: "git diff",
+        commandActions: [],
+        cwd: "/tmp",
+        status: "inProgress",
+      };
+      const commandCompleted = {
+        ...commandStarted,
+        aggregatedOutput: "clean",
+        durationMs: 1,
+        exitCode: 0,
+        status: "completed",
+      };
+      const collabItem = (
+        id: string,
+        tool: "spawnAgent" | "sendInput" | "resumeAgent",
+        senderThreadId: string,
+        receiverThreadIds: ReadonlyArray<string>,
+      ) => ({
+        type: "collabAgentToolCall",
+        id,
+        tool,
+        status: "completed",
+        senderThreadId,
+        receiverThreadIds,
+        prompt: null,
+        model: null,
+        reasoningEffort: null,
+        agentsStates: {},
+      });
+      const script = {
+        rootThreadId: ROOT,
+        notifications: [
+          {
+            method: "item/completed",
+            params: {
+              threadId: ROOT,
+              turnId,
+              item: spawnItem,
+              completedAtMs: 1,
+            },
+          },
+          {
+            method: "item/started",
+            params: {
+              threadId: PROVISIONAL_CHILD,
+              turnId: "provisional-child-turn",
+              item: commandStarted,
+              startedAtMs: 2,
+            },
+          },
+          {
+            method: "item/completed",
+            params: {
+              threadId: PROVISIONAL_CHILD,
+              turnId: "provisional-child-turn",
+              item: commandCompleted,
+              completedAtMs: 3,
+            },
+          },
+          {
+            method: "item/completed",
+            params: {
+              threadId: PROVISIONAL_CHILD,
+              turnId: "provisional-child-turn",
+              item: { type: "agentMessage", id: "child-message", text: "Review complete" },
+              completedAtMs: 4,
+            },
+          },
+          {
+            method: "turn/completed",
+            params: {
+              threadId: PROVISIONAL_CHILD,
+              turn: {
+                ...wireFixture.responses.turnStart.turn,
+                id: "provisional-child-turn",
+                status: "completed",
+              },
+            },
+          },
+          {
+            method: "thread/started",
+            params: {
+              thread: {
+                ...wireFixture.responses.threadStart.thread,
+                id: PROVISIONAL_CHILD,
+                sessionId: PROVISIONAL_CHILD,
+                parentThreadId: ROOT,
+                agentNickname: "reviewer",
+                agentRole: "reviewer",
+                source: {
+                  subAgent: {
+                    thread_spawn: {
+                      depth: 1,
+                      parent_thread_id: ROOT,
+                      agent_nickname: "reviewer",
+                      agent_role: "reviewer",
+                      agent_path: "/root/reviewer",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          {
+            method: "item/completed",
+            params: {
+              threadId: ROOT,
+              turnId,
+              item: {
+                type: "subAgentActivity",
+                id: "call_late_metadata",
+                kind: "started",
+                agentThreadId: PROVISIONAL_CHILD,
+                agentPath: "/root/alice",
+              },
+              completedAtMs: 5,
+            },
+          },
+          {
+            method: "item/completed",
+            params: {
+              threadId: ROOT,
+              turnId,
+              item: collabItem("call_resume", "resumeAgent", ROOT, [PROVISIONAL_CHILD]),
+              completedAtMs: 6,
+            },
+          },
+          {
+            method: "item/completed",
+            params: {
+              threadId: PROVISIONAL_CHILD,
+              turnId: "provisional-child-turn",
+              item: collabItem("call_nested_spawn", "spawnAgent", PROVISIONAL_CHILD, [
+                "nested-child",
+              ]),
+              completedAtMs: 7,
+            },
+          },
+          {
+            method: "item/completed",
+            params: {
+              threadId: PROVISIONAL_CHILD,
+              turnId: "provisional-child-turn",
+              item: collabItem("call_child_to_root", "sendInput", PROVISIONAL_CHILD, [ROOT]),
+              completedAtMs: 8,
+            },
+          },
+        ],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(scriptPath, { force: true })),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-receiver-only-spawn"),
+        binaryPath: peerPath,
+        cwd: "/tmp",
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const eventsFiber = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.method === "turn/completed"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "spawn a reviewer" });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      assert.isTrue(
+        events.some((event) => event.method === "turn/completed"),
+        "child-to-root sendInput must not suppress the root completion",
+      );
+      const started = events.find(
+        (event) =>
+          event.method === "collabAgent/started" &&
+          (event.payload as { agentThreadId?: string }).agentThreadId === PROVISIONAL_CHILD,
+      );
+      assert.isDefined(started, "receiver id produces the lifecycle mapped to task.started");
+
+      const metadata = events.find(
+        (event) =>
+          event.method === "collabAgent/started" &&
+          (event.payload as { metadataOnly?: boolean }).metadataOnly === true,
+      );
+      assert.isDefined(metadata, "late thread metadata enriches without another task.started");
+      assert.equal((metadata.payload as { nickname?: string }).nickname, "reviewer");
+
+      const activityMetadata = events.find(
+        (event) =>
+          event.method === "collabAgent/activity" &&
+          (event.payload as { metadataOnly?: boolean }).metadataOnly === true,
+      );
+      assert.isDefined(activityMetadata, "late activity metadata preserves the merged identity");
+      assert.deepInclude(activityMetadata.payload as Record<string, unknown>, {
+        nickname: "reviewer",
+        role: "reviewer",
+        agentPath: "/root/reviewer",
+      });
+
+      const resumed = events.find(
+        (event) =>
+          event.method === "collabAgent/activity" &&
+          (event.payload as { activityKind?: string }).activityKind === "interacted",
+      );
+      assert.isDefined(resumed, "resuming a known child emits a running status transition");
+
+      const childItems = events.filter((event) => event.method === "collabAgent/item");
+      assert.lengthOf(childItems, 5);
+      assert.deepEqual(
+        childItems.map((event) => event.subagentId),
+        Array.from({ length: 5 }, () => PROVISIONAL_CHILD),
+        "child tool and assistant items stay scoped to the child transcript",
+      );
+      assert.isFalse(
+        events.some(
+          (event) =>
+            event.method === "collabAgent/started" &&
+            (event.payload as { agentThreadId?: string }).agentThreadId === "nested-child",
+        ),
+        "a nested spawn must not register against the root thread",
+      );
+      assert.isFalse(
+        events.some(
+          (event) =>
+            (event.method === "item/started" || event.method === "item/completed") &&
+            (event.payload as { threadId?: string } | undefined)?.threadId === PROVISIONAL_CHILD,
+        ),
+        "child items must not leak through the parent route",
+      );
+
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 
   it.effect("replays the captured fan-out into synthetic agent events without child leaks", () =>
     Effect.gen(function* () {

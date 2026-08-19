@@ -725,6 +725,129 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("keeps child command lifecycle and terminal output alongside task progress", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 4)).pipe(
+        Effect.forkChild,
+      );
+      const startedItem = {
+        type: "commandExecution" as const,
+        id: "command-1",
+        command: "git diff",
+        commandActions: [],
+        cwd: "/tmp",
+        status: "inProgress" as const,
+      };
+      const completedItem = {
+        ...startedItem,
+        aggregatedOutput: "full child output",
+        durationMs: 12,
+        exitCode: 0,
+        status: "completed" as const,
+      };
+
+      for (const [index, lifecycle, item] of [
+        [0, "item.started", startedItem],
+        [1, "item.completed", completedItem],
+      ] as const) {
+        const notification = {
+          threadId: "child-thread-1",
+          turnId: "child-turn-1",
+          item,
+          ...(lifecycle === "item.started"
+            ? { startedAtMs: index + 1 }
+            : { completedAtMs: index + 1 }),
+        };
+        yield* runtime.emit({
+          id: asEventId(`evt-child-command-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: `2026-01-01T00:00:0${index}.000Z`,
+          method: "collabAgent/item",
+          threadId: asThreadId("thread-1"),
+          subagentId: "child-thread-1",
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("command-1"),
+          payload: {
+            agentThreadId: "child-thread-1",
+            lifecycle,
+            item,
+            notification,
+          },
+        });
+      }
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["task.progress", "item.started", "task.progress", "item.completed"],
+      );
+      const completed = events[3];
+      NodeAssert.equal(completed?.type, "item.completed");
+      if (completed?.type !== "item.completed") return;
+      NodeAssert.equal(completed.subagentId, "child-thread-1");
+      NodeAssert.equal(completed.itemId, "command-1");
+      NodeAssert.equal(completed.payload.itemType, "command_execution");
+      NodeAssert.deepStrictEqual(completed.payload.data, {
+        threadId: "child-thread-1",
+        turnId: "child-turn-1",
+        item: completedItem,
+        completedAtMs: 2,
+      });
+    }),
+  );
+
+  it.effect("enriches a known child without restarting it and maps resume to running", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+      const baseEvent = {
+        kind: "notification" as const,
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+      };
+
+      yield* runtime.emit({
+        ...baseEvent,
+        id: asEventId("evt-child-metadata"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collabAgent/started",
+        payload: {
+          agentThreadId: "child-thread-1",
+          nickname: "reviewer",
+          agentPath: "/root/reviewer",
+          metadataOnly: true,
+        },
+      });
+      yield* runtime.emit({
+        ...baseEvent,
+        id: asEventId("evt-child-resumed"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        method: "collabAgent/activity",
+        payload: {
+          agentThreadId: "child-thread-1",
+          nickname: "reviewer",
+          activityKind: "interacted",
+        },
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["task.progress", "task.updated"],
+      );
+      const metadata = events[0];
+      const resumed = events[1];
+      if (metadata?.type !== "task.progress" || resumed?.type !== "task.updated") return;
+      NodeAssert.equal(metadata.payload.title, "reviewer");
+      NodeAssert.equal(resumed.payload.status, "running");
+    }),
+  );
+
   it.effect("maps Codex v2 subagent activity as a running subagent tool call", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

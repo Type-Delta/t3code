@@ -614,6 +614,19 @@ function mapCollabAgentEvent(
 
   switch (event.method) {
     case "collabAgent/started":
+      if (payload.metadataOnly === true) {
+        return [
+          {
+            ...base,
+            type: "task.progress",
+            payload: {
+              taskId,
+              description: title,
+              ...statusLinkage,
+            },
+          },
+        ];
+      }
       return [
         {
           ...base,
@@ -643,6 +656,19 @@ function mapCollabAgentEvent(
         ];
       }
       if (activityKind === "started") {
+        if (payload.metadataOnly === true) {
+          return [
+            {
+              ...base,
+              type: "task.progress",
+              payload: {
+                taskId,
+                description: title,
+                ...statusLinkage,
+              },
+            },
+          ];
+        }
         // Wire-probe finding: children often register via subAgentActivity
         // alone (no thread/started with a spawn source), so this is the one
         // shot at a task.started with a real name — agentPath leaf beats a
@@ -818,26 +844,45 @@ function mapCollabAgentEvent(
         },
       };
       const itemId = typeof item.id === "string" ? item.id.trim() : "";
-      if (canonical !== "assistant_message" || itemId.length === 0) {
+      const lifecycle =
+        payload.lifecycle === "item.started" || payload.lifecycle === "item.completed"
+          ? payload.lifecycle
+          : undefined;
+      const notification = payload.notification;
+      const lifecycleEvent =
+        lifecycle && typeof notification === "object" && notification !== null
+          ? mapItemLifecycle(
+              { ...event, method: lifecycle, payload: notification },
+              canonicalThreadId,
+              lifecycle,
+            )
+          : undefined;
+      if (canonical !== "assistant_message") {
+        return lifecycleEvent ? [progressEvent, lifecycleEvent] : [progressEvent];
+      }
+      if (itemId.length === 0 || lifecycle !== "item.completed") {
+        if (lifecycle === undefined && itemId.length > 0) {
+          const detail = typeof item.text === "string" ? item.text.trim() : "";
+          return [
+            progressEvent,
+            {
+              ...base,
+              subagentId: agentThreadId,
+              itemId: RuntimeItemId.make(itemId),
+              type: "item.completed",
+              payload: {
+                itemType: "assistant_message",
+                status: "completed",
+                title: "Assistant message",
+                ...(detail.length > 0 ? { detail } : {}),
+                data: event.payload,
+              },
+            },
+          ];
+        }
         return [progressEvent];
       }
-      const detail = typeof item.text === "string" ? item.text.trim() : "";
-      return [
-        progressEvent,
-        {
-          ...base,
-          subagentId: agentThreadId,
-          itemId: RuntimeItemId.make(itemId),
-          type: "item.completed",
-          payload: {
-            itemType: "assistant_message",
-            status: "completed",
-            title: "Assistant message",
-            ...(detail.length > 0 ? { detail } : {}),
-            data: event.payload,
-          },
-        },
-      ];
+      return lifecycleEvent ? [progressEvent, lifecycleEvent] : [progressEvent];
     }
     case "collabAgent/closed":
       return [

@@ -208,6 +208,13 @@ Projection migration `040_ProjectionSubagentIds` adds durable correlation column
 activities. Upstream native `task.*` events remain the sole Codex lifecycle and Agents-panel status
 authority; child message deltas use the same native agent/thread identity only to populate the
 separate transcript. Child thread, turn, name, token, and plan chatter cannot mutate the parent.
+Codex app-server builds that report a spawned or resumed child only through the completed
+`collabAgentToolCall.receiverThreadIds` provisionally register each non-sender receiver, emit the
+native child lifecycle, and scope its subsequent tool and assistant items to that child. Each child
+tool keeps its native started/completed rows and complete output alongside task progress. Resume
+reactivates an existing child, while later thread-start or subagent-activity metadata enriches the
+identity without restarting a settled task. Only root-owned routing items can provision children,
+so nested child activity and child-to-root input cannot suppress or pollute the root transcript.
 The main timeline names started, messaged, resumed, waited, stopped,
 interrupted, failed, and finished subagent operations instead of grouping them under a generic
 task label. Only spawn/resume events can establish child routing, so a child message sent back to
@@ -233,8 +240,12 @@ transition. The spawn row, complete prompt where supplied, separate child transc
 status,
 status-aware dropdown, invariant context-strip grouping across the former mobile breakpoint, and
 absent composer were confirmed in the live client.
+The receiver-only Codex v2 path is covered by a focused runtime integration replay that verifies
+the synthesized spawn/resume lifecycle, late metadata ordering, parent-route isolation, and
+child-scoped tool and assistant items. Adapter and ingestion regressions preserve each child tool's
+full native lifecycle and terminal output through projection.
 
-**Last updated:** 2026-08-10
+**Last updated:** 2026-08-19
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 

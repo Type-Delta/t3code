@@ -1160,6 +1160,7 @@ describe("ProviderRuntimeIngestion", () => {
         data: {
           toolCallId: "tool-read-1",
           kind: "read",
+          aggregatedOutput: "full child output",
           rawOutput: {
             content: 'import * as Effect from "effect/Effect"\n',
           },
@@ -1195,6 +1196,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(payload?.detail).toBeUndefined();
     expect(data?.toolCallId).toBe("tool-read-1");
     expect(data?.kind).toBe("read");
+    expect(data?.aggregatedOutput).toBe("full child output");
     expect(rawOutput?.content).toBe('import * as Effect from "effect/Effect"\n');
   });
 
