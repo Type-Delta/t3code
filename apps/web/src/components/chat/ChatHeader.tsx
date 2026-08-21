@@ -157,7 +157,10 @@ export const ChatHeader = memo(function ChatHeader({
   // Inline rename, keyed by thread: navigating away drops an in-progress
   // rename instead of committing stale text. Cleared on thread change (not
   // just hidden) so returning to the thread doesn't revive the old draft.
-  const [renaming, setRenaming] = useState<{ threadId: ThreadId; title: string } | null>(null);
+  const [renaming, setRenaming] = useState<{
+    threadId: ThreadId;
+    title: string;
+  } | null>(null);
   if (renaming !== null && renaming.threadId !== activeThreadId) {
     setRenaming(null);
   }
@@ -170,9 +173,15 @@ export const ChatHeader = memo(function ChatHeader({
   const commitRename = useCallback(
     (title: string) => {
       setRenaming(null);
-      const resolution = resolveRenameCommit({ title, originalTitle: activeThreadTitle });
+      const resolution = resolveRenameCommit({
+        title,
+        originalTitle: activeThreadTitle,
+      });
       if (resolution.action === "reject-empty") {
-        toastManager.add({ type: "warning", title: "Thread title cannot be empty" });
+        toastManager.add({
+          type: "warning",
+          title: "Thread title cannot be empty",
+        });
         return;
       }
       if (resolution.action === "noop") return;
@@ -230,7 +239,7 @@ export const ChatHeader = memo(function ChatHeader({
   );
   return (
     <div
-      className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
+      className="@container/header-actions h-(--workspace-topbar-height) flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
       onContextMenu={handleHeaderContextMenu}
     >
       <WorkspaceBreadcrumb ariaLabel="Thread breadcrumb" className="flex-1">
