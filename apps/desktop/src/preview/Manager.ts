@@ -887,10 +887,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     webContentsId: number,
     expected?: BrowserControlSession,
   ) {
-    const detached = yield* SynchronizedRef.modifyEffect(controlSessionsRef, (sessions) => {
+    const outcome = yield* SynchronizedRef.modifyEffect(controlSessionsRef, (sessions) => {
       const control = sessions.get(webContentsId);
-      if (!control || (expected !== undefined && control !== expected)) {
-        return Effect.succeed([false, sessions] as const);
+      if (!control) {
+        return Effect.succeed(["missing" as const, sessions] as const);
+      }
+      if (expected !== undefined && control !== expected) {
+        return Effect.succeed(["mismatch" as const, sessions] as const);
       }
       const next = replaceMap(sessions, (copy) => {
         copy.delete(webContentsId);
@@ -900,10 +903,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       // finalizer could detach the replacement's debugger.
       return Scope.close(control.scope, Exit.void).pipe(
         Effect.ignore,
-        Effect.as([true, next] as const),
+        Effect.as(["detached" as const, next] as const),
       );
     });
-    if (detached) return;
+    if (outcome !== "missing") return;
     yield* Ref.update(diagnosticsRef, (diagnostics) =>
       replaceMap(diagnostics, (copy) => {
         copy.delete(webContentsId);
@@ -913,6 +916,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   const ensureControlSession = Effect.fn("PreviewManager.ensureControlSession")(function* (
     wc: Electron.WebContents,
+    initializationTimeout?: {
+      readonly duration: number;
+      readonly tabId: string;
+      readonly timeoutMs: number;
+    },
   ) {
     return yield* SynchronizedRef.modifyEffect(
       controlSessionsRef,
@@ -1043,16 +1051,52 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               wc.debugger.on("detach", onDetach);
               wc.debugger.attach("1.3");
             });
-            yield* Effect.all(
-              ["Runtime.enable", "Accessibility.enable", "Network.enable", "Log.enable"].map(
-                (method) =>
-                  attemptPromise(
-                    { operation: `initializeDebugger.${method}`, webContentsId: wc.id },
-                    () => wc.debugger.sendCommand(method),
-                  ),
-              ),
-              { concurrency: "unbounded", discard: true },
-            );
+            const enableDebugger = Effect.gen(function* () {
+              yield* Effect.all(
+                ["Runtime.enable", "Accessibility.enable", "Network.enable", "Log.enable"].map(
+                  (method) =>
+                    attemptPromise(
+                      { operation: `initializeDebugger.${method}`, webContentsId: wc.id },
+                      () => wc.debugger.sendCommand(method),
+                    ),
+                ),
+                { concurrency: "unbounded", discard: true },
+              );
+              if (!initializationTimeout) return;
+              const tab = (yield* SynchronizedRef.get(tabsRef)).get(initializationTimeout.tabId);
+              if (tab?.webContentsId !== wc.id || tab.colorScheme === "system") return;
+              yield* attemptPromise(
+                {
+                  operation: "initializeDebugger.applyColorScheme",
+                  tabId: initializationTimeout.tabId,
+                  webContentsId: wc.id,
+                },
+                () =>
+                  wc.debugger.sendCommand("Emulation.setEmulatedMedia", {
+                    features: [{ name: "prefers-color-scheme", value: tab.colorScheme }],
+                  }),
+              );
+            });
+            if (initializationTimeout) {
+              const initializationFiber = yield* enableDebugger.pipe(
+                Effect.forkDetach({ startImmediately: true, uninterruptible: false }),
+              );
+              const initializationExit = yield* Fiber.await(initializationFiber).pipe(
+                Effect.timeoutOption(initializationTimeout.duration),
+                Effect.interruptible,
+                Effect.onInterrupt(() => Effect.sync(() => initializationFiber.interruptUnsafe())),
+              );
+              if (Option.isNone(initializationExit)) {
+                initializationFiber.interruptUnsafe();
+                return yield* new PreviewAutomationTimeoutError({
+                  tabId: initializationTimeout.tabId,
+                  timeoutMs: initializationTimeout.timeoutMs,
+                });
+              }
+              yield* Fiber.join(initializationFiber);
+            } else {
+              yield* enableDebugger;
+            }
             return [
               control,
               replaceMap(sessions, (copy) => {
@@ -1064,7 +1108,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             Effect.onError(() => Scope.close(scope, Exit.void).pipe(Effect.ignore)),
           );
         });
-        return createControlSession();
+        return existing
+          ? Scope.close(existing.scope, Exit.void).pipe(
+              Effect.ignore,
+              Effect.andThen(createControlSession()),
+            )
+          : createControlSession();
       },
     );
   });
@@ -1092,6 +1141,34 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     commandParams?: Record<string, unknown>,
   ) => Effect.Effect<unknown, PreviewManagerError>;
 
+  const controlTimeoutMs = (requested?: number) =>
+    Math.max(1, (requested ?? DEFAULT_AUTOMATION_TIMEOUT_MS) - AUTOMATION_RESPONSE_BUDGET_MS);
+
+  const timeoutControlWork = <A>(
+    effect: Effect.Effect<A, PreviewManagerError>,
+    tabId: string,
+    wc: Electron.WebContents,
+    control: BrowserControlSession,
+    timeoutMs: number,
+    reportedTimeoutMs = timeoutMs,
+  ) =>
+    effect.pipe(
+      Effect.timeoutOrElse({
+        duration: timeoutMs,
+        orElse: () =>
+          detachControlSession(wc.id, control).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new PreviewAutomationTimeoutError({
+                  tabId,
+                  timeoutMs: reportedTimeoutMs,
+                }),
+              ),
+            ),
+          ),
+      }),
+    );
+
   const prepareAutomationInput = Effect.fn("PreviewManager.prepareAutomationInput")(function* (
     send: SendCommand,
     enableRuntime: boolean,
@@ -1110,6 +1187,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     wc: Electron.WebContents,
     action: string,
     use: (send: SendCommand, sendCleanup: SendCommand) => Effect.Effect<A, PreviewManagerError>,
+    timeoutMs = controlTimeoutMs(),
   ) {
     const sequence = yield* nextCounter(actionSequenceRef);
     const startedAt = yield* currentIso;
@@ -1122,8 +1200,25 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     };
     yield* pushAction(tabId, actionEvent);
     const epoch = (yield* Ref.get(controlEpochRef)).get(tabId) ?? 0;
-    const control = yield* ensureControlSession(wc);
-    const execute = Effect.fn("PreviewManager.executeControlAction")(function* () {
+    const deadline = millis + timeoutMs;
+    const remainingTimeout = Effect.fn("PreviewManager.remainingControlTimeout")(function* () {
+      const remaining = deadline - (yield* currentMillis);
+      if (remaining > 0) return remaining;
+      return yield* new PreviewAutomationTimeoutError({ tabId, timeoutMs });
+    });
+    const ensureBeforeDeadline = Effect.fn("PreviewManager.ensureControlSessionBeforeDeadline")(
+      function* () {
+        const remaining = yield* remainingTimeout();
+        return yield* ensureControlSession(wc, {
+          duration: remaining,
+          tabId,
+          timeoutMs,
+        });
+      },
+    );
+    const execute = Effect.fn("PreviewManager.executeControlAction")(function* (
+      control: BrowserControlSession,
+    ) {
       yield* update(tabId, { controller: "agent" });
       const send: SendCommand = Effect.fn("PreviewManager.sendCommand")(
         function* (method, commandParams) {
@@ -1155,13 +1250,19 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       // with a held key or focus emulation enabled for subsequent actions.
       const sendCleanup: SendCommand = Effect.fn("PreviewManager.sendCleanupCommand")(
         function* (method, commandParams) {
-          return yield* attemptPromise(
-            {
-              operation: `${action}.cleanup.${method}`,
-              tabId,
-              webContentsId: wc.id,
-            },
-            () => wc.debugger.sendCommand(method, commandParams),
+          return yield* timeoutControlWork(
+            attemptPromise(
+              {
+                operation: `${action}.cleanup.${method}`,
+                tabId,
+                webContentsId: wc.id,
+              },
+              () => wc.debugger.sendCommand(method, commandParams),
+            ),
+            tabId,
+            wc,
+            control,
+            AUTOMATION_RESPONSE_BUDGET_MS,
           );
         },
       );
@@ -1199,7 +1300,35 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       const tabs = yield* SynchronizedRef.get(tabsRef);
       if (tabs.has(tabId)) yield* update(tabId, { controller: "none" });
     });
-    return yield* control.semaphore.withPermit(execute().pipe(Effect.onExit(finalize)));
+    const run = Effect.fn("PreviewManager.runControlAction")(function* (): Effect.fn.Return<
+      A,
+      PreviewManagerError
+    > {
+      const control = yield* ensureBeforeDeadline();
+      yield* control.semaphore.take(1).pipe(
+        Effect.timeoutOrElse({
+          duration: yield* remainingTimeout(),
+          orElse: () => Effect.fail(new PreviewAutomationTimeoutError({ tabId, timeoutMs })),
+        }),
+      );
+      const result = yield* Effect.gen(function* () {
+        const current = (yield* SynchronizedRef.get(controlSessionsRef)).get(wc.id);
+        if (control.isDetached() || current !== control) {
+          return { stale: true as const };
+        }
+        return yield* timeoutControlWork(
+          execute(control).pipe(Effect.map((value) => ({ stale: false as const, value }))),
+          tabId,
+          wc,
+          control,
+          yield* remainingTimeout(),
+          timeoutMs,
+        );
+      }).pipe(Effect.ensuring(control.semaphore.release(1)));
+      if (result.stale) return yield* run();
+      return result.value;
+    });
+    return yield* run().pipe(Effect.onExit(finalize));
   });
 
   const evaluateWithDebugger = <A = unknown>(
@@ -2230,45 +2359,38 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     wc: Electron.WebContents,
     colorScheme: DesktopPreviewColorScheme,
   ) {
-    yield* ensureControlSession(wc);
-    yield* attemptPromise({ operation: "applyColorScheme", tabId, webContentsId: wc.id }, () =>
-      wc.debugger.sendCommand("Emulation.setEmulatedMedia", {
-        features: [
-          {
-            name: "prefers-color-scheme",
-            // An empty value clears the override so the page follows the OS.
-            value: colorScheme === "system" ? "" : colorScheme,
-          },
-        ],
-      }),
+    const timeoutMs = controlTimeoutMs();
+    const control = yield* ensureControlSession(wc, { duration: timeoutMs, tabId, timeoutMs });
+    yield* timeoutControlWork(
+      attemptPromise({ operation: "applyColorScheme", tabId, webContentsId: wc.id }, () =>
+        wc.debugger.sendCommand("Emulation.setEmulatedMedia", {
+          features: [
+            {
+              name: "prefers-color-scheme",
+              // An empty value clears the override so the page follows the OS.
+              value: colorScheme === "system" ? "" : colorScheme,
+            },
+          ],
+        }),
+      ),
+      tabId,
+      wc,
+      control,
+      timeoutMs,
     );
   });
 
-  // Re-establish the control session after a detach, restoring any
-  // color-scheme override the tab carries. The scheme is read after the
-  // session attaches so a concurrent setColorScheme is not overwritten with
-  // a stale snapshot.
+  // Re-establish the control session after a detach. Session initialization
+  // restores any color-scheme override under the same deadline.
   const restoreControlSession = (tabId: string, wc: Electron.WebContents) =>
     Effect.gen(function* () {
       const beforeAttach = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
       if (beforeAttach?.webContentsId !== wc.id) return;
-      yield* ensureControlSession(wc);
+      const timeoutMs = controlTimeoutMs();
+      yield* ensureControlSession(wc, { duration: timeoutMs, tabId, timeoutMs });
       const afterAttach = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
       if (afterAttach?.webContentsId !== wc.id) {
         yield* detachControlSession(wc.id);
-        return;
-      }
-      if (afterAttach.colorScheme !== "system") {
-        yield* attemptPromise({ operation: "applyColorScheme", tabId, webContentsId: wc.id }, () =>
-          wc.debugger.sendCommand("Emulation.setEmulatedMedia", {
-            features: [
-              {
-                name: "prefers-color-scheme",
-                value: afterAttach.colorScheme,
-              },
-            ],
-          }),
-        );
       }
     }).pipe(Effect.ignore);
 
@@ -3252,8 +3374,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     input: PreviewAutomationClickInput,
   ) {
     const wc = yield* requireWebContents(tabId);
-    yield* withControlSession(tabId, wc, "click", (send) =>
-      performAutomationClick(tabId, input, send),
+    yield* withControlSession(
+      tabId,
+      wc,
+      "click",
+      (send) => performAutomationClick(tabId, input, send),
+      controlTimeoutMs(input.timeoutMs),
     );
   });
 
@@ -3386,8 +3512,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     input: PreviewAutomationTypeInput,
   ) {
     const wc = yield* requireWebContents(tabId);
-    yield* withControlSession(tabId, wc, "type", (send) =>
-      performAutomationType(tabId, input, send),
+    yield* withControlSession(
+      tabId,
+      wc,
+      "type",
+      (send) => performAutomationType(tabId, input, send),
+      controlTimeoutMs(input.timeoutMs),
     );
   });
 
@@ -3611,8 +3741,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     input: PreviewAutomationWaitForInput,
   ) {
     const wc = yield* requireWebContents(tabId);
-    yield* withControlSession(tabId, wc, "waitFor", (send) =>
-      performAutomationWaitFor(tabId, input, send),
+    yield* withControlSession(
+      tabId,
+      wc,
+      "waitFor",
+      (send) => performAutomationWaitFor(tabId, input, send),
+      controlTimeoutMs(input.timeoutMs),
     );
   });
 
@@ -3926,7 +4060,7 @@ export class PreviewAutomationTimeoutError extends Schema.TaggedErrorClass<Previ
   },
 ) {
   override get message(): string {
-    return `Preview condition did not match within ${this.timeoutMs}ms in tab ${this.tabId}`;
+    return `Preview automation timed out after ${this.timeoutMs}ms in tab ${this.tabId}`;
   }
 }
 

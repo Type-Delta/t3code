@@ -186,6 +186,51 @@ const makeTestPreviewWebContents = (
     capturePage,
   }) as never;
 
+const makeTestControlWebContents = (
+  sendCommand: (method: string, params?: Record<string, unknown>) => Promise<unknown>,
+  capturePage?: () => Promise<unknown>,
+  id = 42,
+) => {
+  let attached = false;
+  const attach = vi.fn(() => {
+    attached = true;
+  });
+  const detach = vi.fn(() => {
+    attached = false;
+  });
+  return {
+    attach,
+    detach,
+    webContents: {
+      id,
+      isDestroyed: () => false,
+      getType: () => "webview",
+      getURL: () => "https://example.com",
+      getTitle: () => "Example",
+      isLoading: () => false,
+      isDevToolsOpened: () => false,
+      getZoomFactor: () => 1,
+      setZoomFactor: vi.fn(),
+      focus: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+      ipc: { on: vi.fn(), off: vi.fn() },
+      send: webviewSend,
+      navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+      setWindowOpenHandler: vi.fn(),
+      debugger: {
+        isAttached: () => attached,
+        attach,
+        detach,
+        sendCommand,
+        on: vi.fn(),
+        off: vi.fn(),
+      },
+      ...(capturePage ? { capturePage } : {}),
+    } as never,
+  };
+};
+
 const TEST_FAVICON = "data:image/png;base64,cG5n";
 
 const makeSourcePng = (width = 1, height = 1): Buffer => {
@@ -2890,6 +2935,273 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("times out a hung CDP command and reattaches for the next same-tab action", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let runtimeEvaluateCalls = 0;
+        const sendCommand = vi.fn((method: string) => {
+          if (method === "Runtime.evaluate") {
+            runtimeEvaluateCalls += 1;
+            if (runtimeEvaluateCalls === 1) return new Promise<never>(() => undefined);
+          }
+          return Promise.resolve(
+            method === "Runtime.evaluate" ? { result: { value: "recovered" } } : undefined,
+          );
+        });
+        const { webContents, attach, detach } = makeTestControlWebContents(sendCommand);
+        fromId.mockReturnValue(webContents);
+
+        yield* manager.createTab("tab_command_timeout");
+        yield* manager.registerWebview("tab_command_timeout", 42);
+        yield* Effect.yieldNow;
+        yield* manager.setColorScheme("tab_command_timeout", "dark");
+        const hung = yield* manager
+          .automationEvaluate("tab_command_timeout", { expression: "neverSettles" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(14_750);
+
+        const exit = yield* Fiber.await(hung);
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit)) {
+          expect(Option.getOrThrow(Cause.findErrorOption(exit.cause))).toMatchObject({
+            _tag: "PreviewAutomationTimeoutError",
+            tabId: "tab_command_timeout",
+            timeoutMs: 14_750,
+          });
+        }
+        expect(detach).toHaveBeenCalledOnce();
+        expect(
+          yield* manager.automationEvaluate("tab_command_timeout", {
+            expression: "document.title",
+          }),
+        ).toBe("recovered");
+        expect(attach).toHaveBeenCalledTimes(2);
+        expect(
+          sendCommand.mock.calls.filter(([method]) => method === "Emulation.setEmulatedMedia"),
+        ).toHaveLength(2);
+      }),
+    ),
+  );
+
+  effectIt.effect("times out hung debugger initialization and releases the session map", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const firstSendCommand = vi.fn((method: string) => {
+          if (method === "Runtime.enable") {
+            return new Promise<never>(() => undefined);
+          }
+          return Promise.resolve(undefined);
+        });
+        const secondSendCommand = vi.fn((method: string) =>
+          Promise.resolve(
+            method === "Runtime.evaluate" ? { result: { value: "available" } } : undefined,
+          ),
+        );
+        const first = makeTestControlWebContents(firstSendCommand, undefined, 42);
+        const second = makeTestControlWebContents(secondSendCommand, undefined, 43);
+        fromId.mockImplementation((id?: number) =>
+          id === 42 ? first.webContents : id === 43 ? second.webContents : null,
+        );
+
+        yield* manager.createTab("tab_initializing");
+        yield* manager.createTab("tab_available");
+        yield* manager.registerWebview("tab_initializing", 42);
+        yield* manager.registerWebview("tab_available", 43);
+        yield* Effect.yieldNow;
+        expect(firstSendCommand).toHaveBeenCalledWith("Runtime.enable");
+        yield* TestClock.adjust(15_000);
+        yield* Effect.yieldNow;
+        expect(first.detach).toHaveBeenCalledOnce();
+        expect(
+          yield* manager.automationEvaluate("tab_available", {
+            expression: "document.title",
+          }),
+        ).toBe("available");
+        expect(second.attach).toHaveBeenCalledOnce();
+      }),
+    ),
+  );
+
+  effectIt.effect("reattaches a same-tab action queued behind a timed-out session", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let markFirstActionStarted!: () => void;
+        const firstActionStarted = new Promise<void>((resolve) => {
+          markFirstActionStarted = resolve;
+        });
+        let evaluateCalls = 0;
+        const sendCommand = vi.fn((method: string) => {
+          if (method === "Runtime.evaluate") {
+            evaluateCalls += 1;
+            if (evaluateCalls === 1) {
+              markFirstActionStarted();
+              return new Promise<never>(() => undefined);
+            }
+            return Promise.resolve({ result: { value: "recovered" } });
+          }
+          return Promise.resolve(undefined);
+        });
+        const { webContents, attach, detach } = makeTestControlWebContents(sendCommand);
+        fromId.mockReturnValue(webContents);
+
+        yield* manager.createTab("tab_queued_timeout");
+        yield* manager.registerWebview("tab_queued_timeout", 42);
+        const first = yield* manager
+          .automationEvaluate("tab_queued_timeout", { expression: "first" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => firstActionStarted);
+        yield* TestClock.adjust(100);
+        const queued = yield* manager
+          .automationEvaluate("tab_queued_timeout", { expression: "second" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        expect(attach).toHaveBeenCalledOnce();
+        yield* TestClock.adjust(14_650);
+
+        expect(Exit.isFailure(yield* Fiber.await(first))).toBe(true);
+        expect(yield* Fiber.join(queued)).toBe("recovered");
+        expect(detach).toHaveBeenCalledOnce();
+        expect(attach).toHaveBeenCalledTimes(2);
+      }),
+    ),
+  );
+
+  effectIt.effect("times out a hung snapshot capture and recovers the same tab", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const image = {
+          getSize: () => ({ width: 800, height: 600 }),
+          resize: () => image,
+          toPNG: () => Buffer.from("recovered-png"),
+        };
+        const capturePage = vi
+          .fn<() => Promise<typeof image>>()
+          .mockImplementationOnce(() => new Promise<never>(() => undefined))
+          .mockResolvedValue(image);
+        const sendCommand = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+          if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+          if (method !== "Runtime.evaluate") return undefined;
+          const expression = String(params?.["expression"] ?? "");
+          return expression.includes("__t3PreviewSnapshotState ??=")
+            ? {
+                result: {
+                  value: {
+                    revision: 1,
+                    page: {
+                      url: "https://example.com",
+                      title: "Example",
+                      loading: false,
+                      visibleText: "Recovered",
+                      interactiveElements: [],
+                    },
+                  },
+                },
+              }
+            : { result: { value: 1 } };
+        });
+        const { webContents, attach, detach } = makeTestControlWebContents(
+          sendCommand,
+          capturePage,
+        );
+        fromId.mockReturnValue(webContents);
+
+        yield* manager.createTab("tab_capture_timeout");
+        yield* manager.registerWebview("tab_capture_timeout", 42);
+        const hung = yield* manager
+          .automationSnapshot("tab_capture_timeout")
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(14_750);
+
+        const exit = yield* Fiber.await(hung);
+        expect(Exit.isFailure(exit)).toBe(true);
+        expect(detach).toHaveBeenCalledOnce();
+        const snapshot = yield* manager.automationSnapshot("tab_capture_timeout");
+        expect(snapshot.visibleText).toBe("Recovered");
+        expect(capturePage).toHaveBeenCalledTimes(2);
+        expect(attach).toHaveBeenCalledTimes(2);
+      }),
+    ),
+  );
+
+  effectIt.effect("preserves explicit automation timeouts above the default control budget", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const sendCommand = vi.fn((method: string) =>
+          method === "Runtime.evaluate"
+            ? new Promise<never>(() => undefined)
+            : Promise.resolve(undefined),
+        );
+        const { webContents } = makeTestControlWebContents(sendCommand);
+        fromId.mockReturnValue(webContents);
+
+        yield* manager.createTab("tab_explicit_timeout");
+        yield* manager.registerWebview("tab_explicit_timeout", 42);
+        const hung = yield* manager
+          .automationType("tab_explicit_timeout", { text: "hello", timeoutMs: 30_000 })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(14_750);
+
+        expect(hung.pollUnsafe()).toBeUndefined();
+        yield* TestClock.adjust(15_000);
+        const exit = yield* Fiber.await(hung);
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit)) {
+          expect(Option.getOrThrow(Cause.findErrorOption(exit.cause))).toMatchObject({
+            _tag: "PreviewAutomationTimeoutError",
+            timeoutMs: 29_750,
+          });
+        }
+      }),
+    ),
+  );
+
+  effectIt.effect("bounds hung press cleanup and recovers the same tab", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        let keyUpCalls = 0;
+        let markCleanupStarted!: () => void;
+        const cleanupStarted = new Promise<void>((resolve) => {
+          markCleanupStarted = resolve;
+        });
+        const sendCommand = vi.fn((method: string, params?: Record<string, unknown>) => {
+          if (method === "Input.dispatchKeyEvent" && params?.["type"] === "keyUp") {
+            keyUpCalls += 1;
+            if (keyUpCalls === 1) {
+              markCleanupStarted();
+              return new Promise<never>(() => undefined);
+            }
+          }
+          return Promise.resolve(
+            method === "Runtime.evaluate" ? { result: { value: "recovered" } } : undefined,
+          );
+        });
+        const { webContents, attach, detach } = makeTestControlWebContents(sendCommand);
+        fromId.mockReturnValue(webContents);
+
+        yield* manager.createTab("tab_press_cleanup");
+        yield* manager.registerWebview("tab_press_cleanup", 42);
+        const press = yield* manager
+          .automationPress("tab_press_cleanup", { key: "x" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.promise(() => cleanupStarted);
+        expect(keyUpCalls).toBe(1);
+        yield* TestClock.adjust(250);
+
+        expect(Exit.isSuccess(yield* Fiber.await(press))).toBe(true);
+        expect(detach).toHaveBeenCalledOnce();
+        expect(
+          yield* manager.automationEvaluate("tab_press_cleanup", {
+            expression: "document.title",
+          }),
+        ).toBe("recovered");
+        expect(attach).toHaveBeenCalledTimes(2);
+      }),
+    ),
+  );
+
   effectIt.effect("reattaches browser control after Electron detaches the debugger", () =>
     withManager((manager) =>
       Effect.gen(function* () {
@@ -2901,6 +3213,7 @@ describe("PreviewManager", () => {
         const sendCommand = vi.fn(async (method: string) =>
           method === "Runtime.evaluate" ? { result: { value: "ready" } } : undefined,
         );
+        const debuggerOff = vi.fn();
         fromId.mockReturnValue({
           id: 42,
           isDestroyed: () => false,
@@ -2927,7 +3240,7 @@ describe("PreviewManager", () => {
             on: vi.fn((event: string, listener: typeof onDebuggerDetach) => {
               if (event === "detach") onDebuggerDetach = listener;
             }),
-            off: vi.fn(),
+            off: debuggerOff,
           },
         } as never);
 
@@ -2940,12 +3253,12 @@ describe("PreviewManager", () => {
 
         attached = false;
         onDebuggerDetach?.({}, "target closed");
-        yield* Effect.yieldNow;
 
         expect(
           yield* manager.automationEvaluate("tab_detach", { expression: "document.title" }),
         ).toBe("ready");
         expect(attach).toHaveBeenCalledTimes(2);
+        expect(debuggerOff).toHaveBeenCalledWith("detach", expect.any(Function));
       }),
     ),
   );

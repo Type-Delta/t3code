@@ -60,15 +60,15 @@ Provider settings show session and weekly bars, and the active thread header sho
 
 The fork hardens desktop collaborative preview control. A debugger detach invalidates the cached Chrome DevTools Protocol attachment, URL-bearing `preview_open` waits for new and reused tab readiness, and a committed `LoadFailed` state is returned as an automation failure rather than a successful load.
 
-Automation also retries dynamic click/type targets, re-resolves click targets after cursor movement, keeps snapshots coherent across DOM mutations, bounds guest viewport work, and quarantines an unresponsive host so later requests can fail over and recover without reconnecting the environment.
+Automation also retries dynamic click/type targets, re-resolves click targets after cursor movement, keeps snapshots coherent across DOM mutations, bounds guest viewport work, and quarantines an unresponsive host so later requests can fail over and recover without reconnecting the environment. Hung native control work now times out below the broker deadline and detaches only its cached debugger session, so the same tab can reattach instead of retaining a blocked control permit.
 
 Browser development's single-origin Vite proxy behavior, including shared and Tailscale origins, is upstream behavior and is not a fork divergence. Explicit IPv4 loopback URLs remain only for the desktop renderer and local-preview automation, where they protect Windows local routing.
 
 **Implementation evidence:** `apps/desktop/src/preview/Manager.ts`, `apps/web/src/components/preview/`, `apps/server/src/mcp/PreviewAutomationBroker.ts`, `apps/server/src/mcp/toolkits/preview/handlers.ts`, and `packages/contracts/src/previewAutomation.ts`.
 
-**Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage (including stale-host failover and `LoadFailed`); `vp check` and `vp run typecheck`.
+**Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage (including same-tab recovery from stalled CDP and capture work, stale-host failover, and `LoadFailed`); `vp check` and `vp run typecheck`.
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-08-21
 
 ### DL005 — Windows portability in CLI fixtures, Git, and tests
 
