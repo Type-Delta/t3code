@@ -168,6 +168,9 @@ export interface CodexSessionRuntimeShape {
   readonly disposeConversationCursor: (
     cursor: CodexConversationCursor,
   ) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly uploadFeedback: (
+    reason?: string,
+  ) => Effect.Effect<EffectCodexSchema.V2FeedbackUploadResponse, CodexSessionRuntimeError>;
   readonly respondToRequest: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -2313,6 +2316,16 @@ export const makeCodexSessionRuntime = (
             });
           }
           yield* client.request("thread/delete", { threadId: cursor.nativeThreadId });
+        }),
+      uploadFeedback: (reason) =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          return yield* client.request("feedback/upload", {
+            classification: "bug",
+            includeLogs: true,
+            ...(reason ? { reason } : {}),
+            threadId: providerThreadId,
+          });
         }),
       respondToRequest: (requestId, decision) =>
         Effect.gen(function* () {

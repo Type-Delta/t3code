@@ -4,11 +4,15 @@ This fork keeps the Windows reliability, durable checkpointing, and workspace ca
 
 Git repository cache keys use Node's native `realpath` so Windows long paths and their 8.3 aliases share one VCS snapshot and refresh history.
 
-## Upstream sync — 2026-08-17
+## Upstream sync — 2026-08-24
+
+Merged upstream `b4be33f0747445f1c9df126e932c7b9792f322d5` into the fork while preserving durable checkpoints, split workspaces, existing-worktree selection, read-only subagent transcripts, preview recovery, zrok sharing, subscription usage, Windows portability, and desktop backend continuity. The integration adopts upstream Codex feedback, provider lifecycle and liveness fixes, normal-tool activity collapsing, redesigned skill menus, background thread creation, appearance contrast, workspace images, client-origin analytics, remote default-branch fallback, and current web/mobile/desktop packaging fixes. Fork migrations `036`–`045` remain deployed in place; idempotent migration `046` repairs databases that previously followed upstream through migration `041`, and upstream auth-session client metadata is assigned `047`. Upstream lifecycle identity and failure semantics remain authoritative while fork receiver-only child routing, transcript isolation, and clickable subagent rows survive. Closing the last desktop window continues to keep the fork backend alive, while explicit quit adopts upstream's activation guard and destroy-windows-before-shutdown cleanup.
+
+## Previous upstream sync — 2026-08-17
 
 Merged upstream `cd096b9ad5a4156ffeab85de617cbb219057007f` into the fork while preserving durable checkpoints, split workspaces, existing-worktree selection, read-only subagent transcripts, preview recovery, zrok sharing, subscription usage, Windows portability, and desktop backend continuity. The integration adopts upstream pull-request and remote-editor services, project access controls, right-panel maximization and file drops, project favicons, default thread environment modes, usage-resolution changes, and the latest web/mobile/desktop refinements. Fork migrations `036`–`043` remain deployed in place; upstream default-thread-environment and favicon migrations are assigned `044`–`045`. The right-panel store advances to version `12` so pull-request surfaces and fork subagent transcript surfaces coexist, and hourly usage aggregation retains a printable `\u001f` four-part key. Upstream's Codex missing-rollout recovery and hermetic Claude text-generation fixture replace their fork equivalents while the fork's additional assertions and provider behavior remain.
 
-## Previous upstream sync — 2026-08-08
+## Earlier upstream sync — 2026-08-08
 
 Merged upstream `8101cd044911c7dc2a2adf7c7a9ba7962abf57b6` into the fork while preserving durable checkpoints, existing-worktree selection, split workspaces, and read-only subagent transcripts. The integration adopts upstream native agent/workflow observability as the lifecycle authority and keeps transcript events agent-scoped outside the parent timeline: native child message completions finalize their matching transcript, persisted child rows enable transcript access from the matching agent row, transcript headers use native lifecycle metadata, child rows stay out of web and mobile parent feeds, and bounded thread-detail reads retain subagent identity. Paginated clients persist the requested user-turn width so checkpoint navigation refreshes the complete loaded window. The latest upstream additions provide main-window desktop zoom controls, a consolidated mobile thread-settings sheet, and cross-environment provider transcript usage reporting; composite in-memory keys use printable source escapes so repository tools continue treating their TypeScript as text. Fork migrations remain `36`–`40`; upstream pinning and pagination migrations are assigned `41`–`43` to preserve deployed fork databases.
 
@@ -18,7 +22,7 @@ Merged upstream `0ad91b6e7fc1fcb6d5f4bc736d84c337e912bc62` into the fork without
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `cd096b9ad5a4156ffeab85de617cbb219057007f`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `b4be33f0747445f1c9df126e932c7b9792f322d5`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -90,15 +94,17 @@ SQLite persists capture jobs, immutable checkpoint entries, timeline generations
 
 Fork migrations `036`–`038` establish the durable checkpoint state (`036_CheckpointDurableState`, `037_CheckpointLegacyMigration`, and `038_CheckpointCaptureProviderMetadata`). Upstream lifecycle and title-regeneration migrations retain canonical IDs `033`–`035`; idempotent migration `039_ReconcileCheckpointAndTitleHistory` replays the `036`–`038` checkpoint schema before supplying checkpoint navigation mode and title-regeneration columns for upstream-ledger databases that skipped those fork migrations.
 
+Migration `046_ReconcileUpstream41History` extends that repair path for databases already carrying upstream ledger entries `036`–`041`: it idempotently restores checkpoint state, navigation metadata, and both subagent projection columns before upstream auth-session client metadata runs as migration `047`.
+
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
-**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
+**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,047_AuthSessionClientConnection}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
 
-**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
+**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
 
-**Last updated:** 2026-08-10
+**Last updated:** 2026-08-24
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -110,7 +116,7 @@ Split membership is persisted as multiple ordered local groups with active state
 
 **Recorded validation:** split-store, sidebar, workspace, right-panel, and drag/drop tests; web typecheck; `vp check`; `git diff --check`; and Electron runtime verification of context menus, routing, pane layout, persistent groups, and right-panel attribution.
 
-**Last updated:** 2026-08-17
+**Last updated:** 2026-08-24
 
 ### DL012 — Prompt preservation during draft promotion
 
@@ -126,13 +132,13 @@ The initial optimistic prompt remains visible while a draft route becomes its se
 
 Codex model and skill discovery is bounded, optional catalog enrichment after a healthy authenticated app-server session starts. Catalog failure cannot replace that healthy snapshot with a provider-status error.
 
-App-server errors are classified by scope: retryable transport errors remain warnings, while a typed non-retryable turn error emits the terminal failed-turn lifecycle needed to release the thread for a follow-up message. A root Codex collaboration `wait` that remains open for 30 minutes is failed explicitly after bounded child-then-parent interruption; matching item or turn completion cancels that deadline. Actual process or transport failure still marks the session unavailable.
+App-server errors are classified by scope: retryable transport errors remain warnings, while a typed non-retryable turn error emits the terminal failed-turn lifecycle needed to release the thread for a follow-up message. A root Codex collaboration `wait` that remains open for 30 minutes is failed explicitly after bounded child-then-parent interruption; matching item or turn completion cancels that deadline. Actual process or transport failure still marks the session unavailable. Upstream terminal-state, hard-stop, tool-identity, and liveness fixes remain authoritative; in particular, a late collaboration `interacted` event can enrich an existing child without restarting one that already completed.
 
 **Implementation evidence:** `apps/server/src/provider/Layers/{CodexProvider,CodexSessionRuntime,CodexAdapter}.ts`, `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`, and `packages/contracts/src/providerRuntime.ts`.
 
-**Recorded validation:** focused Codex adapter, collaboration-runtime, and provider-runtime ingestion tests, `vp check`, and `vp run typecheck`.
+**Recorded validation:** focused Codex adapter, collaboration-runtime, provider-runtime ingestion, mixed-tool lifecycle, and transfer-budget tests, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-08-17
+**Last updated:** 2026-08-24
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 
@@ -215,6 +221,8 @@ tool keeps its native started/completed rows and complete output alongside task 
 reactivates an existing child, while later thread-start or subagent-activity metadata enriches the
 identity without restarting a settled task. Only root-owned routing items can provision children,
 so nested child activity and child-to-root input cannot suppress or pollute the root transcript.
+Upstream `sourceActivityKind` semantics and normal-tool collapsing apply to ordinary work-log rows. Fork-owned subagent lifecycle rows remain visible and clickable instead of collapsing away, preserving transcript navigation and native child attribution.
+
 The main timeline names started, messaged, resumed, waited, stopped,
 interrupted, failed, and finished subagent operations instead of grouping them under a generic
 task label. Only spawn/resume events can establish child routing, so a child message sent back to
@@ -245,11 +253,11 @@ the synthesized spawn/resume lifecycle, late metadata ordering, parent-route iso
 child-scoped tool and assistant items. Adapter and ingestion regressions preserve each child tool's
 full native lifecycle and terminal output through projection.
 
-**Last updated:** 2026-08-19
+**Last updated:** 2026-08-24
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
-Closing the last desktop window leaves Electron's main process and local T3 backend running. Launching the desktop app again activates or recreates the window against that existing backend, while explicit quit, update, and signal shutdown paths retain their normal cleanup semantics. This is intentionally process-local continuity rather than a detached provider daemon: an Electron main-process crash or OS-forced termination still ends the backend.
+Closing the last desktop window leaves Electron's main process and local T3 backend running. Launching the desktop app again activates or recreates the window against that existing backend, while explicit quit, update, and signal shutdown paths retain their normal cleanup semantics. Explicit quit now ignores activation while shutdown is underway and destroys renderer windows before backend cleanup, adopting upstream's cleanup ordering without changing the fork's last-window policy. This is intentionally process-local continuity rather than a detached provider daemon: an Electron main-process crash or OS-forced termination still ends the backend.
 
 On Windows, the standalone service launcher terminates the known server PID and its descendants during stop, update, and fatal shutdown. This prevents launcher-owned provider processes from surviving as orphaned Codex writers without scanning or killing processes by name; direct-child signaling remains the fallback when process-tree termination fails.
 
@@ -257,7 +265,7 @@ On Windows, the standalone service launcher terminates the known server PID and 
 
 **Recorded validation:** focused desktop lifecycle and Windows process-tree integration tests, `vp check`, `vp run typecheck`, and `git diff --check`.
 
-**Last updated:** 2026-08-10
+**Last updated:** 2026-08-24
 
 ### DL020 — Provider turns survive stalled checkpoint captures
 
@@ -273,13 +281,13 @@ Checkpoint workers also reclaim expired leases while the server remains running,
 
 ### DL021 — Clickable Windows file links in thread Markdown
 
-Thread Markdown preserves local Windows drive-letter destinations through URL sanitization and resolves the encoded backslash form emitted by the Markdown parser. These links open through the existing file chip behavior instead of rendering as inert anchors.
+Thread Markdown preserves local Windows drive-letter destinations through URL sanitization and resolves the encoded backslash form emitted by the Markdown parser. These links open through the existing file chip behavior instead of rendering as inert anchors. This coexists with upstream workspace images, spaced-folder command-click handling, contrast-aware annotation styling, and full-path link tooltips.
 
 **Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx` and `apps/web/src/markdown-links.test.ts`.
 
 **Recorded validation:** focused Markdown link tests, an isolated paired web-client pass with a drive-letter link in both user and assistant messages, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-08-15
+**Last updated:** 2026-08-24
 
 ### DL022 — Ephemeral zrok public sharing from Connection Settings
 
@@ -300,6 +308,22 @@ An active zrok endpoint is merged into the advertised endpoint list and is the a
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-08-24 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `2382ae6d4824f4eea30d96404f7b22df5309c05e` (fork) and `b4be33f0747445f1c9df126e932c7b9792f322d5` (upstream/main)
+
+The integration made these semantic choices:
+
+- **Persistence migrations:** preserved deployed fork migrations `036`–`045`, added idempotent migration `046` to reconcile databases that previously followed upstream through `041`, and assigned upstream auth-session client metadata to `047`.
+- **Providers and orchestration:** adopted upstream feedback upload, hard-stop handling, lifecycle identity, liveness, mixed-tool failure, and terminal-state fixes while retaining fork checkpoint navigation, provider health behavior, receiver-only Codex child routing, Claude child persistence, and parent transcript isolation.
+- **Tool and subagent UI:** adopted upstream work-log source semantics and collapsing for ordinary tools while retaining visible, clickable fork subagent rows, transcript actions, native lifecycle metadata, and split-pane/right-panel ownership.
+- **Composer and Markdown:** combined upstream skill menus, background thread creation, draft recovery, workspace images, link tooltips, and appearance contrast with fork checkpoint commands, prompt preservation, workspace context, and Windows drive-letter links.
+- **Desktop and preview:** retained last-window backend continuity and bounded preview automation recovery while adopting upstream explicit-quit cleanup, activation guard, hidden-preview throttling, and current updater behavior.
+- **Git, dependencies, and packaging:** kept existing-worktree selection, patched Claude SDK pinning, native binary exclusions, and zrok sharing alongside upstream remote default-branch, pull-request association, Clerk, release, and package updates.
+- **Repository cleanup:** adopted upstream removal of obsolete plans, PR assets, preview loading helpers, marketing architecture helpers, and superseded skill-presentation helpers.
+- **Post-merge QA:** focused conflict and regression suites passed, including the upstream-ledger migration through `047`, provider/orchestration contracts, web/mobile timeline behavior, desktop lifecycle/preview, and the rebaselined per-snapshot transfer budget. `vp check`, `vp run typecheck`, and `vp run lint:mobile` passed on Node `24.13.1`; the mobile wrapper skipped unavailable SwiftLint, ktlint, and detekt binaries. An isolated paired web client rendered the merged command/skill UI, created a real thread, and received a provider response. Representative mobile emulator verification was unavailable because this Windows host has no Android SDK or ADB and cannot run iOS Simulator tooling.
 
 ### 2026-08-17 — Merge upstream/main into main
 

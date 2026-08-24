@@ -964,7 +964,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
           initializationProbeStatus: "not-run",
         },
         message: isCommandMissingCause(error)
-          ? "Claude Agent CLI (`claude`) is not installed or not on PATH."
+          ? "Claude Agent CLI (`claude`) was not found on PATH."
           : "Failed to execute Claude Agent CLI health check.",
       },
     });
