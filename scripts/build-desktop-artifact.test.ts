@@ -21,6 +21,7 @@ import {
   DESKTOP_ELECTRON_LANGUAGES,
   DESKTOP_FILE_EXCLUSIONS,
   DESKTOP_EXTRA_RESOURCES,
+  DESKTOP_TRAY_TEMPLATE_FILES,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
   InvalidMockUpdateServerPortError,
@@ -427,6 +428,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         to: ".",
         filter: ["server.asar", "server.asar.unpacked/**/*"],
       },
+    ]);
+    assert.deepStrictEqual(DESKTOP_TRAY_TEMPLATE_FILES, [
+      "trayTemplate.png",
+      "trayTemplate@2x.png",
     ]);
   });
 

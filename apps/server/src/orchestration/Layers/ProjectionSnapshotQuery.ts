@@ -124,6 +124,10 @@ const ProjectionCountsRowSchema = Schema.Struct({
   projectCount: Schema.Number,
   threadCount: Schema.Number,
 });
+const ProjectionActiveThreadStatusRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  status: Schema.NullOr(ProjectionThreadSession.fields.status),
+});
 const ProjectionThreadSearchRequest = Schema.Struct({
   pattern: Schema.String,
   limit: Schema.Int,
@@ -797,6 +801,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           (SELECT COUNT(*) FROM projection_projects) AS "projectCount",
           (SELECT COUNT(*) FROM projection_threads) AS "threadCount"
+      `,
+  });
+
+  const listActiveThreadStatusRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionActiveThreadStatusRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          threads.thread_id AS "threadId",
+          sessions.status
+        FROM projection_threads threads
+        LEFT JOIN projection_thread_sessions sessions
+          ON sessions.thread_id = threads.thread_id
+        WHERE threads.deleted_at IS NULL
+          AND threads.archived_at IS NULL
       `,
   });
 
@@ -2521,6 +2541,26 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       ),
     );
 
+  const getRunningThreadCount: ProjectionSnapshotQueryShape["getRunningThreadCount"] = () =>
+    listActiveThreadStatusRows(undefined).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getRunningThreadCount:query",
+          "ProjectionSnapshotQuery.getRunningThreadCount:decodeRows",
+        ),
+      ),
+      Effect.map(
+        (rows) =>
+          rows.filter(
+            (row) =>
+              row.status === "starting" ||
+              row.status === "running" ||
+              (row.status !== "error" &&
+                threadBackgroundLiveness.getThreadBackgroundLiveness(row.threadId) !== null),
+          ).length,
+      ),
+    );
+
   const searchThreads: ProjectionSnapshotQueryShape["searchThreads"] = Effect.fn(
     "ProjectionSnapshotQuery.searchThreads",
   )(function* (input) {
@@ -3185,6 +3225,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     searchThreads,
     getSnapshotSequence,
     getCounts,
+    getRunningThreadCount,
     getActiveProjectByWorkspaceRoot,
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,

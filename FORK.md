@@ -257,13 +257,13 @@ full native lifecycle and terminal output through projection.
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
-Closing the last desktop window leaves Electron's main process and local T3 backend running. Launching the desktop app again activates or recreates the window against that existing backend, while explicit quit, update, and signal shutdown paths retain their normal cleanup semantics. Explicit quit now ignores activation while shutdown is underway and destroys renderer windows before backend cleanup, adopting upstream's cleanup ordering without changing the fork's last-window policy. This is intentionally process-local continuity rather than a detached provider daemon: an Electron main-process crash or OS-forced termination still ends the backend.
+Closing the last desktop window leaves Electron's main process and local T3 backend running. A native OS tray or status item keeps the app discoverable, opens or activates the window, and shows a live count of threads with active foreground or background work. Launching the desktop app again activates or recreates the window against that existing backend, while explicit quit terminates the backend through the owned lifecycle and update and signal shutdown paths retain their normal cleanup semantics. Explicit quit now ignores activation while shutdown is underway and destroys renderer windows before backend cleanup, adopting upstream's cleanup ordering without changing the fork's last-window policy. This is intentionally process-local continuity rather than a detached provider daemon: an Electron main-process crash or OS-forced termination still ends the backend.
 
 On Windows, the standalone service launcher terminates the known server PID and its descendants during stop, update, and fatal shutdown. This prevents launcher-owned provider processes from surviving as orphaned Codex writers without scanning or killing processes by name; direct-child signaling remains the fallback when process-tree termination fails.
 
-**Implementation evidence:** `apps/desktop/src/app/DesktopLifecycle.ts` and `apps/server/src/serviceLauncher.ts`.
+**Implementation evidence:** desktop lifecycle and native tray/status-item modules and their focused tests under `apps/desktop/src/`, dedicated macOS template-image assets and packaging checks, the count-only orchestration HTTP contract and projection query, plus `apps/server/src/serviceLauncher.ts`.
 
-**Recorded validation:** focused desktop lifecycle and Windows process-tree integration tests, `vp check`, `vp run typecheck`, and `git diff --check`.
+**Recorded validation:** focused desktop tray, lifecycle, running-count projection, packaging, and Windows process-tree integration tests; Windows notification-area runtime verification of the count, open, and graceful quit controls; `vp check`; `vp run typecheck`; and `git diff --check`.
 
 **Last updated:** 2026-08-24
 

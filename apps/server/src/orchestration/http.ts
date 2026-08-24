@@ -61,6 +61,25 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "runningThreadCount",
+        Effect.fn("environment.orchestration.runningThreadCount")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const getRunningThreadCount = projectionSnapshotQuery.getRunningThreadCount;
+          if (getRunningThreadCount === undefined) {
+            return yield* failEnvironmentInternal(
+              "orchestration_snapshot_failed",
+              new Error("Running thread count query is unavailable"),
+            );
+          }
+          return yield* getRunningThreadCount().pipe(
+            Effect.catch((cause) =>
+              failEnvironmentInternal("orchestration_snapshot_failed", cause),
+            ),
+          );
+        }),
+      )
+      .handle(
         "threadSnapshot",
         Effect.fn("environment.orchestration.threadSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);

@@ -56,6 +56,7 @@ import * as DesktopSshEnvironment from "./ssh/DesktopSshEnvironment.ts";
 import * as DesktopSshPasswordPrompts from "./ssh/DesktopSshPasswordPrompts.ts";
 import * as DesktopState from "./app/DesktopState.ts";
 import * as DesktopTelemetryPublisher from "./telemetry/DesktopTelemetryPublisher.ts";
+import * as DesktopTray from "./app/DesktopTray.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as BrowserSession from "./preview/BrowserSession.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -187,6 +188,7 @@ const desktopApplicationLayer = Layer.mergeAll(
   DesktopApplicationMenu.layer,
   DesktopLinuxUrlHandler.layer,
   DesktopShellEnvironment.layer,
+  DesktopTray.layer,
   desktopSshLayer,
 ).pipe(
   Layer.provideMerge(DesktopUpdates.layer),

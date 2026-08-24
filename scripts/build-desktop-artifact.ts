@@ -853,6 +853,7 @@ export const DESKTOP_EXTRA_RESOURCES = [
     to: "resource-monitor",
   },
 ] as const;
+export const DESKTOP_TRAY_TEMPLATE_FILES = ["trayTemplate.png", "trayTemplate@2x.png"] as const;
 
 export interface MacPasskeySigningConfiguration {
   readonly appId: string;
@@ -2209,6 +2210,14 @@ const assertPlatformBuildResources = Effect.fn("assertPlatformBuildResources")(f
   verbose: boolean,
 ) {
   if (platform === "mac") {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    for (const fileName of DESKTOP_TRAY_TEMPLATE_FILES) {
+      const sourcePath = path.join(stageResourcesDir, fileName);
+      if (!(yield* fs.exists(sourcePath))) {
+        return yield* new DesktopIconSourceMissingError({ platform, sourcePath });
+      }
+    }
     yield* stageMacIcons(stageResourcesDir, iconAssets.macIconPng, verbose);
     return;
   }

@@ -131,6 +131,9 @@ export interface ProjectionSnapshotQueryShape {
    */
   readonly getCounts: () => Effect.Effect<ProjectionSnapshotCounts, ProjectionRepositoryError>;
 
+  /** Count active threads whose session or background work is running. */
+  readonly getRunningThreadCount?: () => Effect.Effect<number, ProjectionRepositoryError>;
+
   /**
    * Read the active project for an exact workspace root match.
    */

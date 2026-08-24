@@ -27,6 +27,7 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+import * as DesktopTray from "./DesktopTray.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
@@ -230,6 +231,7 @@ const startup = Effect.gen(function* () {
   const preReadyElectronOptions = yield* DesktopPreReadyPlatform.DesktopPreReadyElectronOptions;
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
   const updates = yield* DesktopUpdates.DesktopUpdates;
+  const tray = yield* DesktopTray.DesktopTray;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
 
   yield* shellEnvironment.installIntoProcess;
@@ -285,6 +287,7 @@ const startup = Effect.gen(function* () {
   }
   yield* appIdentity.configure;
   yield* applicationMenu.configure;
+  yield* tray.configure;
   yield* updates.configure;
   yield* linuxUrlHandler.register;
   yield* bootstrap.pipe(Effect.catchCause((cause) => fatalStartupCause("bootstrap", cause)));

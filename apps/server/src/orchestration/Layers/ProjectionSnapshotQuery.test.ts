@@ -30,7 +30,7 @@ const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(val
 
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
-    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provideMerge(ThreadBackgroundLiveness.layer),
     Layer.provide(ThreadPlanProgress.layer),
     Layer.provideMerge(RepositoryIdentityResolver.layer),
     Layer.provideMerge(SqlitePersistenceMemory),
@@ -39,6 +39,86 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("counts only active running sessions and live background work", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const liveness = yield* ThreadBackgroundLiveness.ThreadBackgroundLivenessService;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, default_model_selection_json,
+          scripts_json, created_at, updated_at, deleted_at
+        ) VALUES (
+          'count-project', 'Count project', '/tmp/count-project',
+          '{"provider":"codex","model":"gpt-5-codex"}', '[]',
+          '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z', NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, branch, worktree_path, latest_turn_id,
+          latest_user_message_at, pending_approval_count, pending_user_input_count,
+          has_actionable_proposed_plan, created_at, updated_at, archived_at, deleted_at
+        ) VALUES
+          ('starting', 'count-project', 'Starting', '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0, '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z', NULL, NULL),
+          ('running', 'count-project', 'Running', '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0, '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z', NULL, NULL),
+          ('failed-live', 'count-project', 'Failed live', '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0, '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z', NULL, NULL),
+          ('ready-live', 'count-project', 'Ready live', '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0, '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z', NULL, NULL),
+          ('sessionless-live', 'count-project', 'Sessionless live', '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0, '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z', NULL, NULL),
+          ('archived-live', 'count-project', 'Archived live', '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0, '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:01.000Z', NULL),
+          ('deleted-live', 'count-project', 'Deleted live', '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default', NULL, NULL, NULL, NULL, 0, 0, 0, '2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z', NULL, '2026-08-24T00:00:01.000Z')
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id, status, provider_name, runtime_mode, active_turn_id, last_error, updated_at
+        ) VALUES
+          ('starting', 'starting', 'codex', 'full-access', NULL, NULL, '2026-08-24T00:00:00.000Z'),
+          ('running', 'running', 'codex', 'full-access', NULL, NULL, '2026-08-24T00:00:00.000Z'),
+          ('failed-live', 'error', 'codex', 'full-access', NULL, 'failed', '2026-08-24T00:00:00.000Z'),
+          ('ready-live', 'ready', 'codex', 'full-access', NULL, NULL, '2026-08-24T00:00:00.000Z')
+      `;
+
+      for (const threadId of [
+        "failed-live",
+        "ready-live",
+        "sessionless-live",
+        "archived-live",
+        "deleted-live",
+      ]) {
+        liveness.recordTaskLiveness({
+          threadId,
+          taskId: `task-${threadId}`,
+          taskType: "agent",
+          status: "running",
+          kind: "started",
+        });
+      }
+
+      const getRunningThreadCount = snapshotQuery.getRunningThreadCount;
+      if (getRunningThreadCount === undefined) {
+        assert.fail("Expected running thread count query");
+      }
+      assert.equal(yield* getRunningThreadCount(), 4);
+      for (const threadId of [
+        "failed-live",
+        "ready-live",
+        "sessionless-live",
+        "archived-live",
+        "deleted-live",
+      ]) {
+        liveness.clearThreadLiveness(threadId);
+      }
+      yield* sql`DELETE FROM projection_thread_sessions`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

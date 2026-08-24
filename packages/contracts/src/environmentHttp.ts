@@ -24,7 +24,7 @@ import {
   AuthWebSocketTicketResult,
   ServerAuthSessionMethod,
 } from "./auth.ts";
-import { AuthSessionId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { AuthSessionId, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
   ClientOrchestrationCommand,
@@ -509,6 +509,13 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
     HttpApiEndpoint.get("shellSnapshot", "/api/orchestration/shell", {
       headers: OptionalBearerHeaders,
       success: OrchestrationShellSnapshot,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("runningThreadCount", "/api/orchestration/running-thread-count", {
+      headers: OptionalBearerHeaders,
+      success: NonNegativeInt,
       error: EnvironmentOrchestrationSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
