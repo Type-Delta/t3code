@@ -303,6 +303,30 @@ An active zrok endpoint is merged into the advertised endpoint list and is the a
 
 **Last updated:** 2026-08-16
 
+### DL023 — Environment-scoped agent thread tools
+
+Codex, Claude Code, Cursor, Grok, and OpenCode agents can create, list, read, message, and wait
+on durable T3 threads in their current environment. These threads are user-visible conversations,
+distinct from the providers' internal subagents. New work can stay in the current checkout or use
+a new Git worktree. The caller's permission mode applies to a new thread, while a message sent to
+an existing thread keeps that thread's mode.
+
+The tools share the server-owned provider MCP credential. They cannot access another environment,
+and a thread cannot message itself. Lists default to 50 threads and cap at 200. Reads default to
+10 turns, hide output, and cap at 50 turns and 20,000 characters per item. Wait targets are
+limited to eight threads and five minutes. A failed worktree bootstrap closes its setup terminal,
+deletes the durable thread, removes the worktree when safe, and then removes its generated branch.
+
+**Implementation evidence:** `packages/contracts/src/threadTools.ts`,
+`apps/server/src/mcp/{McpHttpServer,McpSessionRegistry,toolkits/threads}/`,
+`apps/server/src/orchestration/ThreadCommandDispatcher.ts`, and the existing product MCP provider
+integration.
+
+**Recorded validation:** focused thread-tool contract, MCP, dispatcher, and Codex developer
+instruction tests, plus `vp check` and `vp run typecheck`.
+
+**Last updated:** 2026-08-24
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

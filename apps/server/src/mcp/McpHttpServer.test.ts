@@ -7,12 +7,17 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
-import { McpProtocol, McpSchema, McpServer } from "effect/unstable/ai";
+import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
 
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ThreadCommandDispatcher from "../orchestration/ThreadCommandDispatcher.ts";
+import { ThreadToolkit } from "./toolkits/threads/tools.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -39,6 +44,36 @@ const client = McpSchema.McpServerClient.of({
 const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer))),
+);
+const ThreadRegistrationTestLayer = McpHttpServer.McpToolkitRegistrationLive.pipe(
+  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer))),
+  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(
+    Layer.succeed(
+      ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+      {} as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"],
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.succeed(
+      ThreadCommandDispatcher.ThreadCommandDispatcher,
+      {} as ThreadCommandDispatcher.ThreadCommandDispatcher["Service"],
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.succeed(
+      OrchestrationEngine.OrchestrationEngineService,
+      {} as OrchestrationEngine.OrchestrationEngineService["Service"],
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.succeed(
+      GitWorkflowService.GitWorkflowService,
+      {} as GitWorkflowService.GitWorkflowService["Service"],
+    ),
+  ),
+  Layer.provideMerge(Layer.succeed(McpInvocationContext.McpInvocationContext, invocation)),
 );
 
 it("normalizes empty successful notification responses to accepted", () => {
@@ -354,3 +389,60 @@ it.effect("registers annotated tools and preserves authenticated request context
     }),
   ).pipe(Effect.provide(TestLayer)),
 );
+
+it.effect("registers the thread toolkit alongside preview", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const create = server.tools.find(({ tool }) => tool.name === "create_thread");
+    expect(create?.tool.annotations).toMatchObject({
+      title: "Create thread",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+    });
+
+    const read = server.tools.find(({ tool }) => tool.name === "read_thread");
+    expect(read?.tool.annotations).toMatchObject({
+      title: "Read thread",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    });
+
+    const wait = server.tools.find(({ tool }) => tool.name === "wait_threads");
+    expect(wait?.tool.annotations).toMatchObject({
+      title: "Wait for threads",
+      readOnlyHint: true,
+      idempotentHint: false,
+    });
+  }).pipe(Effect.provide(ThreadRegistrationTestLayer)),
+);
+
+it("keeps optional thread defaults optional in generated MCP schemas", () => {
+  const listSchema = Tool.getJsonSchema(ThreadToolkit.tools.list_threads) as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+    readonly required?: ReadonlyArray<string>;
+  };
+  const readSchema = Tool.getJsonSchema(ThreadToolkit.tools.read_thread) as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+    readonly required?: ReadonlyArray<string>;
+  };
+  const hasNull = (value: unknown): boolean => {
+    if (value === "null") return true;
+    if (Array.isArray(value)) return value.some(hasNull);
+    return typeof value === "object" && value !== null && Object.values(value).some(hasNull);
+  };
+
+  expect(listSchema.required ?? []).not.toContain("limit");
+  expect(readSchema.required ?? []).not.toEqual(
+    expect.arrayContaining(["turnLimit", "includeOutputs", "maxOutputCharsPerItem"]),
+  );
+  for (const schema of [
+    listSchema.properties?.limit,
+    readSchema.properties?.turnLimit,
+    readSchema.properties?.includeOutputs,
+    readSchema.properties?.maxOutputCharsPerItem,
+  ]) {
+    expect(hasNull(schema)).toBe(false);
+  }
+});

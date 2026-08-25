@@ -363,6 +363,27 @@ describe("T3 browser developer instructions", () => {
   });
 });
 
+describe("T3 thread developer instructions", () => {
+  it("distinguishes durable user-visible threads from native subagents", () => {
+    for (const instructions of [
+      codexDefaultModeDeveloperInstructions(true),
+      codexPlanModeDeveloperInstructions(true),
+    ]) {
+      NodeAssert.match(instructions, /durable, user-visible T3 threads/);
+      NodeAssert.match(instructions, /native subagents for private, short-lived fan-out/);
+    }
+  });
+
+  it("omits thread guidance when the product MCP server is unavailable", () => {
+    for (const instructions of [
+      codexDefaultModeDeveloperInstructions(false),
+      codexPlanModeDeveloperInstructions(false),
+    ]) {
+      NodeAssert.doesNotMatch(instructions, /T3 Code threads/);
+    }
+  });
+});
+
 describe("hasConfiguredMcpServer", () => {
   it("detects inline Codex MCP configuration arguments", () => {
     NodeAssert.equal(hasConfiguredMcpServer(undefined), false);

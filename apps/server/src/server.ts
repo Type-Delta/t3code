@@ -75,6 +75,7 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { CheckpointNavigationReactorLive } from "./orchestration/Layers/CheckpointNavigationReactor.ts";
 import { CheckpointNavigationReactor } from "./orchestration/Services/CheckpointNavigationReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import * as ThreadCommandDispatcher from "./orchestration/ThreadCommandDispatcher.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
@@ -773,7 +774,7 @@ export const makeServerLayer = Layer.unwrap(
       }),
     );
 
-    const runtimeServicesLive = ServerRuntimeStartup.layerWithOptions({
+    const runtimeStartupLayer = ServerRuntimeStartup.layerWithOptions({
       activate: Deferred.succeed(activation, undefined).pipe(Effect.asVoid),
       abort: (error) => Deferred.die(activation, error).pipe(Effect.asVoid),
       awaitAuxiliaryParked: Effect.all(
@@ -785,7 +786,12 @@ export const makeServerLayer = Layer.unwrap(
         ],
         { concurrency: "unbounded" },
       ).pipe(Effect.asVoid),
-    }).pipe(Layer.provideMerge(RuntimeDependenciesLive), Layer.provide(launcherLayer));
+    });
+    const runtimeServicesLive = ThreadCommandDispatcher.ThreadCommandDispatcherLive.pipe(
+      Layer.provideMerge(runtimeStartupLayer),
+      Layer.provideMerge(RuntimeDependenciesLive),
+      Layer.provide(launcherLayer),
+    );
 
     const routesLayer = HttpRouter.serve(makeRoutesLayer.pipe(Layer.provide(launcherLayer)), {
       disableLogger: !config.logWebSocketEvents,

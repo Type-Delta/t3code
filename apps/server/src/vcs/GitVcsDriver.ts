@@ -141,6 +141,12 @@ export interface GitRenameBranchResult {
   branch: string;
 }
 
+export interface GitDeleteRefInput {
+  readonly cwd: string;
+  readonly refName: string;
+  readonly force: boolean;
+}
+
 export interface GitFetchPullRequestBranchInput {
   cwd: string;
   prNumber: number;
@@ -315,6 +321,7 @@ export class GitVcsDriver extends Context.Service<
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
     ) => Effect.Effect<void, GitCommandError>;
+    readonly deleteRef: (input: GitDeleteRefInput) => Effect.Effect<void, GitCommandError>;
     readonly renameBranch: (
       input: GitRenameBranchInput,
     ) => Effect.Effect<GitRenameBranchResult, GitCommandError>;

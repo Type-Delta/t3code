@@ -1509,6 +1509,13 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
         yield* driver.removeWorktree({ cwd, path: worktreePath });
         const fileSystem = yield* FileSystem.FileSystem;
         assert.equal(yield* fileSystem.exists(worktreePath), false);
+
+        yield* driver.deleteRef({ cwd, refName: "feature/worktree", force: true });
+        const refs = yield* driver.listRefs({ cwd, refresh: true });
+        assert.equal(
+          refs.refs.some((ref) => ref.name === "feature/worktree"),
+          false,
+        );
       }),
     );
   });
