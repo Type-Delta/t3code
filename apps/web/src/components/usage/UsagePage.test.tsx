@@ -107,4 +107,38 @@ describe("UsagePage hourly breakdown", () => {
     expect(body).toContain("$13.00");
     expect(body.indexOf("$11.00")).toBeLessThan(body.indexOf("$13.00"));
   });
+
+  it("shows answered usage while another environment is still reporting", () => {
+    testState.useUsage.mockReturnValue({
+      merged: {
+        ...mergeUsage([], USAGE_CONTRACT_VERSION),
+        costUsd: 42,
+        sessions: 2,
+      },
+      environments: [
+        {
+          environmentId: "answered",
+          label: "Answered host",
+          isPending: false,
+          error: null,
+          summary: {},
+        },
+        {
+          environmentId: "pending",
+          label: "Pending host",
+          isPending: true,
+          error: null,
+          summary: null,
+        },
+      ],
+      isPending: false,
+      isPartial: true,
+      refresh: vi.fn(),
+    });
+
+    const markup = renderToStaticMarkup(<UsagePage />);
+
+    expect(markup).toContain("$42.00");
+    expect(markup).toContain("1 device still scanning");
+  });
 });

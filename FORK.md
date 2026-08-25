@@ -327,6 +327,21 @@ instruction tests, plus `vp check` and `vp run typecheck`.
 
 **Last updated:** 2026-08-24
 
+### DL024 — Progressive multi-environment usage
+
+The web Usage page shows totals as soon as one environment reports them. A device progress strip
+keeps the remaining scans visible, and the page updates the merged totals as later results arrive.
+Mobile already follows the same progressive behavior.
+
+**Implementation evidence:** `apps/web/src/components/usage/UsagePage.tsx`,
+`apps/web/src/components/usage/UsagePage.test.tsx`, and `docs/user/usage.md`.
+
+**Recorded validation:** focused Usage page regression coverage, an isolated two-environment
+browser pass that displayed first-host totals while the second host was still scanning,
+`vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-08-25
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

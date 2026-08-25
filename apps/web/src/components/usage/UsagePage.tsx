@@ -52,11 +52,6 @@ export function UsagePage() {
   const isPast24Hours = windowDays === 1;
   const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
 
-  // Hold the content until every environment is terminal. Rendering merged
-  // totals while devices are still answering makes every number on the page
-  // jump as each one lands.
-  const settling = isPending || isPartial;
-
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
     [window.sinceDay, window.untilDay],
@@ -197,11 +192,11 @@ export function UsagePage() {
 
         <ScrollArea className="min-h-0 flex-1">
           <WorkspacePageContainer width="wide">
-            {settling ? (
-              <>
-                {environments.length > 1 ? <UsageDeviceStrip environments={environments} /> : null}
-                <UsageSkeleton />
-              </>
+            {environments.length > 1 && (isPending || isPartial) ? (
+              <UsageDeviceStrip environments={environments} />
+            ) : null}
+            {isPending ? (
+              <UsageSkeleton />
             ) : (
               <>
                 <UsageCoverageNotice
@@ -457,10 +452,9 @@ function Metric({ label, value }: { readonly label: string; readonly value: stri
 }
 
 /**
- * Says plainly when the totals are incomplete: an environment that failed, or
- * one whose transcripts another environment already reported. Environments
- * that are still answering never reach this notice; the page shows the
- * loading skeleton until every one is terminal.
+ * Says plainly when an environment failed or another environment already
+ * reported its transcripts. The device strip covers environments still
+ * answering.
  */
 function UsageCoverageNotice({
   environments,
@@ -500,9 +494,8 @@ function UsageCoverageNotice({
 }
 
 /**
- * Per-device progress while the page waits for every environment to answer.
- * Only rendered with two or more devices; a lone device has nothing to
- * enumerate.
+ * Per-device progress while environments answer. Only rendered with two or
+ * more devices; a lone device has nothing to enumerate.
  */
 function UsageDeviceStrip({
   environments,
@@ -557,7 +550,7 @@ function UsageDeviceStrip({
 
 /**
  * Static stand-in with the loaded page's shape. No shimmer; blocks fill in
- * exactly once when the last device answers.
+ * when the first device answers.
  */
 function UsageSkeleton() {
   return (
