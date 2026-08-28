@@ -32,7 +32,7 @@ If you are tasked with syncing this fork with the upstream T3 Code repository, p
 - If you are unsure about how to proceed, please ask me for guidance.
 - This is not a "fix merge conflicts" task, you have to make sure that all features are behaving as expected and that those features make sense together both functionally, aesthetically and user experience. An app that works isn't necessarily a good app.
 - After all the code related changes are done (merged, fixed, verified, finalized/cleanup), do the following:
-  - Update "Upstream sync", "Divergence Log" and "Merge History" sections in FORK.md with the latest changes.
+  - Update "Divergence Log" and "Merge History" sections in FORK.md with the latest changes.
   - Commit merge changes in a single commit with a clear message describing the merge decisions made.
   - Move the "base" tag to the commit you just created. Force pushing this tag is fine since its only used for reference. (if `gdx` are available, you can use `gdx tag mv base ~0` to move "base" to the latest commit)
 
