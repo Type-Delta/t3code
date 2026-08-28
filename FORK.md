@@ -4,11 +4,15 @@ This fork keeps the Windows reliability, durable checkpointing, and workspace ca
 
 Git repository cache keys use Node's native `realpath` so Windows long paths and their 8.3 aliases share one VCS snapshot and refresh history.
 
-## Upstream sync — 2026-08-24
+## Upstream sync — 2026-08-28
+
+Merged upstream `f6f2be32d8bc072e87753e41ad77c7c67e8b0b95` into the fork while preserving durable checkpoint navigation, split workspaces, existing-worktree selection, subagent transcript isolation and receiver-only Codex child routing, preview and zrok recovery, Windows and Claude packaging safeguards, desktop tray and backend continuity, environment-scoped thread tools, and progressive multi-environment usage. The integration adopts upstream provider approval, interrupt, and lifecycle fixes including Codex 0.150 events; Git push-base, missing-worktree, and submodule fixes; uploads, HEIC handling, file reveal, pull-request linking, and settle restoration; usage filtering, sorting, and layout updates; desktop release, signing, and Clerk changes; and the current server, web, and mobile fixes. Deployed fork migrations `036` through `047` remain unchanged. Upstream linked-pull-request and unsettled-thread migrations use fresh IDs `048` and `049`.
+
+## Previous upstream sync — 2026-08-24
 
 Merged upstream `b4be33f0747445f1c9df126e932c7b9792f322d5` into the fork while preserving durable checkpoints, split workspaces, existing-worktree selection, read-only subagent transcripts, preview recovery, zrok sharing, subscription usage, Windows portability, and desktop backend continuity. The integration adopts upstream Codex feedback, provider lifecycle and liveness fixes, normal-tool activity collapsing, redesigned skill menus, background thread creation, appearance contrast, workspace images, client-origin analytics, remote default-branch fallback, and current web/mobile/desktop packaging fixes. Fork migrations `036`–`045` remain deployed in place; idempotent migration `046` repairs databases that previously followed upstream through migration `041`, and upstream auth-session client metadata is assigned `047`. Upstream lifecycle identity and failure semantics remain authoritative while fork receiver-only child routing, transcript isolation, and clickable subagent rows survive. Closing the last desktop window continues to keep the fork backend alive, while explicit quit adopts upstream's activation guard and destroy-windows-before-shutdown cleanup.
 
-## Previous upstream sync — 2026-08-17
+## Earlier upstream sync — 2026-08-17
 
 Merged upstream `cd096b9ad5a4156ffeab85de617cbb219057007f` into the fork while preserving durable checkpoints, split workspaces, existing-worktree selection, read-only subagent transcripts, preview recovery, zrok sharing, subscription usage, Windows portability, and desktop backend continuity. The integration adopts upstream pull-request and remote-editor services, project access controls, right-panel maximization and file drops, project favicons, default thread environment modes, usage-resolution changes, and the latest web/mobile/desktop refinements. Fork migrations `036`–`043` remain deployed in place; upstream default-thread-environment and favicon migrations are assigned `044`–`045`. The right-panel store advances to version `12` so pull-request surfaces and fork subagent transcript surfaces coexist, and hourly usage aggregation retains a printable `\u001f` four-part key. Upstream's Codex missing-rollout recovery and hermetic Claude text-generation fixture replace their fork equivalents while the fork's additional assertions and provider behavior remain.
 
@@ -22,7 +26,7 @@ Merged upstream `0ad91b6e7fc1fcb6d5f4bc736d84c337e912bc62` into the fork without
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `b4be33f0747445f1c9df126e932c7b9792f322d5`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `f6f2be32d8bc072e87753e41ad77c7c67e8b0b95`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -96,11 +100,13 @@ Fork migrations `036`–`038` establish the durable checkpoint state (`036_Check
 
 Migration `046_ReconcileUpstream41History` extends that repair path for databases already carrying upstream ledger entries `036`–`041`: it idempotently restores checkpoint state, navigation metadata, and both subagent projection columns before upstream auth-session client metadata runs as migration `047`.
 
+Upstream linked-pull-request and unsettled-thread columns follow this deployed fork history as migrations `048_ProjectionThreadLinkedPullRequest` and `049_ProjectionThreadsUnsettledAt`. Both migrations check the existing schema before adding their columns, so upgraded and partially reconciled databases remain safe.
+
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
-**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,047_AuthSessionClientConnection}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
+**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,047_AuthSessionClientConnection,048_ProjectionThreadLinkedPullRequest,049_ProjectionThreadsUnsettledAt}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
 
 **Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
 
@@ -347,6 +353,20 @@ browser pass that displayed first-host totals while the second host was still sc
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-08-28 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `f3caafe741e9ca21d48788803a9e202c97d6d1ce` (fork) and `f6f2be32d8bc072e87753e41ad77c7c67e8b0b95` (upstream/main)
+
+The integration made these semantic choices:
+
+- **Persistence migrations:** kept deployed fork migrations `036` through `047` in place and assigned upstream linked-pull-request and unsettled-thread migrations to `048` and `049`, with schema guards and ledger coverage.
+- **Providers and orchestration:** adopted upstream approval, interrupt, session recovery, Codex 0.150, Claude, and Grok fixes while retaining checkpoint barriers, receiver-only Codex child routing, child transcript isolation, and environment-scoped durable thread tools.
+- **Git and thread startup:** retained existing-worktree selection and the fork's cleanup-aware shared thread dispatcher, then added upstream missing-worktree recreation, push-base protection, worktree pruning, and submodule initialization.
+- **Web and mobile:** adopted uploads, HEIC conversion, file reveal, linked pull requests, settle restoration, usage sorting and filtering, and current layout fixes while retaining split-pane composer ownership, checkpoint navigation, clickable subagent transcripts, and progressive multi-environment usage.
+- **Desktop and packaging:** retained tray-backed backend continuity, Windows process and Claude safeguards, and lockfile-free patch pinning while adopting upstream macOS signing, preview release, Clerk, and dependency-staging changes.
+- **Post-merge QA:** conflict and regression suites passed, including migrations `048` and `049`, Git and provider integration, progressive usage, desktop packaging, and the transfer-budget test rerun in isolation. `vp check`, `vp run typecheck`, `vp run lint:mobile`, and `git diff --check` passed. An isolated paired web client rendered progressive usage and the merged draft composer. Mobile emulator verification was unavailable because this Windows host has no Android SDK or ADB.
 
 ### 2026-08-24 — Merge upstream/main into main
 

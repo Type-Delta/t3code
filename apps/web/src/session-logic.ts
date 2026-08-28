@@ -1,5 +1,6 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
+import * as Schema from "effect/Schema";
 import {
   isBackgroundTaskActivity,
   type AgentPanelModel,
@@ -13,6 +14,8 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  ProviderApprovalOption,
+  ProviderRequestKind,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -125,10 +128,15 @@ const derivedWorkLogEntryByActivity = new WeakMap<
 
 export interface PendingApproval {
   requestId: ApprovalRequestId;
-  requestKind: "command" | "file-read" | "file-change";
+  requestKind: ProviderRequestKind;
   createdAt: string;
   detail?: string;
+  appName?: string;
+  options?: ReadonlyArray<ProviderApprovalOption>;
 }
+
+const isProviderRequestKind = Schema.is(ProviderRequestKind);
+const isProviderApprovalOption = Schema.is(ProviderApprovalOption);
 
 export interface PendingUserInput {
   requestId: ApprovalRequestId;
@@ -394,6 +402,8 @@ function requestKindFromRequestType(requestType: unknown): PendingApproval["requ
     case "file_change_approval":
     case "apply_patch_approval":
       return "file-change";
+    case "mcp_elicitation_approval":
+      return "mcp-elicitation";
     default:
       return null;
   }
@@ -431,15 +441,16 @@ export function derivePendingApprovals(
         ? ApprovalRequestId.make(payload.requestId)
         : null;
     const requestKind =
-      payload &&
-      (payload.requestKind === "command" ||
-        payload.requestKind === "file-read" ||
-        payload.requestKind === "file-change")
+      payload && isProviderRequestKind(payload.requestKind)
         ? payload.requestKind
         : payload
           ? requestKindFromRequestType(payload.requestType)
           : null;
     const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
+    const appName = payload && typeof payload.appName === "string" ? payload.appName : undefined;
+    const options = Array.isArray(payload?.options)
+      ? payload.options.filter(isProviderApprovalOption)
+      : undefined;
 
     if (activity.kind === "approval.requested" && requestId && requestKind) {
       openByRequestId.set(requestId, {
@@ -447,6 +458,8 @@ export function derivePendingApprovals(
         requestKind,
         createdAt: activity.createdAt,
         ...(detail ? { detail } : {}),
+        ...(appName ? { appName } : {}),
+        ...(options && options.length > 0 ? { options } : {}),
       });
       continue;
     }

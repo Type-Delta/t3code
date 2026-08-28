@@ -60,6 +60,8 @@ import Migration0044 from "./Migrations/044_ProjectionProjectsDefaultThreadEnvMo
 import Migration0045 from "./Migrations/045_ProjectionProjectFaviconPath.ts";
 import Migration0046 from "./Migrations/046_ReconcileUpstream41History.ts";
 import Migration0047 from "./Migrations/047_AuthSessionClientConnection.ts";
+import Migration0048 from "./Migrations/048_ProjectionThreadLinkedPullRequest.ts";
+import Migration0049 from "./Migrations/049_ProjectionThreadsUnsettledAt.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -119,6 +121,8 @@ export const migrationEntries = [
   [45, "ProjectionProjectFaviconPath", Migration0045],
   [46, "ReconcileUpstream41History", Migration0046],
   [47, "AuthSessionClientConnection", Migration0047],
+  [48, "ProjectionThreadLinkedPullRequest", Migration0048],
+  [49, "ProjectionThreadsUnsettledAt", Migration0049],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
