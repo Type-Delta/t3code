@@ -6,6 +6,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   InfoIcon,
+  PencilIcon,
   PlusIcon,
   StarIcon,
   XIcon,
@@ -13,6 +14,7 @@ import {
 import { useMemo, useRef, useState } from "react";
 import {
   ProviderDriverKind,
+  type ModelMetadataOverride,
   type ProviderInstanceId,
   type ServerProviderModel,
 } from "@t3tools/contracts";
@@ -24,6 +26,8 @@ import { MAX_CUSTOM_MODEL_LENGTH } from "../../modelSelection";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { CustomModelMetadataDialog } from "./CustomModelMetadataDialog";
+import { deriveProviderModelDetails } from "./providerModelDetails";
 
 /**
  * Placeholder text for the "add a custom model" input, keyed by driver
@@ -53,9 +57,11 @@ interface ProviderModelsSectionProps {
   /**
    * The persisted custom-model slug list for this instance. Drives dedup,
    * and is the array we hand back verbatim (with the new slug appended /
-   * removed) via `onChange`.
+   * removed) with its metadata via `onCustomModelsChange`.
    */
   readonly customModels: ReadonlyArray<string>;
+  /** User-authored metadata keyed by custom model slug. */
+  readonly modelOverrides: Readonly<Record<string, ModelMetadataOverride>>;
   /** Server-returned model slugs hidden from the model picker. */
   readonly hiddenModels: ReadonlyArray<string>;
   /** Model slugs favorited for this provider instance. */
@@ -63,11 +69,13 @@ interface ProviderModelsSectionProps {
   /** Explicit user-authored model ordering for this provider instance. */
   readonly modelOrder: ReadonlyArray<string>;
   /**
-   * Commit the new custom-model list. Caller is responsible for routing the
-   * write to the correct storage (legacy `settings.providers[kind]` vs.
-   * `providerInstances[id].config`).
+   * Commit the custom-model list and overrides together so one settings write
+   * cannot overwrite the other.
    */
-  readonly onChange: (next: ReadonlyArray<string>) => void;
+  readonly onCustomModelsChange: (
+    customModels: ReadonlyArray<string>,
+    modelOverrides: Readonly<Record<string, ModelMetadataOverride>>,
+  ) => void;
   readonly onHiddenModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onFavoriteModelsChange: (next: ReadonlyArray<string>) => void;
   readonly onModelOrderChange: (next: ReadonlyArray<string>) => void;
@@ -89,16 +97,21 @@ export function ProviderModelsSection({
   driverKind,
   models,
   customModels,
+  modelOverrides,
   hiddenModels,
   favoriteModels,
   modelOrder,
-  onChange,
+  onCustomModelsChange,
   onHiddenModelsChange,
   onFavoriteModelsChange,
   onModelOrderChange,
 }: ProviderModelsSectionProps) {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [metadataDialog, setMetadataDialog] = useState<{
+    readonly slug: string;
+    readonly mode: "add" | "edit";
+  } | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const hiddenModelSet = useMemo(() => new Set(hiddenModels), [hiddenModels]);
   const favoriteModelSet = useMemo(() => new Set(favoriteModels), [favoriteModels]);
@@ -109,6 +122,19 @@ export function ProviderModelsSection({
       modelOrder,
     });
   }, [favoriteModelSet, modelOrder, models]);
+
+  const scrollNewModelIntoView = () => {
+    const el = listRef.current;
+    if (!el) return;
+    const scrollToEnd = () => el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    requestAnimationFrame(scrollToEnd);
+    const observer = new MutationObserver(() => {
+      scrollToEnd();
+      observer.disconnect();
+    });
+    observer.observe(el, { childList: true, subtree: true });
+    setTimeout(() => observer.disconnect(), 2_000);
+  };
 
   const handleAdd = () => {
     const normalized = normalizeCustomModelSlug(input);
@@ -129,28 +155,17 @@ export function ProviderModelsSection({
       return;
     }
 
-    onChange([...customModels, normalized]);
-    setInput("");
     setError(null);
-
-    // Scroll the new row into view once the DOM reflects the commit.
-    // `MutationObserver` handles the one-frame gap between `onChange` and
-    // the `models` prop update; the `requestAnimationFrame` covers the
-    // common case where the parent updates synchronously.
-    const el = listRef.current;
-    if (!el) return;
-    const scrollToEnd = () => el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    requestAnimationFrame(scrollToEnd);
-    const observer = new MutationObserver(() => {
-      scrollToEnd();
-      observer.disconnect();
-    });
-    observer.observe(el, { childList: true, subtree: true });
-    setTimeout(() => observer.disconnect(), 2_000);
+    setMetadataDialog({ slug: normalized, mode: "add" });
   };
 
   const handleRemove = (slug: string) => {
-    onChange(customModels.filter((model) => model !== slug));
+    const nextOverrides = { ...modelOverrides };
+    delete nextOverrides[slug];
+    onCustomModelsChange(
+      customModels.filter((model) => model !== slug),
+      nextOverrides,
+    );
     onModelOrderChange(modelOrder.filter((model) => model !== slug));
     onFavoriteModelsChange(favoriteModels.filter((model) => model !== slug));
     setError(null);
@@ -194,7 +209,8 @@ export function ProviderModelsSection({
         {orderedModels.map((model, index) => {
           const caps = model.capabilities;
           const capLabels: string[] = [];
-          const isHidden = !model.isCustom && hiddenModelSet.has(model.slug);
+          const isUserCustom = customModels.includes(model.slug);
+          const isHidden = !isUserCustom && hiddenModelSet.has(model.slug);
           const isFavorite = favoriteModelSet.has(model.slug);
           const previousModel = orderedModels[index - 1];
           const nextModel = orderedModels[index + 1];
@@ -221,7 +237,14 @@ export function ProviderModelsSection({
           ) {
             capLabels.push("Reasoning");
           }
-          const hasDetails = capLabels.length > 0 || model.name !== model.slug;
+          const override = modelOverrides[model.slug];
+          const displayName = override?.displayName ?? model.name;
+          const details = deriveProviderModelDetails({
+            model,
+            override,
+            capabilityLabels: capLabels,
+          });
+          const hasDetectedMetadata = details.length > 1;
 
           return (
             <div
@@ -238,42 +261,43 @@ export function ProviderModelsSection({
                     isHidden ? "text-muted-foreground line-through" : "text-foreground/90",
                   )}
                 >
-                  {model.name}
+                  {displayName}
                 </span>
-                {hasDetails ? (
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <Button
-                          size="icon-micro"
-                          variant="ghost"
-                          className="text-muted-foreground/60 hover:text-muted-foreground"
-                          aria-label={`Details for ${model.name}`}
-                        />
-                      }
-                    >
-                      <InfoIcon className="size-3" />
-                    </TooltipTrigger>
-                    <TooltipPopup side="top" className="max-w-56">
-                      <div className="space-y-1">
-                        <code className="block text-[11px] text-foreground">{model.slug}</code>
-                        {capLabels.length > 0 ? (
-                          <div className="flex flex-wrap gap-x-2 gap-y-0.5">
-                            {capLabels.map((label) => (
-                              <span key={label} className="text-[10px] text-muted-foreground">
-                                {label}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    </TooltipPopup>
-                  </Tooltip>
-                ) : null}
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="icon-micro"
+                        variant="ghost"
+                        className="text-muted-foreground/60 hover:text-muted-foreground"
+                        aria-label={`Details for ${displayName}`}
+                      />
+                    }
+                  >
+                    <InfoIcon className="size-3" />
+                  </TooltipTrigger>
+                  <TooltipPopup side="top" className="w-80 max-w-[calc(100vw-1rem)] text-left">
+                    <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[11px] leading-snug">
+                      {details.map((detail) => (
+                        <div key={detail.label} className="contents">
+                          <span className="text-muted-foreground">{detail.label}</span>
+                          <span className="min-w-0 break-words text-foreground">
+                            {detail.value}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {!hasDetectedMetadata ? (
+                      <p className="mt-1.5 text-[10px] text-muted-foreground">
+                        No additional model metadata detected.
+                      </p>
+                    ) : null}
+                  </TooltipPopup>
+                </Tooltip>
                 {isHidden ? (
                   <span className="text-[10px] text-muted-foreground">hidden</span>
                 ) : null}
-                {model.isCustom ? (
+                {isUserCustom ? (
                   <span className="text-[10px] text-muted-foreground">custom</span>
                 ) : null}
               </div>
@@ -286,7 +310,7 @@ export function ProviderModelsSection({
                         variant="ghost-muted"
                         className={cn(isFavorite && "text-yellow-500 hover:text-yellow-600")}
                         onClick={() => handleToggleFavorite(model.slug)}
-                        aria-label={`${isFavorite ? "Remove" : "Add"} ${model.name} ${
+                        aria-label={`${isFavorite ? "Remove" : "Add"} ${displayName} ${
                           isFavorite ? "from" : "to"
                         } favorites`}
                       />
@@ -306,7 +330,7 @@ export function ProviderModelsSection({
                         variant="ghost-muted"
                         disabled={!canMoveUp}
                         onClick={() => handleMove(model.slug, -1)}
-                        aria-label={`Move ${model.name} up`}
+                        aria-label={`Move ${displayName} up`}
                       />
                     }
                   >
@@ -322,7 +346,7 @@ export function ProviderModelsSection({
                         variant="ghost-muted"
                         disabled={!canMoveDown}
                         onClick={() => handleMove(model.slug, 1)}
-                        aria-label={`Move ${model.name} down`}
+                        aria-label={`Move ${displayName} down`}
                       />
                     }
                   >
@@ -330,7 +354,7 @@ export function ProviderModelsSection({
                   </TooltipTrigger>
                   <TooltipPopup side="top">Move down</TooltipPopup>
                 </Tooltip>
-                {!model.isCustom ? (
+                {!isUserCustom ? (
                   <Tooltip>
                     <TooltipTrigger
                       render={
@@ -338,7 +362,7 @@ export function ProviderModelsSection({
                           size="icon-micro"
                           variant="ghost-muted"
                           onClick={() => handleToggleHidden(model.slug)}
-                          aria-label={`${isHidden ? "Show" : "Hide"} ${model.name}`}
+                          aria-label={`${isHidden ? "Show" : "Hide"} ${displayName}`}
                         />
                       }
                     >
@@ -353,7 +377,22 @@ export function ProviderModelsSection({
                     </TooltipPopup>
                   </Tooltip>
                 ) : null}
-                {model.isCustom ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="icon-micro"
+                        variant="ghost-muted"
+                        aria-label={`Edit ${displayName} metadata`}
+                        onClick={() => setMetadataDialog({ slug: model.slug, mode: "edit" })}
+                      />
+                    }
+                  >
+                    <PencilIcon className="size-3" />
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">Edit model metadata</TooltipPopup>
+                </Tooltip>
+                {isUserCustom ? (
                   <Tooltip>
                     <TooltipTrigger
                       render={
@@ -399,6 +438,33 @@ export function ProviderModelsSection({
       </div>
 
       {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
+
+      {metadataDialog ? (
+        <CustomModelMetadataDialog
+          open
+          slug={metadataDialog.slug}
+          mode={metadataDialog.mode}
+          initialValue={modelOverrides[metadataDialog.slug]}
+          onOpenChange={(open) => {
+            if (!open) setMetadataDialog(null);
+          }}
+          onSave={(override) => {
+            const nextOverrides = { ...modelOverrides };
+            if (Object.keys(override).length > 0) {
+              nextOverrides[metadataDialog.slug] = override;
+            } else {
+              delete nextOverrides[metadataDialog.slug];
+            }
+            const nextCustomModels =
+              metadataDialog.mode === "add" ? [...customModels, metadataDialog.slug] : customModels;
+            onCustomModelsChange(nextCustomModels, nextOverrides);
+            if (metadataDialog.mode === "add") {
+              setInput("");
+              scrollNewModelIntoView();
+            }
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -15,11 +15,12 @@ import * as Result from "effect/Result";
 import { useState, type ReactNode } from "react";
 import {
   isProviderDriverKind,
+  ProviderDriverKind,
   resolveProviderInstanceEnabled,
+  type ModelMetadataOverride,
   type ProviderInstanceConfig,
   type ProviderInstanceEnvironmentVariable,
   type ProviderInstanceId,
-  type ProviderDriverKind,
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
@@ -45,6 +46,7 @@ import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { SubscriptionUsageBars } from "../SubscriptionUsage";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
+import { CompatibleApiGatewaySection, readApiGatewayDraft } from "./CompatibleApiGatewaySection";
 import {
   getProviderVersionAdvisoryPresentation,
   PROVIDER_STATUS_STYLES,
@@ -92,6 +94,20 @@ function readConfigStringArray(config: unknown, key: string): ReadonlyArray<stri
   return value.filter((entry): entry is string => typeof entry === "string");
 }
 
+export function readConfigModelOverrides(
+  config: unknown,
+): Readonly<Record<string, ModelMetadataOverride>> {
+  if (config === null || typeof config !== "object") return {};
+  const value = (config as Record<string, unknown>).modelOverrides;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Readonly<Record<string, ModelMetadataOverride>>;
+}
+
+function isGatewayDiscoveredModel(model: ServerProviderModel): boolean {
+  const source = model.metadata?.source?.trim().toLowerCase();
+  return source === "gateway" || source === "api-gateway";
+}
+
 /**
  * Set `key` to an arbitrary value on the opaque config blob. Unlike
  * provider settings field updates, does not drop empty-looking values — the
@@ -114,13 +130,23 @@ function nextConfigBlobWithValue(
 export function deriveProviderModelsForDisplay(input: {
   readonly liveModels: ReadonlyArray<ServerProviderModel> | undefined;
   readonly customModels: ReadonlyArray<string>;
+  readonly includeDiscoveredModels?: boolean;
+  readonly modelOverrides?: Readonly<Record<string, ModelMetadataOverride>>;
 }): ReadonlyArray<ServerProviderModel> {
   const liveCustomModelsBySlug = new Map(
     Arr.filterMap(input.liveModels ?? [], (model) =>
       model.isCustom ? Result.succeed([model.slug, model] as const) : Result.failVoid,
     ),
   );
-  const serverModels = input.liveModels?.filter((model) => !model.isCustom) ?? [];
+  const customModelSet = new Set(input.customModels);
+  const serverModels =
+    input.liveModels?.filter(
+      (model) =>
+        !model.isCustom ||
+        (input.includeDiscoveredModels === true &&
+          !customModelSet.has(model.slug) &&
+          (isGatewayDiscoveredModel(model) || input.modelOverrides?.[model.slug] !== undefined)),
+    ) ?? [];
   const customModels = input.customModels.map(
     (slug) =>
       liveCustomModelsBySlug.get(slug) ?? {
@@ -444,12 +470,15 @@ export function ProviderInstanceCard({
     : null;
 
   const customModels = readConfigStringArray(instance.config, "customModels");
+  const modelOverrides = readConfigModelOverrides(instance.config);
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
   const modelsForDisplay = deriveProviderModelsForDisplay({
     liveModels: liveProvider?.models,
     customModels,
+    includeDiscoveredModels: readApiGatewayDraft(instance.config).enabled,
+    modelOverrides,
   });
 
   const updateDisplayName = (value: string) => {
@@ -485,11 +514,19 @@ export function ProviderInstanceCard({
     );
   };
 
-  const updateCustomModels = (next: ReadonlyArray<string>) => {
-    const nextConfig = nextConfigBlobWithValue(instance.config, "customModels", [...next]);
+  const updateCustomModels = (
+    next: ReadonlyArray<string>,
+    nextOverrides: Readonly<Record<string, ModelMetadataOverride>>,
+  ) => {
+    const withModels = nextConfigBlobWithValue(instance.config, "customModels", [...next]);
+    const nextConfig = nextConfigBlobWithValue(withModels, "modelOverrides", nextOverrides);
     const { config: _omit, ...rest } = instance;
     onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
   };
+
+  const supportsApiGateway =
+    driverKind === ProviderDriverKind.make("codex") ||
+    driverKind === ProviderDriverKind.make("claudeAgent");
 
   const updateEnvironment = (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => {
     const cleaned = environment.filter((variable) => variable.name.trim().length > 0);
@@ -774,16 +811,26 @@ export function ProviderInstanceCard({
               />
             ) : null}
 
+            {supportsApiGateway ? (
+              <CompatibleApiGatewaySection
+                value={instance.config}
+                idPrefix={`provider-instance-${instanceId}`}
+                variant="card"
+                onChange={updateConfig}
+              />
+            ) : null}
+
             {driverOption !== undefined ? (
               <ProviderModelsSection
                 instanceId={instanceId}
                 driverKind={driverKind}
                 models={modelsForDisplay}
                 customModels={customModels}
+                modelOverrides={modelOverrides}
                 hiddenModels={hiddenModels}
                 favoriteModels={favoriteModels}
                 modelOrder={modelOrder}
-                onChange={updateCustomModels}
+                onCustomModelsChange={updateCustomModels}
                 onHiddenModelsChange={onHiddenModelsChange}
                 onFavoriteModelsChange={onFavoriteModelsChange}
                 onModelOrderChange={onModelOrderChange}

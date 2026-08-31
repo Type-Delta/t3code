@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ProviderOptionDescriptorType = Schema.Literals(["select", "boolean"]);
@@ -126,6 +126,24 @@ export const ModelCapabilities = Schema.Struct({
   optionDescriptors: Schema.optional(Schema.Array(ProviderOptionDescriptor)),
 });
 export type ModelCapabilities = typeof ModelCapabilities.Type;
+
+export const ModelMetadata = Schema.Struct({
+  contextWindowTokens: Schema.optionalKey(PositiveInt),
+  maxContextWindowTokens: Schema.optionalKey(PositiveInt),
+  maxOutputTokens: Schema.optionalKey(PositiveInt),
+  source: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type ModelMetadata = typeof ModelMetadata.Type;
+
+export const ModelMetadataOverride = Schema.Struct({
+  displayName: Schema.optionalKey(TrimmedNonEmptyString),
+  contextWindowTokens: Schema.optionalKey(PositiveInt),
+  maxContextWindowTokens: Schema.optionalKey(PositiveInt),
+  maxOutputTokens: Schema.optionalKey(PositiveInt),
+  reasoningEfforts: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
+  defaultReasoningEffort: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type ModelMetadataOverride = typeof ModelMetadataOverride.Type;
 
 const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");

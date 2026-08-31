@@ -33,6 +33,7 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
+import { type GatewayCatalogSnapshot, mergeGatewayModelCatalog } from "../GatewayModelCatalog.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
@@ -232,7 +233,6 @@ function appendCustomCodexModels(
   }
 
   const seen = new Set(models.map((model) => model.slug));
-  const fallbackCapabilities = models.find((model) => model.capabilities)?.capabilities ?? null;
   const customEntries: ServerProviderModel[] = [];
   for (const rawModel of customModels) {
     const slug = rawModel.trim();
@@ -244,7 +244,7 @@ function appendCustomCodexModels(
       slug,
       name: slug,
       isCustom: true,
-      capabilities: fallbackCapabilities,
+      capabilities: null,
     });
   }
   return customEntries.length === 0 ? models : [...models, ...customEntries];
@@ -426,28 +426,29 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   } satisfies CodexAppServerProviderSnapshot;
 });
 
-const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] => {
-  const models = new Set<string>();
-  for (const model of codexSettings.customModels) {
-    const trimmed = model.trim();
-    if (trimmed.length > 0) {
-      models.add(trimmed);
-    }
-  }
-  return Array.from(models, (model) => ({
-    slug: model,
-    name: model,
-    isCustom: true,
-    capabilities: null,
-  }));
-};
+const mergeCodexCatalogModels = (
+  codexSettings: CodexSettings,
+  baseModels: ReadonlyArray<ServerProviderModel>,
+  gatewayCatalog?: GatewayCatalogSnapshot,
+): ReadonlyArray<ServerProviderModel> =>
+  applyPreferredCodexDefaultModel(
+    mergeGatewayModelCatalog({
+      baseModels,
+      catalog: gatewayCatalog ?? { models: [], source: "disabled" },
+      customModels: codexSettings.customModels,
+      modelOverrides: codexSettings.modelOverrides ?? {},
+      reasoningOptionId: "reasoningEffort",
+      emptyCustomCapabilities: null,
+    }),
+  );
 
 const makePendingCodexProvider = (
   codexSettings: CodexSettings,
+  gatewayCatalog?: GatewayCatalogSnapshot,
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    const models = emptyCodexModelsFromSettings(codexSettings);
+    const models = mergeCodexCatalogModels(codexSettings, [], gatewayCatalog);
 
     if (!codexSettings.enabled) {
       return buildServerProvider({
@@ -526,6 +527,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
   > = probeCodexAppServerProvider,
   environment?: NodeJS.ProcessEnv,
+  gatewayCatalog?: GatewayCatalogSnapshot,
 ): Effect.fn.Return<
   ServerProviderDraft,
   ServerSettingsError,
@@ -533,7 +535,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 > {
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const emptyModels = emptyCodexModelsFromSettings(codexSettings);
+  const emptyModels = mergeCodexCatalogModels(codexSettings, [], gatewayCatalog);
 
   if (!codexSettings.enabled) {
     return buildServerProvider({
@@ -610,7 +612,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     presentation: CODEX_PRESENTATION,
     enabled: codexSettings.enabled,
     checkedAt,
-    models: snapshot.models,
+    models: mergeCodexCatalogModels(codexSettings, snapshot.models, gatewayCatalog),
     skills: snapshot.skills,
     slashCommands: [
       {

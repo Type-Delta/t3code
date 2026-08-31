@@ -123,6 +123,55 @@ This is different from the recommended Codex setup. Claude Code keeps account an
 multiple files under its config directory, so T3 Code keeps separate config directories isolated
 instead of trying to share part of the state.
 
+## Use a compatible API gateway
+
+Claude provider instances can use an Anthropic-compatible API gateway such as CLIProxyAPI. When
+you add a provider instance, open the third step, **Config**, and enable **Compatible API gateway**.
+You can also expand an existing Claude provider in Settings and change the same fields there.
+
+Set **Gateway base URL** to the inference URL that Claude Code should use. T3 sets
+`ANTHROPIC_BASE_URL` and enables Claude Code's gateway model discovery for this provider instance.
+
+T3 requests its own model catalog so the model picker can show gateway models and their metadata.
+Leave **Model catalog URL** empty to derive `/v1/models` from the base URL, or enter the complete
+catalog URL when the gateway uses another path. **Auto-detect** accepts Codex, Anthropic, and OpenAI
+catalog shapes. Use an explicit format if auto-detection chooses the wrong one.
+
+The **API key environment variable** field contains a variable name, not the key itself. Add that
+variable to the provider instance's **Environment variables** section first and mark its value as
+sensitive. Then enter its name in the gateway settings. Bearer authentication maps the value to
+`ANTHROPIC_AUTH_TOKEN`; `x-api-key` authentication maps it to `ANTHROPIC_API_KEY`. Leave the field
+empty only when the catalog and inference endpoint need no authentication.
+
+The T3 server performs catalog discovery, so web and mobile clients do not receive the gateway
+credential. T3 caches the last successful catalog for this provider instance. If a later request
+fails, the cached models remain available. Without a cache, T3 falls back to its Claude model list
+and any models you added manually.
+
+### Check or override model information
+
+Under **Models**, point to the information icon beside a model to see the detected model ID,
+description, metadata source, usable and maximum context windows, maximum output, reasoning levels,
+default reasoning level, and other reported capabilities. Unknown fields are omitted. If T3 only
+knows the model ID, the tooltip says that no additional metadata was detected.
+
+When you add a custom model, T3 opens a metadata form. You can set its display name, usable context
+window, theoretical maximum context window, maximum output, supported reasoning efforts, and
+default effort. Use the pencil beside any visible model to change those values. Manual values take
+precedence over the gateway catalog and T3's built-in Claude metadata.
+
+The usable context window should be the limit that this gateway and account can accept. The maximum
+context window is the model's theoretical limit and may be larger. For example, enter `200000` as
+usable and `1000000` as maximum when the model supports one million tokens but the account does not.
+Leave unknown values empty instead of estimating them.
+
+T3 passes detected or manually configured reasoning efforts to Claude Code. For context, Claude
+Code exposes a normal model ID and a `[1m]` model selector rather than an arbitrary numeric window.
+T3 uses the normal model ID for usable windows up to 200,000 tokens and appends `[1m]` for larger
+usable windows. Maximum output and theoretical maximum context remain informational. A gateway may
+still reject `[1m]` when the account lacks long-context access, so configure usable context from the
+limit that the account can actually use.
+
 ## I Want To Use OpenRouter
 
 Use this when you want Claude Code to talk to OpenRouter directly, without running a local router.

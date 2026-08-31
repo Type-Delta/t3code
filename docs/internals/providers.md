@@ -51,6 +51,67 @@ probes, respect the `enableProviderUpdateChecks` setting, and never fail a provi
 Codex and Claude drivers apply the classification to every snapshot with `applyModelManifest`;
 driver kinds absent from the manifest have no legacy concept.
 
+## Compatible API gateway catalogs
+
+Codex and Claude instances can carry an optional `apiGateway` config. This is provider-instance
+state, not driver-global state, because two endpoints or API keys can expose different models and
+limits. `ApiGatewaySettings` records the inference base URL, an optional catalog URL, catalog
+format, authentication mode, and the name of a provider environment variable that holds the key.
+The config never copies the key value. Sensitive provider environment values remain server secrets.
+
+[`GatewayModelCatalog.ts`][gateway-catalog] owns server-side discovery and caching. It derives
+`/v1/models` from the inference URL unless the instance has an explicit catalog URL. Auto detection
+tries Codex, Anthropic, then OpenAI formats and prefers the first result that carries metadata or
+reasoning levels. Requests have a five-second timeout and accept at most 5 MiB of JSON text.
+
+The parsers normalize these fields:
+
+| Format    | Container | Context fields                                           | Reasoning fields                                                |
+| --------- | --------- | -------------------------------------------------------- | --------------------------------------------------------------- |
+| Codex     | `models`  | `context_window`, `max_context_window`, `max_tokens`     | `supported_reasoning_levels`, `default_reasoning_level`         |
+| Anthropic | `data`    | `max_input_tokens`, `max_tokens`                         | `capabilities.effort.*.supported`, plus a supported default     |
+| OpenAI    | `data`    | `context_length`, `max_context_length`, completion limit | `thinking.levels` or `supported_reasoning_levels`, plus default |
+
+Each successful response is cached below the provider status cache directory using the instance ID
+and a SHA-256 fingerprint of the gateway settings and resolved credential. The raw credential is
+never cached. A Codex-format response also retains the original JSON in a separate file for
+`model_catalog_json`. Startup loads the cached normalized models before the first network refresh.
+A failed refresh keeps the current snapshot and records a nonfatal catalog error. If no cache
+exists, provider status uses harness or built-in models plus explicit custom models.
+
+`mergeGatewayModelCatalog` produces the provider snapshot. A successfully fetched or cached gateway
+catalog defines the available catalog list, including an empty list. Matching harness entries
+contribute capabilities that the gateway omitted, and explicit custom models are appended. Metadata
+precedence is manual model override, gateway catalog, harness or built-in value, then unknown.
+`contextWindowTokens` means the usable limit for this provider account.
+`maxContextWindowTokens` is the theoretical model maximum. The client shows both rather than
+treating a model's maximum as an account entitlement.
+
+The Models settings tooltip renders the normalized ID, description, provider, source, context and
+output limits, reasoning levels and default, and capability labels. Every visible model also
+exposes a metadata editor. A model override and its custom-model list are saved in one settings
+update so concurrent UI state cannot drop either value.
+
+### Harness relay
+
+The Codex driver adds a managed `t3_api_gateway` model provider with the Responses wire API. It
+passes the configured base URL and environment-variable reference through Codex `-c` arguments. A
+Codex-format response is passed as `model_catalog_json`, and each new session gets
+`model_context_window` for the selected model. T3 sends the selected reasoning effort through the
+normal turn request. OpenAI and Anthropic catalog shapes enrich T3's picker but cannot become a
+Codex `model_catalog_json` file. Descriptions and maximum-output metadata have no per-turn Codex
+setting and remain informational.
+
+The Claude driver sets `ANTHROPIC_BASE_URL` and
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`. Bearer credentials map to
+`ANTHROPIC_AUTH_TOKEN`; `x-api-key` credentials map to `ANTHROPIC_API_KEY`. T3 clears the opposite
+variable so Claude Code sends only the selected authentication header. T3 resolves the selected
+model from the normalized instance catalog before a turn or structured text-generation request, so
+manual reasoning choices reach Claude Code. Claude Code does not accept an arbitrary numeric
+context-window setting. Usable values above 200,000 select the `[1m]` model form, while smaller
+values use the plain model ID. Maximum-output and theoretical maximum-context values remain
+informational, and the gateway can still reject `[1m]` based on account entitlement.
+
 ## How provider work is requested
 
 Clients never call a provider directly. They dispatch orchestration commands over the RPC method
@@ -102,3 +163,4 @@ when a request opens (approval) or user input is requested, via
 [ingest]: ../../apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts
 [cmd]: ../../apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
 [checkpoint]: ../../apps/server/src/orchestration/Layers/CheckpointReactor.ts
+[gateway-catalog]: ../../apps/server/src/provider/GatewayModelCatalog.ts

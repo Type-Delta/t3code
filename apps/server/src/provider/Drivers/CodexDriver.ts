@@ -21,7 +21,12 @@
  *
  * @module provider/Drivers/CodexDriver
  */
-import { CodexSettings, ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
+import {
+  CodexSettings,
+  ProviderDriverKind,
+  type ApiGatewaySettings,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -60,6 +65,18 @@ import {
 } from "./CodexHomeLayout.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { fetchCodexSubscriptionUsage } from "../subscriptionUsage.ts";
+import {
+  makeGatewayModelCatalog,
+  mergeGatewayModelCatalog,
+  type GatewayCatalogSnapshot,
+  usableModelContextWindows,
+} from "../GatewayModelCatalog.ts";
+import {
+  appendCodexLaunchArgs,
+  codexGatewayLaunchArgv,
+  resolveCodexLaunchArgs,
+  T3CODE_CODEX_LAUNCH_ARGS_ENV,
+} from "../Layers/codexLaunchArgs.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -69,6 +86,34 @@ const UPDATE = makePackageManagedProviderMaintenanceResolver({
   homebrewFormula: "codex",
   nativeUpdate: null,
 });
+
+export function syncCodexGatewayLaunchArgs(input: {
+  readonly environment: NodeJS.ProcessEnv;
+  readonly baseLaunchArgs: string;
+  readonly apiGateway: ApiGatewaySettings | undefined;
+  readonly catalog: GatewayCatalogSnapshot;
+}): string {
+  const launchArgs = appendCodexLaunchArgs(
+    input.baseLaunchArgs,
+    codexGatewayLaunchArgv({
+      apiGateway: input.apiGateway,
+      codexCatalogPath:
+        input.catalog.models.length > 0 ? input.catalog.codexCatalogPath : undefined,
+    }),
+  );
+  input.environment[T3CODE_CODEX_LAUNCH_ARGS_ENV] = launchArgs;
+  return launchArgs;
+}
+
+export function withCodexGatewayInventoryAuthority(
+  draft: ServerProviderDraft,
+  catalog: GatewayCatalogSnapshot,
+): ServerProviderDraft {
+  const { modelsAuthoritative: _modelsAuthoritative, ...legacyDraft } = draft;
+  return catalog.source === "network" || catalog.source === "cache"
+    ? { ...legacyDraft, modelsAuthoritative: true }
+    : legacyDraft;
+}
 
 /**
  * Services the driver needs to materialize an instance. Surfaced as the
@@ -125,6 +170,24 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const eventLoggers = yield* ProviderEventLoggers;
       const modelManifest = yield* ModelManifest.ModelManifest;
       const processEnv = mergeProviderInstanceEnvironment(environment);
+      const gatewayModelCatalog = yield* makeGatewayModelCatalog({
+        instanceId,
+        settings: config.apiGateway,
+        environment: processEnv,
+      });
+      const gatewayCatalog = yield* gatewayModelCatalog.current;
+      const baseLaunchArgs = resolveCodexLaunchArgs(config.launchArgs, processEnv);
+      // Resolve the environment override once, then give every Codex launch
+      // path the same combined user + T3-managed configuration.
+      const effectiveProcessEnv: NodeJS.ProcessEnv = {
+        ...processEnv,
+      };
+      const effectiveLaunchArgs = syncCodexGatewayLaunchArgs({
+        environment: effectiveProcessEnv,
+        baseLaunchArgs,
+        apiGateway: config.apiGateway,
+        catalog: gatewayCatalog,
+      });
       const homeLayout = yield* resolveCodexHomeLayout(config);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
@@ -148,17 +211,34 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         ...config,
         enabled,
         homePath: homeLayout.effectiveHomePath ?? "",
+        launchArgs: effectiveLaunchArgs,
       } satisfies CodexSettings;
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
+        env: effectiveProcessEnv,
       });
       // Mirror the probe's CODEX_HOME resolution: explicit homePath first,
       // then the instance environment, else the fetcher's ~/.codex default.
       const codexUsageHome =
         effectiveConfig.homePath.trim().length > 0
           ? expandHomePath(effectiveConfig.homePath.trim())
-          : processEnv["CODEX_HOME"]?.trim() || undefined;
+          : effectiveProcessEnv["CODEX_HOME"]?.trim() || undefined;
+
+      const resolveModelContextWindows = (
+        catalog: typeof gatewayCatalog,
+      ): Readonly<Record<string, number>> =>
+        usableModelContextWindows({
+          models: mergeGatewayModelCatalog({
+            baseModels: [],
+            catalog,
+            customModels: effectiveConfig.customModels,
+            modelOverrides: effectiveConfig.modelOverrides ?? {},
+            reasoningOptionId: "reasoningEffort",
+            emptyCustomCapabilities: null,
+          }),
+          modelOverrides: effectiveConfig.modelOverrides ?? {},
+        });
+      let modelContextWindows = resolveModelContextWindows(gatewayCatalog);
 
       // `makeCodexAdapter` and `makeCodexTextGeneration` have `never` error
       // channels at construction time — their failure modes are all on the
@@ -168,10 +248,11 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // below.
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
-        environment: processEnv,
+        environment: effectiveProcessEnv,
+        resolveModelContextWindow: (model) => modelContextWindows[model],
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, effectiveProcessEnv);
 
       // Build a managed snapshot whose settings never change — mutations come
       // in as instance rebuilds from the registry rather than in-place
@@ -180,14 +261,34 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // Kick the TTL-gated manifest refresh in the background and classify
       // with the in-memory manifest, so a slow or hung fetch never delays the
       // provider check. A refresh that lands mid-probe applies on the next one.
-      const checkProvider = modelManifest.refreshInBackground.pipe(
-        Effect.andThen(
-          Effect.zipWith(
-            checkCodexProviderStatus(effectiveConfig, undefined, processEnv),
-            modelManifest.current,
-            (draft, manifest) =>
-              stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
-            { concurrent: true },
+      const checkProvider = gatewayModelCatalog.refresh.pipe(
+        Effect.tap((catalog) =>
+          Effect.sync(() => {
+            syncCodexGatewayLaunchArgs({
+              environment: effectiveProcessEnv,
+              baseLaunchArgs,
+              apiGateway: config.apiGateway,
+              catalog,
+            });
+            modelContextWindows = resolveModelContextWindows(catalog);
+          }),
+        ),
+        Effect.flatMap((catalog) =>
+          modelManifest.refreshInBackground.pipe(
+            Effect.andThen(
+              Effect.zipWith(
+                checkCodexProviderStatus(effectiveConfig, undefined, effectiveProcessEnv, catalog),
+                modelManifest.current,
+                (draft, manifest) =>
+                  stampIdentity(
+                    withCodexGatewayInventoryAuthority(
+                      ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND),
+                      catalog,
+                    ),
+                  ),
+                { concurrent: true },
+              ),
+            ),
           ),
         ),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -200,10 +301,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
           Effect.zipWith(
-            makePendingCodexProvider(settings.provider),
+            makePendingCodexProvider(settings.provider, gatewayCatalog),
             modelManifest.current,
             (draft, manifest) =>
-              stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
+              stampIdentity(
+                withCodexGatewayInventoryAuthority(
+                  ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND),
+                  gatewayCatalog,
+                ),
+              ),
           ),
         checkProvider,
         enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>

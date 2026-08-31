@@ -74,6 +74,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       threadId: this.options.threadId,
       cwd: this.options.cwd,
       ...(this.options.model ? { model: this.options.model } : {}),
+      resumeCursor: this.options.resumeCursor ?? { threadId: "provider-thread-1" },
       createdAt: this.now,
       updatedAt: this.now,
     } satisfies ProviderSession),
@@ -232,6 +233,9 @@ function makeRuntimeFactory() {
 
   return {
     factory,
+    get runtimes(): ReadonlyArray<FakeCodexRuntime> {
+      return runtimes;
+    },
     get lastRuntime(): FakeCodexRuntime | undefined {
       return runtimes.at(-1);
     },
@@ -562,6 +566,201 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       const runtime = runtimeFactory.lastRuntime;
       NodeAssert.ok(runtime);
       NodeAssert.equal(runtime.options.launchArgs, "--strict-config --enable foo");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("passes the selected model's usable context window to Codex", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          instanceId: ProviderInstanceId.make("codex_gateway"),
+          makeRuntime: runtimeFactory.factory,
+          modelContextWindows: { "proxy-model": 180_000 },
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("sess-model-context"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("codex_gateway"),
+          "proxy-model",
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.deepStrictEqual(runtime.options.appServerArgs, [
+        "-c",
+        "model_context_window=180000",
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("resolves a refreshed model context window when each session starts", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    let usableContextWindow = 180_000;
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          instanceId: ProviderInstanceId.make("codex_gateway_refresh"),
+          makeRuntime: runtimeFactory.factory,
+          resolveModelContextWindow: () => usableContextWindow,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      usableContextWindow = 220_000;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("sess-refreshed-model-context"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("codex_gateway_refresh"),
+          "proxy-model",
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const runtime = runtimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      NodeAssert.deepStrictEqual(runtime.options.appServerArgs, [
+        "-c",
+        "model_context_window=220000",
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("restarts with the second model's context window before its turn", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const instanceId = ProviderInstanceId.make("codex_gateway_switch");
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          instanceId,
+          makeRuntime: runtimeFactory.factory,
+          modelContextWindows: {
+            "model-a": 180_000,
+            "model-b": 220_000,
+          },
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-model-context-switch");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        modelSelection: createModelSelection(instanceId, "model-a"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "first turn",
+        modelSelection: createModelSelection(instanceId, "model-a"),
+      });
+
+      const firstRuntime = runtimeFactory.runtimes[0];
+      NodeAssert.ok(firstRuntime);
+      yield* adapter.sendTurn({
+        threadId,
+        input: "second turn",
+        modelSelection: createModelSelection(instanceId, "model-b"),
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 2);
+      const secondRuntime = runtimeFactory.runtimes[1];
+      NodeAssert.ok(secondRuntime);
+      NodeAssert.deepStrictEqual(secondRuntime.options.appServerArgs, [
+        "-c",
+        "model_context_window=220000",
+      ]);
+      NodeAssert.deepStrictEqual(secondRuntime.options.resumeCursor, {
+        threadId: "provider-thread-1",
+      });
+      NodeAssert.equal(firstRuntime.closeImpl.mock.calls.length, 1);
+      NodeAssert.deepStrictEqual(secondRuntime.sendTurnImpl.mock.calls[0]?.[0], {
+        input: "second turn",
+        model: "model-b",
+      });
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("keeps in-session switching when model context windows match", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const instanceId = ProviderInstanceId.make("codex_gateway_same_context");
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          instanceId,
+          makeRuntime: runtimeFactory.factory,
+          modelContextWindows: {
+            "model-a": 180_000,
+            "model-b": 180_000,
+          },
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-model-same-context-switch");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        modelSelection: createModelSelection(instanceId, "model-a"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "second model, same context",
+        modelSelection: createModelSelection(instanceId, "model-b"),
+      });
+
+      NodeAssert.equal(runtimeFactory.runtimes.length, 1);
+      const runtime = runtimeFactory.runtimes[0];
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.closeImpl.mock.calls.length, 0);
+      NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
+        input: "second model, same context",
+        model: "model-b",
+      });
     }).pipe(Effect.provide(layer));
   });
 
