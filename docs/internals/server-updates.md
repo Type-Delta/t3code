@@ -25,7 +25,7 @@ The state contains one active version and, at most, one update record:
 - `rolled-back A → B` or `failed A → B` selects A;
 - invalid state fails closed so the service manager cannot guess at a runtime.
 
-Every write uses same-directory replacement plus file and directory fsync.
+Every write uses same-directory replacement plus file fsync and, where supported, directory fsync.
 
 ## Remote Update
 

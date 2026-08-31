@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - integration test exercises the Windows process-tree boundary.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -70,6 +72,31 @@ it.skipIf(NodePath.sep !== "\\")(
     }
   },
 );
+
+it.skipIf(NodePath.sep !== "\\")("durably replaces service state on Windows", async () => {
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-service-state-windows-"));
+  const directory = NodePath.join(root, "runtime");
+  const statePath = NodePath.join(directory, "service-state.json");
+  try {
+    await writeServiceState(statePath, {
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      activeVersion: "1.0.0",
+    });
+    const replacement = {
+      protocol: SERVICE_LAUNCHER_PROTOCOL,
+      activeVersion: "1.1.0",
+    } as const;
+    await writeServiceState(statePath, replacement);
+
+    assert.deepEqual(await readServiceState(statePath), replacement);
+    assert.deepEqual(
+      (await NodeFSP.readdir(directory)).filter((entry) => entry.startsWith(".service-state")),
+      [],
+    );
+  } finally {
+    await NodeFSP.rm(root, { recursive: true, force: true });
+  }
+});
 
 it("rejects contradictory service state", () => {
   assert.isUndefined(

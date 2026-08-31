@@ -72,7 +72,7 @@ async function pathExists(target: string): Promise<boolean> {
 }
 
 async function syncFile(filePath: string): Promise<void> {
-  const handle = await NodeFSP.open(filePath, "r");
+  const handle = await NodeFSP.open(filePath, "r+");
   try {
     await handle.sync();
   } finally {
@@ -81,6 +81,9 @@ async function syncFile(filePath: string): Promise<void> {
 }
 
 async function syncDirectory(directory: string): Promise<void> {
+  // Windows cannot fsync directory handles. File contents are still synced before replacement.
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- standalone launcher has no Effect runtime.
+  if (process.platform === "win32") return;
   const handle = await NodeFSP.open(directory, "r");
   try {
     await handle.sync();
@@ -189,12 +192,7 @@ export async function writeServiceState(filePath: string, state: ServiceState): 
     await handle.close();
     handle = undefined;
     await NodeFSP.rename(tempPath, filePath);
-    const directoryHandle = await NodeFSP.open(directory, "r");
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
-    }
+    await syncDirectory(directory);
   } finally {
     await handle?.close().catch(() => undefined);
     await NodeFSP.rm(tempPath, { force: true }).catch(() => undefined);

@@ -328,6 +328,16 @@ browser pass that displayed first-host totals while the second host was still sc
 
 **Last updated:** 2026-08-25
 
+### DL025 — Cross-platform service launcher durability
+
+The service launcher keeps file fsync on writable handles before durable state replacement and database backup or restore. It also routes state replacement through the shared directory-sync path. Windows skips directory fsync because Node rejects it with `EPERM`; platforms that support directory fsync retain it.
+
+**Implementation evidence:** `apps/server/src/serviceLauncher.ts`, `apps/server/src/serviceLauncher.test.ts`, and `docs/internals/server-updates.md`.
+
+**Recorded validation:** focused service-launcher persistence, update, rollback, and Windows replacement tests under Node `24.13.1`; `vp check`; and `vp run typecheck`.
+
+**Last updated:** 2026-08-30
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
