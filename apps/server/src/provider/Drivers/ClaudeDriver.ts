@@ -30,10 +30,12 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeClaudeAdapter } from "../Layers/ClaudeAdapter.ts";
 import {
+  claudeModelsFromSettings,
   checkClaudeProviderStatus,
   makePendingClaudeProvider,
   probeClaudeCapabilities,
 } from "../Layers/ClaudeProvider.ts";
+import { makeGatewayModelCatalog } from "../GatewayModelCatalog.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import * as ModelManifest from "../ModelManifest.ts";
@@ -139,6 +141,19 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         instanceId,
       });
       const effectiveConfig = { ...config, enabled } satisfies ClaudeSettings;
+      const gatewayCatalog = yield* makeGatewayModelCatalog({
+        instanceId,
+        settings: effectiveConfig.apiGateway,
+        environment: processEnv,
+      });
+      const resolveModel = (slug: string) =>
+        gatewayCatalog.current.pipe(
+          Effect.map((catalog) =>
+            claudeModelsFromSettings(effectiveConfig, catalog).find(
+              (candidate) => candidate.slug === slug,
+            ),
+          ),
+        );
       const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
         binaryPath: effectiveConfig.binaryPath,
         env: processEnv,
@@ -155,10 +170,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const adapterOptions = {
         instanceId,
         environment: processEnv,
+        resolveModel,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       };
       const adapter = yield* makeClaudeAdapter(effectiveConfig, adapterOptions);
-      const textGeneration = yield* makeClaudeTextGeneration(effectiveConfig, processEnv);
+      const textGeneration = yield* makeClaudeTextGeneration(
+        effectiveConfig,
+        processEnv,
+        resolveModel,
+      );
 
       // Per-instance capabilities cache: keyed on binary + resolved HOME so
       // account-specific probes never share auth metadata across instances.
@@ -178,11 +198,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const checkProvider = modelManifest.refreshInBackground.pipe(
         Effect.andThen(
           Effect.zipWith(
-            checkClaudeProviderStatus(
-              effectiveConfig,
-              () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
-              processEnv,
-              cwd,
+            gatewayCatalog.refresh.pipe(
+              Effect.flatMap((catalog) =>
+                checkClaudeProviderStatus(
+                  effectiveConfig,
+                  () => Cache.get(capabilitiesProbeCache, capabilitiesCacheKey),
+                  processEnv,
+                  cwd,
+                  catalog,
+                ),
+              ),
             ),
             modelManifest.current,
             (draft, manifest) =>
@@ -202,11 +227,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
-          Effect.zipWith(
-            makePendingClaudeProvider(settings.provider),
-            modelManifest.current,
-            (draft, manifest) =>
-              stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
+          gatewayCatalog.current.pipe(
+            Effect.flatMap((catalog) =>
+              Effect.zipWith(
+                makePendingClaudeProvider(settings.provider, catalog),
+                modelManifest.current,
+                (draft, manifest) =>
+                  stampIdentity(ModelManifest.applyModelManifest(draft, manifest, DRIVER_KIND)),
+              ),
+            ),
           ),
         checkProvider,
         enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>

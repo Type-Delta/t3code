@@ -119,6 +119,58 @@ This is useful when a Codex-compatible setup needs account-specific variables. A
 the provider instance that should receive them, and mark API keys or tokens as sensitive. Sensitive
 values are stored as server secrets and are not sent back to the app after saving.
 
+## Use a compatible API gateway
+
+Codex provider instances can use an OpenAI-compatible API gateway such as CLIProxyAPI. When you
+add a provider instance, open the third step, **Config**, and enable **Compatible API gateway**. You
+can also expand an existing Codex provider in Settings and change the same fields there.
+
+Set **Gateway base URL** to the inference URL that Codex should use. Codex sends Responses API
+requests to this gateway. The gateway must support that API.
+
+T3 also requests a model catalog from the gateway. Leave **Model catalog URL** empty to derive
+`/v1/models` from the base URL, or enter the complete catalog URL when the gateway uses another
+path. **Auto-detect** accepts these catalog shapes:
+
+- Codex catalogs with a top-level `models` array
+- Anthropic catalogs with a top-level `data` array and fields such as `max_input_tokens`
+- OpenAI catalogs with a top-level `data` array
+
+Use an explicit format if auto-detection chooses the wrong shape.
+
+The **API key environment variable** field contains a variable name, not the key itself. Add that
+variable to the provider instance's **Environment variables** section first. Mark its value as
+sensitive, then enter its name, such as `OPENAI_API_KEY`, in the gateway settings. Choose whether
+the catalog request sends it as a bearer token or an `x-api-key` header. Leave the field empty only
+when the catalog needs no authentication.
+
+The T3 server performs discovery, so web and mobile clients do not receive the gateway credential.
+T3 caches the last successful catalog for this provider instance. If a later request fails, the
+cached models remain available. Without a cache, T3 falls back to the models reported by Codex and
+any models you added manually.
+
+### Check or override model information
+
+Under **Models**, point to the information icon beside a model to see the detected model ID,
+description, metadata source, usable and maximum context windows, maximum output, reasoning levels,
+default reasoning level, and other reported capabilities. Unknown fields are omitted. If T3 only
+knows the model ID, the tooltip says that no additional metadata was detected.
+
+When you add a custom model, T3 opens a metadata form. You can set its display name, usable context
+window, theoretical maximum context window, maximum output, supported reasoning efforts, and
+default effort. Use the pencil beside any visible model to change those values. Manual values take
+precedence over the gateway catalog and Codex metadata.
+
+The usable context window should be the limit that this gateway and account can accept. The maximum
+context window is the model's theoretical limit and may be larger. For example, enter `200000` as
+usable and `1000000` as maximum when the model supports one million tokens but the account does not.
+Leave unknown values empty instead of estimating them.
+
+T3 passes the selected reasoning effort to Codex and sets `model_context_window` only when a usable
+context value is known. It never substitutes the theoretical maximum. For a Codex-format catalog,
+T3 also gives the original catalog to Codex through `model_catalog_json`. Descriptions and maximum
+output values remain informational because Codex has no matching per-turn setting for them.
+
 ## Can I Switch Accounts In An Existing Thread?
 
 Yes, when both Codex providers share the same `CODEX_HOME path`.

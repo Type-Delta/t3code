@@ -5,7 +5,6 @@ import {
   type ClaudeSettings,
   type ModelCapabilities,
   type ModelSelection,
-  ProviderDriverKind,
   type ServerProviderDiagnostics,
   type ServerProviderModel,
   type ServerProviderSlashCommand,
@@ -42,7 +41,6 @@ import {
   DEFAULT_TIMEOUT_MS,
   isCommandMissingCause,
   parseGenericCliVersion,
-  providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
@@ -52,6 +50,7 @@ import {
 } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
+import { type GatewayCatalogSnapshot, mergeGatewayModelCatalog } from "../GatewayModelCatalog.ts";
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -391,12 +390,57 @@ function formatClaudeOpus47UpgradeMessage(version: string | null): string {
   return `Claude Code ${versionLabel} is too old for Claude Opus 4.7. Upgrade to v${MINIMUM_CLAUDE_OPUS_4_7_VERSION} or newer to access it.`;
 }
 
-export function getClaudeModelCapabilities(model: string | null | undefined): ModelCapabilities {
+function stampClaudeCatalogAuthority(
+  provider: ServerProviderDraft,
+  catalog: GatewayCatalogSnapshot | undefined,
+): ServerProviderDraft {
+  return catalog?.source === "network" || catalog?.source === "cache"
+    ? { ...provider, modelsAuthoritative: true }
+    : provider;
+}
+
+export function getClaudeModelCapabilities(
+  model: string | null | undefined,
+  models: ReadonlyArray<ServerProviderModel> = BUILT_IN_MODELS,
+): ModelCapabilities {
   const slug = model?.trim();
   return (
-    BUILT_IN_MODELS.find((candidate) => candidate.slug === slug)?.capabilities ??
+    models.find((candidate) => candidate.slug === slug)?.capabilities ??
     DEFAULT_CLAUDE_MODEL_CAPABILITIES
   );
+}
+
+export function claudeModelsFromSettings(
+  claudeSettings: ClaudeSettings,
+  catalog?: GatewayCatalogSnapshot,
+  builtInModels: ReadonlyArray<ServerProviderModel> = BUILT_IN_MODELS,
+): ReadonlyArray<ServerProviderModel> {
+  const mergedModels = mergeGatewayModelCatalog({
+    baseModels: builtInModels,
+    catalog: catalog ?? { models: [], source: "none" },
+    customModels: claudeSettings.customModels,
+    modelOverrides: claudeSettings.modelOverrides ?? {},
+    reasoningOptionId: "effort",
+    emptyCustomCapabilities: DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+  });
+  return mergedModels.map((model) => {
+    if (model.metadata?.contextWindowTokens === undefined || model.capabilities === null) {
+      return model;
+    }
+    const optionDescriptors = model.capabilities.optionDescriptors?.filter(
+      (descriptor) => descriptor.id !== "contextWindow",
+    );
+    if (optionDescriptors?.length === model.capabilities.optionDescriptors?.length) {
+      return model;
+    }
+    return {
+      ...model,
+      capabilities: {
+        ...model.capabilities,
+        optionDescriptors,
+      },
+    };
+  });
 }
 
 export function resolveClaudeEffort(
@@ -425,12 +469,24 @@ export function resolveClaudeEffort(
 export function normalizeClaudeCliEffort(
   effort: string | null | undefined,
   model: string | null | undefined,
+  resolvedModel?: ServerProviderModel,
 ): string | undefined {
   if (!effort || effort === "ultrathink") {
     return undefined;
   }
   if (effort === "ultracode") {
     return "xhigh";
+  }
+  const effortIsAdvertisedByResolvedModel =
+    (resolvedModel?.isCustom === true || resolvedModel?.metadata?.source === "gateway") &&
+    resolvedModel.capabilities?.optionDescriptors?.some(
+      (descriptor) =>
+        descriptor.id === "effort" &&
+        descriptor.type === "select" &&
+        descriptor.options.some((option) => option.id === effort),
+    ) === true;
+  if (effortIsAdvertisedByResolvedModel) {
+    return effort;
   }
   if (
     effort === "xhigh" &&
@@ -453,8 +509,9 @@ export function isClaudeUltracodeEffort(effort: string | null | undefined): bool
 
 export function resolveClaudeContextWindow(
   modelSelection: ModelSelection | undefined,
+  capabilities?: ModelCapabilities,
 ): string | undefined {
-  const caps = getClaudeModelCapabilities(modelSelection?.model);
+  const caps = capabilities ?? getClaudeModelCapabilities(modelSelection?.model);
   const raw = getModelSelectionStringOptionValue(modelSelection, "contextWindow");
   const descriptors = getProviderOptionDescriptors({
     caps,
@@ -465,8 +522,15 @@ export function resolveClaudeContextWindow(
   return typeof value === "string" ? value : undefined;
 }
 
-export function resolveClaudeApiModelId(modelSelection: ModelSelection): string {
-  switch (resolveClaudeContextWindow(modelSelection)) {
+export function resolveClaudeApiModelId(
+  modelSelection: ModelSelection,
+  model?: ServerProviderModel,
+): string {
+  const usableContextWindow = model?.metadata?.contextWindowTokens;
+  if (usableContextWindow !== undefined) {
+    return usableContextWindow > 200_000 ? `${modelSelection.model}[1m]` : modelSelection.model;
+  }
+  switch (resolveClaudeContextWindow(modelSelection, model?.capabilities ?? undefined)) {
     case "1m":
       return `${modelSelection.model}[1m]`;
     default:
@@ -885,6 +949,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   ) => Effect.Effect<ClaudeCapabilitiesProbeOutcome>,
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
+  gatewayCatalog?: GatewayCatalogSnapshot,
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -893,11 +958,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const resolvedEnvironment = environment ?? process.env;
   const platform = yield* HostProcessPlatform;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const allModels = providerModelsFromSettings(
-    BUILT_IN_MODELS,
-    claudeSettings.customModels,
-    DEFAULT_CLAUDE_MODEL_CAPABILITIES,
-  );
+  const allModels = claudeModelsFromSettings(claudeSettings, gatewayCatalog);
+  const buildClaudeProvider = (input: Parameters<typeof buildServerProvider>[0]) =>
+    stampClaudeCatalogAuthority(buildServerProvider(input), gatewayCatalog);
   const sdkNativeExecutable = resolvePackagedClaudeSdkNativeExecutable(platform);
   const baseDiagnostics = {
     configuredExecutable: claudeSettings.binaryPath,
@@ -910,7 +973,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   } satisfies ServerProviderDiagnostics;
 
   if (!claudeSettings.enabled) {
-    return buildServerProvider({
+    return buildClaudeProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: false,
       checkedAt,
@@ -941,7 +1004,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     yield* Effect.logWarning("Claude Agent CLI health check failed.", {
       errorTag: error._tag,
     });
-    return buildServerProvider({
+    return buildClaudeProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
       checkedAt,
@@ -965,7 +1028,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   if (Option.isNone(versionProbe.success)) {
-    return buildServerProvider({
+    return buildClaudeProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
       checkedAt,
@@ -995,7 +1058,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       stdoutLength: version.stdout.length,
       stderrLength: version.stderr.length,
     });
-    return buildServerProvider({
+    return buildClaudeProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
       checkedAt,
@@ -1020,10 +1083,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  const models = providerModelsFromSettings(
+  const models = claudeModelsFromSettings(
+    claudeSettings,
+    gatewayCatalog,
     getBuiltInClaudeModelsForVersion(parsedVersion),
-    claudeSettings.customModels,
-    DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
   const versionUpgradeMessage = supportsClaudeOpus5(parsedVersion)
     ? undefined
@@ -1078,7 +1141,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     authenticated === true
       ? versionUpgradeMessage
       : "Could not verify Claude authentication status from initialization result.";
-  return buildServerProvider({
+  return buildClaudeProvider({
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
     checkedAt,
@@ -1109,17 +1172,16 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 export const makePendingClaudeProvider = (
   claudeSettings: ClaudeSettings,
+  gatewayCatalog?: GatewayCatalogSnapshot,
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* nowIso;
-    const models = providerModelsFromSettings(
-      BUILT_IN_MODELS,
-      claudeSettings.customModels,
-      DEFAULT_CLAUDE_MODEL_CAPABILITIES,
-    );
+    const models = claudeModelsFromSettings(claudeSettings, gatewayCatalog);
+    const buildClaudeProvider = (input: Parameters<typeof buildServerProvider>[0]) =>
+      stampClaudeCatalogAuthority(buildServerProvider(input), gatewayCatalog);
 
     if (!claudeSettings.enabled) {
-      return buildServerProvider({
+      return buildClaudeProvider({
         presentation: CLAUDE_PRESENTATION,
         enabled: false,
         checkedAt,
@@ -1134,7 +1196,7 @@ export const makePendingClaudeProvider = (
       });
     }
 
-    return buildServerProvider({
+    return buildClaudeProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: true,
       checkedAt,

@@ -7,6 +7,7 @@ import { ThreadEnvMode } from "./environment.ts";
 import {
   DEFAULT_TEXT_GENERATION_MODEL,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
+  ModelMetadataOverride,
   ProviderOptionSelections,
 } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
@@ -20,6 +21,7 @@ import {
 } from "./preview.ts";
 import {
   ProviderInstanceConfig,
+  ProviderInstanceEnvironmentVariableName,
   ProviderInstanceId,
   type ProviderDriverKind,
 } from "./providerInstance.ts";
@@ -319,6 +321,26 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
   );
 }
 
+export const ApiGatewayCatalogFormat = Schema.Literals(["auto", "codex", "anthropic", "openai"]);
+export type ApiGatewayCatalogFormat = typeof ApiGatewayCatalogFormat.Type;
+
+export const ApiGatewayAuthMode = Schema.Literals(["bearer", "x-api-key"]);
+export type ApiGatewayAuthMode = typeof ApiGatewayAuthMode.Type;
+
+export const ApiGatewaySettings = Schema.Struct({
+  enabled: Schema.Boolean,
+  baseUrl: TrimmedString,
+  catalogUrl: Schema.optionalKey(TrimmedString),
+  catalogFormat: ApiGatewayCatalogFormat.pipe(
+    Schema.withDecodingDefault(Effect.succeed("auto" as const)),
+  ),
+  apiKeyEnvironmentVariable: Schema.optionalKey(ProviderInstanceEnvironmentVariableName),
+  authMode: ApiGatewayAuthMode.pipe(Schema.withDecodingDefault(Effect.succeed("bearer" as const))),
+});
+export type ApiGatewaySettings = typeof ApiGatewaySettings.Type;
+
+const ModelOverrides = Schema.Record(Schema.String, ModelMetadataOverride);
+
 export const CodexSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -366,6 +388,12 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    apiGateway: Schema.optionalKey(ApiGatewaySettings).pipe(
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    modelOverrides: Schema.optionalKey(ModelOverrides).pipe(
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
   },
   {
     order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
@@ -402,6 +430,12 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    apiGateway: Schema.optionalKey(ApiGatewaySettings).pipe(
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    modelOverrides: Schema.optionalKey(ModelOverrides).pipe(
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
     launchArgs: Schema.String.pipe(
@@ -809,6 +843,8 @@ const CodexSettingsPatch = Schema.Struct({
   shadowHomePath: Schema.optionalKey(TrimmedString),
   launchArgs: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+  apiGateway: Schema.optionalKey(ApiGatewaySettings),
+  modelOverrides: Schema.optionalKey(Schema.Record(Schema.String, ModelMetadataOverride)),
 });
 
 const ClaudeSettingsPatch = Schema.Struct({
@@ -816,6 +852,8 @@ const ClaudeSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+  apiGateway: Schema.optionalKey(ApiGatewaySettings),
+  modelOverrides: Schema.optionalKey(Schema.Record(Schema.String, ModelMetadataOverride)),
   launchArgs: Schema.optionalKey(TrimmedString),
   // Validated at the patch boundary so a typo fails the one update with a
   // schema error instead of a generic whole-settings failure.

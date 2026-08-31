@@ -328,6 +328,38 @@ browser pass that displayed first-host totals while the second host was still sc
 
 **Last updated:** 2026-08-25
 
+### DL025 — Per-instance API gateway model catalogs
+
+Codex and Claude provider instances can declare a compatible API gateway in the add-instance
+wizard or provider settings. The server fetches Codex, Anthropic, or OpenAI model catalogs with a
+provider-environment credential reference, normalizes model context and reasoning metadata, and
+caches the last successful response per instance. Catalog failure retains cached or provider
+models and does not make an otherwise healthy provider unavailable.
+
+Models carry usable context, theoretical maximum context, maximum output, and metadata provenance.
+Every visible model accepts manual display, context, output, and reasoning overrides; manual values
+win over gateway and harness metadata. The Models information tooltip shows every known value
+without inventing missing metadata.
+
+Codex receives a managed Responses API provider, Codex-format `model_catalog_json`, selected
+reasoning effort, and a per-model `model_context_window`. Claude receives its gateway environment,
+gateway discovery flag, selected reasoning effort, and a context-aware plain or `[1m]` model ID.
+Metadata with no matching harness control remains informational.
+
+**Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
+`apps/server/src/provider/GatewayModelCatalog.ts`,
+`apps/server/src/provider/{Drivers,Layers}/`,
+`apps/server/src/textGeneration/ClaudeTextGeneration.ts`,
+`apps/web/src/components/settings/{AddProviderInstanceDialog,CompatibleApiGatewaySection,CustomModelMetadataDialog,ProviderInstanceCard,ProviderModelsSection}.tsx`,
+and `apps/web/src/components/settings/providerModelDetails.ts`.
+
+**Recorded validation:** focused gateway parsing and cache tests, Codex and Claude provider relay
+tests, settings and server contract tests, provider-settings component tests, `vp check`,
+`vp run typecheck`, and integrated web verification of gateway configuration, custom model metadata,
+and model-detail tooltips.
+
+**Last updated:** 2026-08-31
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

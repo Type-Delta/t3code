@@ -36,6 +36,7 @@ import {
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
+  type ServerProviderModel,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   type RuntimeContentStreamKind,
@@ -336,6 +337,7 @@ export interface ClaudeAdapterLiveOptions {
   }) => ClaudeQueryRuntime;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly resolveModel?: (slug: string) => Effect.Effect<ServerProviderModel | undefined>;
 }
 
 function isUuid(value: string): boolean {
@@ -386,8 +388,9 @@ function normalizeClaudeStreamMessages(
 function getEffectiveClaudeAgentEffort(
   effort: string | null | undefined,
   model: string | null | undefined,
+  resolvedModel?: ServerProviderModel,
 ): ClaudeSdkEffort | null {
-  const normalized = normalizeClaudeCliEffort(effort, model);
+  const normalized = normalizeClaudeCliEffort(effort, model, resolvedModel);
   return normalized ? (normalized as ClaudeSdkEffort) : null;
 }
 
@@ -474,7 +477,11 @@ function maxClaudeContextWindowFromModelUsage(
 
 function selectedClaudeContextWindow(
   modelSelection: ModelSelection | undefined,
+  model?: ServerProviderModel,
 ): number | undefined {
+  if (model?.metadata?.contextWindowTokens !== undefined) {
+    return model.metadata.contextWindowTokens;
+  }
   switch (modelSelection?.model) {
     case "claude-opus-4-8":
     case "claude-opus-4-7":
@@ -482,7 +489,7 @@ function selectedClaudeContextWindow(
       return 1_000_000;
   }
 
-  switch (resolveClaudeContextWindow(modelSelection)) {
+  switch (resolveClaudeContextWindow(modelSelection, model?.capabilities ?? undefined)) {
     case "1m":
       return 1_000_000;
     case "200k":
@@ -4291,10 +4298,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
       const modelSelection =
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
-      const caps = getClaudeModelCapabilities(modelSelection?.model);
+      const resolvedModel = modelSelection?.model
+        ? yield* options?.resolveModel?.(modelSelection.model) ?? Effect.succeed(undefined)
+        : undefined;
+      const caps = resolvedModel?.capabilities ?? getClaudeModelCapabilities(modelSelection?.model);
       const descriptors = getProviderOptionDescriptors({ caps });
-      const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
-      const initialContextWindow = selectedClaudeContextWindow(modelSelection);
+      const apiModelId = modelSelection
+        ? resolveClaudeApiModelId(modelSelection, resolvedModel)
+        : undefined;
+      const initialContextWindow = selectedClaudeContextWindow(modelSelection, resolvedModel);
       const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
       const effort = resolveClaudeEffort(caps, rawEffort) ?? null;
       const fastModeSupported = descriptors.some(
@@ -4310,7 +4322,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
         : undefined;
       const ultracode = isClaudeUltracodeEffort(effort);
-      const effectiveEffort = getEffectiveClaudeAgentEffort(effort, modelSelection?.model);
+      const effectiveEffort = getEffectiveClaudeAgentEffort(
+        effort,
+        modelSelection?.model,
+        resolvedModel,
+      );
       const runtimeModeToPermission: Record<string, PermissionMode> = {
         "auto-accept-edits": "acceptEdits",
         auto: "auto",
@@ -4558,7 +4574,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (modelSelection?.model) {
-      const apiModelId = resolveClaudeApiModelId(modelSelection);
+      const resolvedModel = yield* (
+        options?.resolveModel?.(modelSelection.model) ?? Effect.succeed(undefined)
+      );
+      const apiModelId = resolveClaudeApiModelId(modelSelection, resolvedModel);
       if (context.currentApiModelId !== apiModelId) {
         yield* Effect.tryPromise({
           try: () => context.query.setModel(apiModelId),
@@ -4570,13 +4589,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...context.session,
         model: modelSelection.model,
       };
-      const turnCaps = getClaudeModelCapabilities(modelSelection.model);
+      const turnCaps =
+        resolvedModel?.capabilities ?? getClaudeModelCapabilities(modelSelection.model);
       const turnEffort = resolveClaudeEffort(
         turnCaps,
         getModelSelectionStringOptionValue(modelSelection, "effort"),
       );
       context.currentEffort =
-        getEffectiveClaudeAgentEffort(turnEffort ?? null, modelSelection.model) ?? undefined;
+        getEffectiveClaudeAgentEffort(turnEffort ?? null, modelSelection.model, resolvedModel) ??
+        undefined;
     }
 
     // Apply interaction mode by switching the SDK's permission mode.

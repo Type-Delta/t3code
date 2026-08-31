@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  CodexSettings,
   DEFAULT_SERVER_SETTINGS,
   defaultEnabledForDriver,
   resolveProviderInstanceEnabled,
@@ -19,6 +20,56 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
+
+describe("provider API gateway model settings", () => {
+  it("keeps gateway configuration and manual model metadata per provider instance", () => {
+    const decoded = decodeCodexSettings({
+      apiGateway: {
+        enabled: true,
+        baseUrl: " https://gateway.example/v1 ",
+        apiKeyEnvironmentVariable: "GATEWAY_API_KEY",
+      },
+      customModels: ["private-model"],
+      modelOverrides: {
+        "private-model": {
+          displayName: "Private Model",
+          contextWindowTokens: 200_000,
+          maxContextWindowTokens: 1_000_000,
+          maxOutputTokens: 64_000,
+          reasoningEfforts: ["low", "high"],
+          defaultReasoningEffort: "high",
+        },
+      },
+    });
+
+    expect(decoded.apiGateway).toEqual({
+      enabled: true,
+      baseUrl: "https://gateway.example/v1",
+      catalogFormat: "auto",
+      apiKeyEnvironmentVariable: "GATEWAY_API_KEY",
+      authMode: "bearer",
+    });
+    expect(decoded.modelOverrides?.["private-model"]).toEqual({
+      displayName: "Private Model",
+      contextWindowTokens: 200_000,
+      maxContextWindowTokens: 1_000_000,
+      maxOutputTokens: 64_000,
+      reasoningEfforts: ["low", "high"],
+      defaultReasoningEffort: "high",
+    });
+  });
+
+  it("keeps legacy provider settings valid and rejects invalid token counts", () => {
+    expect(decodeClaudeSettings({}).apiGateway).toBeUndefined();
+    expect(decodeClaudeSettings({}).modelOverrides).toBeUndefined();
+    expect(() =>
+      decodeClaudeSettings({
+        modelOverrides: { invalid: { contextWindowTokens: 0 } },
+      }),
+    ).toThrow();
+  });
+});
 
 describe("ClaudeSettings auto-compaction", () => {
   it("uses Claude's default threshold when no override is configured", () => {

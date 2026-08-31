@@ -155,6 +155,7 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly claudeConfig?: Partial<ClaudeSettings>;
   readonly instanceId?: ProviderInstanceId;
+  readonly resolveModel?: ClaudeAdapterLiveOptions["resolveModel"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -166,6 +167,7 @@ function makeHarness(config?: {
 
   const adapterOptions: ClaudeAdapterLiveOptions = {
     ...(config?.instanceId ? { instanceId: config.instanceId } : {}),
+    ...(config?.resolveModel ? { resolveModel: config.resolveModel } : {}),
     createQuery: (input) => {
       createInput = input;
       return query;
@@ -519,6 +521,46 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.equal(createInput?.options.effort, "max");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("preserves xhigh advertised by a resolved custom model", () => {
+    const harness = makeHarness({
+      resolveModel: (slug) =>
+        Effect.succeed({
+          slug,
+          name: "Private Claude",
+          isCustom: true,
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: "effort",
+                label: "Reasoning",
+                type: "select",
+                options: [{ id: "xhigh", label: "Extra High", isDefault: true }],
+              },
+            ],
+          },
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-private",
+          [{ id: "effort", value: "xhigh" }],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.effort, "xhigh");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -4134,6 +4176,47 @@ describe("ClaudeAdapterLive", () => {
       });
 
       assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-6[1m]"]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("uses per-instance usable context metadata when selecting the Claude API model", () => {
+    const harness = makeHarness({
+      resolveModel: (slug) =>
+        Effect.succeed({
+          slug,
+          name: slug,
+          isCustom: true,
+          capabilities: null,
+          metadata: {
+            contextWindowTokens: 200_000,
+            maxContextWindowTokens: 1_000_000,
+            source: "gateway",
+          },
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-4-6",
+          [{ id: "contextWindow", value: "1m" }],
+        ),
+        attachments: [],
+      });
+
+      assert.deepEqual(harness.query.setModelCalls, ["claude-opus-4-6"]);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

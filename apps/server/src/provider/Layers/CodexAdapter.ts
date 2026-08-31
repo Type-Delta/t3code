@@ -123,6 +123,8 @@ function readCodexNativeThreadId(payload: unknown): string | undefined {
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly modelContextWindows?: Readonly<Record<string, number>>;
+  readonly resolveModelContextWindow?: (model: string) => number | undefined;
   readonly makeRuntime?: (
     options: CodexSessionRuntimeOptions,
   ) => Effect.Effect<
@@ -139,6 +141,7 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  readonly modelContextWindow: number | undefined;
   stopped: boolean;
 }
 
@@ -1807,6 +1810,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  const resolveModelContextWindow = (model: string): number | undefined => {
+    const contextWindow =
+      options?.resolveModelContextWindow?.(model) ?? options?.modelContextWindows?.[model];
+    return Number.isSafeInteger(contextWindow) && contextWindow !== undefined && contextWindow > 0
+      ? contextWindow
+      : undefined;
+  };
 
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
@@ -1828,8 +1838,28 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
+        const selectedModel =
+          input.modelSelection?.instanceId === boundInstanceId
+            ? input.modelSelection.model
+            : undefined;
+        const modelContextWindow = selectedModel
+          ? resolveModelContextWindow(selectedModel)
+          : undefined;
         const resumeNativeThreadId = readCodexNativeThreadId(input.resumeCursor);
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const appServerArgs = [
+          ...(modelContextWindow !== undefined
+            ? ["-c", `model_context_window=${modelContextWindow}`]
+            : []),
+          ...(mcpSession
+            ? [
+                "-c",
+                `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
+                "-c",
+                'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+              ]
+            : []),
+        ];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -1840,22 +1870,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(resumeNativeThreadId ? { resumeCursor: { threadId: resumeNativeThreadId } } : {}),
           runtimeMode: input.runtimeMode,
-          ...(input.modelSelection?.instanceId === boundInstanceId
-            ? { model: input.modelSelection.model }
-            : {}),
+          ...(selectedModel ? { model: selectedModel } : {}),
           ...(serviceTier ? { serviceTier } : {}),
+          ...(appServerArgs.length > 0 ? { appServerArgs } : {}),
           ...(mcpSession
             ? {
                 environment: {
                   ...(options?.environment ?? process.env),
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
-                appServerArgs: [
-                  "-c",
-                  `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
-                  "-c",
-                  'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
-                ],
               }
             : {}),
         };
@@ -1925,6 +1948,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           scope: sessionScope,
           runtime,
           eventFiber,
+          modelContextWindow,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -1972,7 +1996,26 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       { concurrency: 1 },
     );
 
-    const session = yield* requireSession(input.threadId);
+    let session = yield* requireSession(input.threadId);
+    const selectedModel =
+      input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection.model : undefined;
+    const requestedModelContextWindow = selectedModel
+      ? resolveModelContextWindow(selectedModel)
+      : undefined;
+    if (selectedModel !== undefined && requestedModelContextWindow !== session.modelContextWindow) {
+      const currentSession = yield* session.runtime.getSession;
+      yield* startSession({
+        provider: PROVIDER,
+        threadId: input.threadId,
+        ...(currentSession.cwd ? { cwd: currentSession.cwd } : {}),
+        modelSelection: input.modelSelection,
+        ...(currentSession.resumeCursor !== undefined
+          ? { resumeCursor: currentSession.resumeCursor }
+          : {}),
+        runtimeMode: currentSession.runtimeMode,
+      });
+      session = yield* requireSession(input.threadId);
+    }
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")

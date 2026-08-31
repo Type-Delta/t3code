@@ -18,7 +18,7 @@ import {
   ResolvedKeybindingsConfig,
 } from "./keybindings.ts";
 import { EditorId, FileManagerRevealKind, RemoteOpenTarget } from "./editor.ts";
-import { ModelCapabilities } from "./model.ts";
+import { ModelCapabilities, ModelMetadata } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
 
@@ -75,12 +75,14 @@ export type ServerProviderDiagnostics = typeof ServerProviderDiagnostics.Type;
 export const ServerProviderModel = Schema.Struct({
   slug: TrimmedNonEmptyString,
   name: TrimmedNonEmptyString,
+  description: Schema.optional(TrimmedNonEmptyString),
   shortName: Schema.optional(TrimmedNonEmptyString),
   subProvider: Schema.optional(TrimmedNonEmptyString),
   isCustom: Schema.Boolean,
   isDefault: Schema.optional(Schema.Boolean),
   isLegacy: Schema.optional(Schema.Boolean),
   capabilities: Schema.NullOr(ModelCapabilities),
+  metadata: Schema.optionalKey(ModelMetadata),
 });
 export type ServerProviderModel = typeof ServerProviderModel.Type;
 
@@ -214,6 +216,11 @@ export const ServerProvider = Schema.Struct({
   // Surfaces in the UI alongside the missing-driver affordance.
   unavailableReason: Schema.optional(TrimmedNonEmptyString),
   models: Schema.Array(ServerProviderModel),
+  // A successful provider-specific inventory may be smaller than the prior
+  // snapshot, including empty. Consumers must replace cached models when this
+  // is true instead of filling gaps from an older snapshot. Omitted legacy
+  // snapshots keep the historical merge behavior.
+  modelsAuthoritative: Schema.optional(Schema.Boolean),
   slashCommands: Schema.Array(ServerProviderSlashCommand).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),

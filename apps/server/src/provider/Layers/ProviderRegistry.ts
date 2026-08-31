@@ -100,6 +100,10 @@ const mergeProviderModels = (
   previousModels: ReadonlyArray<ServerProvider["models"][number]>,
   nextModels: ReadonlyArray<ServerProvider["models"][number]>,
 ): ReadonlyArray<ServerProvider["models"][number]> => {
+  if (provider.modelsAuthoritative === true) {
+    return nextModels;
+  }
+
   const shouldRetainMissingModels = shouldRetainMissingProviderModels(provider);
 
   if (shouldRetainMissingModels && nextModels.length === 0 && previousModels.length > 0) {

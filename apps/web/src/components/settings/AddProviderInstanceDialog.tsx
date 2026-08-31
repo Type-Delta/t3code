@@ -36,6 +36,12 @@ import {
   type WizardNavigation,
 } from "./AddProviderInstanceDialog.logic";
 import { AddProviderInstanceWizardSteps } from "./AddProviderInstanceWizardSteps";
+import {
+  CompatibleApiGatewaySection,
+  hasApiGatewayValidationErrors,
+  readApiGatewayDraft,
+  validateApiGatewayDraft,
+} from "./CompatibleApiGatewaySection";
 
 const PROVIDER_ACCENT_SWATCHES = [
   "#2563eb",
@@ -154,12 +160,18 @@ export function AddProviderInstanceDialog({
     () => deriveProviderSettingsFields(driverOption),
     [driverOption],
   );
+  const supportsApiGateway =
+    driver === ProviderDriverKind.make("codex") ||
+    driver === ProviderDriverKind.make("claudeAgent");
   const instanceIdError = validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
   const previewLabel = label.trim() || `${driverOption.label} Workspace`;
   const wizardStepSummaries = [driverOption.label, previewLabel, null] as const;
 
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
+  const hasInvalidApiGateway =
+    supportsApiGateway &&
+    hasApiGatewayValidationErrors(validateApiGatewayDraft(readApiGatewayDraft(configDraft)));
   const setConfigDraft = (config: Record<string, unknown> | undefined) => {
     setConfigByDriver((existing) => {
       const next = { ...existing };
@@ -189,7 +201,7 @@ export function AddProviderInstanceDialog({
 
   const handleSave = () => {
     setHasAttemptedSubmit(true);
-    if (instanceIdError !== null) return;
+    if (instanceIdError !== null || hasInvalidApiGateway) return;
 
     const config = configByDriver[driver] ?? {};
     const hasConfig = Object.keys(config).length > 0;
@@ -394,8 +406,8 @@ export function AddProviderInstanceDialog({
                 </span>
               </div>
 
-              {driverSettingsFields.length > 0 ? (
-                <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
+              <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
+                {driverSettingsFields.length > 0 ? (
                   <ProviderSettingsForm
                     definition={driverOption}
                     value={configDraft}
@@ -403,14 +415,21 @@ export function AddProviderInstanceDialog({
                     variant="dialog"
                     onChange={setConfigDraft}
                   />
-                </div>
-              ) : wizardStep === 2 ? (
-                <div className="grid gap-2">
+                ) : null}
+                {supportsApiGateway ? (
+                  <CompatibleApiGatewaySection
+                    value={configDraft}
+                    idPrefix={`add-provider-${driver}`}
+                    variant="dialog"
+                    onChange={setConfigDraft}
+                  />
+                ) : null}
+                {driverSettingsFields.length === 0 && !supportsApiGateway ? (
                   <p className="text-sm text-muted-foreground">
                     This driver has no required configuration. You can add the instance now.
                   </p>
-                </div>
-              ) : null}
+                ) : null}
+              </div>
             </AnimatedHeight>
           </div>
 
@@ -433,7 +452,7 @@ export function AddProviderInstanceDialog({
                 Next
               </Button>
             ) : (
-              <Button size="sm" onClick={handleSave}>
+              <Button size="sm" onClick={handleSave} disabled={hasInvalidApiGateway}>
                 Add instance
               </Button>
             )}

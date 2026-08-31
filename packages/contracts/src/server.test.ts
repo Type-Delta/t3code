@@ -26,6 +26,45 @@ const baseProviderSnapshot = {
 };
 
 describe("ServerProvider", () => {
+  it("decodes an authoritative model inventory without changing legacy snapshots", () => {
+    expect(
+      decodeServerProvider({
+        ...baseProviderSnapshot,
+        modelsAuthoritative: true,
+      }).modelsAuthoritative,
+    ).toBe(true);
+    expect(decodeServerProvider(baseProviderSnapshot).modelsAuthoritative).toBeUndefined();
+  });
+
+  it("decodes detailed model metadata for clients", () => {
+    const parsed = decodeServerProvider({
+      ...baseProviderSnapshot,
+      models: [
+        {
+          slug: "gateway-model",
+          name: "Gateway Model",
+          description: "A model discovered from the configured gateway.",
+          isCustom: true,
+          capabilities: null,
+          metadata: {
+            contextWindowTokens: 200_000,
+            maxContextWindowTokens: 1_000_000,
+            maxOutputTokens: 64_000,
+            source: "gateway",
+          },
+        },
+      ],
+    });
+
+    expect(parsed.models[0]?.metadata).toEqual({
+      contextWindowTokens: 200_000,
+      maxContextWindowTokens: 1_000_000,
+      maxOutputTokens: 64_000,
+      source: "gateway",
+    });
+    expect(parsed.models[0]?.description).toBe("A model discovered from the configured gateway.");
+  });
+
   it("defaults capability arrays when decoding provider snapshots", () => {
     const parsed = decodeServerProvider({
       instanceId: "codex",
