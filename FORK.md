@@ -373,6 +373,29 @@ and model-detail tooltips.
 
 **Last updated:** 2026-09-01
 
+### DL027 — Remote editor links select the server account
+
+Remote open-in-editor targets advertise the operating-system account running the
+server when it can be resolved. The web client includes that account inside the
+VS Code Remote-SSH authority (`ssh-remote+user@host`), so Windows clients do not
+fall back to their local username. Windows AD accounts use `USERDOMAIN\\username`
+only when `USERDNSDOMAIN` confirms a domain and the name is not the local
+computer/workgroup. Local accounts use the unqualified username. Systems that
+cannot resolve an account omit the field and retain host-only behavior.
+Desktop-managed SSH aliases remain authoritative and continue to omit the
+advertised account. The username field is optional for compatibility with older
+server configurations.
+
+**Implementation evidence:** `packages/shared/src/hostProcess.ts`,
+`packages/contracts/src/editor.ts`, `apps/server/src/environment/RemoteOpenTargets.ts`,
+`apps/web/src/remoteOpen.ts`, `apps/web/src/components/chat/OpenInPicker.tsx`, and
+`apps/desktop/src/electron/ElectronShell.test.ts`.
+
+**Recorded validation:** focused contract, server target discovery, web remote-open,
+and Electron shell tests.
+
+**Last updated:** 2026-09-01
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

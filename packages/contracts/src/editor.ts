@@ -95,13 +95,15 @@ export const remoteSchemeForEditor = (id: EditorId): string | undefined => {
 };
 
 /**
- * Builds a `<scheme>://vscode-remote/ssh-remote+<host><path>` deep link that
- * opens `absolutePath` on `host` in the local editor over SSH. Returns
- * undefined for editors without remote deep-link support.
+ * Builds a `<scheme>://vscode-remote/ssh-remote+[<username>@]<host><path>` deep
+ * link that opens `absolutePath` on `host` in the local editor over SSH.
+ * Returns undefined for editors without remote deep-link support.
  */
 export const buildRemoteOpenUrl = (input: {
   readonly editor: EditorId;
   readonly host: string;
+  /** SSH account to use; omitted for user-managed SSH aliases. */
+  readonly username?: string;
   readonly absolutePath: string;
 }): string | undefined => {
   const scheme = remoteSchemeForEditor(input.editor);
@@ -112,7 +114,14 @@ export const buildRemoteOpenUrl = (input: {
   const posixPath = input.absolutePath.replaceAll("\\", "/");
   const rootedPath = posixPath.startsWith("/") ? posixPath : `/${posixPath}`;
   const encodedPath = rootedPath.split("/").map(encodeURIComponent).join("/");
-  return `${scheme}://vscode-remote/ssh-remote+${encodeURIComponent(input.host)}${encodedPath}`;
+  // The @ belongs inside the Remote-SSH authority, not in URL userinfo. Keep
+  // it raw as the authority separator; VS Code's URI handler expects this form
+  // (`ssh-remote+user@host`) and Electron can still reject true URL userinfo.
+  const remoteAuthority =
+    input.username === undefined
+      ? encodeURIComponent(input.host)
+      : `${encodeURIComponent(input.username)}@${encodeURIComponent(input.host)}`;
+  return `${scheme}://vscode-remote/ssh-remote+${remoteAuthority}${encodedPath}`;
 };
 
 /**
@@ -127,6 +136,7 @@ export type RemoteOpenTargetKind = typeof RemoteOpenTargetKind.Type;
 export const RemoteOpenTarget = Schema.Struct({
   kind: RemoteOpenTargetKind,
   host: TrimmedNonEmptyString,
+  username: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type RemoteOpenTarget = typeof RemoteOpenTarget.Type;
 

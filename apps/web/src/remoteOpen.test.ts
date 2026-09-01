@@ -20,8 +20,8 @@ const primaryTarget = (httpBaseUrl: string) =>
   });
 
 const TAILSCALE_TARGETS = [
-  { kind: "tailscale", host: "sol.tail1234.ts.net" },
-  { kind: "mdns", host: "sol.local" },
+  { kind: "tailscale", host: "sol.tail1234.ts.net", username: "aila" },
+  { kind: "mdns", host: "sol.local", username: "aila" },
 ] as const;
 
 describe("resolveRemoteOpenState", () => {
@@ -46,7 +46,7 @@ describe("resolveRemoteOpenState", () => {
       }),
     ).toEqual({
       mode: "remote-links",
-      host: { kind: "tailscale", host: "sol.tail1234.ts.net" },
+      host: { kind: "tailscale", host: "sol.tail1234.ts.net", username: "aila" },
     });
   });
 
@@ -93,6 +93,20 @@ describe("resolveRemoteOpenState", () => {
     ).toEqual({ mode: "remote-links", host: { kind: "ssh-alias", host: "sol" } });
   });
 
+  it("preserves legacy advertised targets without a username", () => {
+    expect(
+      resolveRemoteOpenState({
+        target: primaryTarget("https://sol.tail1234.ts.net"),
+        sshAlias: null,
+        isDesktopRenderer: false,
+        remoteOpenTargets: [{ kind: "tailscale", host: "sol.tail1234.ts.net" }],
+      }),
+    ).toEqual({
+      mode: "remote-links",
+      host: { kind: "tailscale", host: "sol.tail1234.ts.net" },
+    });
+  });
+
   it("reports unavailable when a remote environment advertises no hosts", () => {
     for (const remoteOpenTargets of [[], undefined] as const) {
       expect(
@@ -133,6 +147,17 @@ describe("buildRemoteOpenUrl", () => {
     expect(buildRemoteOpenUrl({ editor: "cursor", host: "sol", absolutePath: "/tmp/x" })).toBe(
       "cursor://vscode-remote/ssh-remote+sol/tmp/x",
     );
+  });
+
+  it("includes the SSH username inside the Remote-SSH authority", () => {
+    expect(
+      buildRemoteOpenUrl({
+        editor: "vscode",
+        username: "service-user",
+        host: "sol.tail1234.ts.net",
+        absolutePath: "/home/aila/project",
+      }),
+    ).toBe("vscode://vscode-remote/ssh-remote+service-user@sol.tail1234.ts.net/home/aila/project");
   });
 
   it("roots Windows paths", () => {

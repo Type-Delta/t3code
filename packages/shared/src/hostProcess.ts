@@ -23,6 +23,58 @@ export const HostProcessHostname = Context.Reference<string>(
   },
 );
 
+export const resolveHostProcessUsername = (input: {
+  readonly platform: NodeJS.Platform;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly userInfo: () => { readonly username: string };
+}): string | undefined => {
+  let username: string;
+  try {
+    username = input.userInfo().username.trim();
+  } catch {
+    return undefined;
+  }
+  if (username.length === 0) {
+    return undefined;
+  }
+
+  // OpenSSH on Windows accepts DOMAIN\\user for AD domain accounts. Require
+  // the DNS-domain signal so local/workgroup accounts do not accidentally get
+  // a COMPUTERNAME\\user or WORKGROUP\\user principal.
+  if (input.platform === "win32") {
+    const domain = input.environment.USERDOMAIN?.trim();
+    const dnsDomain = input.environment.USERDNSDOMAIN?.trim();
+    const computerName = input.environment.COMPUTERNAME?.trim();
+    if (
+      domain !== undefined &&
+      domain.length > 0 &&
+      dnsDomain !== undefined &&
+      dnsDomain.length > 0 &&
+      domain.toLowerCase() !== "workgroup" &&
+      (computerName === undefined ||
+        computerName.length === 0 ||
+        domain.toLowerCase() !== computerName.toLowerCase()) &&
+      !username.includes("\\") &&
+      !username.includes("@")
+    ) {
+      return `${domain}\\${username}`;
+    }
+  }
+  return username;
+};
+
+export const HostProcessUsername = Context.Reference<string | undefined>(
+  "@t3tools/shared/hostProcess/HostProcessUsername",
+  {
+    defaultValue: () =>
+      resolveHostProcessUsername({
+        platform: process.platform,
+        environment: process.env,
+        userInfo: NodeOS.userInfo,
+      }),
+  },
+);
+
 export const HostProcessEnvironment = Context.Reference<NodeJS.ProcessEnv>(
   "@t3tools/shared/hostProcess/HostProcessEnvironment",
   {

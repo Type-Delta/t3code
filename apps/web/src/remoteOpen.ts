@@ -27,6 +27,8 @@ import { useEnvironmentPresentation } from "~/state/presentation";
 export interface RemoteOpenHost {
   readonly kind: "ssh-alias" | RemoteOpenTarget["kind"];
   readonly host: string;
+  /** Present only for server-advertised targets, never desktop SSH aliases. */
+  readonly username?: string;
 }
 
 export type RemoteOpenState =
