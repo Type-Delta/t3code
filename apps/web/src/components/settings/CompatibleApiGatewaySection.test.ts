@@ -1,13 +1,75 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
+import { ClaudeSettings } from "@t3tools/contracts";
 
 import {
+  API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
+  configAndEnvironmentWithApiGatewayApiKey,
   configWithApiGateway,
   hasApiGatewayValidationErrors,
+  migrateLegacyApiGatewayApiKey,
   readApiGatewayDraft,
   validateApiGatewayDraft,
 } from "./CompatibleApiGatewaySection";
 
+const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
 describe("CompatibleApiGatewaySection config", () => {
+  it("stores opaque API keys in the sensitive environment", () => {
+    const next = configAndEnvironmentWithApiGatewayApiKey(
+      {
+        apiGateway: {
+          enabled: true,
+          baseUrl: "https://cli-proxyapi.example",
+          catalogFormat: "auto",
+          authMode: "bearer",
+        },
+      },
+      [],
+      "opaque key:/with-dashes?&=",
+    );
+
+    expect(readApiGatewayDraft(next.config).apiKeyEnvironmentVariable).toBe(
+      API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
+    );
+    expect(next.environment).toEqual([
+      {
+        name: API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
+        value: "opaque key:/with-dashes?&=",
+        sensitive: true,
+        valueRedacted: false,
+      },
+    ]);
+    expect(JSON.stringify(next.config)).not.toContain("opaque key");
+    expect(() => decodeClaudeSettings(next.config)).not.toThrow();
+  });
+
+  it("moves keys saved by the old field out of provider config", () => {
+    const next = migrateLegacyApiGatewayApiKey(
+      {
+        apiGateway: {
+          enabled: true,
+          baseUrl: "https://cli-proxyapi.example",
+          apiKeyEnvironmentVariable: "opaque-key-with-dashes",
+          catalogFormat: "auto",
+          authMode: "bearer",
+        },
+      },
+      [],
+    );
+
+    expect(next).toBeDefined();
+    expect(readApiGatewayDraft(next?.config).apiKeyEnvironmentVariable).toBe(
+      API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
+    );
+    expect(next?.environment[0]).toMatchObject({
+      name: API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
+      value: "opaque-key-with-dashes",
+      sensitive: true,
+    });
+    expect(JSON.stringify(next?.config)).not.toContain("opaque-key-with-dashes");
+  });
+
   it("defaults to a disabled gateway without inventing an endpoint", () => {
     expect(readApiGatewayDraft({ customModels: [] })).toEqual({
       enabled: false,

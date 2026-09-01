@@ -343,8 +343,11 @@ The service launcher keeps file fsync on writable handles before durable state r
 Codex and Claude provider instances can declare a compatible API gateway in the add-instance
 wizard or provider settings. The server fetches Codex, Anthropic, or OpenAI model catalogs with a
 provider-environment credential reference, normalizes model context and reasoning metadata, and
-caches the last successful response per instance. Catalog failure retains cached or provider
-models and does not make an otherwise healthy provider unavailable.
+caches the last successful response per instance. The gateway form accepts opaque API keys in a
+password field and stores them through the sensitive provider environment path under a generated
+safe variable name. It also migrates invalid key values written by the earlier variable-name field.
+Catalog failure retains cached or provider models and does not make an otherwise healthy provider
+unavailable.
 
 Models carry usable context, theoretical maximum context, maximum output, and metadata provenance.
 Every visible model accepts manual display, context, output, and reasoning overrides; manual values
@@ -368,7 +371,7 @@ tests, settings and server contract tests, provider-settings component tests, `v
 `vp run typecheck`, and integrated web verification of gateway configuration, custom model metadata,
 and model-detail tooltips.
 
-**Last updated:** 2026-08-31
+**Last updated:** 2026-09-01
 
 ## Merge History
 

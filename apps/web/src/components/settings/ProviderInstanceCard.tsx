@@ -46,7 +46,11 @@ import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { SubscriptionUsageBars } from "../SubscriptionUsage";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
-import { CompatibleApiGatewaySection, readApiGatewayDraft } from "./CompatibleApiGatewaySection";
+import {
+  API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
+  CompatibleApiGatewaySection,
+  readApiGatewayDraft,
+} from "./CompatibleApiGatewaySection";
 import {
   getProviderVersionAdvisoryPresentation,
   PROVIDER_STATUS_STYLES,
@@ -471,13 +475,14 @@ export function ProviderInstanceCard({
 
   const customModels = readConfigStringArray(instance.config, "customModels");
   const modelOverrides = readConfigModelOverrides(instance.config);
+  const apiGateway = readApiGatewayDraft(instance.config);
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
   const modelsForDisplay = deriveProviderModelsForDisplay({
     liveModels: liveProvider?.models,
     customModels,
-    includeDiscoveredModels: readApiGatewayDraft(instance.config).enabled,
+    includeDiscoveredModels: apiGateway.enabled,
     modelOverrides,
   });
 
@@ -527,15 +532,41 @@ export function ProviderInstanceCard({
   const supportsApiGateway =
     driverKind === ProviderDriverKind.make("codex") ||
     driverKind === ProviderDriverKind.make("claudeAgent");
+  const managedGatewayEnvironmentVariable = instance.environment?.find(
+    (variable) =>
+      apiGateway.apiKeyEnvironmentVariable === API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE &&
+      variable.name === API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
+  );
+  const editableEnvironment =
+    managedGatewayEnvironmentVariable === undefined
+      ? (instance.environment ?? [])
+      : (instance.environment ?? []).filter(
+          (variable) => variable.name !== API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
+        );
 
   const updateEnvironment = (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => {
     const cleaned = environment.filter((variable) => variable.name.trim().length > 0);
+    const nextEnvironment = managedGatewayEnvironmentVariable
+      ? [...cleaned, managedGatewayEnvironmentVariable]
+      : cleaned;
     const { environment: _omit, ...rest } = instance;
     onUpdate(
-      cleaned.length > 0
-        ? ({ ...rest, environment: cleaned } as ProviderInstanceConfig)
+      nextEnvironment.length > 0
+        ? ({ ...rest, environment: nextEnvironment } as ProviderInstanceConfig)
         : (rest as ProviderInstanceConfig),
     );
+  };
+
+  const updateGateway = (
+    config: Record<string, unknown>,
+    environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
+  ) => {
+    const { config: _config, environment: _environment, ...rest } = instance;
+    onUpdate({
+      ...rest,
+      config,
+      ...(environment.length > 0 ? { environment } : {}),
+    } as ProviderInstanceConfig);
   };
 
   const titleIconNode = driverKind ? (
@@ -796,7 +827,7 @@ export function ProviderInstanceCard({
 
             <div>
               <ProviderEnvironmentSection
-                environment={instance.environment ?? []}
+                environment={editableEnvironment}
                 onChange={updateEnvironment}
               />
             </div>
@@ -814,9 +845,10 @@ export function ProviderInstanceCard({
             {supportsApiGateway ? (
               <CompatibleApiGatewaySection
                 value={instance.config}
+                environment={instance.environment ?? []}
                 idPrefix={`provider-instance-${instanceId}`}
                 variant="card"
-                onChange={updateConfig}
+                onChange={updateGateway}
               />
             ) : null}
 

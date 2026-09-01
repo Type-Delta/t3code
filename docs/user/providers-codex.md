@@ -138,11 +138,10 @@ path. **Auto-detect** accepts these catalog shapes:
 
 Use an explicit format if auto-detection chooses the wrong shape.
 
-The **API key environment variable** field contains a variable name, not the key itself. Add that
-variable to the provider instance's **Environment variables** section first. Mark its value as
-sensitive, then enter its name, such as `OPENAI_API_KEY`, in the gateway settings. Choose whether
-the catalog request sends it as a bearer token or an `x-api-key` header. Leave the field empty only
-when the catalog needs no authentication.
+Enter the gateway credential in the **API key** password field. The key may use any format accepted
+by the gateway. T3 stores it as a sensitive provider value and shows only a redacted placeholder
+after saving. Choose whether the catalog request sends it as a bearer token or an `x-api-key`
+header. Leave the field empty only when the catalog needs no authentication.
 
 The T3 server performs discovery, so web and mobile clients do not receive the gateway credential.
 T3 caches the last successful catalog for this provider instance. If a later request fails, the

@@ -137,11 +137,11 @@ Leave **Model catalog URL** empty to derive `/v1/models` from the base URL, or e
 catalog URL when the gateway uses another path. **Auto-detect** accepts Codex, Anthropic, and OpenAI
 catalog shapes. Use an explicit format if auto-detection chooses the wrong one.
 
-The **API key environment variable** field contains a variable name, not the key itself. Add that
-variable to the provider instance's **Environment variables** section first and mark its value as
-sensitive. Then enter its name in the gateway settings. Bearer authentication maps the value to
-`ANTHROPIC_AUTH_TOKEN`; `x-api-key` authentication maps it to `ANTHROPIC_API_KEY`. Leave the field
-empty only when the catalog and inference endpoint need no authentication.
+Enter the gateway credential in the **API key** password field. The key may use any format accepted
+by the gateway. T3 stores it as a sensitive provider value and shows only a redacted placeholder
+after saving. Bearer authentication maps the value to `ANTHROPIC_AUTH_TOKEN`; `x-api-key`
+authentication maps it to `ANTHROPIC_API_KEY`. Leave the field empty only when the catalog and
+inference endpoint need no authentication.
 
 The T3 server performs catalog discovery, so web and mobile clients do not receive the gateway
 credential. T3 caches the last successful catalog for this provider instance. If a later request

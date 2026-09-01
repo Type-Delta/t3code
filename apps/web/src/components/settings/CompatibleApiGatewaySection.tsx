@@ -1,9 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import type { ApiGatewayAuthMode, ApiGatewayCatalogFormat } from "@t3tools/contracts";
+import { useEffect, useRef, useState } from "react";
+import type {
+  ApiGatewayAuthMode,
+  ApiGatewayCatalogFormat,
+  ProviderInstanceEnvironmentVariable,
+} from "@t3tools/contracts";
 
 import { DraftInput } from "../ui/draft-input";
+import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
@@ -21,6 +26,9 @@ export interface ApiGatewayValidationErrors {
   readonly baseUrl?: string;
   readonly catalogUrl?: string;
 }
+
+export const API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE = "T3_API_GATEWAY_API_KEY";
+const ENVIRONMENT_VARIABLE_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
 const DEFAULT_GATEWAY: ApiGatewayDraft = {
   enabled: false,
@@ -88,6 +96,73 @@ export function configWithApiGateway(
   return base;
 }
 
+function apiGatewayApiKeyEnvironmentVariable(config: unknown): string {
+  const configured = readApiGatewayDraft(config).apiKeyEnvironmentVariable.trim();
+  return ENVIRONMENT_VARIABLE_NAME_PATTERN.test(configured)
+    ? configured
+    : API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE;
+}
+
+export function configAndEnvironmentWithApiGatewayApiKey(
+  config: unknown,
+  environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
+  apiKey: string,
+): {
+  readonly config: Record<string, unknown>;
+  readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
+} {
+  const variableName = apiGatewayApiKeyEnvironmentVariable(config);
+  const gateway = {
+    ...readApiGatewayDraft(config),
+    apiKeyEnvironmentVariable: variableName,
+  };
+  const variable = {
+    name: variableName,
+    value: apiKey,
+    sensitive: true,
+    valueRedacted: false,
+  } as const;
+  const existingIndex = environment.findIndex((entry) => entry.name === variableName);
+  const nextEnvironment = [...environment];
+  if (existingIndex === -1) {
+    nextEnvironment.push(variable);
+  } else {
+    nextEnvironment[existingIndex] = variable;
+  }
+  return {
+    config: configWithApiGateway(config, gateway),
+    environment: nextEnvironment,
+  };
+}
+
+export function migrateLegacyApiGatewayApiKey(
+  config: unknown,
+  environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
+): ReturnType<typeof configAndEnvironmentWithApiGatewayApiKey> | undefined {
+  const configured = readApiGatewayDraft(config).apiKeyEnvironmentVariable;
+  if (configured.length === 0 || ENVIRONMENT_VARIABLE_NAME_PATTERN.test(configured)) {
+    return undefined;
+  }
+  return configAndEnvironmentWithApiGatewayApiKey(config, environment, configured);
+}
+
+export function configAndEnvironmentWithoutStoredApiGatewayApiKey(
+  config: unknown,
+  environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
+): {
+  readonly config: Record<string, unknown>;
+  readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
+} {
+  const variableName = apiGatewayApiKeyEnvironmentVariable(config);
+  return {
+    config: configWithApiGateway(config, {
+      ...readApiGatewayDraft(config),
+      apiKeyEnvironmentVariable: "",
+    }),
+    environment: environment.filter((entry) => entry.name !== variableName),
+  };
+}
+
 function validateHttpUrl(value: string, label: string): string | undefined {
   let url: URL;
   try {
@@ -127,9 +202,13 @@ export function hasApiGatewayValidationErrors(errors: ApiGatewayValidationErrors
 
 interface CompatibleApiGatewaySectionProps {
   readonly value: unknown;
+  readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly idPrefix: string;
   readonly variant: "card" | "dialog";
-  readonly onChange: (nextConfig: Record<string, unknown>) => void;
+  readonly onChange: (
+    nextConfig: Record<string, unknown>,
+    nextEnvironment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
+  ) => void;
 }
 
 function GatewayTextField(props: {
@@ -183,22 +262,63 @@ function GatewayTextField(props: {
 
 export function CompatibleApiGatewaySection({
   value,
+  environment,
   idPrefix,
   variant,
   onChange,
 }: CompatibleApiGatewaySectionProps) {
   const [gateway, setGateway] = useState(() => readApiGatewayDraft(value));
+  const [apiKey, setApiKey] = useState("");
+  const gatewayMigrationFingerprint = useRef<string | undefined>(undefined);
   useEffect(() => {
     setGateway(readApiGatewayDraft(value));
   }, [idPrefix, value]);
+  useEffect(() => {
+    setApiKey("");
+  }, [idPrefix]);
+  useEffect(() => {
+    const configured = readApiGatewayDraft(value).apiKeyEnvironmentVariable;
+    const fingerprint = `${idPrefix}\0${configured}`;
+    if (gatewayMigrationFingerprint.current === fingerprint) return;
+    gatewayMigrationFingerprint.current = fingerprint;
+    const migrated = migrateLegacyApiGatewayApiKey(value, environment);
+    if (!migrated) return;
+    setGateway(readApiGatewayDraft(migrated.config));
+    onChange(migrated.config, migrated.environment);
+  }, [environment, idPrefix, onChange, value]);
 
   const validationErrors = validateApiGatewayDraft(gateway);
   const publish = (patch: Partial<ApiGatewayDraft>) => {
     const next = { ...gateway, ...patch };
     setGateway(next);
     if (variant === "dialog" || !hasApiGatewayValidationErrors(validateApiGatewayDraft(next))) {
-      onChange(configWithApiGateway(value, next));
+      onChange(configWithApiGateway(value, next), environment);
     }
+  };
+  const apiKeyVariable = apiGatewayApiKeyEnvironmentVariable(value);
+  const hasStoredApiKey = environment.some(
+    (entry) =>
+      entry.name === apiKeyVariable && (entry.value.length > 0 || entry.valueRedacted === true),
+  );
+  const commitApiKey = (nextApiKey: string) => {
+    setApiKey(variant === "dialog" ? nextApiKey : "");
+    if (nextApiKey.length === 0) {
+      if (variant === "dialog" && hasStoredApiKey) {
+        const next = configAndEnvironmentWithoutStoredApiGatewayApiKey(value, environment);
+        setGateway(readApiGatewayDraft(next.config));
+        onChange(next.config, next.environment);
+      }
+      return;
+    }
+    const next = configAndEnvironmentWithApiGatewayApiKey(value, environment, nextApiKey);
+    setGateway(readApiGatewayDraft(next.config));
+    onChange(next.config, next.environment);
+  };
+  const removeApiKey = () => {
+    setApiKey("");
+    const next = configAndEnvironmentWithoutStoredApiGatewayApiKey(value, environment);
+    setGateway(readApiGatewayDraft(next.config));
+    onChange(next.config, next.environment);
   };
 
   return (
@@ -283,15 +403,58 @@ export function CompatibleApiGatewaySection({
             </label>
           </div>
 
-          <GatewayTextField
-            id={`${idPrefix}-gateway-api-key-environment-variable`}
-            label="API key environment variable"
-            description="T3 reads this variable from the provider instance. Leave empty for no auth header."
-            placeholder="OPENAI_API_KEY"
-            value={gateway.apiKeyEnvironmentVariable}
-            variant={variant}
-            onChange={(apiKeyEnvironmentVariable) => publish({ apiKeyEnvironmentVariable })}
-          />
+          <div className="grid gap-1.5">
+            <label
+              htmlFor={`${idPrefix}-gateway-api-key`}
+              className="text-xs font-medium text-foreground"
+            >
+              API key
+            </label>
+            <div className="flex items-center gap-2">
+              {variant === "card" ? (
+                <DraftInput
+                  id={`${idPrefix}-gateway-api-key`}
+                  className="min-w-0 flex-1"
+                  value={apiKey}
+                  onCommit={commitApiKey}
+                  type="password"
+                  autoComplete="off"
+                  placeholder={
+                    hasStoredApiKey ? "Stored secret - enter a new key to replace" : "API key"
+                  }
+                  spellCheck={false}
+                />
+              ) : (
+                <Input
+                  id={`${idPrefix}-gateway-api-key`}
+                  className="min-w-0 flex-1 bg-background"
+                  value={apiKey}
+                  onChange={(event) => commitApiKey(event.target.value)}
+                  type="password"
+                  autoComplete="off"
+                  placeholder="API key"
+                  spellCheck={false}
+                />
+              )}
+              {hasStoredApiKey ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-destructive"
+                  onClick={removeApiKey}
+                  aria-label="Remove stored API key"
+                >
+                  Remove
+                </Button>
+              ) : null}
+            </div>
+            <span className="text-[11px] text-muted-foreground">
+              {hasStoredApiKey
+                ? "Stored as a sensitive value. Enter a new key to replace it."
+                : "Stored as a sensitive value for this provider instance. Leave empty for no authentication."}
+            </span>
+          </div>
         </div>
       ) : null}
     </section>

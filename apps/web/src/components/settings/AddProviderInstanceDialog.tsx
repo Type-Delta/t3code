@@ -8,6 +8,7 @@ import {
   ProviderDriverKind,
   type EnvironmentId,
   type ProviderInstanceConfig,
+  type ProviderInstanceEnvironmentVariable,
 } from "@t3tools/contracts";
 
 import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "../../hooks/useSettings";
@@ -145,6 +146,9 @@ export function AddProviderInstanceDialog({
   // Driver-specific config drafts keyed by driver so toggling between drivers
   // during the same dialog session does not lose in-progress input.
   const [configByDriver, setConfigByDriver] = useState<Record<string, Record<string, unknown>>>({});
+  const [environmentByDriver, setEnvironmentByDriver] = useState<
+    Record<string, ReadonlyArray<ProviderInstanceEnvironmentVariable>>
+  >({});
   // Errors are suppressed until the user has tried to submit once. After that
   // they update live so fixing the problem clears the message in place.
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
@@ -169,6 +173,7 @@ export function AddProviderInstanceDialog({
   const wizardStepSummaries = [driverOption.label, previewLabel, null] as const;
 
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
+  const environmentDraft = environmentByDriver[driver] ?? [];
   const hasInvalidApiGateway =
     supportsApiGateway &&
     hasApiGatewayValidationErrors(validateApiGatewayDraft(readApiGatewayDraft(configDraft)));
@@ -182,6 +187,13 @@ export function AddProviderInstanceDialog({
       }
       return next;
     });
+  };
+  const setGatewayDraft = (
+    config: Record<string, unknown>,
+    environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
+  ) => {
+    setConfigDraft(config);
+    setEnvironmentByDriver((existing) => ({ ...existing, [driver]: environment }));
   };
 
   const applyWizardNavigation = (navigation: WizardNavigation) => {
@@ -212,6 +224,7 @@ export function AddProviderInstanceDialog({
       enabled: true,
       ...(label.trim().length > 0 ? { displayName: label.trim() } : {}),
       ...(normalizedAccentColor ? { accentColor: normalizedAccentColor } : {}),
+      ...(environmentDraft.length > 0 ? { environment: environmentDraft } : {}),
       ...(hasConfig ? { config } : {}),
     };
     // `ProviderInstanceId.make` revalidates the slug; we've already checked
@@ -419,9 +432,10 @@ export function AddProviderInstanceDialog({
                 {supportsApiGateway ? (
                   <CompatibleApiGatewaySection
                     value={configDraft}
+                    environment={environmentDraft}
                     idPrefix={`add-provider-${driver}`}
                     variant="dialog"
-                    onChange={setConfigDraft}
+                    onChange={setGatewayDraft}
                   />
                 ) : null}
                 {driverSettingsFields.length === 0 && !supportsApiGateway ? (

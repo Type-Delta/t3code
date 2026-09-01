@@ -56,8 +56,9 @@ driver kinds absent from the manifest have no legacy concept.
 Codex and Claude instances can carry an optional `apiGateway` config. This is provider-instance
 state, not driver-global state, because two endpoints or API keys can expose different models and
 limits. `ApiGatewaySettings` records the inference base URL, an optional catalog URL, catalog
-format, authentication mode, and the name of a provider environment variable that holds the key.
-The config never copies the key value. Sensitive provider environment values remain server secrets.
+format, authentication mode, and the generated provider environment variable that holds the key.
+The UI accepts the opaque key in a password field, then stores it through the sensitive provider
+environment path. The config never copies the key value.
 
 [`GatewayModelCatalog.ts`][gateway-catalog] owns server-side discovery and caching. It derives
 `/v1/models` from the inference URL unless the instance has an explicit catalog URL. Auto detection
