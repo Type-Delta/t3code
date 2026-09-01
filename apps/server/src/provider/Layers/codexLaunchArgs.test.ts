@@ -62,6 +62,27 @@ describe("codexExecLaunchArgs", () => {
 });
 
 describe("Codex API gateway launch configuration", () => {
+  it.each([
+    ["https://proxy.example", "https://proxy.example/v1"],
+    ["https://proxy.example/", "https://proxy.example/v1"],
+    ["https://proxy.example/openai", "https://proxy.example/openai/v1"],
+    ["https://proxy.example/openai/v1/", "https://proxy.example/openai/v1"],
+  ])("normalizes the Responses API base URL: %s", (configured, expected) => {
+    const args = codexGatewayLaunchArgv({
+      apiGateway: {
+        enabled: true,
+        baseUrl: configured,
+        catalogFormat: "auto",
+        authMode: "bearer",
+      },
+    });
+
+    NodeAssert.equal(
+      args.includes(`model_providers.t3_api_gateway.base_url=${JSON.stringify(expected)}`),
+      true,
+    );
+  });
+
   it("round-trips managed config values containing spaces", () => {
     const combined = appendCodexLaunchArgs("--strict-config", [
       "-c",

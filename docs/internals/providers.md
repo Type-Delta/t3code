@@ -96,8 +96,9 @@ update so concurrent UI state cannot drop either value.
 ### Harness relay
 
 The Codex driver adds a managed `t3_api_gateway` model provider with the Responses wire API. It
-passes the configured base URL and environment-variable reference through Codex `-c` arguments. A
-Codex-format response is passed as `model_catalog_json`, and each new session gets
+normalizes the configured path to end in `/v1`, then passes that provider-specific base URL and the
+environment-variable reference through Codex `-c` arguments. A Codex-format response is passed as
+`model_catalog_json`, and each new session gets
 `model_context_window` for the selected model. T3 sends the selected reasoning effort through the
 normal turn request. OpenAI and Anthropic catalog shapes enrich T3's picker but cannot become a
 Codex `model_catalog_json` file. Descriptions and maximum-output metadata have no per-turn Codex

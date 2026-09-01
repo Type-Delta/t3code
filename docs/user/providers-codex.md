@@ -125,8 +125,9 @@ Codex provider instances can use an OpenAI-compatible API gateway such as CLIPro
 add a provider instance, open the third step, **Config**, and enable **Compatible API gateway**. You
 can also expand an existing Codex provider in Settings and change the same fields there.
 
-Set **Gateway base URL** to the inference URL that Codex should use. Codex sends Responses API
-requests to this gateway. The gateway must support that API.
+Set **Gateway base URL** to the gateway origin or path prefix. You do not need to add `/v1`; T3
+adds it when Codex needs it and preserves an existing `/v1` suffix. Codex sends Responses API
+requests to this gateway, which must support that API.
 
 T3 also requests a model catalog from the gateway. Leave **Model catalog URL** empty to derive
 `/v1/models` from the base URL, or enter the complete catalog URL when the gateway uses another

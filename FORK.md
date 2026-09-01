@@ -355,9 +355,11 @@ win over gateway and harness metadata. The Models information tooltip shows ever
 without inventing missing metadata.
 
 Codex receives a managed Responses API provider, Codex-format `model_catalog_json`, selected
-reasoning effort, and a per-model `model_context_window`. Claude receives its gateway environment,
-gateway discovery flag, selected reasoning effort, and a context-aware plain or `[1m]` model ID.
-Metadata with no matching harness control remains informational.
+reasoning effort, and a per-model `model_context_window`. Its adapter normalizes the configured
+gateway path to end in `/v1`, so users can enter the gateway origin without knowing Codex's URL
+joining rules. Claude receives its gateway environment, gateway discovery flag, selected reasoning
+effort, and a context-aware plain or `[1m]` model ID. Metadata with no matching harness control
+remains informational.
 
 **Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
 `apps/server/src/provider/GatewayModelCatalog.ts`,

@@ -20,6 +20,12 @@ export const appendCodexLaunchArgs = (
 
 const codexConfigValue = (value: string): string => JSON.stringify(value);
 
+const normalizeCodexResponsesBaseUrl = (url: URL): string => {
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = path.endsWith("/v1") ? path : `${path}/v1`;
+  return url.toString();
+};
+
 export function codexGatewayLaunchArgv(input: {
   readonly apiGateway: ApiGatewaySettings | undefined;
   readonly codexCatalogPath?: string | undefined;
@@ -40,7 +46,7 @@ export function codexGatewayLaunchArgv(input: {
           "-c",
           'model_providers.t3_api_gateway.name="T3 API Gateway"',
           "-c",
-          `model_providers.t3_api_gateway.base_url=${codexConfigValue(baseUrl.toString())}`,
+          `model_providers.t3_api_gateway.base_url=${codexConfigValue(normalizeCodexResponsesBaseUrl(baseUrl))}`,
           "-c",
           'model_providers.t3_api_gateway.wire_api="responses"',
         );
