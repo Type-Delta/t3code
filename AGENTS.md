@@ -136,6 +136,7 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 ## Verifying
 
 - Smallest proof that the change works. `vp test run <files>` for the tests you touched, targeted lint and typecheck for the scope you changed.
+- Test meaningful logic or observable behavior. Do not render components to static markup to assert props or attributes, or add tests that merely assert callback wiring or mirror the implementation.
 - Reserve the required repo-wide `vp check` and `vp run typecheck` for the final QA pass. Do not run other repo-wide test or typecheck commands unless asked.
 - Backend behavior changes ship with focused tests for that behavior.
 - The server is event-sourced and its async flows emit typed receipts. Wait on receipts and worker drains, never on sleeps or polling. A test that needs a timeout to pass is wrong.

@@ -21,6 +21,8 @@ import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPrompt
 import { ProviderUpdateLaunchNotification } from "../components/ProviderUpdateLaunchNotification";
 import { SlowRpcRequestToastCoordinator } from "../components/SlowRpcRequestToastCoordinator";
 import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
+import { useDefaultThemeAdoption } from "../hooks/useDefaultTheme";
+import { useEnvironmentThemeSync } from "../hooks/useEnvironmentTheme";
 import { Button } from "../components/ui/button";
 import {
   AnchoredToastProvider,
@@ -135,6 +137,7 @@ function RootRouteView() {
         <DocumentTitleSync />
         <ProviderDiagnosticsConsole />
         <ContrastAppearanceSync />
+        <EnvironmentThemeSync />
         <GlassAppearanceSync />
         <FontAppearanceSync />
         {primaryEnvironmentAuthenticated ? <AuthenticatedTracingBootstrap /> : null}
@@ -179,6 +182,15 @@ function ProviderDiagnosticsConsole() {
     }
   }, [providers]);
 
+  return null;
+}
+
+/** Follows the palette the primary environment's machine publishes, if any. */
+function EnvironmentThemeSync() {
+  useEnvironmentThemeSync();
+  // Ordered after the palette sync so a first-run client adopting the
+  // environment's own theme finds it already in the library.
+  useDefaultThemeAdoption();
   return null;
 }
 

@@ -21,6 +21,7 @@ import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
+import { ThreadDeletionReactor } from "./Services/ThreadDeletionReactor.ts";
 
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
@@ -69,6 +70,7 @@ export const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
   const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const threadDeletionReactor = yield* ThreadDeletionReactor;
   const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
 
   const dispatch: ThreadCommandDispatcher["Service"]["dispatch"] = Effect.fn(
@@ -332,7 +334,7 @@ export const make = Effect.gen(function* () {
 
         const bootstrapProgram = Effect.gen(function* () {
           if (bootstrap?.createThread) {
-            yield* dispatchFromClient({
+            const created = yield* dispatchFromClient({
               type: "thread.create",
               commandId: yield* serverCommandId("bootstrap-thread-create"),
               threadId: command.threadId,
@@ -345,6 +347,10 @@ export const make = Effect.gen(function* () {
               worktreePath: bootstrap.createThread.worktreePath,
               createdAt: bootstrap.createThread.createdAt,
             });
+            // The create event fences every deletion from the prior incarnation.
+            // Wait for that cleanup before setup scripts or the provider can own
+            // resources under the reused thread id.
+            yield* threadDeletionReactor.drainThrough(created.sequence);
             createdThread = true;
           }
 
@@ -435,6 +441,11 @@ export const make = Effect.gen(function* () {
       command.type === "thread.turn.start" && command.bootstrap
         ? dispatchBootstrapTurnStart(command)
         : dispatchFromClient(command).pipe(
+            Effect.tap(({ sequence }) =>
+              command.type === "thread.create"
+                ? threadDeletionReactor.drainThrough(sequence)
+                : Effect.void,
+            ),
             Effect.mapError((cause) =>
               toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
             ),

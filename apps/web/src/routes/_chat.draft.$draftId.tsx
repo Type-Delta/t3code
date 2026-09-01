@@ -2,10 +2,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import ChatView from "../components/ChatView";
-import {
-  resolveDraftPromotionNavigationTarget,
-  threadHasStarted,
-} from "../components/ChatView.logic";
+import { resolveDraftPromotionNavigationTarget } from "../components/ChatView.logic";
 import {
   DraftId,
   markPromotedDraftThreadByRef,
@@ -38,11 +35,10 @@ function DraftChatThreadRouteView() {
     : null;
   const serverThreadRef = draftSession?.promotedTo ?? inferredThreadRef;
   const serverThread = useThread(serverThreadRef);
-  const serverThreadStarted = threadHasStarted(serverThread);
   const backgroundSubmissionPending = useBackgroundDraftSubmissionPending(serverThreadRef);
   const canonicalThreadRef = resolveDraftPromotionNavigationTarget({
     serverThreadRef,
-    serverThreadStarted,
+    serverThread,
     backgroundSubmissionPending,
   });
 

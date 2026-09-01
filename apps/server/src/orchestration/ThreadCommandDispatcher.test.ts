@@ -20,6 +20,7 @@ import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
+import { ThreadDeletionReactor } from "./Services/ThreadDeletionReactor.ts";
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import * as ThreadCommandDispatcher from "./ThreadCommandDispatcher.ts";
 
@@ -89,6 +90,7 @@ const makeLayer = (input: {
   readonly refreshStatus?: VcsStatusBroadcaster.VcsStatusBroadcaster["Service"]["refreshStatus"];
   readonly runForThread?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"]["runForThread"];
   readonly closeTerminal?: TerminalManager.TerminalManager["Service"]["close"];
+  readonly drainThrough?: (sequence: number) => Effect.Effect<void>;
 }) => {
   return ThreadCommandDispatcher.ThreadCommandDispatcherLive.pipe(
     Layer.provide(
@@ -143,6 +145,12 @@ const makeLayer = (input: {
         enqueueCommand: <A, E>(effect: Effect.Effect<A, E>) => effect,
       }),
     ),
+    Layer.provide(
+      Layer.succeed(ThreadDeletionReactor, {
+        start: () => Effect.void,
+        drainThrough: input.drainThrough ?? (() => Effect.void),
+      }),
+    ),
   );
 };
 
@@ -188,6 +196,7 @@ describe("ThreadCommandDispatcher", () => {
 
   it.effect("creates, prepares, records setup work, and starts a bootstrapped turn", () => {
     let sequence = 0;
+    const drainCalls: number[] = [];
     const dispatchCalls: Array<{
       readonly command: OrchestrationCommand;
       readonly options: { readonly origin?: OrchestrationClientOrigin } | undefined;
@@ -238,6 +247,7 @@ describe("ThreadCommandDispatcher", () => {
       const commands = dispatchCalls.map(({ command }) => command);
 
       expect(result).toEqual({ sequence: 5 });
+      expect(drainCalls).toEqual([1]);
       expect(commands.map((command) => command.type)).toEqual([
         "thread.create",
         "thread.meta.update",
@@ -273,6 +283,48 @@ describe("ThreadCommandDispatcher", () => {
           createWorktree,
           refreshStatus,
           runForThread,
+          drainThrough: (drainedSequence) => {
+            drainCalls.push(drainedSequence);
+            return Effect.void;
+          },
+        }),
+      ),
+    );
+  });
+
+  it.effect("waits for prior deletion cleanup after creating a thread", () => {
+    const drainCalls: number[] = [];
+    const command: OrchestrationCommand = {
+      type: "thread.create",
+      commandId: CommandId.make("create"),
+      threadId,
+      projectId: ProjectId.make("project-1"),
+      title: "Thread one",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.4",
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    return Effect.gen(function* () {
+      const dispatcher = yield* ThreadCommandDispatcher.ThreadCommandDispatcher;
+      const result = yield* dispatcher.dispatch(command);
+
+      expect(result).toEqual({ sequence: 12 });
+      expect(drainCalls).toEqual([12]);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          dispatch: () => Effect.succeed({ sequence: 12 }),
+          drainThrough: (sequence) => {
+            drainCalls.push(sequence);
+            return Effect.void;
+          },
         }),
       ),
     );

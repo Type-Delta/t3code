@@ -6,7 +6,7 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `f6f2be32d8bc072e87753e41ad77c7c67e8b0b95`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `0bfb6df34b26dfe0162db6c09dca00bc8c5a5ec4`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -18,9 +18,9 @@ The server and desktop artifact builder pin the patched SDK version, including l
 
 **Implementation evidence:** `patches/@anthropic-ai__claude-agent-sdk@0.3.170.patch`, `apps/server/src/provider/Layers/ClaudeProvider.ts`, `apps/server/src/provider/providerSnapshot.ts`, `scripts/build-desktop-artifact.ts`, `scripts/build-desktop-artifact.test.ts`, `pnpm-workspace.yaml`, and `pnpm-lock.yaml`.
 
-**Recorded validation:** Windows Claude initialization and adapter coverage, server build, `vp check`, `vp run typecheck`, and Windows x64 NSIS packaging with native Claude binaries.
+**Recorded validation:** Windows Claude initialization and adapter coverage, server build, `vp check`, `vp run typecheck`, and Windows x64 NSIS packaging with native Claude binaries. The 2026-09-01 integration retained the `0.3.170` patch and exact package and staging pins under focused provider and artifact-builder coverage.
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-09-01
 
 ### DL002 — Workspace context beside the empty-state hero
 
@@ -54,9 +54,9 @@ Browser development's single-origin Vite proxy behavior, including shared and Ta
 
 **Implementation evidence:** `apps/desktop/src/preview/Manager.ts`, `apps/web/src/components/preview/`, `apps/server/src/mcp/PreviewAutomationBroker.ts`, `apps/server/src/mcp/toolkits/preview/handlers.ts`, and `packages/contracts/src/previewAutomation.ts`.
 
-**Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage (including same-tab recovery from stalled CDP and capture work, stale-host failover, and `LoadFailed`); `vp check` and `vp run typecheck`.
+**Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage, including same-tab recovery from stalled CDP and capture work, stale-host failover, and `LoadFailed`; `vp check` and `vp run typecheck`. The 2026-09-01 merge-focused suites reran the affected desktop, server, and web preview recovery paths.
 
-**Last updated:** 2026-08-21
+**Last updated:** 2026-09-01
 
 ### DL005 — Windows portability in CLI fixtures, Git, and tests
 
@@ -88,9 +88,9 @@ Capture jobs that first lose the workspace-mutation race or fail can be re-enque
 
 **Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,047_AuthSessionClientConnection,048_ProjectionThreadLinkedPullRequest,049_ProjectionThreadsUnsettledAt}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
 
-**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`.
+**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated.
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-09-01
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -100,9 +100,9 @@ Split membership is persisted as multiple ordered local groups with active state
 
 **Implementation evidence:** `apps/web/src/splitViewStore.ts`, `apps/web/src/splitViewDrag.ts`, `apps/web/src/components/{SplitThreadWorkspace,SplitPaneDropHint,Sidebar,LegacySidebar,RightPanelTabs,ChatView}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
 
-**Recorded validation:** split-store, sidebar, workspace, right-panel, and drag/drop tests; web typecheck; `vp check`; `git diff --check`; and Electron runtime verification of context menus, routing, pane layout, persistent groups, and right-panel attribution.
+**Recorded validation:** split-store, sidebar, workspace, right-panel, and drag/drop tests; web typecheck; `vp check`; `git diff --check`; and Electron runtime verification of context menus, routing, pane layout, persistent groups, and right-panel attribution. The 2026-09-01 merge-focused web suite reran split ownership and routing against the new composer, attachment, theme, and activity UI.
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-09-01
 
 ### DL012 — Prompt preservation during draft promotion
 
@@ -122,9 +122,9 @@ App-server errors are classified by scope: retryable transport errors remain war
 
 **Implementation evidence:** `apps/server/src/provider/Layers/{CodexProvider,CodexSessionRuntime,CodexAdapter}.ts`, `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`, and `packages/contracts/src/providerRuntime.ts`.
 
-**Recorded validation:** focused Codex adapter, collaboration-runtime, provider-runtime ingestion, mixed-tool lifecycle, and transfer-budget tests, `vp check`, and `vp run typecheck`.
+**Recorded validation:** focused Codex adapter, collaboration-runtime, provider-runtime ingestion, mixed-tool lifecycle, and transfer-budget tests, `vp check`, and `vp run typecheck`. The 2026-09-01 merge-focused provider suites also covered bounded collaboration waits, turn-scoped failure recovery, and upstream child-model enrichment.
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-09-01
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 
@@ -179,16 +179,19 @@ provider routing defect cannot hide a parent response. The spawn remains visible
 task lifecycle row; selecting that row or its authoritative Agents-panel entry opens a normal chat
 transcript without a composer in the right panel. The provider item remains persisted only for
 transcript correlation and does not create a duplicate spawn row. When the provider reports it,
-the complete, unchanged spawn prompt is synthesized as the
-transcript's first user message.
-Current Codex multi-agent v2 events expose the child thread and path but omit the spawn prompt,
-model, and reasoning effort, so the client labels that metadata unavailable instead of inventing
-it; Claude and legacy rich Codex collaboration events retain the complete metadata. Child plan
-activity cannot
-replace the parent plan, and child assistant messages cannot become the parent turn's checkpoint
-message. Spawn rows show the reported subagent model and reasoning effort, while a count-labeled
-Subagents dropdown between the composer Worktree and branch controls lists every run and opens its
-transcript directly. Its label contracts from `N Subagents` to `N Sub` with the available composer
+the complete, unchanged spawn prompt is synthesized as the transcript's first user message.
+
+Current Codex multi-agent v2 events can omit the spawn prompt and inline model or reasoning effort.
+After child activity registers the thread, the runtime makes one bounded metadata-only
+`thread/resume` request with turn history excluded and propagates any returned model and effort
+through the native lifecycle. Newer child settings and reroutes remain authoritative over that
+snapshot. When a value is still missing, the transcript does not invent it and labels absent model
+metadata unavailable. Claude and legacy rich Codex collaboration events retain the complete
+metadata. Child plan activity cannot replace the parent plan, and child assistant messages cannot
+become the parent turn's checkpoint message. Spawn rows show the reported subagent model and
+reasoning effort, while a count-labeled Subagents dropdown between the composer Worktree and branch
+controls lists every run and opens its transcript directly. Its label contracts from `N Subagents`
+to `N Sub` with the available composer
 width. The aggregate label and each menu item's bot icon reflect completed, working, and failed
 states; active work breathes, while terminal errors remain static. The composer context strip keeps
 the same left-aligned workspace group and right-aligned subagent/branch group at every viewport
@@ -219,6 +222,7 @@ unchanged.
 
 **Implementation evidence:** `packages/contracts/src/{provider,providerRuntime,orchestration}.ts`,
 `apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter,ClaudeAdapter,ProviderSessionReaper}.ts`,
+`apps/server/src/provider/Layers/CodexCollabRuntime.integration.test.ts`,
 `apps/server/src/orchestration/`, `apps/server/src/persistence/Migrations/040_ProjectionSubagentIds.ts`,
 and `apps/web/src/components/{BranchToolbar,ChatView,RightPanelTabs}.tsx`,
 `apps/web/src/components/BranchToolbar.logic.ts`,
@@ -237,9 +241,11 @@ absent composer were confirmed in the live client.
 The receiver-only Codex v2 path is covered by a focused runtime integration replay that verifies
 the synthesized spawn/resume lifecycle, late metadata ordering, parent-route isolation, and
 child-scoped tool and assistant items. Adapter and ingestion regressions preserve each child tool's
-full native lifecycle and terminal output through projection.
+full native lifecycle and terminal output through projection. The 2026-09-01 integration added
+coverage for the single bounded metadata lookup, newer child settings and reroutes, and model and
+effort propagation through every task event.
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-09-01
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
@@ -247,11 +253,11 @@ Closing the last desktop window leaves Electron's main process and local T3 back
 
 On Windows, the standalone service launcher terminates the known server PID and its descendants during stop, update, and fatal shutdown. This prevents launcher-owned provider processes from surviving as orphaned Codex writers without scanning or killing processes by name; direct-child signaling remains the fallback when process-tree termination fails.
 
-**Implementation evidence:** desktop lifecycle and native tray/status-item modules and their focused tests under `apps/desktop/src/`, dedicated macOS template-image assets and packaging checks, the count-only orchestration HTTP contract and projection query, plus `apps/server/src/serviceLauncher.ts`.
+**Implementation evidence:** desktop lifecycle and native tray/status-item modules and their focused tests under `apps/desktop/src/`, dedicated macOS template-image assets and packaging checks, `apps/server/src/orchestration/http.ts`, `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts`, `packages/contracts/src/environmentHttp.ts`, and `apps/server/src/serviceLauncher.ts`.
 
-**Recorded validation:** focused desktop tray, lifecycle, running-count projection, packaging, and Windows process-tree integration tests; Windows notification-area runtime verification of the count, open, and graceful quit controls; `vp check`; `vp run typecheck`; and `git diff --check`.
+**Recorded validation:** focused desktop tray, lifecycle, running-count projection, packaging, and Windows process-tree integration tests; Windows notification-area runtime verification of the count, open, and graceful quit controls; `vp check`; `vp run typecheck`; and `git diff --check`. The 2026-09-01 merge-focused desktop and server suites reran tray continuity and running-count behavior with upstream activity-liveness fixes.
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-09-01
 
 ### DL020 — Provider turns survive stalled checkpoint captures
 
@@ -302,16 +308,21 @@ and a thread cannot message itself. Lists default to 50 threads and cap at 200. 
 10 turns, hide output, and cap at 50 turns and 20,000 characters per item. Wait targets are
 limited to eight threads and five minutes. A failed worktree bootstrap closes its setup terminal,
 deletes the durable thread, removes the worktree when safe, and then removes its generated branch.
+Every successful `thread.create`, including bootstrap creation, now drains deletion cleanup through
+the create event's sequence before setup or later dispatch continues. The shared
+`ThreadCommandDispatcher` owns this fence, so web, mobile, RPC, and agent-tool creation cannot race
+an older deletion reactor that is still removing the reused thread or worktree.
 
 **Implementation evidence:** `packages/contracts/src/threadTools.ts`,
 `apps/server/src/mcp/{McpHttpServer,McpSessionRegistry,toolkits/threads}/`,
-`apps/server/src/orchestration/ThreadCommandDispatcher.ts`, and the existing product MCP provider
-integration.
+`apps/server/src/orchestration/{ThreadCommandDispatcher,Layers/ThreadDeletionReactor,Services/ThreadDeletionReactor}.ts`,
+and the existing product MCP provider integration.
 
 **Recorded validation:** focused thread-tool contract, MCP, dispatcher, and Codex developer
-instruction tests, plus `vp check` and `vp run typecheck`.
+instruction tests, plus `vp check` and `vp run typecheck`. Dispatcher coverage verifies the
+deletion drain for direct and bootstrapped creation and preserves cleanup order on failed setup.
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-09-01
 
 ### DL024 — Progressive multi-environment usage
 
@@ -354,6 +365,10 @@ Every visible model accepts manual display, context, output, and reasoning overr
 win over gateway and harness metadata. The Models information tooltip shows every known value
 without inventing missing metadata.
 
+The gateway controls remain part of upstream's split provider settings editor. Existing opaque
+credentials survive settings refreshes, and the UI replaces or removes a stored key without
+round-tripping its value through provider snapshots.
+
 Codex receives a managed Responses API provider, Codex-format `model_catalog_json`, selected
 reasoning effort, and a per-model `model_context_window`. Its adapter normalizes the configured
 gateway path to end in `/v1`, so users can enter the gateway origin without knowing Codex's URL
@@ -365,7 +380,7 @@ remains informational.
 `apps/server/src/provider/GatewayModelCatalog.ts`,
 `apps/server/src/provider/{Drivers,Layers}/`,
 `apps/server/src/textGeneration/ClaudeTextGeneration.ts`,
-`apps/web/src/components/settings/{AddProviderInstanceDialog,CompatibleApiGatewaySection,CustomModelMetadataDialog,ProviderInstanceCard,ProviderModelsSection}.tsx`,
+`apps/web/src/components/settings/{AddProviderInstanceDialog,CompatibleApiGatewaySection,CustomModelMetadataDialog,ProviderInstanceCard,ProviderModelsSection,ProviderSettingsPanel}.tsx`,
 and `apps/web/src/components/settings/providerModelDetails.ts`.
 
 **Recorded validation:** focused gateway parsing and cache tests, Codex and Claude provider relay
@@ -403,6 +418,21 @@ and Electron shell tests.
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-09-01 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `51acfe8775be51bf6937c2c998e5770bd52e2515` (fork) and `0bfb6df34b26dfe0162db6c09dca00bc8c5a5ec4` (upstream/main)
+
+The integration made these semantic choices:
+
+- **Providers and credentials:** preserved the fork's patched and pinned Claude SDK, Claude and Codex subscription usage, per-instance API gateway catalogs, normalized Codex Responses URL, and opaque gateway credential UI. Adopted upstream OpenCode ownership, child approvals and stops, provider catalog refresh, project-default model handling, and the split provider settings editor.
+- **Checkpoints and subagents:** retained durable checkpoint navigation, child-scoped transcripts, receiver-only Codex routing, parent transcript isolation, and bounded root collaboration waits. Adopted upstream Codex child model lookup and kept newer child settings and reroutes authoritative.
+- **Thread lifecycle and remote access:** retained zrok sharing, environment-scoped thread tools, tray-backed desktop continuity, and liveness-aware running-thread counts. Centralized the post-create deletion drain in `ThreadCommandDispatcher`, so every thread creation waits for older deletion cleanup before bootstrap work continues.
+- **Preview:** retained debugger reattachment, bounded native control work, stale-host quarantine, URL readiness, `LoadFailed` propagation, and same-tab recovery while adopting upstream preview recording, popup, battery, and agent-created-thread fixes.
+- **Web and mobile:** adopted upstream generalized web attachments, mobile upload and file sharing, native image, PDF, and video preview, environment themes, composer and activity presentation changes, settings search, pull-request filters, and Expo 57 with React Native 0.86.3. Fork split workspaces, checkpoint controls, subagent navigation, and Windows file links remain composed with those changes.
+- **Authentication, analytics, and performance:** adopted upstream DPoP diagnostics and replay handling, connected-client analytics, bounded activity payload loading, reduced full tool-output hydration, lower idle CPU use, and provider event-listener cleanup.
+- **Post-merge QA:** merge-focused validation passed 403 server and contracts tests, 548 web tests, 26 mobile tests, and scoped lint and typechecks. Repository-wide `vp check`, `vp run typecheck`, and `vp run lint:mobile` passed. An isolated paired web client verified the merged draft composer, provider subscription and gateway settings, opaque-secret handling, and environment themes through Chrome CDP with no browser exceptions. Representative mobile emulator verification was unavailable because this Linux host has no Android SDK or ADB and cannot run iOS Simulator tooling.
 
 ### 2026-08-28 — Merge upstream/main into main
 
