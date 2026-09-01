@@ -202,9 +202,7 @@ function buildProps() {
     onIsAtEndChange: () => {},
     onManualNavigation: () => {},
     emptyState: {
-      projectName: null,
       machineName: "This device",
-      onOpenProject: null,
     },
   };
 }
@@ -244,35 +242,21 @@ function buildAssistantTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
-  it("renders the active project as an editor link in an empty timeline", async () => {
+  it("identifies the machine in an empty timeline", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
-    const onOpenProject = vi.fn();
     const markup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
         timelineEntries={[]}
         emptyState={{
-          projectName: "t3code",
           machineName: "This device",
-          onOpenProject,
         }}
       />,
     );
 
-    expect(markup).toContain("In ");
-    expect(markup).toContain(">t3code</button>");
-    expect(markup).toContain('aria-label="Open t3code in the preferred editor"');
-    expect(markup).toContain("Send a message to start the conversation.");
-  });
-
-  it("identifies the machine when an empty timeline has no active project", async () => {
-    const { MessagesTimeline } = await import("./MessagesTimeline");
-    const markup = renderToStaticMarkup(
-      <MessagesTimeline {...buildProps()} timelineEntries={[]} />,
-    );
-
     expect(markup).toContain("On This device");
-    expect(markup).not.toContain("Open This device in the preferred editor");
+    expect(markup).not.toContain("In t3code");
+    expect(markup).toContain("Send a message to start the conversation.");
   });
 
   it("renders a feedback command and its pending response as normal thread messages", () => {

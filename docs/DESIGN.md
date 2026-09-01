@@ -26,6 +26,6 @@ T3 Code is a compact, task-first developer tool. The existing interface prioriti
 - Keep transitions short (about 150–200ms) and limited to state feedback. Preserve `motion-reduce` fallbacks.
 - Empty states should explain the current context and the next action in concise language.
 
-## New-Thread Empty State
+## New-thread empty state
 
-The new-thread timeline uses a two-line hierarchy: a contextual title and a muted instructional subtitle. When a project is active, the project name is an inline text action that opens the project in the preferred editor; without a project, the title identifies the current machine/environment. This context is informational first and should remain visually lighter than active conversation content.
+The new-thread hero names the active project in its headline and shows `On <machine-name>` as muted supporting text. The non-draft empty state uses the same machine label above its instructional subtitle. This avoids repeating the project name while keeping the environment visible.

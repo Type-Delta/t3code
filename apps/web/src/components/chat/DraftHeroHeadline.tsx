@@ -29,14 +29,12 @@ interface DraftHeroHeadlineProps {
   readonly activeProjectRef: ScopedProjectRef | null;
   readonly activeProjectTitle: string | null;
   readonly machineName: string;
-  readonly onOpenProject: (() => void) | null;
 }
 
 export function DraftHeroHeadline({
   activeProjectRef,
   activeProjectTitle,
   machineName,
-  onOpenProject,
 }: DraftHeroHeadlineProps) {
   const projects = useProjects();
   const threads = useThreadShells();
@@ -181,27 +179,7 @@ export function DraftHeroHeadline({
           <>Add a project to start</>
         )}
       </h1>
-      <p className="text-sm text-muted-foreground/45">
-        {activeProjectTitle ? (
-          <>
-            In{" "}
-            {onOpenProject ? (
-              <button
-                type="button"
-                className="pointer-events-auto cursor-pointer underline decoration-current/35 underline-offset-4 transition-colors hover:text-muted-foreground"
-                aria-label={`Open ${activeProjectTitle} in the preferred editor`}
-                onClick={onOpenProject}
-              >
-                {activeProjectTitle}
-              </button>
-            ) : (
-              activeProjectTitle
-            )}
-          </>
-        ) : (
-          <>On {machineName}</>
-        )}
-      </p>
+      <p className="text-sm text-muted-foreground/45">On {machineName}</p>
     </div>
   );
 }

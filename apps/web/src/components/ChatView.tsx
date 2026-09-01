@@ -150,7 +150,6 @@ import {
   type TurnDiffSummary,
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
-import { useOpenInPreferredEditor } from "../editorPreferences";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
@@ -2989,15 +2988,6 @@ function ChatViewContent(props: ChatViewProps) {
   });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const availableEditors = useAtomValue(primaryServerAvailableEditorsAtom);
-  const openInPreferredEditor = useOpenInPreferredEditor(
-    activeThread?.environmentId ?? null,
-    availableEditors,
-  );
-  const openActiveProjectInEditor = useCallback(() => {
-    const cwd = gitCwd ?? activeProject?.workspaceRoot;
-    if (!cwd) return;
-    void openInPreferredEditor(cwd);
-  }, [activeProject?.workspaceRoot, gitCwd, openInPreferredEditor]);
   // Prefer an instance-id match so a custom Codex instance (e.g.
   // `codex_personal`) surfaces its own status/message in the banner rather
   // than the default Codex's. Falls back to first-match-by-kind when no
@@ -7643,9 +7633,7 @@ function ChatViewContent(props: ChatViewProps) {
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
                 onOpenSubagent={openSubagentRuns}
                 emptyState={{
-                  projectName: activeProject?.title ?? null,
                   machineName: activeEnvironment?.label ?? "This device",
-                  onOpenProject: activeProject ? openActiveProjectInEditor : null,
                 }}
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
@@ -7703,7 +7691,6 @@ function ChatViewContent(props: ChatViewProps) {
                           activeProjectRef={activeProjectRef}
                           activeProjectTitle={activeProject?.title ?? null}
                           machineName={activeEnvironment?.label ?? "This device"}
-                          onOpenProject={activeProject ? openActiveProjectInEditor : null}
                         />
                       </div>
                     </div>

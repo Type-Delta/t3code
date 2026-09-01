@@ -22,15 +22,15 @@ The server and desktop artifact builder pin the patched SDK version, including l
 
 **Last updated:** 2026-09-01
 
-### DL002 — Workspace context beside the empty-state hero
+### DL002 — Machine context beside the empty-state hero
 
-The upstream draft hero remains the empty-state headline. The fork preserves workspace context as its supporting line and in the existing non-draft empty state: `In <project-name>` opens the current project/worktree in the preferred editor, while `On <machine-name>` identifies an environment without a project. This is additive context, not a replacement for the upstream hero.
+The upstream draft hero remains the empty-state headline. The fork adds `On <machine-name>` as its supporting line and uses the same machine label in the existing non-draft empty state. The project already appears in the hero headline, so the supporting line identifies the environment instead of repeating the project name.
 
 **Implementation evidence:** `apps/web/src/components/ChatView.tsx`, `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/chat/MessagesTimeline.test.tsx`.
 
 **Recorded validation:** `vp test apps/web/src/components/chat/MessagesTimeline.test.tsx`, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-09-01
 
 ### DL003 — Subscription usage for Claude and Codex
 

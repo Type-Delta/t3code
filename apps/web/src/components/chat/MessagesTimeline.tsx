@@ -276,9 +276,7 @@ interface MessagesTimelineProps {
   onManualNavigation: () => void;
   onOpenSubagent?: (runIds: ReadonlyArray<string>) => void;
   emptyState: {
-    projectName: string | null;
     machineName: string;
-    onOpenProject: (() => void) | null;
   };
   hideEmptyPlaceholder?: boolean;
   topFadeEnabled?: boolean;
@@ -641,21 +639,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       <div className="flex h-full items-center justify-center">
         <div className="flex flex-col items-center gap-2 text-center">
           <p className="text-[2rem] leading-tight font-medium text-foreground/80">
-            {emptyState.projectName ? (
-              <>
-                In{" "}
-                <button
-                  type="button"
-                  className="cursor-pointer rounded-sm text-info-foreground underline decoration-current/35 underline-offset-4 transition-colors hover:text-info-foreground/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70"
-                  aria-label={`Open ${emptyState.projectName} in the preferred editor`}
-                  onClick={emptyState.onOpenProject ?? undefined}
-                >
-                  {emptyState.projectName}
-                </button>
-              </>
-            ) : (
-              <>On {emptyState.machineName}</>
-            )}
+            On {emptyState.machineName}
           </p>
           <p className="text-sm text-muted-foreground/45">
             Send a message to start the conversation.

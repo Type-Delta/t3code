@@ -142,7 +142,7 @@ export function SubagentPanel(props: SubagentPanelProps) {
         onIsAtEndChange={doNothing}
         onManualNavigation={doNothing}
         onOpenSubagent={props.onOpenSubagent}
-        emptyState={{ projectName: null, machineName: "Subagent", onOpenProject: null }}
+        emptyState={{ machineName: "Subagent" }}
         hideEmptyPlaceholder
       />
     </div>
