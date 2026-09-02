@@ -650,23 +650,23 @@ export function firstValidTimestamp(
   return null;
 }
 
-// Sidebar sort: static order, newest anchor on top. Activity NEVER reorders
-// the list — a row holds its position between lifecycle transitions, so the
-// screen only moves when a thread enters or leaves the active list. The
-// anchor is creation time until an un-settle re-anchors it (see
-// activeThreadAnchorTimestampMs), so an un-settled thread surfaces at the
-// top instead of sinking back to its creation-order slot. Status (including
-// pending approval) is carried by each card's edge strip, not by position.
+// Active threads follow their latest modification, so a newly sent message
+// moves its thread to the top. Creation and un-settle timestamps remain
+// fallback anchors for malformed or stale updatedAt values.
 export function sortThreadsForSidebar<
   T extends {
+    readonly environmentId: string;
     readonly id: string;
     readonly createdAt: string;
+    readonly updatedAt: string;
     readonly unsettledAt?: string | null | undefined;
   },
 >(threads: readonly T[]): T[] {
   return [...threads].toSorted(
     (left, right) =>
-      activeThreadAnchorTimestampMs(right) - activeThreadAnchorTimestampMs(left) ||
+      Math.max(activeThreadAnchorTimestampMs(right), toSortableTimestamp(right.updatedAt) ?? 0) -
+        Math.max(activeThreadAnchorTimestampMs(left), toSortableTimestamp(left.updatedAt) ?? 0) ||
+      left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
 }
