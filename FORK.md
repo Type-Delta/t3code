@@ -413,6 +413,24 @@ and Electron shell tests.
 
 **Last updated:** 2026-09-01
 
+### DL028 — Isolated Windows x64 GitHub releases
+
+The fork has a manual Windows x64 release workflow that uses GitHub-hosted runners. It builds the
+Linux `node-pty` payload required by the packaged WSL backend, produces an unsigned NSIS installer,
+and publishes only the Windows installer and updater files to this repository's GitHub Releases.
+It does not publish packages, build other desktop platforms, deploy hosted services, announce the
+release, or invoke another release workflow.
+
+The packaged local server remains available. Remote server self-update to the fork version is not
+available because this workflow deliberately does not publish a matching `t3` package.
+
+**Implementation evidence:** `.github/workflows/fork-windows-release.yml`.
+
+**Recorded validation:** workflow syntax and action-policy checks, `vp check`, and
+`vp run typecheck`.
+
+**Last updated:** 2026-09-02
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
