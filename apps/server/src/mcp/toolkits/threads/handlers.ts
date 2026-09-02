@@ -9,6 +9,7 @@ import {
   type OrchestrationProjectShell,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadShell,
+  type ProviderDriverKind,
   type ThreadToolAttentionReason,
   type ThreadToolStatus,
 } from "@t3tools/contracts";
@@ -27,6 +28,7 @@ import * as Stream from "effect/Stream";
 import { projectThreadDetailSnapshot } from "../../../orchestration/ActivityPayloadProjection.ts";
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as ThreadCommandDispatcher from "../../../orchestration/ThreadCommandDispatcher.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -445,6 +447,29 @@ const listThreads = Effect.fn("ThreadToolkit.listThreads")(function* (input: {
   return { environmentId: invocation.environmentId, threads };
 });
 
+const listModels = Effect.fn("ThreadToolkit.listModels")(function* (input: {
+  readonly driver?: ProviderDriverKind;
+}) {
+  const invocation = yield* McpInvocationContext.requireThreadMcpCapability("list_models");
+  const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+  const providers = (yield* providerRegistry.getProviders)
+    .filter(
+      (provider) =>
+        provider.enabled &&
+        provider.status === "ready" &&
+        provider.availability !== "unavailable" &&
+        (input.driver === undefined || provider.driver === input.driver),
+    )
+    .map(({ instanceId, driver, displayName, models }) => ({
+      instanceId,
+      driver,
+      ...(displayName === undefined ? {} : { displayName }),
+      models,
+    }));
+
+  return { environmentId: invocation.environmentId, providers };
+});
+
 const sendMessageToThread = Effect.fn("ThreadToolkit.sendMessageToThread")(function* (input: {
   readonly threadId: ThreadId;
   readonly message: string;
@@ -676,6 +701,7 @@ const waitThreads = Effect.fn("ThreadToolkit.waitThreads")(function* (input: {
 
 const handlers = {
   create_thread: createThread,
+  list_models: listModels,
   list_threads: listThreads,
   read_thread: readThread,
   send_message_to_thread: sendMessageToThread,

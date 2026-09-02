@@ -1,6 +1,8 @@
 import {
   ThreadCreateToolInput,
   ThreadCreateToolResult,
+  ThreadListModelsToolInput,
+  ThreadListModelsToolResult,
   ThreadListToolInput,
   ThreadListToolResult,
   ThreadReadToolInput,
@@ -17,6 +19,7 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as ThreadCommandDispatcher from "../../../orchestration/ThreadCommandDispatcher.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -52,6 +55,20 @@ export const ListThreadsTool = Tool.make("list_threads", {
   dependencies,
 })
   .annotate(Tool.Title, "List threads")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, false);
+
+export const ListModelsTool = Tool.make("list_models", {
+  description:
+    "List models accepted by the currently enabled and ready provider instances, optionally filtered by driver.",
+  parameters: ThreadListModelsToolInput,
+  success: ThreadListModelsToolResult,
+  failure: ThreadToolError,
+  dependencies: [McpInvocationContext.McpInvocationContext, ProviderRegistry.ProviderRegistry],
+})
+  .annotate(Tool.Title, "List models")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true)
@@ -101,6 +118,7 @@ export const WaitThreadsTool = Tool.make("wait_threads", {
 
 export const ThreadToolkit = Toolkit.make(
   CreateThreadTool,
+  ListModelsTool,
   ListThreadsTool,
   ReadThreadTool,
   SendMessageToThreadTool,

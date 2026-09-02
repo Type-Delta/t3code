@@ -17,6 +17,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ThreadCommandDispatcher from "../orchestration/ThreadCommandDispatcher.ts";
+import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import { ThreadToolkit } from "./toolkits/threads/tools.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
@@ -49,6 +50,7 @@ const ThreadRegistrationTestLayer = McpHttpServer.McpToolkitRegistrationLive.pip
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer))),
   Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(makeProviderRegistryLayer()),
   Layer.provideMerge(
     Layer.succeed(
       ProjectionSnapshotQuery.ProjectionSnapshotQuery,
@@ -409,6 +411,15 @@ it.effect("registers the thread toolkit alongside preview", () =>
       idempotentHint: true,
     });
 
+    const listModels = server.tools.find(({ tool }) => tool.name === "list_models");
+    expect(listModels?.tool.annotations).toMatchObject({
+      title: "List models",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+
     const wait = server.tools.find(({ tool }) => tool.name === "wait_threads");
     expect(wait?.tool.annotations).toMatchObject({
       title: "Wait for threads",
@@ -419,6 +430,10 @@ it.effect("registers the thread toolkit alongside preview", () =>
 );
 
 it("keeps optional thread defaults optional in generated MCP schemas", () => {
+  const listModelsSchema = Tool.getJsonSchema(ThreadToolkit.tools.list_models) as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+    readonly required?: ReadonlyArray<string>;
+  };
   const listSchema = Tool.getJsonSchema(ThreadToolkit.tools.list_threads) as {
     readonly properties?: Readonly<Record<string, unknown>>;
     readonly required?: ReadonlyArray<string>;
@@ -434,11 +449,13 @@ it("keeps optional thread defaults optional in generated MCP schemas", () => {
   };
 
   expect(listSchema.required ?? []).not.toContain("limit");
+  expect(listModelsSchema.required ?? []).not.toContain("driver");
   expect(readSchema.required ?? []).not.toEqual(
     expect.arrayContaining(["turnLimit", "includeOutputs", "maxOutputCharsPerItem"]),
   );
   for (const schema of [
     listSchema.properties?.limit,
+    listModelsSchema.properties?.driver,
     readSchema.properties?.turnLimit,
     readSchema.properties?.includeOutputs,
     readSchema.properties?.maxOutputCharsPerItem,

@@ -303,6 +303,12 @@ distinct from the providers' internal subagents. New work can stay in the curren
 a new Git worktree. The caller's permission mode applies to a new thread, while a message sent to
 an existing thread keeps that thread's mode.
 
+Agents can also list the model choices exposed by currently selectable provider instances,
+optionally filtered by driver kind. Results keep provider-instance identity separate from the
+driver that runs it and include the current, legacy, and custom models shown in the product model
+picker. User-created instances that share a driver remain distinct, and runtime provider changes
+are reflected in later calls.
+
 The tools share the server-owned provider MCP credential. They cannot access another environment,
 and a thread cannot message itself. Lists default to 50 threads and cap at 200. Reads default to
 10 turns, hide output, and cap at 50 turns and 20,000 characters per item. Wait targets are
@@ -318,11 +324,12 @@ an older deletion reactor that is still removing the reused thread or worktree.
 `apps/server/src/orchestration/{ThreadCommandDispatcher,Layers/ThreadDeletionReactor,Services/ThreadDeletionReactor}.ts`,
 and the existing product MCP provider integration.
 
-**Recorded validation:** focused thread-tool contract, MCP, dispatcher, and Codex developer
-instruction tests, plus `vp check` and `vp run typecheck`. Dispatcher coverage verifies the
-deletion drain for direct and bootstrapped creation and preserves cleanup order on failed setup.
+**Recorded validation:** focused thread-tool contract, MCP, model-listing, dispatcher, and Codex
+developer instruction tests, plus `vp check` and `vp run typecheck`. Dispatcher coverage verifies
+the deletion drain for direct and bootstrapped creation and preserves cleanup order on failed
+setup.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-02
 
 ### DL024 — Progressive multi-environment usage
 

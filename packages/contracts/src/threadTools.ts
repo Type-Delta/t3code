@@ -18,6 +18,8 @@ import {
   OrchestrationProposedPlan,
   OrchestrationThreadActivityTone,
 } from "./orchestration.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { ServerProviderModel } from "./server.ts";
 
 const THREAD_TOOL_LIST_LIMIT = 200;
 const THREAD_TOOL_READ_TURN_LIMIT = 50;
@@ -31,7 +33,14 @@ const ThreadToolText = Schema.String.check(
   Schema.isMaxLength(THREAD_TOOL_MAX_PROMPT_CHARS),
   Schema.makeFilter((value) => value.trim().length > 0 || "Text must not be blank."),
 );
-const ThreadToolOperation = Schema.Literals(["create", "list", "read", "send", "wait"]);
+const ThreadToolOperation = Schema.Literals([
+  "create",
+  "list",
+  "list_models",
+  "read",
+  "send",
+  "wait",
+]);
 
 export const ThreadToolStatus = Schema.Literals([
   "idle",
@@ -123,6 +132,25 @@ export const ThreadListToolResult = Schema.Struct({
   threads: Schema.Array(ThreadToolSummary),
 });
 export type ThreadListToolResult = typeof ThreadListToolResult.Type;
+
+export const ThreadListModelsToolInput = Schema.Struct({
+  driver: Schema.optionalKey(ProviderDriverKind),
+});
+export type ThreadListModelsToolInput = typeof ThreadListModelsToolInput.Type;
+
+export const ThreadListModelsToolProvider = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  driver: ProviderDriverKind,
+  displayName: Schema.optionalKey(TrimmedNonEmptyString),
+  models: Schema.Array(ServerProviderModel),
+});
+export type ThreadListModelsToolProvider = typeof ThreadListModelsToolProvider.Type;
+
+export const ThreadListModelsToolResult = Schema.Struct({
+  environmentId: EnvironmentId,
+  providers: Schema.Array(ThreadListModelsToolProvider),
+});
+export type ThreadListModelsToolResult = typeof ThreadListModelsToolResult.Type;
 
 export const ThreadReadToolInput = Schema.Struct({
   threadId: ThreadId,

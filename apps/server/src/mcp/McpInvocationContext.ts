@@ -41,7 +41,7 @@ export const requireMcpCapability = Effect.fn("mcp.requireCapability")(function*
 });
 
 export const requireThreadMcpCapability = Effect.fn("mcp.requireThreadCapability")(function* (
-  operation: "create" | "list" | "read" | "send" | "wait",
+  operation: "create" | "list" | "list_models" | "read" | "send" | "wait",
 ) {
   const invocation = yield* McpInvocationContext;
   if (!invocation.capabilities.has("threads")) {

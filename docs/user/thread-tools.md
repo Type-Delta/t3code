@@ -5,6 +5,8 @@ conversation. It appears in the sidebar and stays available after the agent turn
 
 ## Available tools
 
+- `list_models` lists models for currently selectable provider instances, optionally filtered by
+  driver.
 - `create_thread` creates a thread and sends its first message.
 - `list_threads` lists active threads in the current environment.
 - `read_thread` reads a thread and its recent history.
@@ -13,6 +15,17 @@ conversation. It appears in the sidebar and stays available after the agent turn
 
 `read_thread` returns activity output only when the agent asks for it. It can use a cursor to read
 older history.
+
+## Providers, drivers, and models
+
+A provider is one user-configured instance, such as a personal Codex account or a custom endpoint.
+A driver is the supported coding harness behind that instance, such as Codex, Claude Code, Cursor,
+Grok, or OpenCode. More than one provider can use the same driver.
+
+`list_models` returns provider instances that are enabled, available in this build, and ready for
+use. Its models match the choices in T3 Code, including legacy and custom entries. The optional
+filter selects a driver kind rather than a provider instance ID. Provider settings can change while
+the server is running, so call the tool again when current availability matters.
 
 ## Threads and subagents
 

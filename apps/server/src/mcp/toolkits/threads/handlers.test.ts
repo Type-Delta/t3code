@@ -4,7 +4,9 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
+  type ServerProvider,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -20,9 +22,10 @@ import { McpSchema, McpServer } from "effect/unstable/ai";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
 import * as ThreadCommandDispatcher from "../../../orchestration/ThreadCommandDispatcher.ts";
+import { makeProviderRegistryLayer } from "../../../provider/testUtils/providerRegistryMock.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { ThreadToolkitHandlersLive } from "./handlers.ts";
-import { ReadThreadTool, ThreadToolkit } from "./tools.ts";
+import { ListModelsTool, ReadThreadTool, ThreadToolkit } from "./tools.ts";
 
 const environmentId = EnvironmentId.make("thread-tools-environment");
 const projectId = ProjectId.make("thread-tools-project");
@@ -142,15 +145,162 @@ const allowedInvocation = {
   capabilities: new Set(["threads"] as const),
   issuedAt: 1,
 };
-const ThreadToolkitTestLayer = McpServer.toolkit(ThreadToolkit).pipe(
-  Layer.provide(ThreadToolkitHandlersLive),
-  Layer.provideMerge(McpServer.McpServer.layer),
-);
+const provider = (
+  instanceId: string,
+  driver: string,
+  overrides: Partial<ServerProvider> = {},
+): ServerProvider => ({
+  instanceId: ProviderInstanceId.make(instanceId),
+  driver: ProviderDriverKind.make(driver),
+  displayName: instanceId,
+  enabled: true,
+  installed: true,
+  version: "1.0.0",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: now,
+  models: [],
+  slashCommands: [],
+  skills: [],
+  ...overrides,
+});
+const makeThreadToolkitTestLayer = (providers: ReadonlyArray<ServerProvider> = []) =>
+  McpServer.toolkit(ThreadToolkit).pipe(
+    Layer.provide(ThreadToolkitHandlersLive),
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(makeProviderRegistryLayer(providers)),
+  );
+const ThreadToolkitTestLayer = makeThreadToolkitTestLayer();
 
 it("describes the read pagination argument as cursor", () => {
   expect(ReadThreadTool.description).toContain("Use cursor");
   expect(ReadThreadTool.description).not.toContain("olderCursor");
 });
+
+it.effect("registers list_models as a readonly, idempotent, closed-world tool", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const listModels = server.tools.find(({ tool }) => tool.name === ListModelsTool.name);
+    expect(listModels?.tool.annotations).toMatchObject({
+      title: "List models",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+  }).pipe(Effect.provide(ThreadToolkitTestLayer)),
+);
+
+it.effect(
+  "lists selectable models by configured provider instance and filters by open driver slug",
+  () => {
+    const legacyModel = {
+      slug: "claude-legacy",
+      name: "Claude Legacy",
+      isCustom: false,
+      isLegacy: true,
+      capabilities: null,
+    };
+    const customModel = {
+      slug: "proxy/custom-model",
+      name: "Custom Model",
+      isCustom: true,
+      capabilities: null,
+    };
+    const providers = [
+      provider("claude-work", "claudeAgent", {
+        displayName: "Claude Work",
+        models: [legacyModel, customModel],
+      }),
+      provider("claude-personal", "claudeAgent", {
+        displayName: "Claude Personal",
+        models: [customModel],
+      }),
+      provider("custom-gateway", "acme-driver", {
+        displayName: "Acme Gateway",
+        models: [customModel, legacyModel],
+      }),
+      provider("disabled", "claudeAgent", { enabled: false, models: [customModel] }),
+      provider("warning", "claudeAgent", { status: "warning", models: [customModel] }),
+      provider("missing", "claudeAgent", {
+        availability: "unavailable",
+        enabled: false,
+        installed: false,
+        models: [customModel],
+      }),
+    ];
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (arguments_: Record<string, unknown>) =>
+        server
+          .callTool({ name: "list_models", arguments: arguments_ })
+          .pipe(
+            Effect.provideService(McpSchema.McpServerClient, client),
+            Effect.provideService(McpInvocationContext.McpInvocationContext, allowedInvocation),
+          );
+
+      const all = yield* call({});
+      expect(all.isError).toBe(false);
+      expect(all.structuredContent).toEqual({
+        environmentId,
+        providers: [
+          {
+            instanceId: ProviderInstanceId.make("claude-work"),
+            driver: ProviderDriverKind.make("claudeAgent"),
+            displayName: "Claude Work",
+            models: [legacyModel, customModel],
+          },
+          {
+            instanceId: ProviderInstanceId.make("claude-personal"),
+            driver: ProviderDriverKind.make("claudeAgent"),
+            displayName: "Claude Personal",
+            models: [customModel],
+          },
+          {
+            instanceId: ProviderInstanceId.make("custom-gateway"),
+            driver: ProviderDriverKind.make("acme-driver"),
+            displayName: "Acme Gateway",
+            models: [customModel, legacyModel],
+          },
+        ],
+      });
+
+      const claude = yield* call({ driver: "claudeAgent" });
+      expect(
+        (
+          claude.structuredContent as {
+            providers: ReadonlyArray<{ instanceId: string }>;
+          }
+        ).providers.map(({ instanceId }) => instanceId),
+      ).toEqual(["claude-work", "claude-personal"]);
+
+      const custom = yield* call({ driver: "acme-driver" });
+      expect(custom.structuredContent).toMatchObject({
+        providers: [{ instanceId: "custom-gateway", driver: "acme-driver" }],
+      });
+    }).pipe(Effect.provide(makeThreadToolkitTestLayer(providers)));
+  },
+);
+
+it.effect("requires list capability for list_models", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const denied = yield* server.callTool({ name: "list_models", arguments: {} }).pipe(
+      Effect.provideService(McpSchema.McpServerClient, client),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, {
+        ...allowedInvocation,
+        capabilities: new Set(["preview"] as const),
+      }),
+    );
+    expect(denied.isError).toBe(true);
+    expect(denied.content).toEqual([
+      {
+        type: "text",
+        text: "The list_models operation failed: MCP credential does not grant the threads capability.",
+      },
+    ]);
+  }).pipe(Effect.provide(ThreadToolkitTestLayer)),
+);
 
 it.effect("hides projected activity payloads unless outputs are requested", () =>
   Effect.gen(function* () {
