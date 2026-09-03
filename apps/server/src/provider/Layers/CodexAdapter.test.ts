@@ -1614,6 +1614,80 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("attaches native Codex usage-limit reset metadata to the failed turn", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-usage-limit"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "error",
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          error: {
+            message: "You've hit your usage limit.",
+            codexErrorInfo: "usageLimitExceeded",
+          },
+          willRetry: false,
+          t3UsageLimitRetryAt: "2026-01-02T00:00:00.000Z",
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events[1]?.type, "turn.completed");
+      if (events[1]?.type === "turn.completed") {
+        NodeAssert.deepEqual(events[1].payload.retry, {
+          reason: "usage_limit",
+          retryAt: "2026-01-02T00:00:00.000Z",
+        });
+      }
+    }),
+  );
+
+  it.effect("does not treat a CPA 429 as native usage-limit retry metadata", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-cpa-429"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "error",
+        turnId: asTurnId("turn-1"),
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          error: {
+            message: "429 Too Many Requests",
+            codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } },
+          },
+          willRetry: false,
+        },
+      } satisfies ProviderEvent);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(events[1]?.type, "turn.completed");
+      if (events[1]?.type === "turn.completed") {
+        NodeAssert.equal(events[1].payload.retry, undefined);
+      }
+    }),
+  );
+
   it.effect("maps process stderr notifications to runtime.warning", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

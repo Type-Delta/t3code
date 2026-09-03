@@ -187,6 +187,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["installed cli versions newer available codex claude cursor grok opencode"],
   },
   {
+    id: "auto-resume-usage-limits",
+    title: "Auto-resume after usage limits",
+    to: "/settings/general",
+    searchTerms: ["continue reset rate limit claude codex agent"],
+  },
+  {
     id: "background-activity",
     title: "Background activity",
     to: "/settings/general",

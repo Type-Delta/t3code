@@ -31,6 +31,7 @@ import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -56,6 +57,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   CodexResumeCursorSchema,
+  CODEX_USAGE_LIMIT_RETRY_AT_FIELD,
   CodexSessionRuntimeThreadIdMissingError,
   describeMcpElicitation,
   makeCodexSessionRuntime,
@@ -73,6 +75,10 @@ const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
+const CodexUsageLimitRetryMetadata = Schema.Struct({
+  [CODEX_USAGE_LIMIT_RETRY_AT_FIELD]: Schema.optional(Schema.String),
+});
+const decodeCodexUsageLimitRetryMetadata = Schema.decodeUnknownOption(CodexUsageLimitRetryMetadata);
 
 const CodexConversationBindingPayloadSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -916,6 +922,10 @@ function failedTurnCompletion(
   if (!event.turnId) {
     return [];
   }
+  const retryMetadata = decodeCodexUsageLimitRetryMetadata(event.payload);
+  const retryAt = Option.isSome(retryMetadata)
+    ? retryMetadata.value[CODEX_USAGE_LIMIT_RETRY_AT_FIELD]
+    : undefined;
   return [
     {
       ...runtimeEventBase(event, canonicalThreadId),
@@ -923,6 +933,9 @@ function failedTurnCompletion(
       payload: {
         state: "failed",
         errorMessage,
+        ...(typeof retryAt === "string"
+          ? { retry: { reason: "usage_limit" as const, retryAt } }
+          : {}),
       },
     },
   ];

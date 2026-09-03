@@ -517,6 +517,35 @@ key-ID/name-only event attribution. Repository-wide `vp check` and `vp run typec
 
 **Last updated:** 2026-09-03
 
+### DL032 — Automatic resume after native provider usage limits
+
+Auto-resume is enabled by default for all threads and can be turned off under **Settings →
+General → Auto-resume after usage limits**. When native Claude Code or Codex reports an exact
+future reset time for a failed turn, the server stores one durable resume job for that thread and
+sends scoped automatic-resume instructions three seconds after the reset. Before dispatch, the
+server checks the durable message projection for the stable resume message ID. Stable schedule,
+command, and message identifiers make the job safe to recover after a server restart without
+sending the continuation twice. A newer turn, message, provider selection, active request, archive,
+deletion, or explicit settle makes the saved job stale instead. Transient dispatch failures retry
+after another three seconds.
+
+Claude uses the rejected native `rate_limit_event` reset. Codex confirms native
+`usageLimitExceeded` errors through `account/rateLimits/read`. Generic `429` responses from
+compatible API gateways do not expose an authoritative reset through either CLI, so gateway usage
+limits are intentionally unsupported.
+
+**Implementation evidence:** `packages/contracts/src/{orchestration,providerRuntime,settings}.ts`,
+`apps/server/src/provider/Layers/{ClaudeAdapter,CodexAdapter,CodexSessionRuntime}.ts`,
+`apps/server/src/orchestration/Layers/{AutoResumeReactor,ProviderRuntimeIngestion}.ts`,
+`apps/server/src/persistence/{Layers,Services}/AutoResumeJobs.ts`,
+`apps/server/src/persistence/Migrations/051_AutoResumeJobs.ts`, and
+`apps/web/src/components/settings/{SettingsPanels,settingsSearch}.ts*`.
+
+**Recorded validation:** focused native Claude and Codex reset parsing, provider-runtime,
+settings-contract, and server-settings tests.
+
+**Last updated:** 2026-09-03
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

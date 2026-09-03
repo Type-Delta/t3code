@@ -35,6 +35,7 @@ import { CheckpointCaptureJobRepositoryLive } from "../src/persistence/Layers/Ch
 import { CheckpointTimelineRepositoryLive } from "../src/persistence/Layers/CheckpointTimeline.ts";
 import { CheckpointNavigationRepositoryLive } from "../src/persistence/Layers/CheckpointNavigation.ts";
 import { CheckpointRetentionRepositoryLive } from "../src/persistence/Layers/CheckpointRetention.ts";
+import { AutoResumeJobRepositoryLive } from "../src/persistence/Layers/AutoResumeJobs.ts";
 import { makeSqlitePersistenceLive } from "../src/persistence/Layers/Sqlite.ts";
 import { ProjectionCheckpointRepository } from "../src/persistence/Services/ProjectionCheckpoints.ts";
 import { ProjectionPendingApprovalRepository } from "../src/persistence/Services/ProjectionPendingApprovals.ts";
@@ -71,6 +72,7 @@ import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackground
 import * as ThreadPlanProgress from "../src/orchestration/ThreadPlanProgress.ts";
 import { RuntimeReceiptBusTest } from "../src/orchestration/Layers/RuntimeReceiptBus.ts";
 import { OrchestrationReactorLive } from "../src/orchestration/Layers/OrchestrationReactor.ts";
+import { AutoResumeReactorLive } from "../src/orchestration/Layers/AutoResumeReactor.ts";
 import { ProviderCommandReactorLive } from "../src/orchestration/Layers/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionLive } from "../src/orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { CheckpointReactor } from "../src/orchestration/Services/CheckpointReactor.ts";
@@ -281,7 +283,9 @@ export const makeOrchestrationIntegrationHarness = (
     yield* fileSystem.makeDirectory(stateDir, { recursive: true });
     yield* initializeGitWorkspace(workspaceDir);
 
-    const persistenceLayer = makeSqlitePersistenceLive(dbPath);
+    const persistenceLayer = AutoResumeJobRepositoryLive.pipe(
+      Layer.provideMerge(makeSqlitePersistenceLive(dbPath)),
+    );
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
@@ -345,10 +349,15 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(runtimeServicesLayer),
     );
     const serverSettingsLayer = ServerSettingsService.layerTest();
+    const autoResumeReactorLayer = AutoResumeReactorLive.pipe(
+      Layer.provideMerge(runtimeServicesLayer),
+      Layer.provideMerge(serverSettingsLayer),
+    );
     const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(checkpointDiffQueryLayer),
       Layer.provideMerge(serverSettingsLayer),
+      Layer.provideMerge(autoResumeReactorLayer),
     );
     const gitWorkflowLayer = Layer.mock(GitWorkflowService)({
       renameBranch: (input: {
@@ -425,6 +434,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(providerCommandReactorLayer),
       Layer.provideMerge(checkpointReactorLayer),
+      Layer.provideMerge(autoResumeReactorLayer),
       Layer.provideMerge(
         Layer.succeed(ThreadDeletionReactor, {
           start: () => Effect.void,

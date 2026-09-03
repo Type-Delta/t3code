@@ -366,6 +366,12 @@ const TurnStartedPayload = Schema.Struct({
 });
 export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 
+const TurnCompletedRetry = Schema.Struct({
+  reason: Schema.Literal("usage_limit"),
+  retryAt: IsoDateTime,
+});
+export type TurnCompletedRetry = typeof TurnCompletedRetry.Type;
+
 const TurnCompletedPayload = Schema.Struct({
   state: RuntimeTurnState,
   stopReason: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
@@ -373,6 +379,7 @@ const TurnCompletedPayload = Schema.Struct({
   modelUsage: Schema.optional(UnknownRecordSchema),
   totalCostUsd: Schema.optional(Schema.Number),
   errorMessage: Schema.optional(TrimmedNonEmptyStringSchema),
+  retry: Schema.optional(TurnCompletedRetry),
 });
 export type TurnCompletedPayload = typeof TurnCompletedPayload.Type;
 

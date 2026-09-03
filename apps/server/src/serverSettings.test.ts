@@ -714,6 +714,23 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("defaults auto-resume on and persists an explicit disable", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+
+      assert.isTrue((yield* serverSettings.getSettings).autoResumeOnUsageLimit);
+
+      const settings = yield* serverSettings.updateSettings({ autoResumeOnUsageLimit: false });
+      assert.isFalse(settings.autoResumeOnUsageLimit);
+
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      assert.isFalse(JSON.parse(raw).autoResumeOnUsageLimit);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("persists explicit provider enables before their first use", () =>
     Effect.gen(function* () {
       const serverConfig = yield* ServerConfig.ServerConfig;

@@ -43,6 +43,19 @@ When you set this field, T3 Code points Claude Code at that directory with the
 `CLAUDE_CONFIG_DIR` environment variable. It does not change `HOME`, so your system keychain and
 the rest of your environment stay as they are.
 
+## Resume After Usage Limits
+
+T3 Code automatically sends scoped resume instructions when native Claude Code rejects a turn
+because of a usage limit and reports an exact reset time. The pending continuation survives a T3
+server restart and is discarded if the thread is no longer waiting on that failed turn. This is
+sent three seconds after the reported reset and transient dispatch failures retry after another
+three seconds. T3 Code checks that it has not already sent the resume message before each attempt.
+This is enabled by default; turn it off under **Settings → General → Auto-resume after usage
+limits**.
+
+Compatible API gateways do not currently expose an authoritative usage-limit reset through Claude
+Code. T3 Code therefore does not auto-resume generic gateway `429` errors.
+
 ## Reduce Context Usage
 
 In Settings, open your Claude provider and set **Auto-compact after** to a token count between

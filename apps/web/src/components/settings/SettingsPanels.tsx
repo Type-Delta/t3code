@@ -518,6 +518,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
         ? ["Provider update checks"]
         : []),
+      ...(settings.autoResumeOnUsageLimit !== DEFAULT_UNIFIED_SETTINGS.autoResumeOnUsageLimit
+        ? ["Auto-resume after usage limits"]
+        : []),
       ...(isBackgroundActivityDirty ? ["Background activity"] : []),
       ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
         ? ["New thread mode"]
@@ -577,6 +580,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.glassOpacity,
       settings.enableLegacyTokenStreaming,
       settings.enableProviderUpdateChecks,
+      settings.autoResumeOnUsageLimit,
       settings.sidebarAutoSettleAfterDays,
       settings.sidebarAutoSettleOnMerge,
       settings.sidebarProjectGroupingMode,
@@ -666,6 +670,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
       enableLegacyTokenStreaming: DEFAULT_UNIFIED_SETTINGS.enableLegacyTokenStreaming,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
+      autoResumeOnUsageLimit: DEFAULT_UNIFIED_SETTINGS.autoResumeOnUsageLimit,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
       backgroundActivityProfile: DEFAULT_UNIFIED_SETTINGS.backgroundActivityProfile,
       automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
@@ -2139,6 +2144,32 @@ export function GeneralSettingsPanel() {
                 updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
               }
               aria-label="Check provider versions"
+            />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("auto-resume-usage-limits")}
+          description="Continue Claude and Codex work automatically after an exact usage-limit reset."
+          resetAction={
+            settings.autoResumeOnUsageLimit !== DEFAULT_UNIFIED_SETTINGS.autoResumeOnUsageLimit ? (
+              <SettingResetButton
+                label="auto-resume after usage limits"
+                onClick={() =>
+                  updateSettings({
+                    autoResumeOnUsageLimit: DEFAULT_UNIFIED_SETTINGS.autoResumeOnUsageLimit,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.autoResumeOnUsageLimit}
+              onCheckedChange={(checked) =>
+                updateSettings({ autoResumeOnUsageLimit: Boolean(checked) })
+              }
+              aria-label="Auto-resume after usage limits"
             />
           }
         />

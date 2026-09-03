@@ -1234,6 +1234,25 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+/**
+ * Server-owned compare-and-fire command for a due auto-resume schedule.
+ * Stable schedule/message ids make a dispatch safely replayable after a
+ * process restart; the expected fields let the decider reject stale timers.
+ */
+export const ThreadAutoResumeFireCommand = Schema.Struct({
+  type: Schema.Literal("thread.auto-resume.fire"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  scheduleId: TrimmedNonEmptyString,
+  scheduledSequence: NonNegativeInt,
+  sourceTurnId: TurnId,
+  expectedUserMessageId: MessageId,
+  providerInstanceId: ProviderInstanceId,
+  messageId: MessageId,
+  createdAt: IsoDateTime,
+});
+export type ThreadAutoResumeFireCommand = typeof ThreadAutoResumeFireCommand.Type;
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -1246,6 +1265,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadCheckpointNavigationFailCommand,
   ThreadCheckpointForwardHistoryAbandonCommand,
   ThreadTitleRegenerationCompleteCommand,
+  ThreadAutoResumeFireCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 

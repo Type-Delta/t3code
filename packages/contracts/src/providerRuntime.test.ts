@@ -69,6 +69,33 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.planMarkdown).toBe("# Ship it");
   });
 
+  it("decodes a usage-limit retry directive on turn completion", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "turn.completed",
+      eventId: "event-retry-1",
+      provider: "codex",
+      createdAt: "2026-02-28T00:00:00.000Z",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      payload: {
+        state: "failed",
+        retry: {
+          reason: "usage_limit",
+          retryAt: "2026-02-28T05:00:00.000Z",
+        },
+      },
+    });
+
+    expect(parsed.type).toBe("turn.completed");
+    if (parsed.type !== "turn.completed") {
+      throw new Error("expected turn.completed");
+    }
+    expect(parsed.payload.retry).toEqual({
+      reason: "usage_limit",
+      retryAt: "2026-02-28T05:00:00.000Z",
+    });
+  });
+
   it("decodes user-input.requested with structured questions", () => {
     const parsed = decodeRuntimeEvent({
       type: "user-input.requested",

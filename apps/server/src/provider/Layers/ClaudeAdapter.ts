@@ -311,6 +311,12 @@ interface ClaudeSessionContext {
   readonly workflowMemberFingerprints: Map<string, string>;
   /** Task ids that have started and not yet reached a terminal state. */
   readonly liveTaskIds: Set<string>;
+  pendingRateLimitReset:
+    | {
+        readonly turnId: TurnId;
+        readonly retryAt: string;
+      }
+    | undefined;
   turnState: ClaudeTurnState | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
@@ -417,6 +423,35 @@ function resultErrorsText(result: SDKResultMessage): string {
   return "errors" in result && Array.isArray(result.errors)
     ? result.errors.join(" ").toLowerCase()
     : "";
+}
+
+/**
+ * Claude's subscription rate-limit event reports reset timestamps as Unix
+ * seconds. Only a finite timestamp in the future is useful for auto-resume;
+ * gateway/CPA retry delays do not provide this authoritative value.
+ */
+export function claudeRateLimitRetryAt(
+  resetsAt: number | undefined,
+  nowEpochSeconds: number,
+): string | undefined {
+  if (
+    typeof resetsAt !== "number" ||
+    !Number.isFinite(resetsAt) ||
+    !Number.isFinite(nowEpochSeconds)
+  ) {
+    return undefined;
+  }
+
+  const resetEpochMillis = resetsAt * 1_000;
+  if (
+    !Number.isFinite(resetEpochMillis) ||
+    resetEpochMillis <= nowEpochSeconds * 1_000 ||
+    Math.abs(resetEpochMillis) > 8_640_000_000_000_000
+  ) {
+    return undefined;
+  }
+
+  return DateTime.formatIso(DateTime.makeUnsafe(resetEpochMillis));
 }
 
 /**
@@ -2313,6 +2348,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const turnState = context.turnState;
     if (!turnState) {
+      context.pendingRateLimitReset = undefined;
       yield* emitThreadTokenUsage(context, usageSnapshot, {
         rawMethod: "claude/result",
         rawPayload: result ?? { status },
@@ -2394,6 +2430,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     const stamp = yield* makeEventStamp();
+    const retryAt =
+      context.pendingRateLimitReset?.turnId === turnState.turnId
+        ? context.pendingRateLimitReset.retryAt
+        : undefined;
     yield* offerRuntimeEvent({
       type: "turn.completed",
       eventId: stamp.eventId,
@@ -2410,11 +2450,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? { totalCostUsd: result.total_cost_usd }
           : {}),
         ...(errorMessage ? { errorMessage } : {}),
+        ...(retryAt
+          ? {
+              retry: {
+                reason: "usage_limit" as const,
+                retryAt,
+              },
+            }
+          : {}),
       },
       providerRefs: nativeProviderRefs(context),
     });
 
     const updatedAt = yield* nowIso;
+    context.pendingRateLimitReset = undefined;
     context.turnState = undefined;
     context.session = {
       ...context.session,
@@ -3583,6 +3632,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (message.type === "rate_limit_event") {
+      const activeTurnId = context.turnState?.turnId;
+      const retryAt =
+        message.rate_limit_info.status === "rejected" && activeTurnId !== undefined
+          ? claudeRateLimitRetryAt(
+              message.rate_limit_info.resetsAt,
+              DateTime.toEpochMillis(yield* DateTime.now) / 1_000,
+            )
+          : undefined;
+      context.pendingRateLimitReset =
+        activeTurnId !== undefined && retryAt !== undefined
+          ? { turnId: activeTurnId, retryAt }
+          : undefined;
       yield* offerRuntimeEvent({
         ...base,
         type: "account.rate-limits.updated",
@@ -4455,6 +4516,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         workflowMemberFingerprints,
         liveTaskIds,
         turnState: undefined,
+        pendingRateLimitReset: undefined,
         lastKnownContextWindow: initialContextWindow,
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,

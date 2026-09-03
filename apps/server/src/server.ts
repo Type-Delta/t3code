@@ -78,6 +78,7 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { CheckpointNavigationReactorLive } from "./orchestration/Layers/CheckpointNavigationReactor.ts";
 import { CheckpointNavigationReactor } from "./orchestration/Services/CheckpointNavigationReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import { AutoResumeReactorLive } from "./orchestration/Layers/AutoResumeReactor.ts";
 import * as ThreadCommandDispatcher from "./orchestration/ThreadCommandDispatcher.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
@@ -140,6 +141,7 @@ import { CheckpointCaptureJobRepositoryLive } from "./persistence/Layers/Checkpo
 import { CheckpointTimelineRepositoryLive } from "./persistence/Layers/CheckpointTimeline.ts";
 import { CheckpointNavigationRepositoryLive } from "./persistence/Layers/CheckpointNavigation.ts";
 import { CheckpointRetentionRepositoryLive } from "./persistence/Layers/CheckpointRetention.ts";
+import { AutoResumeJobRepositoryLive } from "./persistence/Layers/AutoResumeJobs.ts";
 import { CheckpointLegacyMigrationRepositoryLive } from "./persistence/Layers/CheckpointLegacyMigrations.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -286,6 +288,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
+  Layer.provideMerge(AutoResumeReactorLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
@@ -305,7 +308,10 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
 );
 
-const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
+const PersistenceLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(SqlitePersistenceLayerLive),
+  Layer.provideMerge(AutoResumeJobRepositoryLive),
+);
 
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProjectConfig.layer),
