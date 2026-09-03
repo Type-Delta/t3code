@@ -78,7 +78,9 @@ export const make = Effect.gen(function* () {
   )(function* (command, options) {
     const clientOrigin = options?.origin ?? {};
     const hasClientOrigin =
-      clientOrigin.surface !== undefined || clientOrigin.appVersion !== undefined;
+      clientOrigin.surface !== undefined ||
+      clientOrigin.appVersion !== undefined ||
+      clientOrigin.managementKey !== undefined;
     const dispatchFromClient: OrchestrationEngine.OrchestrationEngineShape["dispatch"] = (
       command,
     ) =>

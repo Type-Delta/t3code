@@ -18,6 +18,10 @@
     "./relay": {
       "types": "./src/relay.ts",
       "import": "./src/relay.ts"
+    },
+    "./managementApiKeys": {
+      "types": "./src/managementApiKeys.ts",
+      "import": "./src/managementApiKeys.ts"
     }
   },
   "scripts": {

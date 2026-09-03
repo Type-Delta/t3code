@@ -2,6 +2,8 @@ import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   EventId,
+  ManagementApiKeyId,
+  type ManagementApiKeyScope,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -14,8 +16,10 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as References from "effect/References";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer } from "effect/unstable/ai";
 
@@ -139,10 +143,32 @@ const client = McpSchema.McpServerClient.of({
 });
 const allowedInvocation = {
   environmentId,
-  threadId: callerThreadId,
-  providerSessionId: "thread-tools-session",
-  providerInstanceId: ProviderInstanceId.make("codex"),
-  capabilities: new Set(["threads"] as const),
+  principal: {
+    type: "provider-session" as const,
+    threadId: callerThreadId,
+    providerSessionId: "thread-tools-session",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  issuedAt: 1,
+};
+const managementScopes = [
+  "models:read",
+  "threads:list",
+  "threads:read",
+  "threads:create",
+  "threads:message",
+  "threads:wait",
+] satisfies ReadonlyArray<ManagementApiKeyScope>;
+const managementInvocation = {
+  environmentId,
+  principal: {
+    type: "management-key" as const,
+    keyId: ManagementApiKeyId.make("thread-tools-management"),
+    name: "Thread tools management",
+    scopes: new Set<ManagementApiKeyScope>(managementScopes),
+    defaultRuntimeMode: "auto-accept-edits" as const,
+    maximumRuntimeMode: "auto-accept-edits" as const,
+  },
   issuedAt: 1,
 };
 const provider = (
@@ -288,15 +314,23 @@ it.effect("requires list capability for list_models", () =>
     const denied = yield* server.callTool({ name: "list_models", arguments: {} }).pipe(
       Effect.provideService(McpSchema.McpServerClient, client),
       Effect.provideService(McpInvocationContext.McpInvocationContext, {
-        ...allowedInvocation,
-        capabilities: new Set(["preview"] as const),
+        environmentId,
+        principal: {
+          type: "management-key",
+          keyId: ManagementApiKeyId.make("thread-tools-read-only"),
+          name: "Read only",
+          scopes: new Set<ManagementApiKeyScope>(),
+          defaultRuntimeMode: "approval-required",
+          maximumRuntimeMode: "approval-required",
+        },
+        issuedAt: 1,
       }),
     );
     expect(denied.isError).toBe(true);
     expect(denied.content).toEqual([
       {
         type: "text",
-        text: "The list_models operation failed: MCP credential does not grant the threads capability.",
+        text: "The list_models operation failed: MCP management key does not grant the models:read scope.",
       },
     ]);
   }).pipe(Effect.provide(ThreadToolkitTestLayer)),
@@ -386,15 +420,23 @@ it.effect("enforces thread capability and forbids self-send", () =>
     const withoutThreads = yield* server.callTool({ name: "list_threads", arguments: {} }).pipe(
       Effect.provideService(McpSchema.McpServerClient, client),
       Effect.provideService(McpInvocationContext.McpInvocationContext, {
-        ...allowedInvocation,
-        capabilities: new Set(["preview"] as const),
+        environmentId,
+        principal: {
+          type: "management-key",
+          keyId: ManagementApiKeyId.make("thread-tools-read-only-2"),
+          name: "Read only",
+          scopes: new Set<ManagementApiKeyScope>(["models:read"]),
+          defaultRuntimeMode: "approval-required",
+          maximumRuntimeMode: "approval-required",
+        },
+        issuedAt: 1,
       }),
     );
     expect(withoutThreads.isError).toBe(true);
     expect(withoutThreads.content).toEqual([
       {
         type: "text",
-        text: "The list operation failed: MCP credential does not grant the threads capability.",
+        text: "The list operation failed: MCP management key does not grant the threads:list scope.",
       },
     ]);
 
@@ -627,6 +669,349 @@ it.effect("keeps local checkout metadata only when creating in the caller projec
       projectId: otherProject.id,
       branch: null,
       worktreePath: null,
+    });
+  }).pipe(Effect.provide(ThreadToolkitTestLayer)),
+);
+
+it.effect("uses management-key create defaults and records its origin", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const managementProject = {
+      ...project,
+      defaultModelSelection: modelSelection,
+    };
+    const created = {
+      ...shell,
+      projectId,
+      modelSelection,
+      runtimeMode: "auto-accept-edits" as const,
+    };
+    const dispatched: Array<{
+      readonly command: unknown;
+      readonly options: unknown;
+    }> = [];
+    const createQuery = {
+      getThreadShellById: () => Effect.succeed(Option.some(created)),
+      getProjectShellById: () => Effect.succeed(Option.some(managementProject)),
+    } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+    const dispatcher = ThreadCommandDispatcher.ThreadCommandDispatcher.of({
+      dispatch: (command, options) =>
+        Effect.sync(() => {
+          dispatched.push({ command, options });
+          return { sequence: dispatched.length };
+        }),
+    });
+    const crypto = Crypto.make({
+      randomBytes: (size) => new Uint8Array(size),
+      digest: (_algorithm, data) => Effect.succeed(data),
+    });
+
+    const createdResult = yield* server
+      .callTool({
+        name: "create_thread",
+        arguments: {
+          prompt: "Create this from a durable management key.",
+          target: { projectId },
+        },
+      })
+      .pipe(
+        Effect.provideService(McpSchema.McpServerClient, client),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, managementInvocation),
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, createQuery),
+        Effect.provideService(ThreadCommandDispatcher.ThreadCommandDispatcher, dispatcher),
+        Effect.provideService(Crypto.Crypto, crypto),
+      );
+
+    expect(createdResult.isError).toBe(false);
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({
+      options: {
+        origin: {
+          managementKey: {
+            id: managementInvocation.principal.keyId,
+            name: managementInvocation.principal.name,
+          },
+        },
+      },
+      command: {
+        type: "thread.turn.start",
+        modelSelection,
+        runtimeMode: "auto-accept-edits",
+        interactionMode: "default",
+        bootstrap: {
+          createThread: {
+            projectId,
+            modelSelection,
+            runtimeMode: "auto-accept-edits",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+          },
+        },
+      },
+    });
+  }).pipe(Effect.provide(ThreadToolkitTestLayer)),
+);
+
+it.effect("logs management state-changing thread operations without token material", () => {
+  const logs: Array<{
+    readonly message: unknown;
+    readonly annotations: Readonly<Record<string, unknown>>;
+  }> = [];
+  const logger = Logger.make(({ fiber, message }) => {
+    logs.push({
+      message,
+      annotations: fiber.getRef(References.CurrentLogAnnotations),
+    });
+  });
+  const managementLogInvocation = {
+    ...managementInvocation,
+    principal: {
+      ...managementInvocation.principal,
+      defaultRuntimeMode: "approval-required" as const,
+      maximumRuntimeMode: "auto-accept-edits" as const,
+    },
+  };
+  const created = { ...shell, runtimeMode: "auto-accept-edits" as const };
+  const queryForOperations = {
+    getThreadShellById: () => Effect.succeed(Option.some(created)),
+    getProjectShellById: () =>
+      Effect.succeed(Option.some({ ...project, defaultModelSelection: modelSelection })),
+  } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+  const dispatched: Array<unknown> = [];
+  const dispatcher = ThreadCommandDispatcher.ThreadCommandDispatcher.of({
+    dispatch: (command) =>
+      Effect.sync(() => {
+        dispatched.push(command);
+        return { sequence: dispatched.length };
+      }),
+  });
+  const crypto = Crypto.make({
+    randomBytes: (size) => new Uint8Array(size),
+    digest: (_algorithm, data) => Effect.succeed(data),
+  });
+
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.provideService(McpSchema.McpServerClient, client),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, managementLogInvocation),
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, queryForOperations),
+        Effect.provideService(ThreadCommandDispatcher.ThreadCommandDispatcher, dispatcher),
+        Effect.provideService(Crypto.Crypto, crypto),
+      );
+
+    const createdResult = yield* provide(
+      server.callTool({
+        name: "create_thread",
+        arguments: { prompt: "Create a managed thread.", target: { projectId } },
+      }),
+    );
+    const sentResult = yield* provide(
+      server.callTool({
+        name: "send_message_to_thread",
+        arguments: { threadId, message: "Send a managed message." },
+      }),
+    );
+
+    expect(createdResult.isError).toBe(false);
+    expect(sentResult.isError).toBe(false);
+    expect(dispatched).toHaveLength(2);
+    const operationLogs = logs.filter(
+      (log) =>
+        log.annotations.operation === "create_thread" ||
+        log.annotations.operation === "send_message_to_thread",
+    );
+    expect(operationLogs.map((log) => log.annotations)).toEqual([
+      {
+        operation: "create_thread",
+        managementApiKeyId: managementLogInvocation.principal.keyId,
+        managementApiKeyName: managementLogInvocation.principal.name,
+        targetThreadId: expect.any(String),
+      },
+      {
+        operation: "send_message_to_thread",
+        managementApiKeyId: managementLogInvocation.principal.keyId,
+        managementApiKeyName: managementLogInvocation.principal.name,
+        targetThreadId: threadId,
+      },
+    ]);
+    expect(
+      logs.some((log) =>
+        Object.values(log.annotations).some((value) => String(value).includes("t3mgmt_")),
+      ),
+    ).toBe(false);
+  }).pipe(
+    Effect.provide(
+      Layer.merge(ThreadToolkitTestLayer, Logger.layer([logger], { mergeWithExisting: false })),
+    ),
+  );
+});
+
+it.effect("requires a project and a model default for management-key create", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const dispatched: Array<unknown> = [];
+    const dispatcher = ThreadCommandDispatcher.ThreadCommandDispatcher.of({
+      dispatch: (command) =>
+        Effect.sync(() => {
+          dispatched.push(command);
+          return { sequence: dispatched.length };
+        }),
+    });
+    const noDefaultQuery = {
+      getProjectShellById: () => Effect.succeed(Option.some(project)),
+      getThreadShellById: () => Effect.succeed(Option.some(shell)),
+    } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+    const create = (arguments_: Record<string, unknown>) =>
+      server
+        .callTool({ name: "create_thread", arguments: arguments_ })
+        .pipe(
+          Effect.provideService(McpSchema.McpServerClient, client),
+          Effect.provideService(McpInvocationContext.McpInvocationContext, managementInvocation),
+          Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, noDefaultQuery),
+          Effect.provideService(ThreadCommandDispatcher.ThreadCommandDispatcher, dispatcher),
+        );
+
+    const missingProject = yield* create({ prompt: "Needs a target project." });
+    expect(missingProject.isError).toBe(true);
+    expect(missingProject.content).toEqual([
+      {
+        type: "text",
+        text: "The create input is invalid: A management key must provide target.projectId when creating a thread.",
+      },
+    ]);
+
+    const missingModel = yield* create({ prompt: "Needs a model.", target: { projectId } });
+    expect(missingModel.isError).toBe(true);
+    expect(missingModel.content).toEqual([
+      {
+        type: "text",
+        text: "The create input is invalid: A management create requires modelSelection or a default model selection on the target project.",
+      },
+    ]);
+    expect(dispatched).toHaveLength(0);
+  }).pipe(Effect.provide(ThreadToolkitTestLayer)),
+);
+
+it.effect("rejects management sends above the key runtime ceiling before dispatch", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const dispatched: Array<unknown> = [];
+    const dispatcher = ThreadCommandDispatcher.ThreadCommandDispatcher.of({
+      dispatch: (command) =>
+        Effect.sync(() => {
+          dispatched.push(command);
+          return { sequence: dispatched.length };
+        }),
+    });
+    const target = { ...shell, runtimeMode: "auto" as const };
+    const targetQuery = {
+      getThreadShellById: () => Effect.succeed(Option.some(target)),
+      getProjectShellById: () => Effect.succeed(Option.some(project)),
+    } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+    const rejected = yield* server
+      .callTool({
+        name: "send_message_to_thread",
+        arguments: { threadId, message: "This must not dispatch." },
+      })
+      .pipe(
+        Effect.provideService(McpSchema.McpServerClient, client),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          ...managementInvocation,
+          principal: {
+            ...managementInvocation.principal,
+            maximumRuntimeMode: "approval-required" as const,
+          },
+        }),
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, targetQuery),
+        Effect.provideService(ThreadCommandDispatcher.ThreadCommandDispatcher, dispatcher),
+      );
+
+    expect(rejected.isError).toBe(true);
+    expect(rejected.content).toEqual([
+      {
+        type: "text",
+        text: "The send input is invalid: A management key cannot send to a thread whose runtime mode exceeds its maximum permission mode.",
+      },
+    ]);
+    expect(dispatched).toHaveLength(0);
+  }).pipe(Effect.provide(ThreadToolkitTestLayer)),
+);
+
+it.effect("management-key waits ignore messages on an unrelated caller thread", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const events = yield* PubSub.unbounded<import("@t3tools/contracts").OrchestrationEvent>();
+    const unrelatedCallerMessage = {
+      aggregateKind: "thread",
+      aggregateId: callerThreadId,
+      type: "thread.message-sent",
+      payload: { role: "user" },
+    } as unknown as import("@t3tools/contracts").OrchestrationEvent;
+    const targetEvent = {
+      aggregateKind: "thread",
+      aggregateId: threadId,
+      type: "thread.activity.appended",
+      payload: {},
+    } as unknown as import("@t3tools/contracts").OrchestrationEvent;
+    const completedTurn = {
+      turnId: TurnId.make("thread-tools-management-completed-turn"),
+      state: "completed" as const,
+      requestedAt: now,
+      startedAt: now,
+      completedAt: now,
+      assistantMessageId: null,
+    };
+    let detailLoads = 0;
+    const waitQuery = {
+      getThreadDetailSnapshot: () =>
+        Effect.gen(function* () {
+          detailLoads += 1;
+          if (detailLoads === 1) {
+            // The stream subscription is established before the initial state
+            // load, so both events are available to the wait loop.
+            yield* PubSub.publish(events, unrelatedCallerMessage);
+            yield* PubSub.publish(events, targetEvent);
+            return Option.some(detail);
+          }
+          return Option.some({
+            ...detail,
+            snapshotSequence: 8,
+            page: { ...detail.page, snapshotSequence: 8, threadSequence: 7 },
+          });
+        }),
+      getThreadShellById: () =>
+        Effect.succeed(
+          Option.some(detailLoads >= 2 ? { ...shell, latestTurn: completedTurn } : shell),
+        ),
+      getProjectShellById: () => Effect.succeed(Option.some(project)),
+    } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+    const engine = OrchestrationEngine.OrchestrationEngineService.of({
+      dispatch: () => Effect.die("unused"),
+      readEvents: () => Stream.empty,
+      streamDomainEvents: Stream.fromPubSub(events),
+      latestSequence: Effect.succeed(8),
+    });
+
+    const waited = yield* server
+      .callTool({
+        name: "wait_threads",
+        arguments: { targets: [{ threadId, afterCursor: "6" }], timeoutMs: 1_000 },
+      })
+      .pipe(
+        Effect.provideService(McpSchema.McpServerClient, client),
+        Effect.provideService(McpInvocationContext.McpInvocationContext, managementInvocation),
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, waitQuery),
+        Effect.provideService(OrchestrationEngine.OrchestrationEngineService, engine),
+      );
+
+    expect(waited.isError).toBe(false);
+    expect(waited.structuredContent).toMatchObject({
+      reason: "completed",
+      target: { threadId, status: "completed", eventCursor: "7" },
+      targets: [{ threadId, status: "completed", eventCursor: "7" }],
     });
   }).pipe(Effect.provide(ThreadToolkitTestLayer)),
 );

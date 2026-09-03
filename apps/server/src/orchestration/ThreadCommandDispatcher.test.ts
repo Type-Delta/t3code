@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
+  ManagementApiKeyId,
   type OrchestrationClientOrigin,
   type OrchestrationCommand,
   MessageId,
@@ -25,6 +26,12 @@ import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import * as ThreadCommandDispatcher from "./ThreadCommandDispatcher.ts";
 
 const clientOrigin: OrchestrationClientOrigin = { surface: "web", appVersion: "1.2.3" };
+const managementOrigin: OrchestrationClientOrigin = {
+  managementKey: {
+    id: ManagementApiKeyId.make("management-key-1"),
+    name: "External automation",
+  },
+};
 
 const threadId = ThreadId.make("thread-1");
 
@@ -191,6 +198,33 @@ describe("ThreadCommandDispatcher", () => {
 
       expect(result).toEqual({ sequence: 7 });
       expect(dispatchCalls).toEqual([{ command, options: { origin: clientOrigin } }]);
+    }).pipe(Effect.provide(makeLayer({ dispatch })));
+  });
+
+  it.effect("preserves management-only origins", () => {
+    const dispatchCalls: Array<{
+      readonly command: OrchestrationCommand;
+      readonly options: { readonly origin?: OrchestrationClientOrigin } | undefined;
+    }> = [];
+    const dispatch: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"] = (
+      command,
+      options,
+    ) => {
+      dispatchCalls.push({ command, options });
+      return Effect.succeed({ sequence: 9 });
+    };
+    const command: OrchestrationCommand = {
+      type: "thread.turn.interrupt",
+      commandId: CommandId.make("management-interrupt"),
+      threadId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    return Effect.gen(function* () {
+      const dispatcher = yield* ThreadCommandDispatcher.ThreadCommandDispatcher;
+      yield* dispatcher.dispatch(command, { origin: managementOrigin });
+
+      expect(dispatchCalls).toEqual([{ command, options: { origin: managementOrigin } }]);
     }).pipe(Effect.provide(makeLayer({ dispatch })));
   });
 

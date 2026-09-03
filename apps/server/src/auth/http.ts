@@ -29,6 +29,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Cookies from "effect/unstable/http/Cookies";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
@@ -36,6 +37,7 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
+import * as ManagementApiKeyService from "./ManagementApiKeyService.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
@@ -481,3 +483,116 @@ export const authHttpApiLayer = HttpApiBuilder.group(
       );
   }),
 );
+
+function firstForwardedHeaderValue(value: string | undefined): string | undefined {
+  const first = value?.split(",")[0]?.trim();
+  return first && first.length > 0 ? first : undefined;
+}
+
+function resolveManagementMcpEndpoint(request: HttpServerRequest.HttpServerRequest): string {
+  const forwardedHost = firstForwardedHeaderValue(request.headers["x-forwarded-host"]);
+  const forwardedProto = firstForwardedHeaderValue(request.headers["x-forwarded-proto"]);
+  const host = forwardedHost ?? request.headers.host ?? "127.0.0.1";
+  const protocol =
+    forwardedProto ?? (request.originalUrl.startsWith("https://") ? "https" : "http");
+  try {
+    const requestUrl = new URL(request.originalUrl, `${protocol}://${host}`);
+    requestUrl.pathname = "/mcp";
+    requestUrl.search = "";
+    requestUrl.hash = "";
+    return requestUrl.toString();
+  } catch {
+    return `${protocol}://${host}/mcp`;
+  }
+}
+
+type ManagementApiKeyInternalReason =
+  | "management_api_keys_load_failed"
+  | "management_api_key_creation_failed"
+  | "management_api_key_revocation_failed"
+  | "management_api_key_rotation_failed";
+
+const catchManagementApiKeyError = <A, R>(
+  effect: Effect.Effect<A, ManagementApiKeyService.ManagementApiKeyServiceError, R>,
+  internalReason: ManagementApiKeyInternalReason,
+) =>
+  Effect.catchTags(effect, {
+    ManagementApiKeyValidationError: () => failEnvironmentInvalidRequest("invalid_command"),
+    ManagementApiKeyServiceInternalError: (error) => failEnvironmentInternal(internalReason, error),
+  });
+
+/** Authenticated administration handlers for persistent MCP management keys. */
+export const managementApiHttpLayer = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "management",
+  Effect.fnUntraced(function* (handlers) {
+    const managementKeys = yield* ManagementApiKeyService.ManagementApiKeyService;
+
+    return handlers
+      .handle(
+        "keys",
+        Effect.fn("environment.management.keys")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthAccessReadScope);
+          return yield* catchManagementApiKeyError(
+            managementKeys.list(),
+            "management_api_keys_load_failed",
+          );
+        }),
+      )
+      .handle(
+        "createKey",
+        Effect.fn("environment.management.createKey")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthAccessWriteScope);
+          const issued = yield* catchManagementApiKeyError(
+            managementKeys.create(args.payload),
+            "management_api_key_creation_failed",
+          );
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return {
+            key: issued.key,
+            secret: issued.secret,
+            mcpEndpoint: resolveManagementMcpEndpoint(request),
+          };
+        }),
+      )
+      .handle(
+        "revokeKey",
+        Effect.fn("environment.management.revokeKey")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthAccessWriteScope);
+          return yield* Effect.map(
+            catchManagementApiKeyError(
+              managementKeys.revoke(args.params.id),
+              "management_api_key_revocation_failed",
+            ),
+            (revoked) => ({ revoked }),
+          );
+        }),
+      )
+      .handle(
+        "rotateKey",
+        Effect.fn("environment.management.rotateKey")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthAccessWriteScope);
+          const rotated = yield* catchManagementApiKeyError(
+            managementKeys.rotate(args.params.id),
+            "management_api_key_rotation_failed",
+          );
+          if (Option.isNone(rotated)) {
+            return yield* failEnvironmentNotFound("management_api_key_not_found");
+          }
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return {
+            key: rotated.value.key,
+            secret: rotated.value.secret,
+            mcpEndpoint: resolveManagementMcpEndpoint(request),
+          };
+        }),
+      );
+  }),
+);
+
+// Keep a descriptive alias for callers that build the route layer by feature.
+export const managementHttpApiLayer = managementApiHttpLayer;

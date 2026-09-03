@@ -268,7 +268,7 @@ export class ThreadToolInvalidInputError extends Schema.TaggedErrorClass<ThreadT
   },
 ) {
   override get message(): string {
-    return `The ${this.operation} input is invalid.`;
+    return `The ${this.operation} input is invalid: ${this.reason}`;
   }
 }
 

@@ -54,6 +54,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { ManagementApiKeysSettings } from "./ManagementApiKeysSettings";
 import { searchableSetting } from "./settingsSearch";
 
 const FILL_VALUE = "fill";
@@ -525,6 +526,7 @@ export function IntegrationsSettingsPanel() {
           previewDefaults
         )}
       </SettingsSection>
+      <ManagementApiKeysSettings />
     </SettingsPageContainer>
   );
 }

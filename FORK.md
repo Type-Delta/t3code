@@ -473,6 +473,50 @@ the workflow can adopt upstream's `--signed` path once those secrets exist.
 
 **Last updated:** 2026-09-03
 
+### DL031 — Durable management API keys for external MCP clients
+
+Integrations settings can create environment-wide management API keys with named read-only,
+thread-orchestration, or custom scopes, explicit expiration, and a safe permission ceiling. The
+secret is revealed only once after creation or rotation; list rows retain only a display prefix and
+key metadata, while rotation invalidates the previous secret and revocation takes effect
+immediately. The existing HTTP MCP endpoint accepts these persistent keys alongside ephemeral
+provider-session credentials and enforces one management scope per thread operation. Management
+callers can select projects, create and message threads within their permission ceiling, read and
+wait on threads, and list models. They cannot use preview automation or environment administration.
+State-changing orchestration events retain the key ID and name without retaining its secret or
+display prefix.
+
+Effect MCP registers tools server-wide, so `tools/list` still advertises preview tool names to a
+management client. Preview handlers require a provider-session principal and reject every management
+key call. Keeping that authorization check at the handler boundary avoids a transport-level response
+rewriter and matches the MCP plan's fallback for server-wide registration.
+
+The settings surface includes copyable generic JSON HTTP MCP and Codex `bearer_token_env_var`
+examples, and keeps the one-time secret in transient dialog state only. Persistence stores a SHA-256
+hash of each token, checks expiration and revocation on authentication, throttles last-used writes,
+and coordinates concurrent resolution, rotation, and revocation without exposing two active
+secrets.
+
+**Implementation evidence:** `apps/web/src/components/settings/ManagementApiKeysSettings.tsx`,
+`apps/web/src/components/settings/ManagementApiKeysSettings.logic.ts`,
+`apps/web/src/environments/primary/managementApiKeys.ts`,
+`apps/server/src/auth/ManagementApiKeyService.ts`,
+`apps/server/src/persistence/ManagementApiKeys.ts`,
+`apps/server/src/persistence/Migrations/050_ManagementApiKeys.ts`,
+`apps/server/src/mcp/McpInvocationContext.ts`, `apps/server/src/mcp/McpHttpServer.ts`,
+`apps/server/src/mcp/toolkits/threads/handlers.ts`, `packages/contracts/src/managementApiKeys.ts`,
+and `docs/user/thread-tools.md`.
+
+**Recorded validation:** focused persistence, migration, service concurrency and interruption,
+administration HTTP, MCP authentication, provider-session regression, scope enforcement, preview
+denial, thread-handler, attribution, contracts, and settings UI tests. An isolated paired web client
+created, rotated, and revoked a key; a real external MCP client used it to list models and threads,
+create, read, message, and wait on a Codex thread; the old rotated token and revoked replacement both
+returned the generic 401 response. Database and log inspection confirmed hash-only persistence and
+key-ID/name-only event attribution. Repository-wide `vp check` and `vp run typecheck` passed.
+
+**Last updated:** 2026-09-03
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

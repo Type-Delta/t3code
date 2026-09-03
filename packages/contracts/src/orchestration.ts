@@ -23,6 +23,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { ManagementApiKeyId } from "./managementApiKeys.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -1563,6 +1564,12 @@ export const ThreadActivityAppendedPayload = Schema.Struct({
 export const OrchestrationClientOrigin = Schema.Struct({
   surface: Schema.optional(ClientSurface),
   appVersion: Schema.optional(TrimmedNonEmptyString),
+  managementKey: Schema.optional(
+    Schema.Struct({
+      id: ManagementApiKeyId,
+      name: TrimmedNonEmptyString,
+    }),
+  ),
 });
 export type OrchestrationClientOrigin = typeof OrchestrationClientOrigin.Type;
 

@@ -1,10 +1,18 @@
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ManagementApiKeyId,
+  type ManagementApiKeyScope,
+  PreviewTabId,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
@@ -12,11 +20,16 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
 
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as ManagementApiKeyService from "../auth/ManagementApiKeyService.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ThreadCommandDispatcher from "../orchestration/ThreadCommandDispatcher.ts";
+import * as ManagementApiKeys from "../persistence/ManagementApiKeys.ts";
+import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import { ThreadToolkit } from "./toolkits/threads/tools.ts";
 
@@ -26,10 +39,12 @@ const tabId = PreviewTabId.make("tab-mcp-test");
 const alternateTabId = PreviewTabId.make("tab-mcp-alternate");
 const invocation = {
   environmentId,
-  threadId,
-  providerSessionId: "provider-session-mcp-test",
-  providerInstanceId: ProviderInstanceId.make("codex"),
-  capabilities: new Set(["preview"] as const),
+  principal: {
+    type: "provider-session" as const,
+    threadId,
+    providerSessionId: "provider-session-mcp-test",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
   issuedAt: 1,
 };
 const client = McpSchema.McpServerClient.of({
@@ -78,6 +93,131 @@ const ThreadRegistrationTestLayer = McpHttpServer.McpToolkitRegistrationLive.pip
   Layer.provideMerge(Layer.succeed(McpInvocationContext.McpInvocationContext, invocation)),
 );
 
+const managementScopes = [
+  "models:read",
+  "threads:list",
+  "threads:read",
+  "threads:create",
+  "threads:message",
+  "threads:wait",
+] satisfies ReadonlyArray<ManagementApiKeyScope>;
+
+const managementPrincipal: ManagementApiKeyService.ManagementApiKeyPrincipal = {
+  type: "management-key",
+  keyId: ManagementApiKeyId.make("mcp-http-management-key"),
+  name: "HTTP management key",
+  scopes: new Set(managementScopes),
+  defaultRuntimeMode: "approval-required",
+  maximumRuntimeMode: "auto-accept-edits",
+};
+
+const emptyMcpRegistry = McpSessionRegistry.McpSessionRegistry.of({
+  issue: () => Effect.die("MCP issue is not used by this test"),
+  resolve: () => Effect.succeed(undefined),
+  touch: () => Effect.void,
+  revokeProviderSession: () => Effect.void,
+  revokeThread: () => Effect.void,
+  revokeAll: Effect.void,
+});
+
+const testServerEnvironment = ServerEnvironment.ServerEnvironment.of({
+  getEnvironmentId: Effect.succeed(environmentId),
+  getDescriptor: Effect.die("MCP descriptor is not used by this test"),
+});
+
+const mcpHttpToolkitLayer = McpHttpServer.McpToolkitRegistrationLive.pipe(
+  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(McpHttpServer.McpTransportLive),
+);
+
+const makeMcpHttpTestLayer = (
+  managementService: ManagementApiKeyService.ManagementApiKeyService["Service"],
+  registry = emptyMcpRegistry,
+) =>
+  HttpRouter.serve(mcpHttpToolkitLayer, {
+    disableListenLog: true,
+    disableLogger: true,
+  }).pipe(
+    Layer.provide(Layer.succeed(McpSessionRegistry.McpSessionRegistry, registry)),
+    Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, testServerEnvironment)),
+    Layer.provide(
+      Layer.succeed(ManagementApiKeyService.ManagementApiKeyService, managementService),
+    ),
+    Layer.provide(makeProviderRegistryLayer()),
+    Layer.provide(
+      Layer.succeed(
+        ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+        {} as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"],
+      ),
+    ),
+    Layer.provide(
+      Layer.succeed(
+        ThreadCommandDispatcher.ThreadCommandDispatcher,
+        {} as ThreadCommandDispatcher.ThreadCommandDispatcher["Service"],
+      ),
+    ),
+    Layer.provide(
+      Layer.succeed(
+        OrchestrationEngine.OrchestrationEngineService,
+        {} as OrchestrationEngine.OrchestrationEngineService["Service"],
+      ),
+    ),
+    Layer.provide(
+      Layer.succeed(
+        GitWorkflowService.GitWorkflowService,
+        {} as GitWorkflowService.GitWorkflowService["Service"],
+      ),
+    ),
+    Layer.provide(
+      Layer.succeed(
+        PreviewAutomationBroker.PreviewAutomationBroker,
+        {} as PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+      ),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(NodeHttpServer.layerTest),
+  );
+
+const initializePayload = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "initialize",
+  params: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "management-key-test", version: "1.0.0" },
+  },
+});
+
+const mcpRequest = (token: string, body: string, sessionId?: string) => ({
+  headers: {
+    accept: "application/json, text/event-stream",
+    authorization: `Bearer ${token}`,
+    ...(sessionId === undefined ? {} : { "mcp-session-id": sessionId }),
+    ...(sessionId === undefined ? {} : { "mcp-protocol-version": "2025-06-18" }),
+  },
+  body: HttpBody.text(body, "application/json"),
+});
+
+const callListModelsPayload = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 2,
+  method: "tools/call",
+  params: { name: "list_models", arguments: {} },
+});
+
+const makeManagementService = (
+  resolveToken: ManagementApiKeyService.ManagementApiKeyService["Service"]["resolveToken"],
+) =>
+  ManagementApiKeyService.ManagementApiKeyService.of({
+    create: () => Effect.die("management key creation is not used by this test"),
+    list: () => Effect.succeed([]),
+    revoke: () => Effect.succeed(false),
+    rotate: () => Effect.succeed(Option.none()),
+    resolveToken,
+    authenticate: resolveToken,
+  });
+
 it("normalizes empty successful notification responses to accepted", () => {
   const notificationResponse = McpHttpServer.normalizeMcpHttpResponse(
     HttpServerResponse.text("", { status: 200, contentType: "application/json" }),
@@ -89,6 +229,99 @@ it("normalizes empty successful notification responses to accepted", () => {
   );
   expect(resultResponse.status).toBe(200);
 });
+
+it.effect(
+  "returns the same generic 401 for missing, malformed, unknown, revoked, and expired bearers",
+  () =>
+    Effect.gen(function* () {
+      const activeToken = "t3mgmt_mcp-http-management-key_active-secret";
+      const managementService = makeManagementService((candidate) =>
+        Effect.succeed(
+          candidate === activeToken ? Option.some(managementPrincipal) : Option.none(),
+        ),
+      );
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const httpClient = yield* HttpClient.HttpClient;
+          const candidates = [
+            undefined,
+            "not-a-bearer",
+            "t3mgmt_mcp-http-management-key_unknown-secret",
+            "t3mgmt_mcp-http-management-key_revoked-secret",
+            "t3mgmt_mcp-http-management-key_expired-secret",
+          ] as const;
+          const responses = [];
+          for (const candidate of candidates) {
+            const response = yield* httpClient.post(
+              "/mcp",
+              candidate === undefined
+                ? {
+                    headers: { accept: "application/json, text/event-stream" },
+                    body: HttpBody.text(initializePayload, "application/json"),
+                  }
+                : mcpRequest(candidate, initializePayload),
+            );
+            responses.push({ status: response.status, body: yield* response.text });
+          }
+          expect(responses).toHaveLength(candidates.length);
+          for (const response of responses) {
+            expect(response.status).toBe(401);
+            expect(response.body).toContain('"error":"invalid_mcp_credential"');
+            expect(response.body).toContain("A valid MCP bearer credential is required.");
+          }
+          expect(new Set(responses.map((response) => response.body)).size).toBe(1);
+        }).pipe(Effect.provide(makeMcpHttpTestLayer(managementService))),
+      );
+    }),
+);
+
+it.effect("authenticates a persisted key after rebuilding the service and HTTP transport", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const repository = yield* ManagementApiKeys.ManagementApiKeyRepository;
+      const firstService = yield* ManagementApiKeyService.make;
+      const issued = yield* firstService.create({
+        name: "Persisted HTTP integration",
+        scopes: managementScopes,
+        defaultRuntimeMode: "approval-required",
+        maximumRuntimeMode: "auto-accept-edits",
+      });
+      const rebuiltService = yield* ManagementApiKeyService.make;
+      expect(rebuiltService).not.toBe(firstService);
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const httpClient = yield* HttpClient.HttpClient;
+          const initialize = yield* httpClient.post(
+            "/mcp",
+            mcpRequest(issued.secret, initializePayload),
+          );
+          expect(initialize.status).toBe(200);
+          const sessionId = initialize.headers["mcp-session-id"];
+          expect(sessionId).toBeDefined();
+
+          const models = yield* httpClient.post(
+            "/mcp",
+            mcpRequest(issued.secret, callListModelsPayload, sessionId),
+          );
+          expect(models.status).toBe(200);
+          expect(yield* models.text).toContain(environmentId);
+        }).pipe(Effect.provide(makeMcpHttpTestLayer(rebuiltService))),
+      );
+      // Keep the repository alive until the rebuilt transport has finished
+      // resolving the token from the in-memory persisted row.
+      void repository;
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          ManagementApiKeys.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+          NodeServices.layer,
+        ),
+      ),
+    ),
+  ),
+);
 
 it.effect("returns bounded structural preview snapshot failures", () =>
   Effect.scoped(

@@ -104,9 +104,15 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
-import { authHttpApiLayer, environmentAuthenticatedAuthLayer } from "./auth/http.ts";
+import {
+  authHttpApiLayer,
+  environmentAuthenticatedAuthLayer,
+  managementApiHttpLayer,
+} from "./auth/http.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as ManagementApiKeyService from "./auth/ManagementApiKeyService.ts";
+import * as ManagementApiKeys from "./persistence/ManagementApiKeys.ts";
 import {
   connectHttpApiLayer,
   pendingServiceUpdateExists,
@@ -488,6 +494,11 @@ const AuthLayerLive = EnvironmentAuth.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const ManagementApiKeyServiceLayerLive = ManagementApiKeyService.layer.pipe(
+  Layer.provideMerge(ManagementApiKeys.layer),
+  Layer.provideMerge(PersistenceLayerLive),
+);
+
 const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
   RelayClientLive,
   CloudManagedEndpointRuntime.layer.pipe(
@@ -551,6 +562,7 @@ const RuntimeCoreDependenciesLive = RuntimeCoreBaseLive.pipe(
   Layer.provideMerge(RepositoryIdentityResolver.layer),
   Layer.provideMerge(ServerEnvironmentLayerLive),
   Layer.provideMerge(AuthLayerLive),
+  Layer.provideMerge(ManagementApiKeyServiceLayerLive),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(
     Layer.mergeAll(
@@ -597,6 +609,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(authHttpApiLayer),
+      Layer.provide(managementApiHttpLayer),
       Layer.provide(connectHttpApiLayer),
       Layer.provide(orchestrationHttpApiLayer),
       Layer.provide(pullRequestHttpApiLayer),

@@ -49,6 +49,54 @@ Thread tools use the same product MCP access as agent browser tools. In **Settin
 **Integrations**, turn on **Agent browser access** before you start a new agent session. A running
 agent keeps the tools it received when its session started.
 
+## Management API keys
+
+For an external MCP client, create a durable credential in **Settings → Integrations → Management
+API keys**. Give the key a recognizable name, choose an expiration and access preset, then copy the
+secret from the confirmation dialog. The secret is shown only once. Store it in a password manager
+or an environment variable; it is not included when keys are listed later.
+
+Management keys apply to the whole environment. They can be limited to model discovery and
+thread reading, or granted the thread orchestration tools. They do not grant access to terminals,
+files, previews, settings, connections, or other management keys. The permission mode sets the
+default for new threads and the maximum mode allowed when messaging an existing thread.
+
+The endpoint shown after creating a key is the environment's `/mcp` endpoint. A generic JSON HTTP
+MCP configuration can use an environment variable for the bearer token:
+
+```json
+{
+  "mcpServers": {
+    "t3": {
+      "type": "http",
+      "url": "https://your-t3-host.example/mcp",
+      "headers": {
+        "Authorization": "Bearer ${T3_MANAGEMENT_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Claude Code accepts the same HTTP entry in its project `.mcp.json` file. Keep the `${T3_MANAGEMENT_API_KEY}` placeholder in the file so Claude Code reads the bearer token from the process environment instead of storing it in project configuration.
+
+For Codex, set the variable before starting Codex and add the HTTP server to its TOML
+configuration:
+
+```sh
+export T3_MANAGEMENT_API_KEY='paste-the-secret-here'
+```
+
+```toml
+[mcp_servers.t3]
+url = "https://your-t3-host.example/mcp"
+bearer_token_env_var = "T3_MANAGEMENT_API_KEY"
+```
+
+Rotate a key when its secret may have been exposed. Rotation immediately invalidates the old
+secret and reveals a replacement once. Revoke a key to disable it immediately; existing MCP
+connections will receive an authentication error on their next request.
+
 ## Worktrees
 
 An agent can create a thread in the current checkout or in a new Git worktree. A worktree uses a

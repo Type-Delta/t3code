@@ -17,6 +17,7 @@ import {
   GitCommandError,
   KeybindingRule,
   MessageId,
+  ManagementApiKeyId,
   ExternalLauncherCommandNotFoundError,
   OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
@@ -153,6 +154,7 @@ import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as ManagementApiKeyService from "./auth/ManagementApiKeyService.ts";
 import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
 import * as ZrokShare from "./remoteAccess/ZrokShare.ts";
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
@@ -431,6 +433,7 @@ const buildAppUnderTest = (options?: {
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
     serverRuntimeStartup?: Partial<ServerRuntimeStartup.ServerRuntimeStartup["Service"]>;
     serverEnvironment?: Partial<ServerEnvironment.ServerEnvironment["Service"]>;
+    managementApiKeyService?: Partial<ManagementApiKeyService.ManagementApiKeyService["Service"]>;
     repositoryIdentityResolver?: Partial<
       RepositoryIdentityResolver.RepositoryIdentityResolver["Service"]
     >;
@@ -1029,6 +1032,20 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provideMerge(makeAuthTestLayer()),
+      // The production routes include management-key administration. Keep the
+      // broad router harness independent from that feature's storage tests by
+      // supplying a deterministic no-op service here.
+      Layer.provide(
+        Layer.mock(ManagementApiKeyService.ManagementApiKeyService)({
+          create: () => Effect.die("Management API key creation is not stubbed in this test"),
+          list: () => Effect.succeed([]),
+          revoke: () => Effect.die("Management API key revocation is not stubbed in this test"),
+          rotate: () => Effect.die("Management API key rotation is not stubbed in this test"),
+          resolveToken: () => Effect.succeed(Option.none()),
+          authenticate: () => Effect.succeed(Option.none()),
+          ...options?.layers?.managementApiKeyService,
+        }),
+      ),
       Layer.provideMerge(ServerSecretStore.layer),
       Layer.provide(workspaceAndProjectServicesLayer),
       Layer.provideMerge(FetchHttpClient.layer),
@@ -3819,6 +3836,121 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assert.isTrue(body.credential.length > 0);
       assert.equal(body.label, "Hosted web");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("protects management API key administration with environment session scopes", () =>
+    Effect.gen(function* () {
+      const keyId = ManagementApiKeyId.make("management-http-test");
+      const createdAt = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
+      const key = {
+        id: keyId,
+        name: "External orchestrator",
+        prefix: "t3mgmt_test1234",
+        scopes: ["models:read", "threads:list"] as const,
+        defaultRuntimeMode: "approval-required" as const,
+        maximumRuntimeMode: "auto-accept-edits" as const,
+        createdAt,
+        expiresAt: null,
+        lastUsedAt: null,
+      };
+      const secret = "t3mgmt_management-http-test_secret";
+      const rotatedSecret = "t3mgmt_management-http-test_rotated";
+      let revoked = false;
+
+      yield* buildAppUnderTest({
+        layers: {
+          managementApiKeyService: {
+            list: () => Effect.succeed(revoked ? [] : [key]),
+            create: () => Effect.succeed({ key, secret }),
+            rotate: () =>
+              Effect.succeed(
+                Option.some({
+                  key: { ...key, prefix: "t3mgmt_rotated" },
+                  secret: rotatedSecret,
+                }),
+              ),
+            revoke: () =>
+              Effect.sync(() => {
+                const wasActive = !revoked;
+                revoked = true;
+                return wasActive;
+              }),
+          },
+        },
+      });
+
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const createResponse = yield* HttpClient.post("/api/management/keys", {
+        headers: { cookie: ownerCookie },
+        body: yield* HttpBody.json({
+          name: key.name,
+          scopes: key.scopes,
+          defaultRuntimeMode: key.defaultRuntimeMode,
+          maximumRuntimeMode: key.maximumRuntimeMode,
+        }),
+      });
+      const createBody = (yield* createResponse.json) as {
+        readonly secret: string;
+        readonly mcpEndpoint: string;
+      };
+      assert.equal(createResponse.status, 200);
+      assert.equal(createBody.secret, secret);
+      assert.match(createBody.mcpEndpoint, /\/mcp$/);
+
+      const listResponse = yield* HttpClient.get("/api/management/keys", {
+        headers: { cookie: ownerCookie },
+      });
+      const listed = (yield* listResponse.json) as ReadonlyArray<Record<string, unknown>>;
+      assert.equal(listResponse.status, 200);
+      assert.equal(listed.length, 1);
+      assert.equal("secret" in (listed[0] ?? {}), false);
+
+      const pairingResponse = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: ownerCookie },
+        body: yield* HttpBody.json({ scopes: ["access:read"] }),
+      });
+      const pairingBody = (yield* pairingResponse.json) as { readonly credential: string };
+      const readCookie = yield* getAuthenticatedSessionCookieHeader(pairingBody.credential);
+      const readListResponse = yield* HttpClient.get("/api/management/keys", {
+        headers: { cookie: readCookie },
+      });
+      const readCreateResponse = yield* HttpClient.post("/api/management/keys", {
+        headers: { cookie: readCookie },
+        body: yield* HttpBody.json({
+          name: key.name,
+          scopes: key.scopes,
+          defaultRuntimeMode: key.defaultRuntimeMode,
+          maximumRuntimeMode: key.maximumRuntimeMode,
+        }),
+      });
+      assert.equal(readListResponse.status, 200);
+      assert.equal(readCreateResponse.status, 403);
+
+      const managementAuthResponse = yield* HttpClient.get("/api/management/keys", {
+        headers: { authorization: `Bearer ${secret}` },
+      });
+      assert.equal(managementAuthResponse.status, 401);
+
+      const rotateResponse = yield* HttpClient.post(`/api/management/keys/${keyId}/rotate`, {
+        headers: { cookie: ownerCookie },
+      });
+      const rotateBody = (yield* rotateResponse.json) as { readonly secret: string };
+      assert.equal(rotateResponse.status, 200);
+      assert.equal(rotateBody.secret, rotatedSecret);
+
+      const revokeResponse = yield* HttpClient.post(`/api/management/keys/${keyId}/revoke`, {
+        headers: { cookie: ownerCookie },
+      });
+      const revokeBody = (yield* revokeResponse.json) as { readonly revoked: boolean };
+      const revokeAgainResponse = yield* HttpClient.post(`/api/management/keys/${keyId}/revoke`, {
+        headers: { cookie: ownerCookie },
+      });
+      const revokeAgainBody = (yield* revokeAgainResponse.json) as { readonly revoked: boolean };
+      assert.equal(revokeResponse.status, 200);
+      assert.equal(revokeBody.revoked, true);
+      assert.equal(revokeAgainResponse.status, 200);
+      assert.equal(revokeAgainBody.revoked, false);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
