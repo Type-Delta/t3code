@@ -1,4 +1,8 @@
-import { AuthStandardClientScopes, EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthAdministrativeScopes,
+  AuthStandardClientScopes,
+  EnvironmentId,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -63,7 +67,7 @@ function pairingHttpLayer(
           issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
           token_type: "Bearer",
           expires_in: 3600,
-          scope: AuthStandardClientScopes.join(" "),
+          scope: AuthAdministrativeScopes.join(" "),
         }),
       );
     }
@@ -113,7 +117,7 @@ describe("connection onboarding", () => {
           : String(tokenRequest?.init.body);
       const tokenParams = new URLSearchParams(tokenBody);
       expect(tokenParams.get("subject_token")).toBe("pairing-token");
-      expect(tokenParams.get("scope")).toBe(AuthStandardClientScopes.join(" "));
+      expect(tokenParams.has("scope")).toBe(false);
       expect(tokenParams.get("client_label")).toBe("T3 Code Test");
     }),
   );

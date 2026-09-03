@@ -52,14 +52,16 @@ agent keeps the tools it received when its session started.
 ## Management API keys
 
 For an external MCP client, create a durable credential in **Settings → Integrations → Management
-API keys**. Give the key a recognizable name, choose an expiration and access preset, then copy the
-secret from the confirmation dialog. The secret is shown only once. Store it in a password manager
-or an environment variable; it is not included when keys are listed later.
+API keys**. Select the environment that runs on the machine the client should control, give the key
+a recognizable name, choose an expiration and access preset, then copy the secret from the
+confirmation dialog. The secret is shown only once. Store it in a password manager or an
+environment variable; it is not included when keys are listed later.
 
-Management keys apply to the whole environment. They can be limited to model discovery and
-thread reading, or granted the thread orchestration tools. They do not grant access to terminals,
-files, previews, settings, connections, or other management keys. The permission mode sets the
-default for new threads and the maximum mode allowed when messaging an existing thread.
+Each management key belongs to one environment and works only with that machine's MCP endpoint. A
+different environment needs its own key. Keys can be limited to model discovery and thread reading,
+or granted the thread orchestration tools. They do not grant access to terminals, files, previews,
+settings, connections, or other management keys. The permission mode sets the default for new
+threads and the maximum mode allowed when messaging an existing thread.
 
 The endpoint shown after creating a key is the environment's `/mcp` endpoint. A generic JSON HTTP
 MCP configuration can use an environment variable for the bearer token:

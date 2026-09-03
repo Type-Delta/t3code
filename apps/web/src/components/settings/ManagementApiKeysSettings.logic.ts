@@ -1,8 +1,12 @@
 import {
+  AuthAccessReadScope,
+  AuthAccessWriteScope,
   MANAGEMENT_API_KEY_RUNTIME_MODE_ORDER,
+  type AuthSessionState,
   type ManagementApiKeyRuntimeMode,
   type ManagementApiKeyScope as ContractManagementApiKeyScope,
 } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 
 export const MANAGEMENT_API_KEY_SCOPES = [
   "models:read",
@@ -16,6 +20,73 @@ export const MANAGEMENT_API_KEY_SCOPES = [
 export type ManagementApiKeyScope = ContractManagementApiKeyScope;
 export type ManagementApiKeyPreset = "read-only" | "thread-orchestration" | "custom";
 export type ManagementApiKeyExpiration = "30-days" | "90-days" | "1-year" | "never";
+
+export interface ManagementApiKeyEnvironmentOption {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+}
+
+export type ManagementApiKeyAccess = "granted" | "denied" | "pending";
+
+export function resolveManagementApiKeyAccess(input: {
+  readonly isPrimary: boolean;
+  readonly hasDesktopBridge: boolean;
+  readonly session: Pick<AuthSessionState, "authenticated" | "scopes"> | null;
+  readonly isPending: boolean;
+  readonly hasError: boolean;
+  readonly requiredScope: typeof AuthAccessReadScope | typeof AuthAccessWriteScope;
+}): ManagementApiKeyAccess {
+  if (input.isPrimary && input.hasDesktopBridge) return "granted";
+  if (input.session === null) {
+    if (input.isPending) return "pending";
+    // A failed session read is a transport problem, not proof of denial. The
+    // environment request remains authoritative if access is actually missing.
+    return input.hasError ? "granted" : "denied";
+  }
+  if (!input.session.authenticated) return "denied";
+  // Older remote servers did not report scopes. Keep their existing session useful;
+  // the environment request remains authoritative if the operation is rejected.
+  if (input.session.scopes === undefined) return input.isPrimary ? "denied" : "granted";
+  return input.session.scopes.includes(input.requiredScope) ? "granted" : "denied";
+}
+
+/** Keep the primary machine prominent while making every other machine easy to find. */
+export function buildManagementApiKeyEnvironmentOptions<
+  T extends ManagementApiKeyEnvironmentOption,
+>(environments: ReadonlyArray<T>, primaryEnvironmentId: EnvironmentId | null): ReadonlyArray<T> {
+  return environments.toSorted((left, right) => {
+    const leftIsPrimary = left.environmentId === primaryEnvironmentId;
+    const rightIsPrimary = right.environmentId === primaryEnvironmentId;
+    if (leftIsPrimary !== rightIsPrimary) return leftIsPrimary ? -1 : 1;
+    return (
+      left.label.localeCompare(right.label) ||
+      String(left.environmentId).localeCompare(String(right.environmentId))
+    );
+  });
+}
+
+/** Preserve the user's disconnected choice, falling back to primary then the first machine. */
+export function resolveSelectedManagementApiKeyEnvironmentId<
+  T extends ManagementApiKeyEnvironmentOption,
+>(
+  environments: ReadonlyArray<T>,
+  selectedEnvironmentId: EnvironmentId | null,
+  primaryEnvironmentId: EnvironmentId | null,
+): EnvironmentId | null {
+  if (
+    selectedEnvironmentId !== null &&
+    environments.some((environment) => environment.environmentId === selectedEnvironmentId)
+  ) {
+    return selectedEnvironmentId;
+  }
+  if (
+    primaryEnvironmentId !== null &&
+    environments.some((environment) => environment.environmentId === primaryEnvironmentId)
+  ) {
+    return primaryEnvironmentId;
+  }
+  return environments[0]?.environmentId ?? null;
+}
 
 export const MANAGEMENT_API_KEY_SCOPE_DETAILS: ReadonlyArray<{
   readonly scope: ManagementApiKeyScope;

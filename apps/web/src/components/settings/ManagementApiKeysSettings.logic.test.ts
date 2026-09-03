@@ -1,8 +1,10 @@
+import { AuthAccessReadScope, AuthAccessWriteScope, EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildManagementApiKeyCodexExample,
   buildManagementApiKeyJsonExample,
+  buildManagementApiKeyEnvironmentOptions,
   canRotateManagementApiKey,
   clampManagementApiKeyDefaultRuntimeMode,
   clearManagementApiKeyReveal,
@@ -11,8 +13,104 @@ import {
   orderedManagementApiKeyScopes,
   revealManagementApiKey,
   resolveManagementApiKeyExpiration,
+  resolveManagementApiKeyAccess,
+  resolveSelectedManagementApiKeyEnvironmentId,
   scopesForManagementApiKeyPreset,
 } from "./ManagementApiKeysSettings.logic";
+
+const environment = (environmentId: string, label: string) => ({
+  environmentId: EnvironmentId.make(environmentId),
+  label,
+});
+
+describe("management API key environment selection", () => {
+  it("sorts the primary machine first, then labels with an id tie-breaker", () => {
+    const options = buildManagementApiKeyEnvironmentOptions(
+      [environment("z", "Zulu"), environment("b", "Alpha"), environment("a", "Alpha")],
+      EnvironmentId.make("z"),
+    );
+    expect(options.map(({ environmentId }) => environmentId)).toEqual(["z", "a", "b"]);
+  });
+
+  it("preserves a known selection and falls back to primary then first", () => {
+    const options = [environment("primary", "Primary"), environment("remote", "Remote")];
+    expect(
+      resolveSelectedManagementApiKeyEnvironmentId(
+        options,
+        EnvironmentId.make("remote"),
+        EnvironmentId.make("primary"),
+      ),
+    ).toBe("remote");
+    expect(
+      resolveSelectedManagementApiKeyEnvironmentId(
+        options,
+        EnvironmentId.make("missing"),
+        EnvironmentId.make("primary"),
+      ),
+    ).toBe("primary");
+    expect(resolveSelectedManagementApiKeyEnvironmentId([], null, null)).toBeNull();
+  });
+});
+
+describe("management API key access", () => {
+  const session = { authenticated: true, scopes: [AuthAccessReadScope] } as const;
+
+  it("requires the requested scope and grants desktop primary access", () => {
+    expect(
+      resolveManagementApiKeyAccess({
+        isPrimary: false,
+        hasDesktopBridge: false,
+        session,
+        isPending: false,
+        hasError: false,
+        requiredScope: AuthAccessReadScope,
+      }),
+    ).toBe("granted");
+    expect(
+      resolveManagementApiKeyAccess({
+        isPrimary: false,
+        hasDesktopBridge: false,
+        session,
+        isPending: false,
+        hasError: false,
+        requiredScope: AuthAccessWriteScope,
+      }),
+    ).toBe("denied");
+    expect(
+      resolveManagementApiKeyAccess({
+        isPrimary: true,
+        hasDesktopBridge: true,
+        session: null,
+        isPending: false,
+        hasError: false,
+        requiredScope: AuthAccessWriteScope,
+      }),
+    ).toBe("granted");
+  });
+
+  it("keeps remote older-server sessions usable and treats primary scope absence as denied", () => {
+    expect(
+      resolveManagementApiKeyAccess({
+        isPrimary: false,
+        hasDesktopBridge: false,
+        session: { authenticated: true },
+        isPending: false,
+        hasError: false,
+        requiredScope: AuthAccessReadScope,
+      }),
+    ).toBe("granted");
+    expect(
+      resolveManagementApiKeyAccess({
+        isPrimary: true,
+        hasDesktopBridge: false,
+        session: { authenticated: true },
+        isPending: false,
+        hasError: false,
+        requiredScope: AuthAccessReadScope,
+      }),
+    ).toBe("denied");
+  });
+});
 
 describe("management API key access presets", () => {
   it("keeps scopes in permission order and maps the built-in presets", () => {

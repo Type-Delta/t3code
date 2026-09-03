@@ -139,6 +139,10 @@
       "types": "./src/state/session.ts",
       "default": "./src/state/session.ts"
     },
+    "./state/management-api-keys": {
+      "types": "./src/state/managementApiKeys.ts",
+      "default": "./src/state/managementApiKeys.ts"
+    },
     "./state/shell": {
       "types": "./src/state/shell.ts",
       "default": "./src/state/shell.ts"

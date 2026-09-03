@@ -475,16 +475,23 @@ the workflow can adopt upstream's `--signed` path once those secrets exist.
 
 ### DL031 — Durable management API keys for external MCP clients
 
-Integrations settings can create environment-wide management API keys with named read-only,
-thread-orchestration, or custom scopes, explicit expiration, and a safe permission ceiling. The
-secret is revealed only once after creation or rotation; list rows retain only a display prefix and
-key metadata, while rotation invalidates the previous secret and revocation takes effect
-immediately. The existing HTTP MCP endpoint accepts these persistent keys alongside ephemeral
-provider-session credentials and enforces one management scope per thread operation. Management
-callers can select projects, create and message threads within their permission ceiling, read and
-wait on threads, and list models. They cannot use preview automation or environment administration.
-State-changing orchestration events retain the key ID and name without retaining its secret or
-display prefix.
+Integrations settings can select any known machine and create environment-wide management API keys
+there with named read-only, thread-orchestration, or custom scopes, explicit expiration, and a safe
+permission ceiling. The selected environment's prepared HTTP connection supplies its own URL and
+cookie, bearer, or DPoP authorization, so listing and every mutation reach the chosen machine. A
+disconnected machine stays selectable but cannot mutate keys. The secret is revealed only once
+after creation or rotation; list rows retain only a display prefix and key metadata, while rotation
+invalidates the previous secret and revocation takes effect immediately.
+
+Direct pairing preserves the scopes carried by the pairing credential instead of always requesting
+the standard client scope set. Standard links therefore remain constrained, while an administrative
+startup link can manage keys on the paired machine without inventing or broadening privileges.
+
+The existing HTTP MCP endpoint accepts these persistent keys alongside ephemeral provider-session
+credentials and enforces one management scope per thread operation. Management callers can select
+projects, create and message threads within their permission ceiling, read and wait on threads, and
+list models. They cannot use preview automation or environment administration. State-changing
+orchestration events retain the key ID and name without retaining its secret or display prefix.
 
 Effect MCP registers tools server-wide, so `tools/list` still advertises preview tool names to a
 management client. Preview handlers require a provider-session principal and reject every management
@@ -499,7 +506,9 @@ secrets.
 
 **Implementation evidence:** `apps/web/src/components/settings/ManagementApiKeysSettings.tsx`,
 `apps/web/src/components/settings/ManagementApiKeysSettings.logic.ts`,
-`apps/web/src/environments/primary/managementApiKeys.ts`,
+`apps/web/src/environments/managementApiKeys.ts`,
+`packages/client-runtime/src/state/managementApiKeys.ts`,
+`packages/client-runtime/src/connection/onboarding.ts`,
 `apps/server/src/auth/ManagementApiKeyService.ts`,
 `apps/server/src/persistence/ManagementApiKeys.ts`,
 `apps/server/src/persistence/Migrations/050_ManagementApiKeys.ts`,
@@ -513,7 +522,10 @@ denial, thread-handler, attribution, contracts, and settings UI tests. An isolat
 created, rotated, and revoked a key; a real external MCP client used it to list models and threads,
 create, read, message, and wait on a Codex thread; the old rotated token and revoked replacement both
 returned the generic 401 response. Database and log inspection confirmed hash-only persistence and
-key-ID/name-only event attribution. Repository-wide `vp check` and `vp run typecheck` passed.
+key-ID/name-only event attribution. A two-server web pass paired an administrative remote
+environment, created separate keys on the primary and remote machines, showed each machine's own
+MCP endpoint, kept the two lists isolated while switching the selector, and revoked both disposable
+keys. Repository-wide `vp check` and `vp run typecheck` passed.
 
 **Last updated:** 2026-09-03
 

@@ -41,19 +41,6 @@ export { refreshPrimarySessionState, usePrimarySessionState } from "./sessionSta
 export { PrimaryEnvironmentHttpClient } from "./httpClient";
 
 export {
-  createManagementApiKey,
-  listManagementApiKeys,
-  ManagementApiKeyRequestError,
-  revokeManagementApiKey,
-  rotateManagementApiKey,
-  type ManagementApiKeyCreateInput,
-  type ManagementApiKeyCreateResult,
-  type ManagementApiKeyRecord,
-  type ManagementApiKeyRotateResult,
-  type ManagementApiKeySafeRuntimeMode,
-} from "./managementApiKeys";
-
-export {
   DesktopEnvironmentBootstrapIncompleteError,
   isDesktopEnvironmentBootstrapIncompleteError,
   isPrimaryEnvironmentProtocolUnsupportedError,
