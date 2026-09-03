@@ -2025,13 +2025,13 @@ export function GeneralSettingsPanel() {
 
         <SettingsRow
           {...searchableSetting("next-prompt-suggestions")}
-          title="Next prompt suggestions"
-          description="After the agent finishes a turn, use the selected chat model to suggest your next message as faded text in an empty composer. Press Tab to accept. Recent messages from that thread are sent to the selected provider."
+          title="QA suggestions"
+          description="After the agent finishes a turn, use the selected chat model to suggest a QA-focused next message as faded text in an empty composer. Press Tab to accept. Recent messages from that thread are sent to the selected provider."
           resetAction={
             settings.composerSuggestionEnabled !==
             DEFAULT_UNIFIED_SETTINGS.composerSuggestionEnabled ? (
               <SettingResetButton
-                label="next prompt suggestions"
+                label="QA suggestions"
                 onClick={() =>
                   updateSettings({
                     composerSuggestionEnabled: DEFAULT_UNIFIED_SETTINGS.composerSuggestionEnabled,
@@ -2046,7 +2046,7 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ composerSuggestionEnabled: Boolean(checked) })
               }
-              aria-label="Enable next prompt suggestions"
+              aria-label="Enable QA suggestions"
             />
           }
         />

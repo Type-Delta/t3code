@@ -176,9 +176,9 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "next-prompt-suggestions",
-    title: "Next prompt suggestions",
+    title: "QA suggestions",
     to: "/settings/general",
-    searchTerms: ["ghost text follow up suggestion tab ai composer next prompt"],
+    searchTerms: ["qa ghost text follow up suggestion tab ai composer next prompt"],
   },
   {
     id: "skills-in-slash-menu",
