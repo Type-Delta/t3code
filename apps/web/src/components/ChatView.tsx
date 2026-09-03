@@ -261,6 +261,9 @@ import {
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
+import { MAX_QUEUED_PROMPTS, usePromptQueue, usePromptQueueStore } from "../promptQueueStore";
+import { shouldDispatchNextQueuedPrompt } from "@t3tools/client-runtime/state/prompt-queue";
+import { PromptQueueList } from "./chat/PromptQueueList";
 import {
   appendTerminalContextsToPrompt,
   formatTerminalContextLabel,
@@ -2736,6 +2739,49 @@ function ChatViewContent(props: ChatViewProps) {
     !compactionSettled;
   const isWorking =
     phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || isCompacting;
+
+  // ── Prompt queue (client-side, per device) ──────────────────────────────
+  // Lets the user line up follow-up prompts while a turn runs; each fires as a
+  // fresh turn once the thread goes idle. Distinct from steering, which injects
+  // into the running turn. The queue drains only while the thread is open.
+  const promptQueueThreadKey = isServerThread ? activeThreadKey : null;
+  const activePromptQueue = usePromptQueue(promptQueueThreadKey);
+  const enqueuePromptToQueue = usePromptQueueStore((store) => store.enqueue);
+  const dequeueQueuedPromptHead = usePromptQueueStore((store) => store.dequeueHead);
+  const restoreQueuedPromptHead = usePromptQueueStore((store) => store.restoreHead);
+  const removeQueuedPromptFromQueue = usePromptQueueStore((store) => store.removePrompt);
+  const queueDispatchInFlightRef = useRef(false);
+  const queueDispatchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Head id whose dispatch failed: auto-dispatch pauses on it to avoid a hot
+  // retry loop, and resumes once the queue advances or a manual turn recovers
+  // the thread.
+  const failedQueueHeadIdRef = useRef<string | null>(null);
+  const clearQueueDispatchInFlight = useCallback(() => {
+    queueDispatchInFlightRef.current = false;
+    if (queueDispatchTimeoutRef.current !== null) {
+      clearTimeout(queueDispatchTimeoutRef.current);
+      queueDispatchTimeoutRef.current = null;
+    }
+  }, []);
+  useEffect(() => clearQueueDispatchInFlight, [clearQueueDispatchInFlight]);
+
+  const handleQueuePrompt = useCallback(
+    (text: string): { accepted: boolean; reason?: "empty" | "full" } => {
+      if (!promptQueueThreadKey) {
+        return { accepted: false, reason: "empty" };
+      }
+      return enqueuePromptToQueue(promptQueueThreadKey, text);
+    },
+    [enqueuePromptToQueue, promptQueueThreadKey],
+  );
+  const handleRemoveQueuedPrompt = useCallback(
+    (id: string) => {
+      if (!promptQueueThreadKey) return;
+      removeQueuedPromptFromQueue(promptQueueThreadKey, id);
+    },
+    [promptQueueThreadKey, removeQueuedPromptFromQueue],
+  );
+
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -3281,6 +3327,105 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [activeServerThread, draftId, routeThreadKey, routeThreadRef],
   );
+
+  // Drains the client-side prompt queue: once the thread is genuinely idle,
+  // pop the head and start it as a fresh turn. Defined here (after
+  // setThreadError) so a failed dispatch can surface an error.
+  useEffect(() => {
+    if (!isServerThread || !activeThread || !promptQueueThreadKey) return;
+    // A dispatch is in flight: hold until the started turn is observed running
+    // (isWorking), which bridges the projection lag between the command
+    // resolving and the session flipping to running. Never dispatch again in
+    // this state, so two queued prompts can't start concurrent turns.
+    if (queueDispatchInFlightRef.current) {
+      if (isWorking) clearQueueDispatchInFlight();
+      return;
+    }
+    const head = activePromptQueue[0];
+    if (!head) {
+      failedQueueHeadIdRef.current = null;
+      return;
+    }
+    if (failedQueueHeadIdRef.current !== null) {
+      if (failedQueueHeadIdRef.current !== head.id || isWorking) {
+        failedQueueHeadIdRef.current = null;
+      } else {
+        return;
+      }
+    }
+    const shouldDispatch = shouldDispatchNextQueuedPrompt({
+      isWorking,
+      hasPendingApproval: pendingApprovals.length > 0,
+      hasPendingUserInput: pendingUserInputs.length > 0,
+      isConnecting,
+      isEnvironmentAvailable: !activeEnvironmentUnavailable,
+      queueLength: activePromptQueue.length,
+    });
+    if (!shouldDispatch) return;
+
+    const dequeued = dequeueQueuedPromptHead(promptQueueThreadKey);
+    if (!dequeued) return;
+    queueDispatchInFlightRef.current = true;
+    // Safety net: if the started turn is never observed running (e.g. a silent
+    // start failure), release the in-flight hold so the queue is not wedged.
+    queueDispatchTimeoutRef.current = setTimeout(clearQueueDispatchInFlight, 15_000);
+    const targetThreadId = activeThread.id;
+    const targetEnvironmentId = activeThread.environmentId;
+    const targetQueueKey = promptQueueThreadKey;
+    const createdAt = new Date().toISOString();
+    void (async () => {
+      try {
+        const result = await startThreadTurn({
+          environmentId: targetEnvironmentId,
+          input: {
+            threadId: targetThreadId,
+            message: {
+              messageId: newMessageId(),
+              role: "user",
+              text: dequeued.text,
+              attachments: [],
+            },
+            runtimeMode,
+            interactionMode,
+            createdAt,
+          },
+        });
+        if (result._tag === "Failure") {
+          restoreQueuedPromptHead(targetQueueKey, dequeued);
+          failedQueueHeadIdRef.current = dequeued.id;
+          clearQueueDispatchInFlight();
+          if (!isAtomCommandInterrupted(result)) {
+            setThreadError(
+              targetThreadId,
+              "A queued prompt could not start. It's back at the top of the queue.",
+            );
+          }
+        }
+      } catch {
+        restoreQueuedPromptHead(targetQueueKey, dequeued);
+        failedQueueHeadIdRef.current = dequeued.id;
+        clearQueueDispatchInFlight();
+      }
+    })();
+  }, [
+    activeEnvironmentUnavailable,
+    activePromptQueue,
+    activeThread,
+    clearQueueDispatchInFlight,
+    dequeueQueuedPromptHead,
+    interactionMode,
+    isConnecting,
+    isServerThread,
+    isWorking,
+    pendingApprovals.length,
+    pendingUserInputs.length,
+    promptQueueThreadKey,
+    restoreQueuedPromptHead,
+    runtimeMode,
+    setThreadError,
+    startThreadTurn,
+  ]);
+
   const retryableTurnStartMessage = useMemo(() => {
     if (
       serverThread?.session?.status !== "error" ||
@@ -8299,6 +8444,12 @@ function ChatViewContent(props: ChatViewProps) {
                   >
                     <ComposerSurface.Shell contextStrip={showComposerContextStrip}>
                       <ComposerSurface.Host>
+                        {isServerThread ? (
+                          <PromptQueueList
+                            queue={activePromptQueue}
+                            onRemove={handleRemoveQueuedPrompt}
+                          />
+                        ) : null}
                         <div ref={attachDraftHeroComposerAnchorRef} className="relative z-10">
                           <ChatComposer
                             composerRef={composerRef}
@@ -8379,6 +8530,8 @@ function ChatViewContent(props: ChatViewProps) {
                             onPageScrollKeyUp={onComposerPageScrollKeyUp}
                             onPageScrollRelease={onComposerPageScrollRelease}
                             onSend={onSend}
+                            onQueuePrompt={isServerThread ? handleQueuePrompt : undefined}
+                            isPromptQueueFull={activePromptQueue.length >= MAX_QUEUED_PROMPTS}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
                             onRespondToApproval={onRespondToApproval}

@@ -561,6 +561,40 @@ search, and switching groups preserves the query. Provider and continuation rest
 
 **Last updated:** 2026-09-07
 
+### DL034 — Client-side prompt queue for sequential follow-up turns
+
+While a turn is running, the composer can queue follow-up prompts (up to 10 per
+thread) that each fire as their own fresh turn once the thread goes idle. This is
+distinct from steering, which is preserved: sending mid-turn (Enter / the
+running-send button) still injects text into the running turn, while the new
+"Queue" button holds a prompt to run after completion. The queue drains only into
+a genuinely idle thread — it pauses on a running turn, a pending approval, a
+pending user-input request, a connecting/unavailable environment — so an
+auto-fired follow-up never buries blocked-on-you work. A failed dispatch restores
+the prompt to the head of the queue and pauses auto-dispatch on it to avoid a hot
+retry loop.
+
+The queue is client-side and persisted per device (localStorage), keyed by the
+thread's scoped ref, so it survives reload but does not sync across devices or run
+while the app is closed. It drains for the thread currently open in the chat view.
+Queued prompts are text-only in this revision (attachments and composer contexts
+stay in the composer). The pure queueing rules and the idle-dispatch decision live
+in `client-runtime` so a future mobile surface can reuse them; mobile is a
+deliberate follow-up because it already ships a separate durable thread-outbox with
+its own delivery semantics.
+
+**Implementation evidence:** `packages/client-runtime/src/state/promptQueue.ts`
+(+ test), `apps/web/src/promptQueueStore.ts` (+ test),
+`apps/web/src/components/chat/PromptQueueList.tsx`,
+`apps/web/src/components/chat/ComposerPrimaryActions.tsx`,
+`apps/web/src/components/chat/ChatComposer.tsx`, and
+`apps/web/src/components/ChatView.tsx`.
+
+**Recorded validation:** focused queue-core and web-store unit tests; repo-wide
+`vp check` and `vp run typecheck`.
+
+**Last updated:** 2026-09-03
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

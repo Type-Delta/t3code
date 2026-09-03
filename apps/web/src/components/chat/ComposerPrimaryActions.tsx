@@ -32,6 +32,12 @@ interface ComposerPrimaryActionsProps {
   /** Enter-to-send is disabled on mobile viewports, where stop would otherwise
    * be the only primary action and a running turn could not be steered. */
   showSendWhileRunning?: boolean;
+  /** Queues the current prompt to run as a fresh turn after the running one
+   * finishes. Shown only while a turn is running and the composer has text; a
+   * queue-full reason disables it. Distinct from steering (which sends into the
+   * running turn). */
+  onQueuePrompt?: (() => void) | undefined;
+  queueDisabledReason?: string | null | undefined;
   onPreviousPendingQuestion: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -73,6 +79,8 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   hasSendableContent,
   preserveComposerFocusOnPointerDown = false,
   showSendWhileRunning = false,
+  onQueuePrompt,
+  queueDisabledReason = null,
   onPreviousPendingQuestion,
   onInterrupt,
   onImplementPlanInNewThread,
@@ -271,12 +279,29 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     </button>
   );
 
+  const queueButton =
+    onQueuePrompt && promptHasText ? (
+      <button
+        type="button"
+        className={cn(
+          "flex h-8 shrink-0 items-center justify-center rounded-full border border-border/70 bg-background px-3 text-xs font-medium text-foreground shadow-xs transition-all duration-150 enabled:cursor-pointer enabled:hover:bg-muted disabled:pointer-events-none disabled:opacity-40",
+        )}
+        {...pointerFocusProps}
+        onClick={onQueuePrompt}
+        disabled={queueDisabledReason !== null || isEnvironmentUnavailable}
+        aria-label={queueDisabledReason ?? "Queue this prompt to run after the current turn"}
+      >
+        Queue
+      </button>
+    ) : null;
+
   if (!isRunning) {
     return sendButton;
   }
 
   return (
     <>
+      {queueButton}
       {renderStopGenerationButton(false)}
       {showSendWhileRunning && hasSendableContent ? sendButton : null}
     </>
