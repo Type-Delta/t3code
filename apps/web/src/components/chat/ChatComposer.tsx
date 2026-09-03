@@ -146,6 +146,7 @@ import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerControl, ComposerControlIcon, ComposerSelectControl } from "./ComposerControl";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
+import { useComposerSuggestion } from "./useComposerSuggestion";
 import {
   searchSlashCommandItems,
   slashCommandItemsForPromptPosition,
@@ -1257,6 +1258,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
    * the next draft.
    */
   const pendingImageCompressionsRef = useRef<Map<ThreadId, number>>(new Map());
+  const isComposerApprovalState = activePendingApproval !== null;
+
+  const lastThreadMessage = activeThread?.messages.at(-1) ?? null;
+  const composerSuggestionState = useComposerSuggestion({
+    enabled: settings.composerSuggestionEnabled && !isMobileViewport,
+    disabled:
+      isConnecting ||
+      isSendBusy ||
+      isComposerApprovalState ||
+      projectSelectionRequired ||
+      activePendingProgress !== null ||
+      pendingUserInputs.length > 0,
+    threadIdle: phase === "ready" && activeThread?.session?.activeTurnId == null,
+    environmentId,
+    threadId: activeThreadId,
+    lastMessageId: lastThreadMessage?.id ?? null,
+    hasAssistantReply: lastThreadMessage?.role === "assistant" && !lastThreadMessage.streaming,
+    prompt,
+    trigger: composerTrigger,
+    modelSelection: selectedModelSelection,
+  });
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -1443,7 +1465,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [nonPersistedComposerImageIds],
   );
 
-  const isComposerApprovalState = activePendingApproval !== null;
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const showComposerTopDrawer =
     isComposerApprovalState ||
@@ -2336,6 +2357,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if ((key === "Enter" || key === "Tab") && selectedItem) {
         onSelectComposerItem(selectedItem);
         return true;
+      }
+    }
+    if (key === "Tab" && !event.shiftKey) {
+      const suggestion = composerSuggestionState.accept();
+      if (suggestion) {
+        return applyPromptReplacement(0, promptRef.current.length, suggestion);
       }
     }
     const submissionIntent =
@@ -4080,6 +4107,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       : []
                   }
                   skills={selectedProviderStatus?.skills ?? []}
+                  ghostText={composerSuggestionState.ghostText}
                   {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
                   onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
                   onChange={onPromptChange}

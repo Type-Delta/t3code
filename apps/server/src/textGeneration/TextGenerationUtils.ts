@@ -19,6 +19,17 @@ export function limitSection(value: string, maxChars: number): string {
   return `${truncated}\n\n[truncated]`;
 }
 
+const EARLIER_CONTENT_TRUNCATION_MARKER = "[Earlier content truncated]\n\n";
+
+/** Truncate a text section while retaining its newest `maxChars` characters. */
+export function limitSectionEnd(value: string, maxChars: number): string {
+  const contents = value.startsWith(EARLIER_CONTENT_TRUNCATION_MARKER)
+    ? value.slice(EARLIER_CONTENT_TRUNCATION_MARKER.length)
+    : value;
+  if (contents.length <= maxChars) return value;
+  return `${EARLIER_CONTENT_TRUNCATION_MARKER}${contents.slice(-maxChars)}`;
+}
+
 /** Normalise a raw commit subject to imperative-mood, ≤72 chars, no trailing period. */
 export function sanitizeCommitSubject(raw: string): string {
   const singleLine = raw.trim().split(/\r?\n/g)[0]?.trim() ?? "";
@@ -61,6 +72,18 @@ export function sanitizeThreadTitle(raw: string): string {
   }
 
   return `${normalized.slice(0, 47).trimEnd()}...`;
+}
+
+/** Suggestions are inserted verbatim, so anything multi-line or oversized is dropped. */
+export function sanitizeComposerSuggestion(raw: string): string | null {
+  const text = raw
+    .replace(/\r/g, "")
+    .trim()
+    .replace(/^["'\u201c\u201d]+|["'\u201c\u201d]+$/g, "")
+    .trim();
+  if (!text || text.length > 200) return null;
+  if (text.includes("\n") || text.includes("```")) return null;
+  return text;
 }
 
 /** CLI name to human-readable label, e.g. "codex" → "Codex CLI (`codex`)" */

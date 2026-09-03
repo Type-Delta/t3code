@@ -175,6 +175,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["diff ignore spaces edits default"],
   },
   {
+    id: "next-prompt-suggestions",
+    title: "Next prompt suggestions",
+    to: "/settings/general",
+    searchTerms: ["ghost text follow up suggestion tab ai composer next prompt"],
+  },
+  {
     id: "skills-in-slash-menu",
     title: "Show skills in slash menu",
     to: "/settings/general",

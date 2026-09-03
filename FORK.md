@@ -32,6 +32,16 @@ The upstream draft hero remains the empty-state headline. The fork adds `On <mac
 
 **Last updated:** 2026-09-01
 
+### DL007 — Opt-in next-prompt suggestions
+
+Once a turn settles, the web composer can ask the thread's active provider and model what the user would plausibly send next, with the model acting as a senior QA expert that prioritizes concrete validation and release-risk reduction. The suggestion renders as faded text in the empty composer; Tab accepts it. The server reads an end-preserving tail of the requested thread through the existing projection query and text-generation boundary, so no thread turn, event, message, or provider session is created. Requests are bound to the latest completed assistant message, rejected before project lookup when stale or active, and checked again immediately before provider launch; worktree-backed threads skip the project lookup entirely. Suggestions clear as soon as the user types, remain dismissed for that turn even if the draft is erased, and reset only when the model, thread, or latest message changes. Mobile has no toggle or request path.
+
+**Implementation evidence:** `packages/contracts/src/composerSuggestion.ts`, `apps/server/src/textGeneration/`, `apps/server/src/ws.ts`, and `apps/web/src/components/chat/useComposerSuggestion.ts`.
+
+**Recorded validation:** focused web gating, RPC stale-turn/worktree/recheck, text-generation prompt, authorization, and command single-flight tests; repository-wide `vp check` and `vp run typecheck`; integrated web pass against an isolated environment seeded from a real database snapshot, covering opt-in, ghost text after a settled Codex reply, Tab acceptance, whitespace drafts, and no repeat request after typing then erasing.
+
+**Last updated:** 2026-09-03
+
 ### DL003 — Subscription usage for Claude and Codex
 
 Authenticated Claude and Codex snapshots carry best-effort session and weekly quota windows (`usedPercent` and `resetsAt`). The drivers read their CLI-managed OAuth credentials and enrich the regular snapshot cycle; missing credentials, scopes, network access, or endpoint failures leave `usage` absent without affecting provider health. Cursor and Grok are intentionally excluded.

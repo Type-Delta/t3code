@@ -884,6 +884,7 @@ interface ComposerPromptEditorProps {
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
   placeholder: string;
+  ghostText?: string | null;
   className?: string;
   onRemoveTerminalContext: (contextId: string) => void;
   onChange: (
@@ -1533,6 +1534,7 @@ function ComposerPromptEditorInner({
   skills,
   disabled,
   placeholder,
+  ghostText,
   className,
   onRemoveTerminalContext,
   onChange,
@@ -1766,7 +1768,17 @@ function ComposerPromptEditorInner({
           placeholder={
             terminalContexts.length > 0 ? null : (
               <div className="pointer-events-none absolute inset-0 leading-relaxed text-placeholder">
-                {placeholder}
+                {ghostText ? (
+                  <span
+                    className="text-muted-foreground/60"
+                    data-testid="composer-ghost-text"
+                    aria-hidden="true"
+                  >
+                    {ghostText}
+                  </span>
+                ) : (
+                  placeholder
+                )}
               </div>
             )
           }
@@ -1794,6 +1806,7 @@ export function ComposerPromptEditor({
   skills,
   disabled,
   placeholder,
+  ghostText,
   className,
   onRemoveTerminalContext,
   onChange,
@@ -1832,6 +1845,7 @@ export function ComposerPromptEditor({
         skills={skills}
         disabled={disabled}
         placeholder={placeholder}
+        {...(ghostText === undefined ? {} : { ghostText })}
         onRemoveTerminalContext={onRemoveTerminalContext}
         onChange={onChange}
         onPaste={onPaste}

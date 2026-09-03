@@ -3,10 +3,16 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
+  buildComposerSuggestionPrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
+  formatComposerSuggestionConversation,
 } from "./TextGenerationPrompts.ts";
-import { normalizeCliError, sanitizeThreadTitle } from "./TextGenerationUtils.ts";
+import {
+  normalizeCliError,
+  sanitizeComposerSuggestion,
+  sanitizeThreadTitle,
+} from "./TextGenerationUtils.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 
 describe("buildCommitMessagePrompt", () => {
@@ -301,5 +307,68 @@ describe("normalizeCliError", () => {
 
     expect(result.detail).toBe("Failed to generate a commit message");
     expect(result.message).not.toContain("secret-token");
+  });
+});
+
+describe("composer next-prompt suggestion", () => {
+  it("keeps only the recent user and assistant turns in the transcript", () => {
+    const conversation = formatComposerSuggestionConversation(
+      [
+        { role: "system", text: "ignored" },
+        { role: "user", text: "add a test" },
+        { role: "assistant", text: "added it" },
+        { role: "user", text: "   " },
+      ],
+      2,
+    );
+
+    expect(conversation).toBe("USER:\nadd a test\n\nASSISTANT:\nadded it");
+  });
+
+  it("preserves the newest content through message and conversation truncation", () => {
+    const latestConclusion = "LATEST_ASSISTANT_CONCLUSION";
+    const conversation = formatComposerSuggestionConversation(
+      [
+        { role: "user", text: `USER_PREFIX_SHOULD_DROP${"u".repeat(3_000)}` },
+        {
+          role: "assistant",
+          text: `ASSISTANT_PREFIX_SHOULD_DROP${"a".repeat(3_000)}${latestConclusion}`,
+        },
+      ],
+      2,
+    );
+    const { prompt } = buildComposerSuggestionPrompt({
+      conversation: `TRANSCRIPT_PREFIX_SHOULD_DROP${"x".repeat(9_000)}${conversation}`,
+    });
+
+    expect(conversation).toContain("[Earlier content truncated]");
+    expect(conversation).toContain(latestConclusion);
+    expect(conversation).not.toContain("USER_PREFIX_SHOULD_DROP");
+    expect(conversation).not.toContain("ASSISTANT_PREFIX_SHOULD_DROP");
+    expect(prompt).toContain("[Earlier content truncated]");
+    expect(prompt).toContain(latestConclusion);
+    expect(prompt).not.toContain("TRANSCRIPT_PREFIX_SHOULD_DROP");
+  });
+
+  it("asks a QA expert for a single short follow-up written as the user", () => {
+    const first = buildComposerSuggestionPrompt({ conversation: "USER:\nadd a test" });
+    const second = buildComposerSuggestionPrompt({ conversation: "USER:\nrun the app" });
+    const { prompt } = first;
+
+    expect(first.outputSchema).toBe(second.outputSchema);
+    expect(prompt).toContain("senior QA expert");
+    expect(prompt).toContain("validates the work or reduces release risk");
+    expect(prompt).toContain("edge cases, boundaries, negative paths, or regressions");
+    expect(prompt).toContain("follow-up message the USER would send next");
+    expect(prompt).toContain("untrusted data");
+    expect(prompt).toContain("USER:\nadd a test");
+  });
+
+  it("drops output that cannot be inserted verbatim", () => {
+    expect(sanitizeComposerSuggestion('"Run the focused tests"')).toBe("Run the focused tests");
+    expect(sanitizeComposerSuggestion("line one\nline two")).toBeNull();
+    expect(sanitizeComposerSuggestion("```sh")).toBeNull();
+    expect(sanitizeComposerSuggestion("x".repeat(201))).toBeNull();
+    expect(sanitizeComposerSuggestion("   ")).toBeNull();
   });
 });
