@@ -448,6 +448,26 @@ The current sidebar orders active threads by their latest `updatedAt` timestamp,
 
 **Last updated:** 2026-09-02
 
+### DL030 — Isolated macOS GitHub releases
+
+The fork has a manual macOS release workflow that uses GitHub-hosted `macos-15` runners. It builds
+unsigned, non-notarized DMG and ZIP artifacts for Apple Silicon and Intel, merges the per-arch
+updater manifests into one `latest-mac.yml`, and publishes only those files to this repository's
+GitHub Releases. Like DL028 it does not publish packages, build other platforms, or deploy hosted
+services, and it does not publish a matching `t3` package.
+
+Because the build is unsigned, Gatekeeper blocks first launch until the user opens the app via
+right-click → Open or clears the quarantine attribute, and in-app auto-update does not work. Signing
+and notarization need a Developer ID certificate (`CSC_LINK`/`CSC_KEY_PASSWORD`), an App Store
+Connect API key (`APPLE_API_KEY*`), and for passkeys an `APPLE_TEAM_ID` plus provisioning profile;
+the workflow can adopt upstream's `--signed` path once those secrets exist.
+
+**Implementation evidence:** `.github/workflows/fork-macos-release.yml`.
+
+**Recorded validation:** actionlint, `vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-09-03
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
