@@ -376,6 +376,10 @@ The gateway controls remain part of upstream's split provider settings editor. E
 credentials survive settings refreshes, and the UI replaces or removes a stored key without
 round-tripping its value through provider snapshots.
 
+The add-instance wizard keeps its title, description, and step tabs pinned above a single scrollable
+step body, with the Back and confirm buttons pinned below, so the long Config step scrolls inside the
+dialog instead of overflowing past the viewport.
+
 Codex receives a managed Responses API provider, Codex-format `model_catalog_json`, selected
 reasoning effort, and a per-model `model_context_window`. Its adapter normalizes the configured
 gateway path to end in `/v1`, so users can enter the gateway origin without knowing Codex's URL
@@ -393,9 +397,10 @@ and `apps/web/src/components/settings/providerModelDetails.ts`.
 **Recorded validation:** focused gateway parsing and cache tests, Codex and Claude provider relay
 tests, settings and server contract tests, provider-settings component tests, `vp check`,
 `vp run typecheck`, and integrated web verification of gateway configuration, custom model metadata,
-and model-detail tooltips.
+and model-detail tooltips. The 2026-09-03 add-instance dialog scroll fix was verified in a browser at
+1000x720 and 390x700 with the gateway section expanded.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-03
 
 ### DL027 — Remote editor links select the server account
 
