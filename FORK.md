@@ -42,6 +42,16 @@ Once a turn settles, the web composer can ask the thread's active provider and m
 
 **Last updated:** 2026-09-03
 
+### DL028 — Local-source desktop update action
+
+The desktop sidebar and Settings → General → About update actions are replaced by a local-source update action. It asks for the root of a T3 Code checkout, then opens a visible PowerShell window that refuses a dirty checkout, fetches and merges the tracked default branch locally, runs `vp check` and `vp run typecheck`, and invokes `vp run update:local` to build and open the installer. The update source is `upstream` when that remote exists and `origin` otherwise, so a fork that tracks only its own remote updates from itself; a missing remote HEAD is repaired with `git remote set-head --auto`. It never pushes to any remote repository.
+
+**Implementation evidence:** `apps/desktop/src/updates/LocalDesktopUpdate.ts`, `apps/desktop/src/ipc/methods/updates.ts`, and `apps/web/src/components/sidebar/SidebarUpdatePill.tsx`.
+
+**Recorded validation:** focused local-update and installer-script tests; PowerShell parse check plus a scratch-repository run of the remote-selection block covering origin-only forks, a missing remote HEAD, and upstream taking precedence; repository-wide `vp check` and `vp run typecheck`.
+
+**Last updated:** 2026-09-03
+
 ### DL003 — Subscription usage for Claude and Codex
 
 Authenticated Claude and Codex snapshots carry best-effort session and weekly quota windows (`usedPercent` and `resetsAt`). The drivers read their CLI-managed OAuth credentials and enrich the regular snapshot cycle; missing credentials, scopes, network access, or endpoint failures leave `usage` absent without affecting provider health. Cursor and Grok are intentionally excluded.

@@ -1165,6 +1165,8 @@ export interface DesktopBridge {
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
+  /** Opens a visible terminal that updates a user-selected local T3 Code checkout. */
+  startLocalUpdate: (sourceDirectory: string) => Promise<void>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
   /**
    * Desktop-only preview surface. Present iff the renderer is hosted by the

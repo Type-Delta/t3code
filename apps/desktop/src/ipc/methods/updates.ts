@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import * as DesktopUpdates from "../../updates/DesktopUpdates.ts";
+import { launchLocalDesktopUpdate } from "../../updates/LocalDesktopUpdate.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 
@@ -58,5 +59,14 @@ export const checkForUpdate = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.updates.check")(function* () {
     const updates = yield* DesktopUpdates.DesktopUpdates;
     return yield* updates.check("web-ui");
+  }),
+});
+
+export const startLocalUpdate = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.LOCAL_UPDATE_START_CHANNEL,
+  payload: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.updates.startLocal")(function* (sourceDirectory) {
+    yield* launchLocalDesktopUpdate(sourceDirectory).pipe(Effect.scoped);
   }),
 });
