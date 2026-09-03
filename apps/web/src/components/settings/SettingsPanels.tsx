@@ -292,7 +292,8 @@ function AboutVersionSection() {
   const buttonTooltip = "Update this local T3 Code checkout and build a new installer.";
   const buttonDisabled = isUpdateActionPending;
   const buttonLabel = isUpdateActionPending ? "Updating…" : "Update from Type-Delta";
-  const description = "Build and install an update from a local T3 Code source checkout.";
+  const description =
+    "Fetch the latest Type-Delta code from GitHub and merge it with the current version of this local checkout. Verify the combined code, build a new installer, then open it so you can choose whether to install it now.";
 
   return (
     <>
