@@ -17,6 +17,7 @@ import {
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildTurnStartParams,
+  codexUsageLimitRetryAt,
   describeMcpElicitation,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
@@ -27,6 +28,52 @@ import {
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("codexUsageLimitRetryAt", () => {
+  it("uses the latest future reset among exhausted applicable constraints", () => {
+    const retryAt = codexUsageLimitRetryAt(
+      {
+        rateLimits: {
+          limitId: "codex",
+          primary: { usedPercent: 100, resetsAt: 1_800_000_100, windowDurationMins: 300 },
+          secondary: { usedPercent: 100, resetsAt: 1_800_000_200, windowDurationMins: 10080 },
+          credits: null,
+          individualLimit: null,
+          spendControlReached: false,
+          planType: "pro",
+          rateLimitReachedType: "rate_limit_reached",
+        },
+        rateLimitsByLimitId: {},
+        rateLimitResetCredits: null,
+      },
+      1_800_000_000_000,
+    );
+
+    NodeAssert.equal(retryAt, "2027-01-15T08:03:20.000Z");
+  });
+
+  it("ignores unexhausted and expired windows", () => {
+    const retryAt = codexUsageLimitRetryAt(
+      {
+        rateLimits: {
+          limitId: "codex",
+          primary: { usedPercent: 99, resetsAt: 1_800_000_200, windowDurationMins: 300 },
+          secondary: { usedPercent: 100, resetsAt: 1_799_999_999, windowDurationMins: 10080 },
+          credits: null,
+          individualLimit: null,
+          spendControlReached: false,
+          planType: "pro",
+          rateLimitReachedType: "rate_limit_reached",
+        },
+        rateLimitsByLimitId: {},
+        rateLimitResetCredits: null,
+      },
+      1_800_000_000_000,
+    );
+
+    NodeAssert.equal(retryAt, undefined);
+  });
+});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {

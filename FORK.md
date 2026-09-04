@@ -323,6 +323,12 @@ distinct from the providers' internal subagents. New work can stay in the curren
 a new Git worktree. The caller's permission mode applies to a new thread, while a message sent to
 an existing thread keeps that thread's mode.
 
+Agents can also list the model choices exposed by currently selectable provider instances,
+optionally filtered by driver kind. Results keep provider-instance identity separate from the
+driver that runs it and include the current, legacy, and custom models shown in the product model
+picker. User-created instances that share a driver remain distinct, and runtime provider changes
+are reflected in later calls.
+
 The tools share the server-owned provider MCP credential. They cannot access another environment,
 and a thread cannot message itself. Lists default to 50 threads and cap at 200. Reads default to
 10 turns, hide output, and cap at 50 turns and 20,000 characters per item. Wait targets are
@@ -338,11 +344,12 @@ an older deletion reactor that is still removing the reused thread or worktree.
 `apps/server/src/orchestration/{ThreadCommandDispatcher,Layers/ThreadDeletionReactor,Services/ThreadDeletionReactor}.ts`,
 and the existing product MCP provider integration.
 
-**Recorded validation:** focused thread-tool contract, MCP, dispatcher, and Codex developer
-instruction tests, plus `vp check` and `vp run typecheck`. Dispatcher coverage verifies the
-deletion drain for direct and bootstrapped creation and preserves cleanup order on failed setup.
+**Recorded validation:** focused thread-tool contract, MCP, model-listing, dispatcher, and Codex
+developer instruction tests, plus `vp check` and `vp run typecheck`. Dispatcher coverage verifies
+the deletion drain for direct and bootstrapped creation and preserves cleanup order on failed
+setup.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-02
 
 ### DL024 — Progressive multi-environment usage
 
@@ -389,6 +396,10 @@ The gateway controls remain part of upstream's split provider settings editor. E
 credentials survive settings refreshes, and the UI replaces or removes a stored key without
 round-tripping its value through provider snapshots.
 
+The add-instance wizard keeps its title, description, and step tabs pinned above a single scrollable
+step body, with the Back and confirm buttons pinned below, so the long Config step scrolls inside the
+dialog instead of overflowing past the viewport.
+
 Codex receives a managed Responses API provider, Codex-format `model_catalog_json`, selected
 reasoning effort, and a per-model `model_context_window`. Its adapter normalizes the configured
 gateway path to end in `/v1`, so users can enter the gateway origin without knowing Codex's URL
@@ -406,9 +417,10 @@ and `apps/web/src/components/settings/providerModelDetails.ts`.
 **Recorded validation:** focused gateway parsing and cache tests, Codex and Claude provider relay
 tests, settings and server contract tests, provider-settings component tests, `vp check`,
 `vp run typecheck`, and integrated web verification of gateway configuration, custom model metadata,
-and model-detail tooltips.
+and model-detail tooltips. The 2026-09-03 add-instance dialog scroll fix was verified in a browser at
+1000x720 and 390x700 with the gateway section expanded.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-03
 
 ### DL027 — Remote editor links select the server account
 
@@ -432,6 +444,127 @@ server configurations.
 and Electron shell tests.
 
 **Last updated:** 2026-09-01
+
+### DL028 — Isolated Windows x64 GitHub releases
+
+The fork has a manual Windows x64 release workflow that uses GitHub-hosted runners. It builds the
+Linux `node-pty` payload required by the packaged WSL backend, produces an unsigned NSIS installer,
+and publishes only the Windows installer and updater files to this repository's GitHub Releases.
+It does not publish packages, build other desktop platforms, deploy hosted services, announce the
+release, or invoke another release workflow.
+
+The packaged local server remains available. Remote server self-update to the fork version is not
+available because this workflow deliberately does not publish a matching `t3` package.
+
+**Implementation evidence:** `.github/workflows/fork-windows-release.yml`.
+
+**Recorded validation:** workflow syntax and action-policy checks, `vp check`, and
+`vp run typecheck`.
+
+**Last updated:** 2026-09-02
+
+### DL029 — Active sidebar threads follow modification time
+
+The current sidebar orders active threads by their latest `updatedAt` timestamp, so sending a message moves an older thread above less recently modified active threads. Creation and un-settle timestamps remain fallback anchors for invalid or stale modification timestamps, and equal anchors use environment and thread IDs for deterministic ordering.
+
+**Implementation evidence:** `apps/web/src/components/Sidebar.logic.ts` and `apps/web/src/components/Sidebar.logic.test.ts`.
+
+**Recorded validation:** focused Sidebar logic regression tests covering message-driven reordering, creation fallback, un-settle re-entry, stale timestamps, and deterministic ties.
+
+**Last updated:** 2026-09-02
+
+### DL030 — Isolated macOS GitHub releases
+
+The fork has a manual macOS release workflow that uses GitHub-hosted `macos-15` runners. It builds
+unsigned, non-notarized DMG and ZIP artifacts for Apple Silicon and Intel, merges the per-arch
+updater manifests into one `latest-mac.yml`, and publishes only those files to this repository's
+GitHub Releases. Like DL028 it does not publish packages, build other platforms, or deploy hosted
+services, and it does not publish a matching `t3` package.
+
+Because the build is unsigned, Gatekeeper blocks first launch until the user opens the app via
+right-click → Open or clears the quarantine attribute, and in-app auto-update does not work. Signing
+and notarization need a Developer ID certificate (`CSC_LINK`/`CSC_KEY_PASSWORD`), an App Store
+Connect API key (`APPLE_API_KEY*`), and for passkeys an `APPLE_TEAM_ID` plus provisioning profile;
+the workflow can adopt upstream's `--signed` path once those secrets exist.
+
+**Implementation evidence:** `.github/workflows/fork-macos-release.yml`.
+
+**Recorded validation:** actionlint, `vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-09-03
+
+### DL031 — Durable management API keys for external MCP clients
+
+Integrations settings can create environment-wide management API keys with named read-only,
+thread-orchestration, or custom scopes, explicit expiration, and a safe permission ceiling. The
+secret is revealed only once after creation or rotation; list rows retain only a display prefix and
+key metadata, while rotation invalidates the previous secret and revocation takes effect
+immediately. The existing HTTP MCP endpoint accepts these persistent keys alongside ephemeral
+provider-session credentials and enforces one management scope per thread operation. Management
+callers can select projects, create and message threads within their permission ceiling, read and
+wait on threads, and list models. They cannot use preview automation or environment administration.
+State-changing orchestration events retain the key ID and name without retaining its secret or
+display prefix.
+
+Effect MCP registers tools server-wide, so `tools/list` still advertises preview tool names to a
+management client. Preview handlers require a provider-session principal and reject every management
+key call. Keeping that authorization check at the handler boundary avoids a transport-level response
+rewriter and matches the MCP plan's fallback for server-wide registration.
+
+The settings surface includes copyable generic JSON HTTP MCP and Codex `bearer_token_env_var`
+examples, and keeps the one-time secret in transient dialog state only. Persistence stores a SHA-256
+hash of each token, checks expiration and revocation on authentication, throttles last-used writes,
+and coordinates concurrent resolution, rotation, and revocation without exposing two active
+secrets.
+
+**Implementation evidence:** `apps/web/src/components/settings/ManagementApiKeysSettings.tsx`,
+`apps/web/src/components/settings/ManagementApiKeysSettings.logic.ts`,
+`apps/web/src/environments/primary/managementApiKeys.ts`,
+`apps/server/src/auth/ManagementApiKeyService.ts`,
+`apps/server/src/persistence/ManagementApiKeys.ts`,
+`apps/server/src/persistence/Migrations/050_ManagementApiKeys.ts`,
+`apps/server/src/mcp/McpInvocationContext.ts`, `apps/server/src/mcp/McpHttpServer.ts`,
+`apps/server/src/mcp/toolkits/threads/handlers.ts`, `packages/contracts/src/managementApiKeys.ts`,
+and `docs/user/thread-tools.md`.
+
+**Recorded validation:** focused persistence, migration, service concurrency and interruption,
+administration HTTP, MCP authentication, provider-session regression, scope enforcement, preview
+denial, thread-handler, attribution, contracts, and settings UI tests. An isolated paired web client
+created, rotated, and revoked a key; a real external MCP client used it to list models and threads,
+create, read, message, and wait on a Codex thread; the old rotated token and revoked replacement both
+returned the generic 401 response. Database and log inspection confirmed hash-only persistence and
+key-ID/name-only event attribution. Repository-wide `vp check` and `vp run typecheck` passed.
+
+**Last updated:** 2026-09-03
+
+### DL032 — Automatic resume after native provider usage limits
+
+Auto-resume is enabled by default for all threads and can be turned off under **Settings →
+General → Auto-resume after usage limits**. When native Claude Code or Codex reports an exact
+future reset time for a failed turn, the server stores one durable resume job for that thread and
+sends scoped automatic-resume instructions three seconds after the reset. Before dispatch, the
+server checks the durable message projection for the stable resume message ID. Stable schedule,
+command, and message identifiers make the job safe to recover after a server restart without
+sending the continuation twice. A newer turn, message, provider selection, active request, archive,
+deletion, or explicit settle makes the saved job stale instead. Transient dispatch failures retry
+after another three seconds.
+
+Claude uses the rejected native `rate_limit_event` reset. Codex confirms native
+`usageLimitExceeded` errors through `account/rateLimits/read`. Generic `429` responses from
+compatible API gateways do not expose an authoritative reset through either CLI, so gateway usage
+limits are intentionally unsupported.
+
+**Implementation evidence:** `packages/contracts/src/{orchestration,providerRuntime,settings}.ts`,
+`apps/server/src/provider/Layers/{ClaudeAdapter,CodexAdapter,CodexSessionRuntime}.ts`,
+`apps/server/src/orchestration/Layers/{AutoResumeReactor,ProviderRuntimeIngestion}.ts`,
+`apps/server/src/persistence/{Layers,Services}/AutoResumeJobs.ts`,
+`apps/server/src/persistence/Migrations/051_AutoResumeJobs.ts`, and
+`apps/web/src/components/settings/{SettingsPanels,settingsSearch}.ts*`.
+
+**Recorded validation:** focused native Claude and Codex reset parsing, provider-runtime,
+settings-contract, and server-settings tests.
+
+**Last updated:** 2026-09-03
 
 ## Merge History
 

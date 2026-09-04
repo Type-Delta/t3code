@@ -9,6 +9,7 @@ import {
   CheckpointRef,
   classifyTaskAgentKind,
   EventId,
+  IsoDateTime,
   isToolLifecycleItemType,
   ThreadId,
   type ThreadTokenUsageSnapshot,
@@ -35,6 +36,8 @@ import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionT
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { AutoResumeReactor } from "../Services/AutoResumeReactor.ts";
+import { autoResumeMessageId, autoResumeScheduleId } from "../Services/AutoResumeReactor.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -103,6 +106,29 @@ const TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY = 10_000;
 const TASK_DESCRIPTION_BY_TASK_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+
+/**
+ * Usage-limit retry metadata is provider-shaped and intentionally stays at
+ * the provider-runtime boundary. Adapters that know a reset timestamp put it
+ * on `turn.completed.payload.retry`; providers without a directive simply do
+ * not produce a schedule.
+ */
+export function autoResumeRetryFromEvent(
+  event: ProviderRuntimeEvent,
+): { readonly reason: "usage_limit"; readonly retryAt: string } | undefined {
+  if (event.type !== "turn.completed" || event.payload.state !== "failed") {
+    return undefined;
+  }
+
+  const retry = (event.payload as { readonly retry?: unknown }).retry;
+  if (retry === null || typeof retry !== "object" || Array.isArray(retry)) {
+    return undefined;
+  }
+  const candidate = retry as { readonly reason?: unknown; readonly retryAt?: unknown };
+  return candidate.reason === "usage_limit" && typeof candidate.retryAt === "string"
+    ? { reason: "usage_limit", retryAt: candidate.retryAt }
+    : undefined;
+}
 
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,
@@ -905,6 +931,7 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const autoResumeReactor = yield* AutoResumeReactor;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
@@ -1657,6 +1684,7 @@ const make = Effect.gen(function* () {
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
           : null;
+      let completedLifecycleSequence: number | undefined;
 
       if (
         event.type === "session.started" ||
@@ -1738,7 +1766,7 @@ const make = Effect.gen(function* () {
             );
           }
 
-          yield* orchestrationEngine.dispatch({
+          const lifecycleResult = yield* orchestrationEngine.dispatch({
             type: "thread.session.set",
             commandId: yield* providerCommandId(event, "thread-session-set"),
             threadId: thread.id,
@@ -1756,6 +1784,9 @@ const make = Effect.gen(function* () {
             },
             createdAt: now,
           });
+          if (event.type === "turn.completed") {
+            completedLifecycleSequence = lifecycleResult.sequence;
+          }
         }
       }
 
@@ -2001,6 +2032,39 @@ const make = Effect.gen(function* () {
             turnId,
             updatedAt: now,
           });
+        }
+      }
+
+      const autoResumeRetry = autoResumeRetryFromEvent(event);
+      if (
+        autoResumeRetry &&
+        event.turnId !== undefined &&
+        completedLifecycleSequence !== undefined
+      ) {
+        const detailedThread = yield* getLoadedThreadDetail();
+        const expectedUserMessage = detailedThread?.messages.findLast(
+          (message) => message.role === "user",
+        );
+        if (expectedUserMessage) {
+          const sourceTurnId = toTurnId(event.turnId);
+          if (sourceTurnId !== undefined) {
+            const providerInstanceId =
+              event.providerInstanceId ??
+              thread.session?.providerInstanceId ??
+              thread.modelSelection.instanceId;
+            yield* autoResumeReactor.schedule({
+              scheduleId: autoResumeScheduleId(thread.id, sourceTurnId),
+              threadId: thread.id,
+              scheduledSequence: completedLifecycleSequence,
+              sourceTurnId,
+              expectedUserMessageId: MessageId.make(expectedUserMessage.id),
+              providerInstanceId,
+              messageId: MessageId.make(autoResumeMessageId(thread.id, sourceTurnId)),
+              reason: autoResumeRetry.reason,
+              retryAt: autoResumeRetry.retryAt as IsoDateTime,
+              createdAt: now,
+            });
+          }
         }
       }
 

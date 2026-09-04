@@ -28,12 +28,19 @@ const makeBroker = PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices
 
 const scope = {
   environmentId: EnvironmentId.make("environment-1"),
-  threadId: ThreadId.make("thread-1"),
-  providerSessionId: "provider-session-1",
-  providerInstanceId: ProviderInstanceId.make("codex"),
-  capabilities: new Set(["preview"] as const),
+  principal: {
+    type: "provider-session" as const,
+    threadId: ThreadId.make("thread-1"),
+    providerSessionId: "provider-session-1",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
   issuedAt: 1,
 };
+
+const withProviderPrincipal = (overrides: Partial<typeof scope.principal>) => ({
+  ...scope,
+  principal: { ...scope.principal, ...overrides },
+});
 
 const makeHost = (overrides: Partial<PreviewAutomationHost> = {}): PreviewAutomationHost => ({
   clientId: "client-1",
@@ -338,9 +345,9 @@ it.effect("preserves bounded request and remote selector diagnostics", () => {
       expect(error).toMatchObject({
         operation: "click",
         environmentId: scope.environmentId,
-        threadId: scope.threadId,
-        providerSessionId: scope.providerSessionId,
-        providerInstanceId: scope.providerInstanceId,
+        threadId: scope.principal.threadId,
+        providerSessionId: scope.principal.providerSessionId,
+        providerInstanceId: scope.principal.providerInstanceId,
         clientId: "client-1",
         requestId: "preview-0",
         tabId: "tab-1",
@@ -429,9 +436,9 @@ it.effect("distinguishes malformed remote failures", () =>
       expect(error).toMatchObject({
         operation: "status",
         environmentId: scope.environmentId,
-        threadId: scope.threadId,
-        providerSessionId: scope.providerSessionId,
-        providerInstanceId: scope.providerInstanceId,
+        threadId: scope.principal.threadId,
+        providerSessionId: scope.principal.providerSessionId,
+        providerInstanceId: scope.principal.providerInstanceId,
         clientId: "client-1",
         requestId: "preview-0",
         timeoutMs: 2_000,
@@ -451,9 +458,9 @@ it.effect("rejects calls when no connected host exists", () =>
     expect(error).toMatchObject({
       operation: "status",
       environmentId: scope.environmentId,
-      threadId: scope.threadId,
-      providerSessionId: scope.providerSessionId,
-      providerInstanceId: scope.providerInstanceId,
+      threadId: scope.principal.threadId,
+      providerSessionId: scope.principal.providerSessionId,
+      providerInstanceId: scope.principal.providerInstanceId,
     });
   }),
 );
@@ -517,11 +524,10 @@ it.effect("routes requests for background threads through an environment-level h
       yield* Effect.yieldNow;
 
       const result = yield* broker.invoke<string>({
-        scope: {
-          ...scope,
+        scope: withProviderPrincipal({
           threadId: backgroundThreadId,
           providerSessionId: "provider-session-background",
-        },
+        }),
         operation: "status",
         input: {},
       });
@@ -628,10 +634,9 @@ it.effect("pins a provider session to its initial host despite later focus chang
         focused: true,
       });
 
-      const firstPinnedScope = {
-        ...scope,
+      const firstPinnedScope = withProviderPrincipal({
         providerSessionId: "provider-session-first-pinned",
-      };
+      });
       expect(
         yield* broker.invoke<string>({ scope: firstPinnedScope, operation: "status", input: {} }),
       ).toBe("first");
@@ -648,7 +653,7 @@ it.effect("pins a provider session to its initial host despite later focus chang
       ).toBe("first");
       expect(
         yield* broker.invoke<string>({
-          scope: { ...scope, providerSessionId: "provider-session-second-pinned" },
+          scope: withProviderPrincipal({ providerSessionId: "provider-session-second-pinned" }),
           operation: "status",
           input: {},
         }),
@@ -1093,9 +1098,9 @@ it.effect("fails requests assigned to the stream that is replaced", () =>
       expect(error).toMatchObject({
         operation: "status",
         environmentId: scope.environmentId,
-        threadId: scope.threadId,
-        providerSessionId: scope.providerSessionId,
-        providerInstanceId: scope.providerInstanceId,
+        threadId: scope.principal.threadId,
+        providerSessionId: scope.principal.providerSessionId,
+        providerInstanceId: scope.principal.providerInstanceId,
         clientId: "client-1",
         requestId: "preview-0",
         timeoutMs: 15_000,

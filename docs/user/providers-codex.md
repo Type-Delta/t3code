@@ -35,6 +35,18 @@ Log in with Codex normally:
 codex login
 ```
 
+## Resume After Usage Limits
+
+T3 Code automatically sends scoped resume instructions when native Codex rejects a turn because of
+a usage limit and reports an exact reset time. The pending continuation survives a T3 server restart
+and is discarded if the thread is no longer waiting on that failed turn. This is sent three seconds
+after the reported reset and transient dispatch failures retry after another three seconds. T3 Code
+checks that it has not already sent the resume message before each attempt. This is enabled by
+default; turn it off under **Settings → General → Auto-resume after usage limits**.
+
+Compatible API gateways do not currently expose an authoritative usage-limit reset through Codex.
+T3 Code therefore does not auto-resume generic gateway `429` errors.
+
 ## Send feedback to OpenAI
 
 In an existing Codex thread, send `/feedback` or `/feedback` followed by a description of the

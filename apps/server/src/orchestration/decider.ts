@@ -926,6 +926,112 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.auto-resume.fire": {
+      const targetThread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const rejectStale = (detail: string) =>
+        Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Stale auto-resume schedule '${command.scheduleId}': ${detail}`,
+          }),
+        );
+
+      if (targetThread.deletedAt !== null) {
+        return yield* rejectStale(`thread '${command.threadId}' is deleted`);
+      }
+      // A manual settle is an explicit acknowledgement that this thread is
+      // finished. It invalidates any previously scheduled provider retry;
+      // snooze is only a visibility overlay and must not block a resume.
+      if (targetThread.settledOverride === "settled") {
+        return yield* rejectStale(`thread '${command.threadId}' was manually settled`);
+      }
+      if (
+        targetThread.latestTurn === null ||
+        targetThread.latestTurn.turnId !== command.sourceTurnId ||
+        targetThread.latestTurn.state === "running" ||
+        targetThread.latestTurn.completedAt === null
+      ) {
+        return yield* rejectStale(
+          `turn '${command.sourceTurnId}' is no longer the latest settled turn`,
+        );
+      }
+      if (
+        targetThread.session?.activeTurnId !== null &&
+        targetThread.session?.activeTurnId !== undefined
+      ) {
+        return yield* rejectStale(`thread '${command.threadId}' has an active turn`);
+      }
+      if (
+        targetThread.session?.status === "starting" ||
+        targetThread.session?.status === "running" ||
+        threadHasQueuedTurnStart(targetThread, command.createdAt) ||
+        hasOpenBlockingRequest(targetThread)
+      ) {
+        return yield* rejectStale(`thread '${command.threadId}' has pending work`);
+      }
+      if (targetThread.modelSelection.instanceId !== command.providerInstanceId) {
+        return yield* rejectStale(
+          `provider instance changed from '${command.providerInstanceId}' to '${targetThread.modelSelection.instanceId}'`,
+        );
+      }
+      const latestUserMessage = targetThread.messages.findLast(
+        (message) => message.role === "user",
+      );
+      if (latestUserMessage?.id !== command.expectedUserMessageId) {
+        return yield* rejectStale(`latest user message is not '${command.expectedUserMessageId}'`);
+      }
+
+      const messageSent = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-sent" as const,
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          role: "user" as const,
+          text: `[T3 Code automatic resume]
+
+The previous turn stopped because the provider usage limit was reached. The limit has now reset.
+
+Resume only the work already requested in this thread. Inspect current workspace, artifacts and any subagent status. Identify incomplete checklist items or interrupted operations, repair any partial state, and continue from where the turn stopped.
+
+Do not repeat completed work, start new work, or expand the user's requested scope. If the requested work is already complete, report completion and stop.`,
+          attachments: [],
+          turnId: null,
+          streaming: false,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+      const turnStartRequested = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        causationEventId: messageSent.eventId,
+        type: "thread.turn-start-requested" as const,
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          modelSelection: targetThread.modelSelection,
+          runtimeMode: targetThread.runtimeMode,
+          interactionMode: targetThread.interactionMode,
+          createdAt: command.createdAt,
+        },
+      };
+      return [messageSent, turnStartRequested];
+    }
+
     case "thread.turn.start": {
       const targetThread = yield* requireThread({
         readModel,

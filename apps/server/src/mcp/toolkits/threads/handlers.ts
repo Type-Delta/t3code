@@ -6,9 +6,14 @@ import {
   ThreadToolNotFoundError,
   ThreadToolOperationFailureError,
   ThreadToolSelfSendForbiddenError,
+  managementApiKeyRuntimeModeAtMost,
+  managementApiKeyRuntimeModeAllowed,
   type OrchestrationProjectShell,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadShell,
+  type ProviderDriverKind,
+  type RuntimeMode,
+  type ManagementApiKeyRuntimeMode,
   type ThreadToolAttentionReason,
   type ThreadToolStatus,
 } from "@t3tools/contracts";
@@ -27,12 +32,13 @@ import * as Stream from "effect/Stream";
 import { projectThreadDetailSnapshot } from "../../../orchestration/ActivityPayloadProjection.ts";
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProviderRegistry from "../../../provider/Services/ProviderRegistry.ts";
 import * as ThreadCommandDispatcher from "../../../orchestration/ThreadCommandDispatcher.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { ThreadToolkit } from "./tools.ts";
 
-type ThreadToolOperation = "create" | "list" | "read" | "send" | "wait";
+type ThreadToolOperation = McpInvocationContext.McpThreadToolOperation;
 
 const DEFAULT_READ_TURN_LIMIT = 10;
 const DEFAULT_LIST_LIMIT = 50;
@@ -324,18 +330,41 @@ const createThread = Effect.fn("ThreadToolkit.createThread")(function* (input: {
   readonly modelSelection?: OrchestrationThreadShell["modelSelection"];
 }) {
   const invocation = yield* McpInvocationContext.requireThreadMcpCapability("create");
-  const caller = yield* getThreadShell("create", invocation.threadId);
-  const project = yield* getProjectShell("create", input.target?.projectId ?? caller.projectId);
+  const provider = McpInvocationContext.getProviderSessionPrincipal(invocation);
+  const management = McpInvocationContext.isManagementKeyPrincipal(invocation.principal)
+    ? invocation.principal
+    : undefined;
+  if (!provider && input.target?.projectId === undefined) {
+    return yield* new ThreadToolInvalidInputError({
+      operation: "create",
+      reason: "A management key must provide target.projectId when creating a thread.",
+    });
+  }
+  const caller = provider ? yield* getThreadShell("create", provider.threadId) : undefined;
+  const project = yield* getProjectShell("create", input.target?.projectId ?? caller!.projectId);
+  let modelSelection = input.modelSelection;
+  if (modelSelection === undefined) {
+    if (provider !== undefined) {
+      modelSelection = caller!.modelSelection;
+    } else if (project.defaultModelSelection !== null) {
+      modelSelection = project.defaultModelSelection;
+    } else {
+      return yield* new ThreadToolInvalidInputError({
+        operation: "create",
+        reason:
+          "A management create requires modelSelection or a default model selection on the target project.",
+      });
+    }
+  }
   const threadId = ThreadId.make(yield* newId("create"));
   const commandId = CommandId.make(`mcp:create:${yield* newId("create")}`);
   const messageId = MessageId.make(yield* newId("create"));
   const createdAt = yield* nowIso;
   const title = input.title ?? deriveTitle(input.prompt);
-  const modelSelection = input.modelSelection ?? caller.modelSelection;
   const environment = input.target?.environment ?? { type: "local" as const };
   const isWorktree = environment.type === "worktree";
-  const isCallerProject = project.id === caller.projectId;
-  let baseBranch: string | null = caller.branch;
+  const isCallerProject = provider !== undefined && project.id === caller!.projectId;
+  let baseBranch: string | null = provider ? caller!.branch : null;
   let worktreeBranch: string | undefined;
 
   if (isWorktree) {
@@ -359,46 +388,59 @@ const createThread = Effect.fn("ThreadToolkit.createThread")(function* (input: {
 
   const dispatcher = yield* ThreadCommandDispatcher.ThreadCommandDispatcher;
   const dispatched = yield* dispatcher
-    .dispatch({
-      type: "thread.turn.start",
-      commandId,
-      threadId,
-      message: {
-        messageId,
-        role: "user",
-        text: input.prompt,
-        attachments: [],
-      },
-      modelSelection,
-      titleSeed: title,
-      runtimeMode: caller.runtimeMode,
-      interactionMode: caller.interactionMode,
-      bootstrap: {
-        createThread: {
-          projectId: project.id,
-          title,
-          modelSelection,
-          runtimeMode: caller.runtimeMode,
-          interactionMode: caller.interactionMode,
-          branch: isWorktree ? baseBranch : isCallerProject ? caller.branch : null,
-          worktreePath: isCallerProject && !isWorktree ? caller.worktreePath : null,
-          createdAt,
+    .dispatch(
+      {
+        type: "thread.turn.start",
+        commandId,
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: input.prompt,
+          attachments: [],
         },
-        ...(isWorktree
-          ? {
-              prepareWorktree: {
-                projectCwd: project.workspaceRoot,
-                baseBranch: baseBranch!,
-                branch: worktreeBranch,
-                ...(environment.startFromOrigin ? { startFromOrigin: true } : {}),
-              },
-              runSetupScript: true,
-            }
-          : {}),
+        modelSelection,
+        titleSeed: title,
+        runtimeMode: provider ? caller!.runtimeMode : management!.defaultRuntimeMode,
+        interactionMode: provider ? caller!.interactionMode : "default",
+        bootstrap: {
+          createThread: {
+            projectId: project.id,
+            title,
+            modelSelection,
+            runtimeMode: provider ? caller!.runtimeMode : management!.defaultRuntimeMode,
+            interactionMode: provider ? caller!.interactionMode : "default",
+            branch: isWorktree ? baseBranch : isCallerProject ? caller!.branch : null,
+            worktreePath: isCallerProject && !isWorktree ? caller!.worktreePath : null,
+            createdAt,
+          },
+          ...(isWorktree
+            ? {
+                prepareWorktree: {
+                  projectCwd: project.workspaceRoot,
+                  baseBranch: baseBranch!,
+                  branch: worktreeBranch,
+                  ...(environment.startFromOrigin ? { startFromOrigin: true } : {}),
+                },
+                runSetupScript: true,
+              }
+            : {}),
+        },
+        createdAt,
       },
-      createdAt,
-    })
+      McpInvocationContext.getManagementOrigin(invocation),
+    )
     .pipe(Effect.mapError((error) => operationFailure("create", error)));
+  if (management !== undefined) {
+    yield* Effect.logInfo("MCP management thread operation dispatched").pipe(
+      Effect.annotateLogs({
+        operation: "create_thread",
+        managementApiKeyId: management.keyId,
+        managementApiKeyName: management.name,
+        targetThreadId: threadId,
+      }),
+    );
+  }
   const created = yield* getThreadShell("create", threadId);
 
   return {
@@ -445,50 +487,120 @@ const listThreads = Effect.fn("ThreadToolkit.listThreads")(function* (input: {
   return { environmentId: invocation.environmentId, threads };
 });
 
+const listModels = Effect.fn("ThreadToolkit.listModels")(function* (input: {
+  readonly driver?: ProviderDriverKind;
+}) {
+  const invocation = yield* McpInvocationContext.requireThreadMcpCapability("list_models");
+  const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+  const providers = (yield* providerRegistry.getProviders)
+    .filter(
+      (provider) =>
+        provider.enabled &&
+        provider.status === "ready" &&
+        provider.availability !== "unavailable" &&
+        (input.driver === undefined || provider.driver === input.driver),
+    )
+    .map(({ instanceId, driver, displayName, models }) => ({
+      instanceId,
+      driver,
+      ...(displayName === undefined ? {} : { displayName }),
+      models,
+    }));
+
+  return { environmentId: invocation.environmentId, providers };
+});
+
 const sendMessageToThread = Effect.fn("ThreadToolkit.sendMessageToThread")(function* (input: {
   readonly threadId: ThreadId;
   readonly message: string;
   readonly modelSelection?: OrchestrationThreadShell["modelSelection"];
 }) {
   const invocation = yield* McpInvocationContext.requireThreadMcpCapability("send");
-  if (input.threadId === invocation.threadId) {
+  const provider = McpInvocationContext.getProviderSessionPrincipal(invocation);
+  const management = McpInvocationContext.isManagementKeyPrincipal(invocation.principal)
+    ? invocation.principal
+    : undefined;
+  if (provider?.threadId === input.threadId) {
     return yield* new ThreadToolSelfSendForbiddenError({
-      sourceThreadId: invocation.threadId,
+      sourceThreadId: provider.threadId,
       targetThreadId: input.threadId,
     });
   }
   const target = yield* getThreadShell("send", input.threadId);
+  if (management !== undefined) {
+    const targetRuntimeMode: RuntimeMode = target.runtimeMode;
+    const managementRuntimeMode =
+      targetRuntimeMode === "full-access" ? undefined : targetRuntimeMode;
+    if (
+      managementRuntimeMode === undefined ||
+      !managementApiKeyRuntimeModeAllowed(managementRuntimeMode)
+    ) {
+      return yield* new ThreadToolInvalidInputError({
+        operation: "send",
+        reason:
+          "A management key cannot send to a thread whose runtime mode exceeds its maximum permission mode.",
+      });
+    }
+    if (
+      !managementApiKeyRuntimeModeAtMost(
+        managementRuntimeMode as ManagementApiKeyRuntimeMode,
+        management.maximumRuntimeMode as ManagementApiKeyRuntimeMode,
+      )
+    ) {
+      return yield* new ThreadToolInvalidInputError({
+        operation: "send",
+        reason:
+          "A management key cannot send to a thread whose runtime mode exceeds its maximum permission mode.",
+      });
+    }
+  }
   const dispatcher = yield* ThreadCommandDispatcher.ThreadCommandDispatcher;
 
   if (input.modelSelection !== undefined) {
     yield* dispatcher
-      .dispatch({
-        type: "thread.meta.update",
-        commandId: CommandId.make(`mcp:send-model:${yield* newId("send")}`),
-        threadId: input.threadId,
-        modelSelection: input.modelSelection,
-      })
+      .dispatch(
+        {
+          type: "thread.meta.update",
+          commandId: CommandId.make(`mcp:send-model:${yield* newId("send")}`),
+          threadId: input.threadId,
+          modelSelection: input.modelSelection,
+        },
+        McpInvocationContext.getManagementOrigin(invocation),
+      )
       .pipe(Effect.mapError((error) => operationFailure("send", error)));
   }
 
   const createdAt = yield* nowIso;
   const dispatched = yield* dispatcher
-    .dispatch({
-      type: "thread.turn.start",
-      commandId: CommandId.make(`mcp:send:${yield* newId("send")}`),
-      threadId: input.threadId,
-      message: {
-        messageId: MessageId.make(yield* newId("send")),
-        role: "user",
-        text: input.message,
-        attachments: [],
+    .dispatch(
+      {
+        type: "thread.turn.start",
+        commandId: CommandId.make(`mcp:send:${yield* newId("send")}`),
+        threadId: input.threadId,
+        message: {
+          messageId: MessageId.make(yield* newId("send")),
+          role: "user",
+          text: input.message,
+          attachments: [],
+        },
+        modelSelection: input.modelSelection ?? target.modelSelection,
+        runtimeMode: target.runtimeMode,
+        interactionMode: target.interactionMode,
+        createdAt,
       },
-      modelSelection: input.modelSelection ?? target.modelSelection,
-      runtimeMode: target.runtimeMode,
-      interactionMode: target.interactionMode,
-      createdAt,
-    })
+      McpInvocationContext.getManagementOrigin(invocation),
+    )
     .pipe(Effect.mapError((error) => operationFailure("send", error)));
+  if (management !== undefined) {
+    yield* Effect.logInfo("MCP management thread operation dispatched").pipe(
+      Effect.annotateLogs({
+        operation: "send_message_to_thread",
+        managementApiKeyId: management.keyId,
+        managementApiKeyName: management.name,
+        targetThreadId: input.threadId,
+      }),
+    );
+  }
   const updated = yield* getThreadShell("send", input.threadId);
   const currentTime = yield* nowIso;
 
@@ -508,6 +620,8 @@ const waitThreads = Effect.fn("ThreadToolkit.waitThreads")(function* (input: {
   readonly timeoutMs: number;
 }) {
   const invocation = yield* McpInvocationContext.requireThreadMcpCapability("wait");
+  const provider = McpInvocationContext.getProviderSessionPrincipal(invocation);
+  const callerThreadId = provider?.threadId;
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;
   const targetIds = new Set(input.targets.map((target) => target.threadId));
   const events = yield* Queue.bounded<ThreadId>(targetIds.size);
@@ -530,14 +644,16 @@ const waitThreads = Effect.fn("ThreadToolkit.waitThreads")(function* (input: {
         if (event.aggregateKind !== "thread") return false;
         if (targetIds.has(ThreadId.make(event.aggregateId))) return true;
         return (
-          event.aggregateId === invocation.threadId &&
+          callerThreadId !== undefined &&
+          event.aggregateId === callerThreadId &&
           event.type === "thread.message-sent" &&
           event.payload.role === "user"
         );
       }),
       Stream.runForEach((event) => {
         if (
-          event.aggregateId === invocation.threadId &&
+          callerThreadId !== undefined &&
+          event.aggregateId === callerThreadId &&
           event.type === "thread.message-sent" &&
           event.payload.role === "user"
         ) {
@@ -676,6 +792,7 @@ const waitThreads = Effect.fn("ThreadToolkit.waitThreads")(function* (input: {
 
 const handlers = {
   create_thread: createThread,
+  list_models: listModels,
   list_threads: listThreads,
   read_thread: readThread,
   send_message_to_thread: sendMessageToThread,

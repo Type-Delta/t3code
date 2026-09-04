@@ -25,6 +25,14 @@ import {
   ServerAuthSessionMethod,
 } from "./auth.ts";
 import {
+  ManagementApiKeyCreateRequest,
+  ManagementApiKeyCreateResponse,
+  ManagementApiKeyIdParams,
+  ManagementApiKeyListResponse,
+  ManagementApiKeyRevokeResponse,
+  ManagementApiKeyRotateResponse,
+} from "./managementApiKeys.ts";
+import {
   AuthSessionId,
   DpopFailureReason,
   NonNegativeInt,
@@ -91,6 +99,10 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "pairing_credential_issuance_failed",
   "pairing_links_load_failed",
   "pairing_link_revoke_failed",
+  "management_api_keys_load_failed",
+  "management_api_key_creation_failed",
+  "management_api_key_revocation_failed",
+  "management_api_key_rotation_failed",
   "client_sessions_load_failed",
   "client_session_revoke_failed",
   "orchestration_snapshot_failed",
@@ -192,7 +204,10 @@ export class EnvironmentInternalError extends Schema.TaggedErrorClass<Environmen
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  "management_api_key_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedErrorClass<EnvironmentResourceNotFoundError>()(
@@ -491,6 +506,59 @@ export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+/** First-party key administration is its own group so consumers can opt into
+ * those endpoints without having to implement the unrelated auth routes. */
+export class EnvironmentManagementHttpApi extends HttpApiGroup.make("management")
+  .add(
+    HttpApiEndpoint.get("keys", "/api/management/keys", {
+      headers: OptionalBearerHeaders,
+      success: ManagementApiKeyListResponse,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentScopeRequiredError,
+        EnvironmentInternalError,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createKey", "/api/management/keys", {
+      headers: OptionalBearerHeaders,
+      payload: ManagementApiKeyCreateRequest,
+      success: ManagementApiKeyCreateResponse,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentScopeRequiredError,
+        EnvironmentInternalError,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("revokeKey", "/api/management/keys/:id/revoke", {
+      headers: OptionalBearerHeaders,
+      params: ManagementApiKeyIdParams,
+      success: ManagementApiKeyRevokeResponse,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentResourceNotFoundError,
+        EnvironmentScopeRequiredError,
+        EnvironmentInternalError,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("rotateKey", "/api/management/keys/:id/rotate", {
+      headers: OptionalBearerHeaders,
+      params: ManagementApiKeyIdParams,
+      success: ManagementApiKeyRotateResponse,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentResourceNotFoundError,
+        EnvironmentScopeRequiredError,
+        EnvironmentInternalError,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
   threadId: ThreadId,
 });
@@ -625,6 +693,7 @@ export class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
 export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
+  .add(EnvironmentManagementHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentConnectHttpApi) {}

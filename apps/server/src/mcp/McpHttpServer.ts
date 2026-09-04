@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -10,6 +11,8 @@ import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import packageJson from "../../package.json" with { type: "json" };
+import * as ManagementApiKeyService from "../auth/ManagementApiKeyService.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -28,7 +31,7 @@ import { ThreadToolkit } from "./toolkits/threads/tools.ts";
 const unauthorized = HttpServerResponse.jsonUnsafe(
   {
     error: "invalid_mcp_credential",
-    message: "A valid provider-scoped MCP bearer credential is required.",
+    message: "A valid MCP bearer credential is required.",
   },
   {
     status: 401,
@@ -45,14 +48,6 @@ type AuthenticatedHttpEffect = Effect.Effect<
   McpInvocationContext.McpInvocationContext
 >;
 
-type McpAuthMiddleware = (
-  httpEffect: AuthenticatedHttpEffect,
-) => Effect.Effect<
-  HttpServerResponse.HttpServerResponse,
-  Types.unhandled,
-  HttpServerRequest.HttpServerRequest
->;
-
 export const normalizeMcpHttpResponse = (
   response: HttpServerResponse.HttpServerResponse,
 ): HttpServerResponse.HttpServerResponse => {
@@ -65,34 +60,69 @@ export const normalizeMcpHttpResponse = (
     : response;
 };
 
-const makeMcpAuthMiddleware = McpSessionRegistry.McpSessionRegistry.pipe(
-  Effect.map(
-    (registry): McpAuthMiddleware =>
-      Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
-        const request = yield* HttpServerRequest.HttpServerRequest;
-        const authorization = request.headers.authorization;
-        const token =
-          authorization?.startsWith("Bearer ") === true
-            ? authorization.slice("Bearer ".length).trim()
-            : "";
-        const invocation = yield* registry.resolve(token);
-        if (!invocation) {
-          // Without this the only symptom of a dead credential is the agent
-          // quietly losing the whole `t3-code` toolkit for the rest of its
-          // session, with nothing on the server to explain why.
-          yield* Effect.logWarning("rejected MCP request with an unusable credential", {
-            reason: token.length === 0 ? "missing_bearer_token" : "unknown_or_expired_token",
-          });
-          return unauthorized;
-        }
-        return yield* httpEffect.pipe(
-          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-          Effect.map(normalizeMcpHttpResponse),
-        );
-      }),
-  ),
-  Effect.withSpan("McpHttpServer.makeAuthMiddleware"),
-);
+const MANAGEMENT_TOKEN_MAX_LENGTH = 512;
+const managementTokenShape = /^t3mgmt_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$/;
+
+const hasManagementTokenShape = (token: string): boolean =>
+  token.length <= MANAGEMENT_TOKEN_MAX_LENGTH && managementTokenShape.test(token);
+
+const makeMcpAuthMiddleware = Effect.gen(function* () {
+  const registry = yield* McpSessionRegistry.McpSessionRegistry;
+  const managementKeys = yield* ManagementApiKeyService.ManagementApiKeyService;
+  const environment = yield* ServerEnvironment.ServerEnvironment;
+  const environmentId = yield* environment.getEnvironmentId;
+
+  return Effect.fn("McpHttpServer.authenticateRequest")(function* (
+    httpEffect: AuthenticatedHttpEffect,
+  ) {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const authorization = request.headers.authorization;
+    const token =
+      authorization?.startsWith("Bearer ") === true
+        ? authorization.slice("Bearer ".length).trim()
+        : "";
+
+    // Provider credentials remain the first lookup so the existing ephemeral
+    // session path (including liveness refresh) is unchanged.
+    const providerInvocation = yield* registry.resolve(token);
+    let invocation = providerInvocation;
+    if (!invocation && hasManagementTokenShape(token)) {
+      const managementPrincipal = yield* managementKeys.resolveToken(token).pipe(
+        Effect.catchTag("ManagementApiKeyServiceInternalError", (error) =>
+          Effect.logWarning("management MCP credential lookup failed", {
+            reason: error.operation,
+          }).pipe(Effect.as(Option.none())),
+        ),
+      );
+      if (Option.isSome(managementPrincipal)) {
+        invocation = {
+          environmentId,
+          principal: managementPrincipal.value,
+          issuedAt: yield* Clock.currentTimeMillis,
+        };
+      }
+    }
+
+    if (!invocation) {
+      // Without this the only symptom of a dead credential is the agent
+      // quietly losing the whole `t3-code` toolkit for the rest of its
+      // session, with nothing on the server to explain why.
+      yield* Effect.logWarning("rejected MCP request with an unusable credential", {
+        reason:
+          token.length === 0
+            ? "missing_bearer_token"
+            : hasManagementTokenShape(token)
+              ? "unknown_or_expired_token"
+              : "malformed_bearer_token",
+      });
+      return unauthorized;
+    }
+    return yield* httpEffect.pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.map(normalizeMcpHttpResponse),
+    );
+  });
+}).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
 
 const McpAuthMiddlewareLive = HttpRouter.middleware<{
   provides: McpInvocationContext.McpInvocationContext;
@@ -227,7 +257,7 @@ export const McpToolkitRegistrationLive = Layer.mergeAll(
   ThreadToolkitRegistrationLive,
 );
 
-const McpTransportLive = McpServer.layerHttp({
+export const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
   path: "/mcp",

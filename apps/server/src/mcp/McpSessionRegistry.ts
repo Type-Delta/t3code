@@ -123,12 +123,16 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const providerSessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
+      const threadId = ThreadId.make(request.threadId);
+      const providerInstanceId = ProviderInstanceId.make(request.providerInstanceId);
       const scope: McpInvocationContext.McpInvocationScope = {
         environmentId,
-        threadId: ThreadId.make(request.threadId),
-        providerSessionId,
-        providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        capabilities: new Set(["preview", "threads"]),
+        principal: {
+          type: "provider-session",
+          threadId,
+          providerSessionId,
+          providerInstanceId,
+        },
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {
@@ -139,9 +143,9 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       return {
         config: {
           environmentId,
-          threadId: scope.threadId,
+          threadId,
           providerSessionId,
-          providerInstanceId: scope.providerInstanceId,
+          providerInstanceId,
           endpoint,
           authorizationHeader: `Bearer ${rawToken}`,
         },
@@ -172,7 +176,10 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         const current = pruneDead(records, timestamp);
         const next = new Map(current);
         for (const [tokenHash, record] of current) {
-          if (record.scope.threadId === threadId) {
+          if (
+            record.scope.principal.type === "provider-session" &&
+            record.scope.principal.threadId === threadId
+          ) {
             next.set(tokenHash, { ...record, lastAliveAt: timestamp });
           }
         }
@@ -192,11 +199,19 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     touch,
     revokeProviderSession: Effect.fn("McpSessionRegistry.revokeProviderSession")(
       function* (providerSessionId) {
-        yield* revokeWhere((record) => record.scope.providerSessionId === providerSessionId);
+        yield* revokeWhere(
+          (record) =>
+            record.scope.principal.type === "provider-session" &&
+            record.scope.principal.providerSessionId === providerSessionId,
+        );
       },
     ),
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
-      yield* revokeWhere((record) => record.scope.threadId === threadId);
+      yield* revokeWhere(
+        (record) =>
+          record.scope.principal.type === "provider-session" &&
+          record.scope.principal.threadId === threadId,
+      );
     }),
     revokeAll: SynchronizedRef.set(state, { records: new Map() }),
   });

@@ -48,6 +48,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import { AutoResumeReactor } from "../Services/AutoResumeReactor.ts";
 import { DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
@@ -232,6 +233,7 @@ describe("ProviderRuntimeIngestion", () => {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
     const provider = createProviderServiceHarness();
+    const autoResumeSchedules: unknown[] = [];
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -253,6 +255,17 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(ThreadPlanProgress.layer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      Layer.provideMerge(
+        Layer.succeed(AutoResumeReactor, {
+          start: () => Effect.void,
+          schedule: (input) =>
+            Effect.sync(() => {
+              autoResumeSchedules.push(input);
+              return true;
+            }),
+          drain: Effect.void,
+        }),
+      ),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
@@ -326,6 +339,7 @@ describe("ProviderRuntimeIngestion", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      autoResumeSchedules,
       drain,
     };
   }
@@ -370,6 +384,133 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("ready");
     expect(thread.session?.lastError).toBe("turn failed");
+  });
+
+  it("schedules one auto-resume job for a failed turn with retry metadata", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-usage-limited");
+    const userMessageId = asMessageId("message-before-usage-limit");
+    const providerInstanceId = ProviderInstanceId.make("codex-work");
+    const completedAt = "2026-01-01T00:00:02.000Z";
+    const retryAt = "2026-01-01T01:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-usage-limit"),
+      threadId,
+      message: {
+        messageId: userMessageId,
+        role: "user",
+        text: "Finish the task",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-usage-limited"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId,
+      threadId,
+      turnId,
+      createdAt: completedAt,
+      payload: {
+        state: "failed",
+        errorMessage: "Usage limit reached",
+        retry: { reason: "usage_limit", retryAt },
+      },
+    });
+    await harness.drain();
+
+    expect(harness.autoResumeSchedules).toEqual([
+      {
+        scheduleId: `auto-resume:${threadId}:${turnId}`,
+        threadId,
+        scheduledSequence: expect.any(Number),
+        sourceTurnId: turnId,
+        expectedUserMessageId: userMessageId,
+        providerInstanceId,
+        messageId: asMessageId(`auto-resume-message:${threadId}:${turnId}`),
+        reason: "usage_limit",
+        retryAt,
+        createdAt: completedAt,
+      },
+    ]);
+  });
+
+  it("does not schedule auto-resume for a failed turn without retry metadata", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-ordinary-failure"),
+      threadId,
+      message: {
+        messageId: asMessageId("message-before-ordinary-failure"),
+        role: "user",
+        text: "Finish the task",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-ordinary-failure"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("turn-ordinary-failure"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: {
+        state: "failed",
+        errorMessage: "Provider failed",
+      },
+    });
+    await harness.drain();
+
+    expect(harness.autoResumeSchedules).toEqual([]);
+  });
+
+  it("does not schedule auto-resume for a successful turn", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("cmd-turn-start-before-success"),
+      threadId,
+      message: {
+        messageId: asMessageId("message-before-success"),
+        role: "user",
+        text: "Finish the task",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-turn-completed-success"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("turn-success"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: {
+        state: "completed",
+      },
+    });
+    await harness.drain();
+
+    expect(harness.autoResumeSchedules).toEqual([]);
   });
 
   it("applies provider session.state.changed transitions directly", async () => {

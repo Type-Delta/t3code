@@ -37,7 +37,11 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+import {
+  claudeRateLimitRetryAt,
+  makeClaudeAdapter,
+  type ClaudeAdapterLiveOptions,
+} from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -1128,6 +1132,135 @@ describe("ClaudeAdapterLive", () => {
       if (completed?.type === "turn.completed") {
         assert.equal(String(completed.turnId), String(turn.turnId));
         assert.equal(completed.payload.state, "completed");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it("accepts only finite future Claude rate-limit reset timestamps", () => {
+    assert.equal(claudeRateLimitRetryAt(4_102_444_800, 4_102_444_799), "2100-01-01T00:00:00.000Z");
+    assert.equal(claudeRateLimitRetryAt(undefined, 0), undefined);
+    assert.equal(claudeRateLimitRetryAt(Number.NaN, 0), undefined);
+    assert.equal(claudeRateLimitRetryAt(4_102_444_799, 4_102_444_799), undefined);
+  });
+
+  it.effect("attaches a rejected Claude rate-limit reset to the active turn completion", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "continue",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "rate_limit_event",
+        session_id: "sdk-session-rate-limit",
+        uuid: "rate-limit-1",
+        rate_limit_info: {
+          status: "rejected",
+          resetsAt: 4_102_444_800,
+          rateLimitType: "five_hour",
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["usage limit exceeded"],
+        session_id: "sdk-session-rate-limit",
+        uuid: "result-rate-limit",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const completed = runtimeEvents.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed") {
+        assert.deepEqual(completed.payload.retry, {
+          reason: "usage_limit",
+          retryAt: "2100-01-01T00:00:00.000Z",
+        });
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not carry Claude rate-limit resets into another turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const firstEventsFiber = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "first",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "rate_limit_event",
+        session_id: "sdk-session-rate-limit-stale",
+        uuid: "rate-limit-stale",
+        rate_limit_info: {
+          status: "rejected",
+          resetsAt: 4_102_444_800,
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-rate-limit-stale",
+        uuid: "result-rate-limit-stale",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(firstEventsFiber);
+
+      const secondEventsFiber = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "second",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["another failure"],
+        session_id: "sdk-session-rate-limit-stale",
+        uuid: "result-second",
+      } as unknown as SDKMessage);
+
+      const secondEvents = Array.from(yield* Fiber.join(secondEventsFiber));
+      const completed = secondEvents.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed") {
+        assert.equal(completed.payload.retry, undefined);
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

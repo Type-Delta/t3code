@@ -4,6 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   ThreadCreateToolInput,
   ThreadCreateToolResult,
+  ThreadListModelsToolInput,
+  ThreadListModelsToolResult,
   ThreadListToolInput,
   ThreadReadToolInput,
   ThreadReadToolResult,
@@ -16,6 +18,8 @@ import {
 const decodeCreateInput = Schema.decodeUnknownSync(ThreadCreateToolInput);
 const decodeCreateResult = Schema.decodeUnknownSync(ThreadCreateToolResult);
 const decodeListInput = Schema.decodeUnknownSync(ThreadListToolInput);
+const decodeListModelsInput = Schema.decodeUnknownSync(ThreadListModelsToolInput);
+const decodeListModelsResult = Schema.decodeUnknownSync(ThreadListModelsToolResult);
 const decodeReadInput = Schema.decodeUnknownSync(ThreadReadToolInput);
 const decodeReadResult = Schema.decodeUnknownSync(ThreadReadToolResult);
 const decodeSendInput = Schema.decodeUnknownSync(ThreadSendMessageToolInput);
@@ -71,6 +75,18 @@ describe("thread tool inputs", () => {
     expect(decodeReadInput({ threadId: "thread-1" })).not.toHaveProperty("maxOutputCharsPerItem");
   });
 
+  it("accepts an absent, built-in, or custom driver filter", () => {
+    expect(decodeListModelsInput({})).not.toHaveProperty("driver");
+    expect(decodeListModelsInput({ driver: "codex" }).driver).toBe("codex");
+    expect(decodeListModelsInput({ driver: "ollama_remote" }).driver).toBe("ollama_remote");
+  });
+
+  it("rejects malformed driver filters", () => {
+    expect(() => decodeListModelsInput({ driver: "open code" })).toThrow();
+    expect(() => decodeListModelsInput({ driver: "1codex" })).toThrow();
+    expect(() => decodeListModelsInput({ driver: "codex/remote" })).toThrow();
+  });
+
   it("rejects blank prompts and bounded list or read inputs", () => {
     expect(() => decodeCreateInput({ prompt: " \n " })).toThrow();
     expect(() => decodeListInput({ limit: 201 })).toThrow();
@@ -112,6 +128,106 @@ describe("thread tool inputs", () => {
 });
 
 describe("thread tool results", () => {
+  it("groups complete model catalogs by provider instance", () => {
+    const result = decodeListModelsResult({
+      environmentId: "environment-1",
+      providers: [
+        {
+          instanceId: "codex_personal",
+          driver: "codex",
+          displayName: "Personal Codex",
+          models: [
+            {
+              slug: "gpt-5.3-codex",
+              name: "GPT-5.3 Codex",
+              description: "Previous-generation coding model",
+              shortName: "5.3",
+              isCustom: false,
+              isLegacy: true,
+              capabilities: null,
+              metadata: {
+                contextWindowTokens: 200000,
+                maxOutputTokens: 100000,
+                source: "codex-app-server",
+              },
+            },
+          ],
+        },
+        {
+          instanceId: "codex_work",
+          driver: "codex",
+          displayName: "Work Codex",
+          models: [
+            {
+              slug: "company-codex",
+              name: "Company Codex",
+              subProvider: "internal-gateway",
+              isCustom: true,
+              isDefault: true,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "reasoningEffort",
+                    label: "Reasoning effort",
+                    type: "select",
+                    options: [
+                      {
+                        id: "high",
+                        label: "High",
+                        description: "Use more reasoning",
+                        isDefault: true,
+                      },
+                    ],
+                    currentValue: "high",
+                    promptInjectedValues: ["high"],
+                  },
+                ],
+              },
+              metadata: {
+                contextWindowTokens: 400000,
+                maxContextWindowTokens: 500000,
+                maxOutputTokens: 120000,
+                source: "custom-config",
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.providers.map(({ instanceId, driver }) => ({ instanceId, driver }))).toEqual([
+      { instanceId: "codex_personal", driver: "codex" },
+      { instanceId: "codex_work", driver: "codex" },
+    ]);
+    expect(result.providers[0]?.models[0]).toMatchObject({
+      slug: "gpt-5.3-codex",
+      isCustom: false,
+      isLegacy: true,
+      metadata: { source: "codex-app-server" },
+    });
+    expect(result.providers[1]?.models[0]).toMatchObject({
+      slug: "company-codex",
+      subProvider: "internal-gateway",
+      isCustom: true,
+      isDefault: true,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            currentValue: "high",
+            promptInjectedValues: ["high"],
+          },
+        ],
+      },
+      metadata: {
+        contextWindowTokens: 400000,
+        maxContextWindowTokens: 500000,
+        maxOutputTokens: 120000,
+        source: "custom-config",
+      },
+    });
+  });
+
   it("keeps identifiers and cursors in a create result", () => {
     expect(
       decodeCreateResult({

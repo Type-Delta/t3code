@@ -13,7 +13,10 @@ import {
   PreviewAutomationTargetNotEditableError,
   PreviewAutomationTimeoutError,
   PreviewAutomationUnsupportedClientError,
+  PreviewAutomationUnavailableError,
   PreviewTabId,
+  ProviderInstanceId,
+  ThreadId,
   type PreviewAutomationError,
   type PreviewAutomationOperation,
   type PreviewAutomationHost,
@@ -95,9 +98,9 @@ interface HostAssignment {
 interface PreviewAutomationRequestErrorContext {
   readonly operation: PreviewAutomationOperation;
   readonly environmentId: McpInvocationContext.McpInvocationScope["environmentId"];
-  readonly threadId: McpInvocationContext.McpInvocationScope["threadId"];
+  readonly threadId: ThreadId;
   readonly providerSessionId: string;
-  readonly providerInstanceId: McpInvocationContext.McpInvocationScope["providerInstanceId"];
+  readonly providerInstanceId: ProviderInstanceId;
   readonly clientId: string;
   readonly connectionId: ClientConnection["connectionId"];
   readonly requestId: string;
@@ -116,6 +119,12 @@ interface BrokerState {
 }
 
 const HOST_TIMEOUT_QUARANTINE_MS = 30_000;
+
+const providerPreviewFallback = {
+  threadId: ThreadId.make("mcp-management-key"),
+  providerSessionId: "mcp-management-key",
+  providerInstanceId: ProviderInstanceId.make("mcp-management-key"),
+} as const;
 
 const removeConnectionFromState = (
   current: BrokerState,
@@ -155,7 +164,20 @@ const selectorDiagnosticsFromInput = (
 };
 
 const hostAssignmentKey = (scope: McpInvocationContext.McpInvocationScope): string =>
-  `${scope.environmentId}\u0000${scope.providerSessionId}`;
+  `${scope.environmentId}\u0000${
+    scope.principal.type === "provider-session"
+      ? scope.principal.providerSessionId
+      : `management-key:${scope.principal.keyId}`
+  }`;
+
+const providerPreviewContext = (scope: McpInvocationContext.McpInvocationScope) =>
+  scope.principal.type === "provider-session"
+    ? {
+        threadId: scope.principal.threadId,
+        providerSessionId: scope.principal.providerSessionId,
+        providerInstanceId: scope.principal.providerInstanceId,
+      }
+    : undefined;
 
 const isPreviewTabId = Schema.is(PreviewTabId);
 
@@ -483,6 +505,10 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         }),
       );
       const assignmentKey = hostAssignmentKey(input.scope);
+      const provider = providerPreviewContext(input.scope);
+      if (!provider) {
+        return [undefined, { ...current, assignments }] as const;
+      }
       const assigned = assignments.get(assignmentKey);
       const assignedConnection = assigned ? current.clients.get(assigned.clientId) : undefined;
       const hasLiveAssignment = assignedConnection?.environmentId === input.scope.environmentId;
@@ -535,9 +561,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       const context: PreviewAutomationRequestErrorContext = {
         operation: input.operation,
         environmentId: input.scope.environmentId,
-        threadId: input.scope.threadId,
-        providerSessionId: input.scope.providerSessionId,
-        providerInstanceId: input.scope.providerInstanceId,
+        ...provider,
         clientId: connection.clientId,
         connectionId: connection.connectionId,
         requestId,
@@ -553,12 +577,20 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       ] as const;
     });
     if (!route) {
+      const provider = providerPreviewContext(input.scope);
+      if (!provider) {
+        return yield* new PreviewAutomationUnavailableError({
+          capability: "preview",
+          environmentId: input.scope.environmentId,
+          // This branch is defensive: normal preview MCP handlers reject
+          // management principals before entering the broker.
+          ...providerPreviewFallback,
+        });
+      }
       return yield* new PreviewAutomationNoAvailableHostError({
         operation: input.operation,
         environmentId: input.scope.environmentId,
-        threadId: input.scope.threadId,
-        providerSessionId: input.scope.providerSessionId,
-        providerInstanceId: input.scope.providerInstanceId,
+        ...provider,
       });
     }
     const { connection, requestId, requestContext, requestSequence } = route;
@@ -574,7 +606,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         connectionId: connection.connectionId,
         request: {
           requestId,
-          threadId: input.scope.threadId,
+          threadId: providerPreviewContext(input.scope)!.threadId,
           tabId: requestContext.tabId,
           tabIdExplicit: input.tabId !== undefined,
           operation: input.operation,

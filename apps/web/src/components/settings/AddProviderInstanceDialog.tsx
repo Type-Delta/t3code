@@ -257,7 +257,7 @@ export function AddProviderInstanceDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-xl overflow-hidden">
         <div className="flex min-h-0 flex-col overflow-hidden">
-          <DialogHeader>
+          <DialogHeader className="shrink-0">
             <DialogTitle>Add provider instance</DialogTitle>
             <DialogDescription>
               Configure an additional provider instance on {environmentLabel} — for example, a
@@ -273,7 +273,7 @@ export function AddProviderInstanceDialog({
 
           <div
             data-slot="dialog-panel"
-            className="space-y-4 bg-zinc-25/80 px-6 py-5 ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5"
+            className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-zinc-25/80 px-6 py-5 ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5"
           >
             <AnimatedHeight>
               <div className={cn("grid gap-2", wizardStep !== 0 && "hidden")}>
@@ -447,7 +447,7 @@ export function AddProviderInstanceDialog({
             </AnimatedHeight>
           </div>
 
-          <DialogFooter variant="bare">
+          <DialogFooter variant="bare" className="shrink-0">
             <Button
               variant="outline"
               size="sm"

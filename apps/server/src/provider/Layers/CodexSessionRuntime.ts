@@ -25,6 +25,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -43,6 +44,34 @@ import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.t
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
+
+export const CODEX_USAGE_LIMIT_RETRY_AT_FIELD = "t3UsageLimitRetryAt";
+
+export function codexUsageLimitRetryAt(
+  response: EffectCodexSchema.V2GetAccountRateLimitsResponse,
+  nowMillis: number,
+): string | undefined {
+  const snapshot = response.rateLimits;
+  const resetCandidates = [snapshot.primary, snapshot.secondary]
+    .filter(
+      (window) =>
+        window !== null &&
+        window !== undefined &&
+        window.usedPercent >= 100 &&
+        window.resetsAt != null,
+    )
+    .map((window) => window!.resetsAt! * 1_000);
+  if (snapshot.individualLimit?.remainingPercent === 0) {
+    resetCandidates.push(snapshot.individualLimit.resetsAt * 1_000);
+  }
+  const retryAtMillis = resetCandidates.reduce(
+    (latest, candidate) => (candidate > nowMillis ? Math.max(latest, candidate) : latest),
+    0,
+  );
+  return retryAtMillis > nowMillis
+    ? DateTime.formatIso(DateTime.makeUnsafe(retryAtMillis))
+    : undefined;
+}
 
 const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
 const ANSI_ESCAPE_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*m`, "g");
@@ -2072,7 +2101,7 @@ export const makeCodexSessionRuntime = (
         const isMemoryConsolidationNotification =
           suppressMemoryConsolidationNotification(notification);
 
-        const payload = notification.params;
+        let payload: unknown = notification.params;
         const route = readRouteFields(notification);
         const collabReceiverTurns = yield* Ref.get(collabReceiverTurnsRef);
         const childParentTurnId = (() => {
@@ -2192,6 +2221,26 @@ export const makeCodexSessionRuntime = (
               next.delete(rawRequestId);
               return next;
             });
+          }
+        }
+
+        if (
+          notification.method === "error" &&
+          notification.params.willRetry === false &&
+          notification.params.error.codexErrorInfo === "usageLimitExceeded"
+        ) {
+          const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
+          const retryAt = yield* client.request("account/rateLimits/read", undefined).pipe(
+            Effect.map((response) => codexUsageLimitRetryAt(response, nowMillis)),
+            Effect.timeoutOption("3 seconds"),
+            Effect.map(Option.getOrUndefined),
+            Effect.catch(() => Effect.succeed(undefined)),
+          );
+          if (retryAt !== undefined) {
+            payload = {
+              ...notification.params,
+              [CODEX_USAGE_LIMIT_RETRY_AT_FIELD]: retryAt,
+            };
           }
         }
 

@@ -22,6 +22,22 @@ const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
 
+describe("auto resume on usage limit", () => {
+  it("defaults existing settings to enabled", () => {
+    expect(decodeServerSettings({}).autoResumeOnUsageLimit).toBe(true);
+    expect(DEFAULT_SERVER_SETTINGS.autoResumeOnUsageLimit).toBe(true);
+  });
+
+  it("accepts an explicit disabled value and patch", () => {
+    expect(decodeServerSettings({ autoResumeOnUsageLimit: false }).autoResumeOnUsageLimit).toBe(
+      false,
+    );
+    expect(
+      decodeServerSettingsPatch({ autoResumeOnUsageLimit: false }).autoResumeOnUsageLimit,
+    ).toBe(false);
+  });
+});
+
 describe("provider API gateway model settings", () => {
   it("keeps gateway configuration and manual model metadata per provider instance", () => {
     const decoded = decodeCodexSettings({

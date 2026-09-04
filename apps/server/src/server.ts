@@ -78,6 +78,7 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { CheckpointNavigationReactorLive } from "./orchestration/Layers/CheckpointNavigationReactor.ts";
 import { CheckpointNavigationReactor } from "./orchestration/Services/CheckpointNavigationReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import { AutoResumeReactorLive } from "./orchestration/Layers/AutoResumeReactor.ts";
 import * as ThreadCommandDispatcher from "./orchestration/ThreadCommandDispatcher.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
@@ -104,9 +105,15 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
-import { authHttpApiLayer, environmentAuthenticatedAuthLayer } from "./auth/http.ts";
+import {
+  authHttpApiLayer,
+  environmentAuthenticatedAuthLayer,
+  managementApiHttpLayer,
+} from "./auth/http.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as ManagementApiKeyService from "./auth/ManagementApiKeyService.ts";
+import * as ManagementApiKeys from "./persistence/ManagementApiKeys.ts";
 import {
   connectHttpApiLayer,
   pendingServiceUpdateExists,
@@ -134,6 +141,7 @@ import { CheckpointCaptureJobRepositoryLive } from "./persistence/Layers/Checkpo
 import { CheckpointTimelineRepositoryLive } from "./persistence/Layers/CheckpointTimeline.ts";
 import { CheckpointNavigationRepositoryLive } from "./persistence/Layers/CheckpointNavigation.ts";
 import { CheckpointRetentionRepositoryLive } from "./persistence/Layers/CheckpointRetention.ts";
+import { AutoResumeJobRepositoryLive } from "./persistence/Layers/AutoResumeJobs.ts";
 import { CheckpointLegacyMigrationRepositoryLive } from "./persistence/Layers/CheckpointLegacyMigrations.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -280,6 +288,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
+  Layer.provideMerge(AutoResumeReactorLive),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
@@ -299,7 +308,10 @@ const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
 );
 
-const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
+const PersistenceLayerLive = Layer.empty.pipe(
+  Layer.provideMerge(SqlitePersistenceLayerLive),
+  Layer.provideMerge(AutoResumeJobRepositoryLive),
+);
 
 const VcsDriverRegistryLayerLive = VcsDriverRegistry.layer.pipe(
   Layer.provide(VcsProjectConfig.layer),
@@ -488,6 +500,11 @@ const AuthLayerLive = EnvironmentAuth.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const ManagementApiKeyServiceLayerLive = ManagementApiKeyService.layer.pipe(
+  Layer.provideMerge(ManagementApiKeys.layer),
+  Layer.provideMerge(PersistenceLayerLive),
+);
+
 const CloudManagedEndpointRuntimeLive = Layer.mergeAll(
   RelayClientLive,
   CloudManagedEndpointRuntime.layer.pipe(
@@ -551,6 +568,7 @@ const RuntimeCoreDependenciesLive = RuntimeCoreBaseLive.pipe(
   Layer.provideMerge(RepositoryIdentityResolver.layer),
   Layer.provideMerge(ServerEnvironmentLayerLive),
   Layer.provideMerge(AuthLayerLive),
+  Layer.provideMerge(ManagementApiKeyServiceLayerLive),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(
     Layer.mergeAll(
@@ -597,6 +615,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(authHttpApiLayer),
+      Layer.provide(managementApiHttpLayer),
       Layer.provide(connectHttpApiLayer),
       Layer.provide(orchestrationHttpApiLayer),
       Layer.provide(pullRequestHttpApiLayer),
