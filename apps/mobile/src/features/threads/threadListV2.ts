@@ -473,8 +473,8 @@ export function buildThreadListV2Items(input: {
         );
   const orderedSettled = [...settled].sort(
     (left, right) =>
-      firstValidTimestampMs(right.latestUserMessageAt, right.updatedAt) -
-      firstValidTimestampMs(left.latestUserMessageAt, left.updatedAt),
+      firstValidTimestampMs(right.latestUserMessageAt, right.createdAt) -
+      firstValidTimestampMs(left.latestUserMessageAt, left.createdAt),
   );
   const settledLimit = input.settledLimit ?? Number.POSITIVE_INFINITY;
   const pagedSettled =

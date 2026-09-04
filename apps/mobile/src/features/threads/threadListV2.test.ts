@@ -782,6 +782,33 @@ describe("buildThreadListV2Items", () => {
     expect(items.map((item) => item.thread.id)).toEqual(["newer-created", "older-created"]);
   });
 
+  it("does not promote settled threads for non-message updates", () => {
+    const { items } = buildThreadListV2Items({
+      threads: [
+        makeThread({
+          id: ThreadId.make("older-created"),
+          title: "Older",
+          createdAt: "2026-06-01T08:00:00.000Z",
+          updatedAt: NOW,
+          settledOverride: "settled",
+          settledAt: NOW,
+        }),
+        makeThread({
+          id: ThreadId.make("newer-created"),
+          title: "Newer",
+          createdAt: "2026-06-01T12:00:00.000Z",
+          settledOverride: "settled",
+          settledAt: NOW,
+        }),
+      ],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+
+    expect(items.map((item) => item.thread.id)).toEqual(["newer-created", "older-created"]);
+  });
+
   it("keeps settled threads in the tail and filters by search query", () => {
     const { items } = buildThreadListV2Items({
       threads: [

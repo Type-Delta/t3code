@@ -443,15 +443,15 @@ available because this workflow deliberately does not publish a matching `t3` pa
 
 **Last updated:** 2026-09-02
 
-### DL029 — Active sidebar threads follow modification time
+### DL029 — User messages promote active sidebar threads
 
-The current sidebar orders active threads by their latest `updatedAt` timestamp, so sending a message moves an older thread above less recently modified active threads. Creation and un-settle timestamps remain fallback anchors for invalid or stale modification timestamps, and equal anchors use environment and thread IDs for deterministic ordering.
+The current sidebar moves an active thread to the top when the user sends it a new message. Other thread updates do not change its position. Creation and un-settle timestamps remain lifecycle anchors, and equal anchors use environment and thread IDs for deterministic ordering.
 
 **Implementation evidence:** `apps/web/src/components/Sidebar.logic.ts` and `apps/web/src/components/Sidebar.logic.test.ts`.
 
-**Recorded validation:** focused Sidebar logic regression tests covering message-driven reordering, creation fallback, un-settle re-entry, stale timestamps, and deterministic ties.
+**Recorded validation:** focused shared, web, and mobile thread-sort tests covering user-message promotion, non-message updates, creation fallback, un-settle re-entry, and deterministic ties; `vp check`; and `vp run typecheck`.
 
-**Last updated:** 2026-09-02
+**Last updated:** 2026-09-03
 
 ### DL030 — Isolated macOS GitHub releases
 

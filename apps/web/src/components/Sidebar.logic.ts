@@ -650,22 +650,27 @@ export function firstValidTimestamp(
   return null;
 }
 
-// Active threads follow their latest modification, so a newly sent message
-// moves its thread to the top. Creation and un-settle timestamps remain
-// fallback anchors for malformed or stale updatedAt values.
+// User messages move active threads to the top. Other thread updates leave
+// their position alone; creation and un-settle remain lifecycle anchors.
 export function sortThreadsForSidebar<
   T extends {
     readonly environmentId: string;
     readonly id: string;
     readonly createdAt: string;
-    readonly updatedAt: string;
+    readonly latestUserMessageAt?: string | null | undefined;
     readonly unsettledAt?: string | null | undefined;
   },
 >(threads: readonly T[]): T[] {
   return [...threads].toSorted(
     (left, right) =>
-      Math.max(activeThreadAnchorTimestampMs(right), toSortableTimestamp(right.updatedAt) ?? 0) -
-        Math.max(activeThreadAnchorTimestampMs(left), toSortableTimestamp(left.updatedAt) ?? 0) ||
+      Math.max(
+        activeThreadAnchorTimestampMs(right),
+        toSortableTimestamp(right.latestUserMessageAt ?? undefined) ?? 0,
+      ) -
+        Math.max(
+          activeThreadAnchorTimestampMs(left),
+          toSortableTimestamp(left.latestUserMessageAt ?? undefined) ?? 0,
+        ) ||
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
