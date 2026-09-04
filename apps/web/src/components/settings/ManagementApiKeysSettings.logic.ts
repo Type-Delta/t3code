@@ -1,8 +1,5 @@
 import {
-  AuthAccessReadScope,
-  AuthAccessWriteScope,
   MANAGEMENT_API_KEY_RUNTIME_MODE_ORDER,
-  type AuthSessionState,
   type ManagementApiKeyRuntimeMode,
   type ManagementApiKeyScope as ContractManagementApiKeyScope,
 } from "@t3tools/contracts";
@@ -24,30 +21,6 @@ export type ManagementApiKeyExpiration = "30-days" | "90-days" | "1-year" | "nev
 export interface ManagementApiKeyEnvironmentOption {
   readonly environmentId: EnvironmentId;
   readonly label: string;
-}
-
-export type ManagementApiKeyAccess = "granted" | "denied" | "pending";
-
-export function resolveManagementApiKeyAccess(input: {
-  readonly isPrimary: boolean;
-  readonly hasDesktopBridge: boolean;
-  readonly session: Pick<AuthSessionState, "authenticated" | "scopes"> | null;
-  readonly isPending: boolean;
-  readonly hasError: boolean;
-  readonly requiredScope: typeof AuthAccessReadScope | typeof AuthAccessWriteScope;
-}): ManagementApiKeyAccess {
-  if (input.isPrimary && input.hasDesktopBridge) return "granted";
-  if (input.session === null) {
-    if (input.isPending) return "pending";
-    // A failed session read is a transport problem, not proof of denial. The
-    // environment request remains authoritative if access is actually missing.
-    return input.hasError ? "granted" : "denied";
-  }
-  if (!input.session.authenticated) return "denied";
-  // Older remote servers did not report scopes. Keep their existing session useful;
-  // the environment request remains authoritative if the operation is rejected.
-  if (input.session.scopes === undefined) return input.isPrimary ? "denied" : "granted";
-  return input.session.scopes.includes(input.requiredScope) ? "granted" : "denied";
 }
 
 /** Keep the primary machine prominent while making every other machine easy to find. */

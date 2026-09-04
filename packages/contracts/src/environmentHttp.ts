@@ -513,11 +513,7 @@ export class EnvironmentManagementHttpApi extends HttpApiGroup.make("management"
     HttpApiEndpoint.get("keys", "/api/management/keys", {
       headers: OptionalBearerHeaders,
       success: ManagementApiKeyListResponse,
-      error: [
-        EnvironmentRequestInvalidError,
-        EnvironmentScopeRequiredError,
-        EnvironmentInternalError,
-      ],
+      error: [EnvironmentRequestInvalidError, EnvironmentInternalError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -525,11 +521,7 @@ export class EnvironmentManagementHttpApi extends HttpApiGroup.make("management"
       headers: OptionalBearerHeaders,
       payload: ManagementApiKeyCreateRequest,
       success: ManagementApiKeyCreateResponse,
-      error: [
-        EnvironmentRequestInvalidError,
-        EnvironmentScopeRequiredError,
-        EnvironmentInternalError,
-      ],
+      error: [EnvironmentRequestInvalidError, EnvironmentInternalError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -540,7 +532,6 @@ export class EnvironmentManagementHttpApi extends HttpApiGroup.make("management"
       error: [
         EnvironmentRequestInvalidError,
         EnvironmentResourceNotFoundError,
-        EnvironmentScopeRequiredError,
         EnvironmentInternalError,
       ],
     }).middleware(EnvironmentAuthenticatedAuth),
@@ -553,7 +544,6 @@ export class EnvironmentManagementHttpApi extends HttpApiGroup.make("management"
       error: [
         EnvironmentRequestInvalidError,
         EnvironmentResourceNotFoundError,
-        EnvironmentScopeRequiredError,
         EnvironmentInternalError,
       ],
     }).middleware(EnvironmentAuthenticatedAuth),

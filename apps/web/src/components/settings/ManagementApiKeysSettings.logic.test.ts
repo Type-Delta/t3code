@@ -1,4 +1,4 @@
-import { AuthAccessReadScope, AuthAccessWriteScope, EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -13,7 +13,6 @@ import {
   orderedManagementApiKeyScopes,
   revealManagementApiKey,
   resolveManagementApiKeyExpiration,
-  resolveManagementApiKeyAccess,
   resolveSelectedManagementApiKeyEnvironmentId,
   scopesForManagementApiKeyPreset,
 } from "./ManagementApiKeysSettings.logic";
@@ -49,66 +48,6 @@ describe("management API key environment selection", () => {
       ),
     ).toBe("primary");
     expect(resolveSelectedManagementApiKeyEnvironmentId([], null, null)).toBeNull();
-  });
-});
-
-describe("management API key access", () => {
-  const session = { authenticated: true, scopes: [AuthAccessReadScope] } as const;
-
-  it("requires the requested scope and grants desktop primary access", () => {
-    expect(
-      resolveManagementApiKeyAccess({
-        isPrimary: false,
-        hasDesktopBridge: false,
-        session,
-        isPending: false,
-        hasError: false,
-        requiredScope: AuthAccessReadScope,
-      }),
-    ).toBe("granted");
-    expect(
-      resolveManagementApiKeyAccess({
-        isPrimary: false,
-        hasDesktopBridge: false,
-        session,
-        isPending: false,
-        hasError: false,
-        requiredScope: AuthAccessWriteScope,
-      }),
-    ).toBe("denied");
-    expect(
-      resolveManagementApiKeyAccess({
-        isPrimary: true,
-        hasDesktopBridge: true,
-        session: null,
-        isPending: false,
-        hasError: false,
-        requiredScope: AuthAccessWriteScope,
-      }),
-    ).toBe("granted");
-  });
-
-  it("keeps remote older-server sessions usable and treats primary scope absence as denied", () => {
-    expect(
-      resolveManagementApiKeyAccess({
-        isPrimary: false,
-        hasDesktopBridge: false,
-        session: { authenticated: true },
-        isPending: false,
-        hasError: false,
-        requiredScope: AuthAccessReadScope,
-      }),
-    ).toBe("granted");
-    expect(
-      resolveManagementApiKeyAccess({
-        isPrimary: true,
-        hasDesktopBridge: false,
-        session: { authenticated: true },
-        isPending: false,
-        hasError: false,
-        requiredScope: AuthAccessReadScope,
-      }),
-    ).toBe("denied");
   });
 });
 

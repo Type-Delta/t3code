@@ -3839,7 +3839,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("protects management API key administration with environment session scopes", () =>
+  it.effect("lets any authenticated T3 session administer external management API keys", () =>
     Effect.gen(function* () {
       const keyId = ManagementApiKeyId.make("management-http-test");
       const createdAt = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
@@ -3925,7 +3925,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         }),
       });
       assert.equal(readListResponse.status, 200);
-      assert.equal(readCreateResponse.status, 403);
+      assert.equal(readCreateResponse.status, 200);
+
+      const unauthenticatedResponse = yield* HttpClient.get("/api/management/keys");
+      assert.equal(unauthenticatedResponse.status, 401);
 
       const managementAuthResponse = yield* HttpClient.get("/api/management/keys", {
         headers: { authorization: `Bearer ${secret}` },

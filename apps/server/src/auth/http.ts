@@ -533,7 +533,6 @@ export const managementApiHttpLayer = HttpApiBuilder.group(
         "keys",
         Effect.fn("environment.management.keys")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthAccessReadScope);
           return yield* catchManagementApiKeyError(
             managementKeys.list(),
             "management_api_keys_load_failed",
@@ -544,7 +543,6 @@ export const managementApiHttpLayer = HttpApiBuilder.group(
         "createKey",
         Effect.fn("environment.management.createKey")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthAccessWriteScope);
           const issued = yield* catchManagementApiKeyError(
             managementKeys.create(args.payload),
             "management_api_key_creation_failed",
@@ -561,7 +559,6 @@ export const managementApiHttpLayer = HttpApiBuilder.group(
         "revokeKey",
         Effect.fn("environment.management.revokeKey")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthAccessWriteScope);
           return yield* Effect.map(
             catchManagementApiKeyError(
               managementKeys.revoke(args.params.id),
@@ -575,7 +572,6 @@ export const managementApiHttpLayer = HttpApiBuilder.group(
         "rotateKey",
         Effect.fn("environment.management.rotateKey")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthAccessWriteScope);
           const rotated = yield* catchManagementApiKeyError(
             managementKeys.rotate(args.params.id),
             "management_api_key_rotation_failed",

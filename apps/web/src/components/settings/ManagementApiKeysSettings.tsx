@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { AuthAccessReadScope, AuthAccessWriteScope, EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId } from "@t3tools/contracts";
 import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import * as Option from "effect/Option";
 
@@ -28,9 +28,7 @@ import {
   type ManagementApiKeySafeRuntimeMode,
 } from "~/environments/managementApiKeys";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
-import { useEnvironmentSessionState, usePreparedConnection } from "~/state/session";
-import { isElectron } from "~/env";
-import { usePrimarySessionState } from "~/environments/primary";
+import { usePreparedConnection } from "~/state/session";
 import { cn } from "~/lib/utils";
 
 import {
@@ -60,6 +58,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Spinner } from "../ui/spinner";
 import { Textarea } from "../ui/textarea";
 import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { EnvironmentSettingsTabs } from "./EnvironmentSettingsTabs";
 import {
   buildManagementApiKeyCodexExample,
   buildManagementApiKeyEnvironmentOptions,
@@ -73,7 +72,6 @@ import {
   managementApiKeyRuntimeModeLabel,
   managementApiKeyScopeSummary,
   resolveManagementApiKeyExpiration,
-  resolveManagementApiKeyAccess,
   resolveSelectedManagementApiKeyEnvironmentId,
   revealManagementApiKey,
   scopesForManagementApiKeyPreset,
@@ -701,32 +699,6 @@ export function ManagementApiKeysSettings() {
     environmentOptions.find(({ environmentId }) => environmentId === effectiveEnvironmentId) ??
     null;
   const prepared = usePreparedConnection(effectiveEnvironmentId);
-  const sessionEnvironmentId =
-    effectiveEnvironmentId ??
-    primaryEnvironmentId ??
-    environmentOptions[0]?.environmentId ??
-    EnvironmentId.make("management-api-keys-unselected");
-  const primarySessionState = usePrimarySessionState();
-  const remoteSessionState = useEnvironmentSessionState(sessionEnvironmentId);
-  const isSelectedPrimary =
-    effectiveEnvironmentId !== null && effectiveEnvironmentId === primaryEnvironmentId;
-  const selectedSessionState = isSelectedPrimary ? primarySessionState : remoteSessionState;
-  const selectedReadAccess = resolveManagementApiKeyAccess({
-    isPrimary: isSelectedPrimary,
-    hasDesktopBridge: isElectron,
-    session: selectedSessionState.data,
-    isPending: selectedSessionState.isPending,
-    hasError: isSelectedPrimary ? primarySessionState.error !== null : remoteSessionState.hasError,
-    requiredScope: AuthAccessReadScope,
-  });
-  const selectedWriteAccess = resolveManagementApiKeyAccess({
-    isPrimary: isSelectedPrimary,
-    hasDesktopBridge: isElectron,
-    session: selectedSessionState.data,
-    isPending: selectedSessionState.isPending,
-    hasError: isSelectedPrimary ? primarySessionState.error !== null : remoteSessionState.hasError,
-    requiredScope: AuthAccessWriteScope,
-  });
   const [stateByEnvironment, setStateByEnvironment] = useState<
     Readonly<Record<string, ManagementApiKeyEnvironmentState>>
   >({});
@@ -819,7 +791,7 @@ export function ManagementApiKeysSettings() {
       ...current,
       [effectiveEnvironmentId]: EMPTY_ENVIRONMENT_STATE,
     }));
-    if (Option.isSome(prepared) && selectedReadAccess === "granted") {
+    if (Option.isSome(prepared)) {
       void refreshKeys(effectiveEnvironmentId, prepared.value);
     } else {
       requestGeneration.current.set(
@@ -827,7 +799,7 @@ export function ManagementApiKeysSettings() {
         (requestGeneration.current.get(effectiveEnvironmentId) ?? 0) + 1,
       );
     }
-  }, [effectiveEnvironmentId, prepared, refreshKeys, selectedReadAccess]);
+  }, [effectiveEnvironmentId, prepared, refreshKeys]);
 
   const selectedTarget: ManagementApiKeyTarget | null =
     selectedEnvironment !== null && Option.isSome(prepared)
@@ -837,8 +809,8 @@ export function ManagementApiKeysSettings() {
           prepared: prepared.value,
         }
       : null;
-  const canListSelectedEnvironment = selectedTarget !== null && selectedReadAccess === "granted";
-  const canMutateSelectedEnvironment = selectedTarget !== null && selectedWriteAccess === "granted";
+  const canListSelectedEnvironment = selectedTarget !== null;
+  const canMutateSelectedEnvironment = selectedTarget !== null;
   const mutationInFlight = isMutating || busyKey !== null;
   const selectEnvironment = (environmentId: EnvironmentId) => {
     setSelectedEnvironmentId(environmentId);
@@ -958,41 +930,17 @@ export function ManagementApiKeysSettings() {
           </Button>
         }
       >
-        <div className="space-y-2 px-3 sm:px-4">
-          <Label htmlFor="management-api-key-environment">Environment</Label>
-          <Select
-            value={effectiveEnvironmentId ?? ""}
-            onValueChange={(value) => {
-              if (value) selectEnvironment(value as EnvironmentId);
-            }}
-            disabled={environmentOptions.length === 0 || mutationInFlight}
-          >
-            <SelectTrigger id="management-api-key-environment" className="w-full">
-              <SelectValue>{selectedEnvironment?.label ?? "Select an environment"}</SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {environmentOptions.map((environment) => (
-                <SelectItem key={environment.environmentId} value={environment.environmentId}>
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate">{environment.label}</span>
-                    {environment.environmentId === primaryEnvironmentId ? (
-                      <span className="text-xs text-muted-foreground">Primary</span>
-                    ) : null}
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Keys belong only to the selected environment. Choose the machine where the external MCP
-            client should connect.
-          </p>
-        </div>
+        <EnvironmentSettingsTabs
+          environments={environmentOptions}
+          selectedEnvironmentId={effectiveEnvironmentId}
+          onSelect={selectEnvironment}
+          disabled={mutationInFlight}
+        />
         <SettingsRow
           title="External MCP access"
-          description="Durable credentials for MCP clients. Keys only expose the thread tools selected below; they never grant project administration, terminal, filesystem, preview, or settings access."
+          description="Create a separate credential for a third-party MCP client that cannot use a normal T3 connection. Each key belongs to this machine and only exposes the thread tools selected below."
         />
-        {selectedState.error && selectedReadAccess === "granted" && !isCreateDialogOpen ? (
+        {selectedState.error && !isCreateDialogOpen ? (
           <div
             className="mx-3 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive sm:mx-4"
             role="alert"
@@ -1009,15 +957,6 @@ export function ManagementApiKeysSettings() {
             <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
               {selectedEnvironment.label} is currently unavailable. Reconnect to this machine to
               manage its API keys.
-            </div>
-          ) : selectedReadAccess === "pending" ? (
-            <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-              Checking access to {selectedEnvironment.label}…
-            </div>
-          ) : selectedReadAccess === "denied" ? (
-            <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-              You need access-management read permission to view API keys on{" "}
-              {selectedEnvironment.label}.
             </div>
           ) : selectedState.isLoading ? (
             <div className="flex items-center gap-2 py-5 text-sm text-muted-foreground">
