@@ -6,11 +6,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
-import {
-  ManagementApiKeyId,
-  ManagementApiKeyRuntimeMode,
-  ManagementApiKeyScopes,
-} from "@t3tools/contracts";
+import { ManagementApiKeyId, ManagementApiKeyScopes } from "@t3tools/contracts";
 
 import {
   type ManagementApiKeyRepositoryError,
@@ -25,8 +21,6 @@ export const ManagementApiKeyRecord = Schema.Struct({
   secretHash: Schema.String,
   secretPrefix: Schema.String,
   scopes: ManagementApiKeyScopes,
-  defaultRuntimeMode: ManagementApiKeyRuntimeMode,
-  maximumRuntimeMode: ManagementApiKeyRuntimeMode,
   createdAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   lastUsedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -40,8 +34,6 @@ export const CreateManagementApiKeyInput = Schema.Struct({
   secretHash: Schema.String,
   secretPrefix: Schema.String,
   scopes: ManagementApiKeyScopes,
-  defaultRuntimeMode: ManagementApiKeyRuntimeMode,
-  maximumRuntimeMode: ManagementApiKeyRuntimeMode,
   createdAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.NullOr(Schema.DateTimeUtcFromString),
 });
@@ -79,8 +71,6 @@ const ManagementApiKeyDbRow = Schema.Struct({
   secretHash: Schema.String,
   secretPrefix: Schema.String,
   scopes: Schema.fromJsonString(ManagementApiKeyScopes),
-  defaultRuntimeMode: ManagementApiKeyRuntimeMode,
-  maximumRuntimeMode: ManagementApiKeyRuntimeMode,
   createdAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   lastUsedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -93,8 +83,6 @@ const ManagementApiKeyRawDbRow = Schema.Struct({
   secretHash: Schema.Unknown,
   secretPrefix: Schema.Unknown,
   scopes: Schema.Unknown,
-  defaultRuntimeMode: Schema.Unknown,
-  maximumRuntimeMode: Schema.Unknown,
   createdAt: Schema.Unknown,
   expiresAt: Schema.Unknown,
   lastUsedAt: Schema.Unknown,
@@ -151,8 +139,6 @@ const allColumns = `
   secret_hash AS "secretHash",
   secret_prefix AS "secretPrefix",
   scopes AS "scopes",
-  default_runtime_mode AS "defaultRuntimeMode",
-  maximum_runtime_mode AS "maximumRuntimeMode",
   created_at AS "createdAt",
   expires_at AS "expiresAt",
   last_used_at AS "lastUsedAt",
@@ -172,8 +158,6 @@ export const make = Effect.gen(function* () {
           secret_hash,
           secret_prefix,
           scopes,
-          default_runtime_mode,
-          maximum_runtime_mode,
           created_at,
           expires_at,
           last_used_at,
@@ -185,8 +169,6 @@ export const make = Effect.gen(function* () {
           ${input.secretHash},
           ${input.secretPrefix},
           ${JSON.stringify(input.scopes)},
-          ${input.defaultRuntimeMode},
-          ${input.maximumRuntimeMode},
           ${input.createdAt},
           ${input.expiresAt},
           NULL,

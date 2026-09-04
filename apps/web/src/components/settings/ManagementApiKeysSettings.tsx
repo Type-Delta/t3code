@@ -25,7 +25,6 @@ import {
   type ManagementApiKeyCreateInput,
   type ManagementApiKeyCreateResult,
   type ManagementApiKeyRecord,
-  type ManagementApiKeySafeRuntimeMode,
 } from "~/environments/managementApiKeys";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { usePreparedConnection } from "~/state/session";
@@ -64,12 +63,9 @@ import {
   buildManagementApiKeyEnvironmentOptions,
   buildManagementApiKeyJsonExample,
   canRotateManagementApiKey,
-  clampManagementApiKeyDefaultRuntimeMode,
   clearManagementApiKeyReveal,
   MANAGEMENT_API_KEY_PRESETS,
-  MANAGEMENT_API_KEY_RUNTIME_MODES,
   MANAGEMENT_API_KEY_SCOPE_DETAILS,
-  managementApiKeyRuntimeModeLabel,
   managementApiKeyScopeSummary,
   resolveManagementApiKeyExpiration,
   resolveSelectedManagementApiKeyEnvironmentId,
@@ -83,8 +79,6 @@ import {
 
 const DEFAULT_EXPIRATION: ManagementApiKeyExpiration = "90-days";
 const DEFAULT_PRESET: ManagementApiKeyPreset = "read-only";
-const DEFAULT_RUNTIME_MODE: ManagementApiKeySafeRuntimeMode = "approval-required";
-const DEFAULT_MAXIMUM_RUNTIME_MODE: ManagementApiKeySafeRuntimeMode = "auto-accept-edits";
 
 type SecretRevealState = NonNullable<ManagementApiKeyRevealState<ManagementApiKeyCreateResult>> & {
   readonly environmentId: EnvironmentId;
@@ -203,21 +197,13 @@ function KeyRow({
           </Button>
         </div>
       </div>
-      <div className="mt-3 grid min-w-0 gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+      <div className="mt-3 grid min-w-0 gap-2 text-xs text-muted-foreground sm:grid-cols-2">
         <div className="min-w-0">
           <span className="block text-[11px] uppercase tracking-wide text-muted-foreground/70">
             Access
           </span>
           <span className="break-words text-foreground/85">
             {managementApiKeyScopeSummary(keyRecord.scopes)}
-          </span>
-        </div>
-        <div className="min-w-0">
-          <span className="block text-[11px] uppercase tracking-wide text-muted-foreground/70">
-            Permission ceiling
-          </span>
-          <span className="break-words text-foreground/85">
-            {managementApiKeyRuntimeModeLabel(keyRecord.maximumRuntimeMode)}
           </span>
         </div>
         <div className="min-w-0">
@@ -250,8 +236,6 @@ function CreateManagementApiKeyDialog({
   readonly onSubmit: (input: {
     readonly name: string;
     readonly scopes: ReadonlyArray<ManagementApiKeyScope>;
-    readonly defaultRuntimeMode: ManagementApiKeySafeRuntimeMode;
-    readonly maximumRuntimeMode: ManagementApiKeySafeRuntimeMode;
     readonly expiresAt: string | null;
   }) => void;
 }) {
@@ -261,11 +245,6 @@ function CreateManagementApiKeyDialog({
   const [customScopes, setCustomScopes] = useState<ReadonlyArray<ManagementApiKeyScope>>(
     scopesForManagementApiKeyPreset(DEFAULT_PRESET),
   );
-  const [defaultRuntimeMode, setDefaultRuntimeMode] =
-    useState<ManagementApiKeySafeRuntimeMode>(DEFAULT_RUNTIME_MODE);
-  const [maximumRuntimeMode, setMaximumRuntimeMode] = useState<ManagementApiKeySafeRuntimeMode>(
-    DEFAULT_MAXIMUM_RUNTIME_MODE,
-  );
 
   useEffect(() => {
     if (!open) return;
@@ -273,18 +252,9 @@ function CreateManagementApiKeyDialog({
     setExpiration(DEFAULT_EXPIRATION);
     setPreset(DEFAULT_PRESET);
     setCustomScopes(scopesForManagementApiKeyPreset(DEFAULT_PRESET));
-    setDefaultRuntimeMode(DEFAULT_RUNTIME_MODE);
-    setMaximumRuntimeMode(DEFAULT_MAXIMUM_RUNTIME_MODE);
   }, [open]);
 
   const selectedScopes = scopesForManagementApiKeyPreset(preset, customScopes);
-  const allowedDefaultModes = MANAGEMENT_API_KEY_RUNTIME_MODES.filter(
-    (mode) =>
-      mode.rank <=
-      MANAGEMENT_API_KEY_RUNTIME_MODES.find((candidate) => candidate.value === maximumRuntimeMode)!
-        .rank,
-  );
-
   const toggleScope = (scope: ManagementApiKeyScope, checked: boolean) => {
     setCustomScopes((current) => {
       const next = checked
@@ -303,8 +273,6 @@ function CreateManagementApiKeyDialog({
     onSubmit({
       name: trimmedName,
       scopes: selectedScopes,
-      defaultRuntimeMode,
-      maximumRuntimeMode,
       expiresAt: resolveManagementApiKeyExpiration(expiration),
     });
   };
@@ -424,72 +392,6 @@ function CreateManagementApiKeyDialog({
               </fieldset>
             ) : null}
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="min-w-0 space-y-2">
-                <Label htmlFor="management-api-key-default-mode">Default permission mode</Label>
-                <Select
-                  value={defaultRuntimeMode}
-                  onValueChange={(value) => {
-                    if (!value) return;
-                    const next = value as ManagementApiKeySafeRuntimeMode;
-                    setDefaultRuntimeMode(next);
-                    if (!isRuntimeModeWithinOptions(next, maximumRuntimeMode)) {
-                      setMaximumRuntimeMode(next);
-                    }
-                  }}
-                >
-                  <SelectTrigger id="management-api-key-default-mode" className="w-full">
-                    <SelectValue>
-                      {managementApiKeyRuntimeModeLabel(defaultRuntimeMode)}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {allowedDefaultModes.map((mode) => (
-                      <SelectItem key={mode.value} value={mode.value}>
-                        <span className="flex flex-col gap-0.5">
-                          <span>{mode.label}</span>
-                          <span className="text-xs text-muted-foreground">{mode.description}</span>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              </div>
-              <div className="min-w-0 space-y-2">
-                <Label htmlFor="management-api-key-maximum-mode">Maximum permission mode</Label>
-                <Select
-                  value={maximumRuntimeMode}
-                  onValueChange={(value) => {
-                    if (!value) return;
-                    const next = value as ManagementApiKeySafeRuntimeMode;
-                    setMaximumRuntimeMode(next);
-                    setDefaultRuntimeMode(
-                      clampManagementApiKeyDefaultRuntimeMode(defaultRuntimeMode, next),
-                    );
-                  }}
-                >
-                  <SelectTrigger id="management-api-key-maximum-mode" className="w-full">
-                    <SelectValue>
-                      {managementApiKeyRuntimeModeLabel(maximumRuntimeMode)}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {MANAGEMENT_API_KEY_RUNTIME_MODES.map((mode) => (
-                      <SelectItem key={mode.value} value={mode.value}>
-                        <span className="flex flex-col gap-0.5">
-                          <span>{mode.label}</span>
-                          <span className="text-xs text-muted-foreground">{mode.description}</span>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              </div>
-            </div>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Permission modes apply when this key creates a thread and cap messages sent to
-              existing threads. Full access is intentionally unavailable for management keys.
-            </p>
             {error ? (
               <p className="text-sm text-destructive" role="alert">
                 {error}
@@ -511,21 +413,6 @@ function CreateManagementApiKeyDialog({
         </form>
       </DialogPopup>
     </Dialog>
-  );
-}
-
-function isRuntimeModeWithinOptions(
-  defaultRuntimeMode: ManagementApiKeySafeRuntimeMode,
-  maximumRuntimeMode: ManagementApiKeySafeRuntimeMode,
-): boolean {
-  const defaultMode = MANAGEMENT_API_KEY_RUNTIME_MODES.find(
-    (mode) => mode.value === defaultRuntimeMode,
-  );
-  const maximumMode = MANAGEMENT_API_KEY_RUNTIME_MODES.find(
-    (mode) => mode.value === maximumRuntimeMode,
-  );
-  return (
-    defaultMode !== undefined && maximumMode !== undefined && defaultMode.rank <= maximumMode.rank
   );
 }
 

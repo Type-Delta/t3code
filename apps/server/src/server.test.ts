@@ -3848,8 +3848,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         name: "External orchestrator",
         prefix: "t3mgmt_test1234",
         scopes: ["models:read", "threads:list"] as const,
-        defaultRuntimeMode: "approval-required" as const,
-        maximumRuntimeMode: "auto-accept-edits" as const,
         createdAt,
         expiresAt: null,
         lastUsedAt: null,
@@ -3886,8 +3884,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         body: yield* HttpBody.json({
           name: key.name,
           scopes: key.scopes,
-          defaultRuntimeMode: key.defaultRuntimeMode,
-          maximumRuntimeMode: key.maximumRuntimeMode,
         }),
       });
       const createBody = (yield* createResponse.json) as {
@@ -3920,8 +3916,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         body: yield* HttpBody.json({
           name: key.name,
           scopes: key.scopes,
-          defaultRuntimeMode: key.defaultRuntimeMode,
-          maximumRuntimeMode: key.maximumRuntimeMode,
         }),
       });
       assert.equal(readListResponse.status, 200);

@@ -35,8 +35,6 @@ const KEY = {
   name: "Automation key",
   prefix: "t3mgmt_key-1",
   scopes: ["threads:list" as const],
-  defaultRuntimeMode: "approval-required" as const,
-  maximumRuntimeMode: "approval-required" as const,
   createdAt: DateTime.makeUnsafe("2026-01-01T00:00:00.000Z"),
   expiresAt: null,
   lastUsedAt: null,
@@ -70,8 +68,6 @@ describe("environment management API keys", () => {
         payload: {
           name: "Automation key",
           scopes: ["threads:list"],
-          defaultRuntimeMode: "approval-required",
-          maximumRuntimeMode: "approval-required",
         },
       });
       const rotated = yield* rotateEnvironmentManagementApiKey({

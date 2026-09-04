@@ -60,8 +60,8 @@ environment variable; it is not included when keys are listed later.
 Each management key belongs to one environment and works only with that machine's MCP endpoint. A
 different environment needs its own key. Keys can be limited to model discovery and thread reading,
 or granted the thread orchestration tools. They do not grant access to terminals, files, previews,
-settings, connections, or other management keys. The permission mode sets the default for new
-threads and the maximum mode allowed when messaging an existing thread.
+settings, connections, or other management keys. Runtime permissions belong to threads, not keys:
+new threads use T3 Code's normal default, and messages use the existing thread's current mode.
 
 The endpoint shown after creating a key is the environment's `/mcp` endpoint. A generic JSON HTTP
 MCP configuration can use an environment variable for the bearer token:

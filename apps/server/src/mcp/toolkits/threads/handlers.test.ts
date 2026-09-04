@@ -166,8 +166,6 @@ const managementInvocation = {
     keyId: ManagementApiKeyId.make("thread-tools-management"),
     name: "Thread tools management",
     scopes: new Set<ManagementApiKeyScope>(managementScopes),
-    defaultRuntimeMode: "auto-accept-edits" as const,
-    maximumRuntimeMode: "auto-accept-edits" as const,
   },
   issuedAt: 1,
 };
@@ -320,8 +318,6 @@ it.effect("requires list capability for list_models", () =>
           keyId: ManagementApiKeyId.make("thread-tools-read-only"),
           name: "Read only",
           scopes: new Set<ManagementApiKeyScope>(),
-          defaultRuntimeMode: "approval-required",
-          maximumRuntimeMode: "approval-required",
         },
         issuedAt: 1,
       }),
@@ -426,8 +422,6 @@ it.effect("enforces thread capability and forbids self-send", () =>
           keyId: ManagementApiKeyId.make("thread-tools-read-only-2"),
           name: "Read only",
           scopes: new Set<ManagementApiKeyScope>(["models:read"]),
-          defaultRuntimeMode: "approval-required",
-          maximumRuntimeMode: "approval-required",
         },
         issuedAt: 1,
       }),
@@ -673,7 +667,7 @@ it.effect("keeps local checkout metadata only when creating in the caller projec
   }).pipe(Effect.provide(ThreadToolkitTestLayer)),
 );
 
-it.effect("uses management-key create defaults and records its origin", () =>
+it.effect("uses the normal create defaults for management keys and records their origin", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     const managementProject = {
@@ -684,7 +678,7 @@ it.effect("uses management-key create defaults and records its origin", () =>
       ...shell,
       projectId,
       modelSelection,
-      runtimeMode: "auto-accept-edits" as const,
+      runtimeMode: "full-access" as const,
     };
     const dispatched: Array<{
       readonly command: unknown;
@@ -736,13 +730,13 @@ it.effect("uses management-key create defaults and records its origin", () =>
       command: {
         type: "thread.turn.start",
         modelSelection,
-        runtimeMode: "auto-accept-edits",
+        runtimeMode: "full-access",
         interactionMode: "default",
         bootstrap: {
           createThread: {
             projectId,
             modelSelection,
-            runtimeMode: "auto-accept-edits",
+            runtimeMode: "full-access",
             interactionMode: "default",
             branch: null,
             worktreePath: null,
@@ -764,15 +758,8 @@ it.effect("logs management state-changing thread operations without token materi
       annotations: fiber.getRef(References.CurrentLogAnnotations),
     });
   });
-  const managementLogInvocation = {
-    ...managementInvocation,
-    principal: {
-      ...managementInvocation.principal,
-      defaultRuntimeMode: "approval-required" as const,
-      maximumRuntimeMode: "auto-accept-edits" as const,
-    },
-  };
-  const created = { ...shell, runtimeMode: "auto-accept-edits" as const };
+  const managementLogInvocation = managementInvocation;
+  const created = { ...shell, runtimeMode: "full-access" as const };
   const queryForOperations = {
     getThreadShellById: () => Effect.succeed(Option.some(created)),
     getProjectShellById: () =>
@@ -818,6 +805,11 @@ it.effect("logs management state-changing thread operations without token materi
     expect(createdResult.isError).toBe(false);
     expect(sentResult.isError).toBe(false);
     expect(dispatched).toHaveLength(2);
+    expect(dispatched[1]).toMatchObject({
+      type: "thread.turn.start",
+      threadId,
+      runtimeMode: "full-access",
+    });
     const operationLogs = logs.filter(
       (log) =>
         log.annotations.operation === "create_thread" ||
@@ -889,51 +881,6 @@ it.effect("requires a project and a model default for management-key create", ()
       {
         type: "text",
         text: "The create input is invalid: A management create requires modelSelection or a default model selection on the target project.",
-      },
-    ]);
-    expect(dispatched).toHaveLength(0);
-  }).pipe(Effect.provide(ThreadToolkitTestLayer)),
-);
-
-it.effect("rejects management sends above the key runtime ceiling before dispatch", () =>
-  Effect.gen(function* () {
-    const server = yield* McpServer.McpServer;
-    const dispatched: Array<unknown> = [];
-    const dispatcher = ThreadCommandDispatcher.ThreadCommandDispatcher.of({
-      dispatch: (command) =>
-        Effect.sync(() => {
-          dispatched.push(command);
-          return { sequence: dispatched.length };
-        }),
-    });
-    const target = { ...shell, runtimeMode: "auto" as const };
-    const targetQuery = {
-      getThreadShellById: () => Effect.succeed(Option.some(target)),
-      getProjectShellById: () => Effect.succeed(Option.some(project)),
-    } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
-    const rejected = yield* server
-      .callTool({
-        name: "send_message_to_thread",
-        arguments: { threadId, message: "This must not dispatch." },
-      })
-      .pipe(
-        Effect.provideService(McpSchema.McpServerClient, client),
-        Effect.provideService(McpInvocationContext.McpInvocationContext, {
-          ...managementInvocation,
-          principal: {
-            ...managementInvocation.principal,
-            maximumRuntimeMode: "approval-required" as const,
-          },
-        }),
-        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, targetQuery),
-        Effect.provideService(ThreadCommandDispatcher.ThreadCommandDispatcher, dispatcher),
-      );
-
-    expect(rejected.isError).toBe(true);
-    expect(rejected.content).toEqual([
-      {
-        type: "text",
-        text: "The send input is invalid: A management key cannot send to a thread whose runtime mode exceeds its maximum permission mode.",
       },
     ]);
     expect(dispatched).toHaveLength(0);

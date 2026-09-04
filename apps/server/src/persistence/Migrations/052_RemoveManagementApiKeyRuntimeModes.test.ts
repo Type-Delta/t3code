@@ -8,16 +8,25 @@ import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("050_ManagementApiKeys", (it) => {
-  it.effect("creates the management key table, index, and migration ledger entry", () =>
+layer("052_RemoveManagementApiKeyRuntimeModes", (it) => {
+  it.effect("removes runtime-mode policy from management keys", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runMigrations({ toMigrationInclusive: 49 });
       yield* runMigrations({ toMigrationInclusive: 50 });
-      yield* runMigrations({ toMigrationInclusive: 50 });
+      // Simulate an installation that already ran the original migration 50.
+      yield* sql`
+        ALTER TABLE management_api_keys
+        ADD COLUMN default_runtime_mode TEXT NOT NULL DEFAULT 'approval-required'
+      `;
+      yield* sql`
+        ALTER TABLE management_api_keys
+        ADD COLUMN maximum_runtime_mode TEXT NOT NULL DEFAULT 'auto-accept-edits'
+      `;
+      yield* runMigrations({ toMigrationInclusive: 52 });
+      yield* runMigrations({ toMigrationInclusive: 52 });
 
-      const columns = yield* sql<{ readonly name: string; readonly notnull: number }>`
+      const columns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(management_api_keys)
       `;
       assert.deepEqual(
@@ -34,26 +43,13 @@ layer("050_ManagementApiKeys", (it) => {
           "revoked_at",
         ],
       );
-      assert.ok(
-        columns.every(
-          (column) =>
-            column.notnull === 1 ||
-            ["expires_at", "last_used_at", "revoked_at"].includes(column.name) ||
-            column.name === "id",
-        ),
-      );
-
-      const indexes = yield* sql<{ readonly name: string }>`
-        PRAGMA index_list(management_api_keys)
-      `;
-      assert.ok(indexes.some((index) => index.name === "idx_management_api_keys_active"));
 
       const ledger = yield* sql<{ readonly migrationId: number; readonly name: string }>`
         SELECT migration_id AS "migrationId", name
         FROM effect_sql_migrations
-        WHERE migration_id = 50
+        WHERE migration_id = 52
       `;
-      assert.deepEqual(ledger, [{ migrationId: 50, name: "ManagementApiKeys" }]);
+      assert.deepEqual(ledger, [{ migrationId: 52, name: "RemoveManagementApiKeyRuntimeModes" }]);
     }),
   );
 });

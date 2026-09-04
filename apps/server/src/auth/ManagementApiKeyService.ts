@@ -2,10 +2,8 @@ import {
   ManagementApiKey,
   ManagementApiKeyCreateRequest,
   ManagementApiKeyId,
-  ManagementApiKeyRuntimeMode,
   ManagementApiKeyScope,
   ManagementApiKeyScopes,
-  managementApiKeyRuntimeModeAtMost,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -29,7 +27,6 @@ const bytesToHex = (bytes: Uint8Array): string =>
 
 const tokenFromBytes = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url");
 
-const isManagementApiKeyRuntimeMode = Schema.is(ManagementApiKeyRuntimeMode);
 const decodeManagementApiKeyId = Schema.decodeUnknownOption(ManagementApiKeyId);
 
 type KeyMutation =
@@ -67,13 +64,7 @@ type RotateFinishResult = {
 export class ManagementApiKeyValidationError extends Schema.TaggedErrorClass<ManagementApiKeyValidationError>()(
   "ManagementApiKeyValidationError",
   {
-    reason: Schema.Literals([
-      "empty_scopes",
-      "duplicate_scopes",
-      "default_runtime_mode_exceeds_maximum",
-      "unsafe_runtime_mode",
-      "expired_at_creation",
-    ]),
+    reason: Schema.Literals(["empty_scopes", "duplicate_scopes", "expired_at_creation"]),
   },
 ) {
   override get message(): string {
@@ -82,10 +73,6 @@ export class ManagementApiKeyValidationError extends Schema.TaggedErrorClass<Man
         return "A management API key needs at least one scope.";
       case "duplicate_scopes":
         return "A management API key cannot contain duplicate scopes.";
-      case "default_runtime_mode_exceeds_maximum":
-        return "The default runtime mode cannot exceed the maximum runtime mode.";
-      case "unsafe_runtime_mode":
-        return "Full access is not available to management API keys.";
       case "expired_at_creation":
         return "A management API key expiration must be in the future.";
     }
@@ -113,8 +100,6 @@ export interface ManagementApiKeyPrincipal {
   readonly keyId: ManagementApiKeyId;
   readonly name: string;
   readonly scopes: ReadonlySet<ManagementApiKeyScope>;
-  readonly defaultRuntimeMode: ManagementApiKeyRuntimeMode;
-  readonly maximumRuntimeMode: ManagementApiKeyRuntimeMode;
 }
 
 export interface IssuedManagementApiKey {
@@ -211,8 +196,6 @@ function toPublic(record: ManagementApiKeys.ManagementApiKeyRecord): ManagementA
     name: record.name,
     prefix: record.secretPrefix,
     scopes: record.scopes,
-    defaultRuntimeMode: record.defaultRuntimeMode,
-    maximumRuntimeMode: record.maximumRuntimeMode,
     createdAt: record.createdAt,
     expiresAt: record.expiresAt,
     lastUsedAt: record.lastUsedAt,
@@ -396,17 +379,6 @@ export const make = Effect.gen(function* () {
     const scopes = isValidScopeList(input.scopes);
     if (!scopes.ok) return yield* new ManagementApiKeyValidationError({ reason: scopes.reason });
     if (
-      !isManagementApiKeyRuntimeMode(input.defaultRuntimeMode) ||
-      !isManagementApiKeyRuntimeMode(input.maximumRuntimeMode)
-    ) {
-      return yield* new ManagementApiKeyValidationError({ reason: "unsafe_runtime_mode" });
-    }
-    if (!managementApiKeyRuntimeModeAtMost(input.defaultRuntimeMode, input.maximumRuntimeMode)) {
-      return yield* new ManagementApiKeyValidationError({
-        reason: "default_runtime_mode_exceeds_maximum",
-      });
-    }
-    if (
       input.expiresAt !== undefined &&
       input.expiresAt !== null &&
       input.expiresAt.epochMilliseconds <= now.epochMilliseconds
@@ -438,8 +410,6 @@ export const make = Effect.gen(function* () {
         secretHash,
         secretPrefix: generated.prefix,
         scopes: input.scopes,
-        defaultRuntimeMode: input.defaultRuntimeMode,
-        maximumRuntimeMode: input.maximumRuntimeMode,
         createdAt: now,
         expiresAt: input.expiresAt ?? null,
       })
@@ -449,8 +419,6 @@ export const make = Effect.gen(function* () {
       name: input.name,
       prefix: generated.prefix,
       scopes: input.scopes,
-      defaultRuntimeMode: input.defaultRuntimeMode,
-      maximumRuntimeMode: input.maximumRuntimeMode,
       createdAt: now,
       expiresAt: input.expiresAt ?? null,
       lastUsedAt: null,
@@ -619,8 +587,6 @@ export const make = Effect.gen(function* () {
               keyId: record.id,
               name: record.name,
               scopes: new Set(record.scopes),
-              defaultRuntimeMode: record.defaultRuntimeMode,
-              maximumRuntimeMode: record.maximumRuntimeMode,
             } satisfies ManagementApiKeyPrincipal);
           }).pipe(
             Effect.ensuring(

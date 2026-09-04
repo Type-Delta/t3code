@@ -33,8 +33,6 @@ const makeManagementInvocation = (
     keyId: ManagementApiKeyId.make("key-scope-test"),
     name: "Scope test key",
     scopes,
-    defaultRuntimeMode: "approval-required",
-    maximumRuntimeMode: "approval-required",
   },
   issuedAt: 1,
 });
@@ -47,8 +45,6 @@ it.effect("reports the scoped credential context when preview capability is unav
       keyId: ManagementApiKeyId.make("key-1"),
       name: "Read only",
       scopes: new Set(),
-      defaultRuntimeMode: "approval-required",
-      maximumRuntimeMode: "approval-required",
     },
     issuedAt: 1,
   };
@@ -79,8 +75,6 @@ it.effect("rejects thread tools when the credential only grants preview", () => 
       keyId: ManagementApiKeyId.make("key-threads-1"),
       name: "Read only",
       scopes: new Set(["models:read"]),
-      defaultRuntimeMode: "approval-required",
-      maximumRuntimeMode: "approval-required",
     },
     issuedAt: 1,
   };

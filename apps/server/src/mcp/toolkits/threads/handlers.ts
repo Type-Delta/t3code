@@ -1,19 +1,16 @@
 import {
   CommandId,
+  DEFAULT_RUNTIME_MODE,
   MessageId,
   ThreadId,
   ThreadToolInvalidInputError,
   ThreadToolNotFoundError,
   ThreadToolOperationFailureError,
   ThreadToolSelfSendForbiddenError,
-  managementApiKeyRuntimeModeAtMost,
-  managementApiKeyRuntimeModeAllowed,
   type OrchestrationProjectShell,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadShell,
   type ProviderDriverKind,
-  type RuntimeMode,
-  type ManagementApiKeyRuntimeMode,
   type ThreadToolAttentionReason,
   type ThreadToolStatus,
 } from "@t3tools/contracts";
@@ -401,14 +398,14 @@ const createThread = Effect.fn("ThreadToolkit.createThread")(function* (input: {
         },
         modelSelection,
         titleSeed: title,
-        runtimeMode: provider ? caller!.runtimeMode : management!.defaultRuntimeMode,
+        runtimeMode: provider ? caller!.runtimeMode : DEFAULT_RUNTIME_MODE,
         interactionMode: provider ? caller!.interactionMode : "default",
         bootstrap: {
           createThread: {
             projectId: project.id,
             title,
             modelSelection,
-            runtimeMode: provider ? caller!.runtimeMode : management!.defaultRuntimeMode,
+            runtimeMode: provider ? caller!.runtimeMode : DEFAULT_RUNTIME_MODE,
             interactionMode: provider ? caller!.interactionMode : "default",
             branch: isWorktree ? baseBranch : isCallerProject ? caller!.branch : null,
             worktreePath: isCallerProject && !isWorktree ? caller!.worktreePath : null,
@@ -527,33 +524,6 @@ const sendMessageToThread = Effect.fn("ThreadToolkit.sendMessageToThread")(funct
     });
   }
   const target = yield* getThreadShell("send", input.threadId);
-  if (management !== undefined) {
-    const targetRuntimeMode: RuntimeMode = target.runtimeMode;
-    const managementRuntimeMode =
-      targetRuntimeMode === "full-access" ? undefined : targetRuntimeMode;
-    if (
-      managementRuntimeMode === undefined ||
-      !managementApiKeyRuntimeModeAllowed(managementRuntimeMode)
-    ) {
-      return yield* new ThreadToolInvalidInputError({
-        operation: "send",
-        reason:
-          "A management key cannot send to a thread whose runtime mode exceeds its maximum permission mode.",
-      });
-    }
-    if (
-      !managementApiKeyRuntimeModeAtMost(
-        managementRuntimeMode as ManagementApiKeyRuntimeMode,
-        management.maximumRuntimeMode as ManagementApiKeyRuntimeMode,
-      )
-    ) {
-      return yield* new ThreadToolInvalidInputError({
-        operation: "send",
-        reason:
-          "A management key cannot send to a thread whose runtime mode exceeds its maximum permission mode.",
-      });
-    }
-  }
   const dispatcher = yield* ThreadCommandDispatcher.ThreadCommandDispatcher;
 
   if (input.modelSelection !== undefined) {

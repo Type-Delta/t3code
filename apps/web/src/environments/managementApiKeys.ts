@@ -3,7 +3,6 @@ import {
   type ManagementApiKey,
   type ManagementApiKeyCreateRequest,
   type ManagementApiKeyId,
-  type ManagementApiKeyRuntimeMode,
   type ManagementApiKeyScope,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -22,15 +21,11 @@ import { runtime } from "../lib/runtime";
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 
-export type ManagementApiKeySafeRuntimeMode = Exclude<ManagementApiKeyRuntimeMode, "auto">;
-
 export interface ManagementApiKeyRecord {
   readonly id: string;
   readonly name: string;
   readonly prefix: string;
   readonly scopes: ReadonlyArray<ManagementApiKeyScope>;
-  readonly defaultRuntimeMode: ManagementApiKeyRuntimeMode;
-  readonly maximumRuntimeMode: ManagementApiKeyRuntimeMode;
   readonly createdAt: string;
   readonly expiresAt: string | null;
   readonly lastUsedAt: string | null;
@@ -39,8 +34,6 @@ export interface ManagementApiKeyRecord {
 export interface ManagementApiKeyCreateInput {
   readonly name: string;
   readonly scopes: ReadonlyArray<ManagementApiKeyScope>;
-  readonly defaultRuntimeMode: ManagementApiKeySafeRuntimeMode;
-  readonly maximumRuntimeMode: ManagementApiKeySafeRuntimeMode;
   readonly expiresAt: string | null;
 }
 
@@ -106,8 +99,6 @@ function mapManagementApiKey(value: ManagementApiKey): ManagementApiKeyRecord {
     name: value.name,
     prefix: value.prefix,
     scopes: value.scopes,
-    defaultRuntimeMode: value.defaultRuntimeMode,
-    maximumRuntimeMode: value.maximumRuntimeMode,
     createdAt: toIso(value.createdAt),
     expiresAt: toNullableIso(value.expiresAt),
     lastUsedAt: toNullableIso(value.lastUsedAt),
@@ -130,8 +121,6 @@ function mapCreatePayload(input: ManagementApiKeyCreateInput): ManagementApiKeyC
   return {
     name: input.name,
     scopes: input.scopes,
-    defaultRuntimeMode: input.defaultRuntimeMode,
-    maximumRuntimeMode: input.maximumRuntimeMode,
     ...(input.expiresAt === null
       ? { expiresAt: null }
       : { expiresAt: DateTime.makeUnsafe(input.expiresAt) }),
