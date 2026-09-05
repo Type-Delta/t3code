@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
@@ -23,12 +24,12 @@ import {
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
-import { compareSemverVersions } from "@t3tools/shared/semver";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   query as claudeQuery,
   type Options as ClaudeQueryOptions,
   type SlashCommand as ClaudeSlashCommand,
+  type SDKControlGetUsageResponse,
   type SDKUserMessage,
   type SettingSource,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -38,6 +39,7 @@ import {
   buildSelectOptionDescriptor,
   buildServerProvider,
   type CommandResult,
+  COMPACT_SLASH_COMMAND,
   DEFAULT_TIMEOUT_MS,
   isCommandMissingCause,
   parseGenericCliVersion,
@@ -51,6 +53,18 @@ import {
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { type GatewayCatalogSnapshot, mergeGatewayModelCatalog } from "../GatewayModelCatalog.ts";
+import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
+import {
+  type ClaudeScopedLimitNames,
+  claudeUsageResponseToLimits,
+  recordClaudeUsageResponse,
+} from "./claudeUsageLimits.ts";
+import {
+  BUNDLED_CLAUDE_MODEL_CATALOG,
+  type ClaudeModelCatalog,
+  formatClaudeVersionUpgradeMessage,
+  resolveClaudeModelsForVersion,
+} from "../ClaudeModelCatalog.ts";
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -60,10 +74,6 @@ const CLAUDE_PRESENTATION = {
   displayName: "Claude",
   showInteractionModeToggle: true,
 } as const;
-const MINIMUM_CLAUDE_OPUS_5_VERSION = "2.1.219";
-const MINIMUM_CLAUDE_FABLE_5_VERSION = "2.1.169";
-const MINIMUM_CLAUDE_OPUS_4_8_VERSION = "2.1.154";
-const MINIMUM_CLAUDE_OPUS_4_7_VERSION = "2.1.111";
 
 const CLAUDE_MODEL_CATALOG: ReadonlyArray<ServerProviderModel> = [
   {
@@ -333,62 +343,6 @@ const CLAUDE_MODEL_CATALOG: ReadonlyArray<ServerProviderModel> = [
 // Legacy classification happens at the driver boundary via `applyModelManifest`,
 // so the catalog itself carries no `isLegacy` flags.
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = CLAUDE_MODEL_CATALOG;
-
-function supportsClaudeOpus5(version: string | null | undefined): boolean {
-  return version ? compareSemverVersions(version, MINIMUM_CLAUDE_OPUS_5_VERSION) >= 0 : false;
-}
-
-function supportsClaudeFable5(version: string | null | undefined): boolean {
-  return version ? compareSemverVersions(version, MINIMUM_CLAUDE_FABLE_5_VERSION) >= 0 : false;
-}
-
-function supportsClaudeOpus48(version: string | null | undefined): boolean {
-  return version ? compareSemverVersions(version, MINIMUM_CLAUDE_OPUS_4_8_VERSION) >= 0 : false;
-}
-
-function supportsClaudeOpus47(version: string | null | undefined): boolean {
-  return version ? compareSemverVersions(version, MINIMUM_CLAUDE_OPUS_4_7_VERSION) >= 0 : false;
-}
-
-function getBuiltInClaudeModelsForVersion(
-  version: string | null | undefined,
-): ReadonlyArray<ServerProviderModel> {
-  return BUILT_IN_MODELS.filter((model) => {
-    if (model.slug === "claude-opus-5") {
-      return supportsClaudeOpus5(version);
-    }
-    if (model.slug === "claude-fable-5") {
-      return supportsClaudeFable5(version);
-    }
-    if (model.slug === "claude-opus-4-8") {
-      return supportsClaudeOpus48(version);
-    }
-    if (model.slug === "claude-opus-4-7") {
-      return supportsClaudeOpus47(version);
-    }
-    return true;
-  });
-}
-
-function formatClaudeOpus5UpgradeMessage(version: string | null): string {
-  const versionLabel = version ? `v${version}` : "the installed version";
-  return `Claude Code ${versionLabel} is too old for Claude Opus 5. Upgrade to v${MINIMUM_CLAUDE_OPUS_5_VERSION} or newer to access it.`;
-}
-
-function formatClaudeFable5UpgradeMessage(version: string | null): string {
-  const versionLabel = version ? `v${version}` : "the installed version";
-  return `Claude Code ${versionLabel} is too old for Claude Fable 5. Upgrade to v${MINIMUM_CLAUDE_FABLE_5_VERSION} or newer to access it.`;
-}
-
-function formatClaudeOpus48UpgradeMessage(version: string | null): string {
-  const versionLabel = version ? `v${version}` : "the installed version";
-  return `Claude Code ${versionLabel} is too old for Claude Opus 4.8. Upgrade to v${MINIMUM_CLAUDE_OPUS_4_8_VERSION} or newer to access it.`;
-}
-
-function formatClaudeOpus47UpgradeMessage(version: string | null): string {
-  const versionLabel = version ? `v${version}` : "the installed version";
-  return `Claude Code ${versionLabel} is too old for Claude Opus 4.7. Upgrade to v${MINIMUM_CLAUDE_OPUS_4_7_VERSION} or newer to access it.`;
-}
 
 function stampClaudeCatalogAuthority(
   provider: ServerProviderDraft,
@@ -716,6 +670,12 @@ type ClaudeCapabilitiesProbe = {
    */
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
+  /**
+   * Subscription windows from the SDK's `get_usage` control request, or
+   * `undefined` when the request itself failed. Absent windows on an
+   * otherwise successful response mean the account has none (API key).
+   */
+  readonly usage?: Pick<SDKControlGetUsageResponse, "rate_limits_available" | "rate_limits">;
 };
 
 type ClaudeCapabilitiesProbeOutcome = {
@@ -875,8 +835,22 @@ const probeClaudeCapabilities = (
           },
         },
       });
-      try {
-        const init = await q.initializationResult();
+      const init = await q.initializationResult();
+      return { q, init, processExit };
+    });
+  }).pipe(
+    Effect.flatMap(({ q, init, processExit }) =>
+      Effect.gen(function* () {
+        // Usage has its own deadline so a slow optional request cannot discard initialization.
+        const usageResult = yield* Effect.tryPromise(() =>
+          q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(),
+        ).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS), Effect.result);
+        const usage = Result.isSuccess(usageResult)
+          ? {
+              rate_limits_available: usageResult.success.rate_limits_available,
+              rate_limits: usageResult.success.rate_limits,
+            }
+          : undefined;
         const account = init.account as
           | {
               readonly email?: string;
@@ -891,17 +865,21 @@ const probeClaudeCapabilities = (
           tokenSource: account?.tokenSource,
           apiProvider: account?.apiProvider,
           slashCommands: parseClaudeInitializationCommands(init.commands),
+          ...(usage ? { usage } : {}),
         } satisfies ClaudeCapabilitiesProbe;
-      } finally {
-        if (!abort.signal.aborted) abort.abort();
-        try {
-          await q.return(undefined);
-        } finally {
-          await processExit;
-        }
-      }
-    });
-  }).pipe(
+      }).pipe(
+        Effect.ensuring(
+          Effect.promise(async () => {
+            if (!abort.signal.aborted) abort.abort();
+            try {
+              await q.return?.(undefined);
+            } finally {
+              await processExit;
+            }
+          }).pipe(Effect.ignore),
+        ),
+      ),
+    ),
     Effect.ensuring(
       Effect.sync(() => {
         if (!abort.signal.aborted) abort.abort();
@@ -955,6 +933,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   ) => Effect.Effect<ClaudeCapabilitiesProbeOutcome>,
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
+  catalog: ClaudeModelCatalog | GatewayCatalogSnapshot = BUNDLED_CLAUDE_MODEL_CATALOG,
+  /** Shared with the adapter so turn events reuse the scoped-bucket names this probe saw. */
+  scopedLimitNames?: Ref.Ref<ClaudeScopedLimitNames>,
   gatewayCatalog?: GatewayCatalogSnapshot,
 ): Effect.fn.Return<
   ServerProviderDraft,
@@ -962,11 +943,17 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
 > {
   const resolvedEnvironment = environment ?? process.env;
+  const modelCatalog = "source" in catalog ? BUNDLED_CLAUDE_MODEL_CATALOG : catalog;
+  const resolvedGatewayCatalog = "source" in catalog ? catalog : gatewayCatalog;
   const platform = yield* HostProcessPlatform;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const allModels = claudeModelsFromSettings(claudeSettings, gatewayCatalog);
+  const allModels = claudeModelsFromSettings(
+    claudeSettings,
+    resolvedGatewayCatalog,
+    modelCatalog.models.map((entry) => entry.model),
+  );
   const buildClaudeProvider = (input: Parameters<typeof buildServerProvider>[0]) =>
-    stampClaudeCatalogAuthority(buildServerProvider(input), gatewayCatalog);
+    stampClaudeCatalogAuthority(buildServerProvider(input), resolvedGatewayCatalog);
   const sdkNativeExecutable = resolvePackagedClaudeSdkNativeExecutable(platform);
   const baseDiagnostics = {
     configuredExecutable: claudeSettings.binaryPath,
@@ -1091,18 +1078,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
 
   const models = claudeModelsFromSettings(
     claudeSettings,
-    gatewayCatalog,
-    getBuiltInClaudeModelsForVersion(parsedVersion),
+    resolvedGatewayCatalog,
+    resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
   );
-  const versionUpgradeMessage = supportsClaudeOpus5(parsedVersion)
-    ? undefined
-    : supportsClaudeFable5(parsedVersion)
-      ? formatClaudeOpus5UpgradeMessage(parsedVersion)
-      : supportsClaudeOpus48(parsedVersion)
-        ? formatClaudeFable5UpgradeMessage(parsedVersion)
-        : supportsClaudeOpus47(parsedVersion)
-          ? formatClaudeOpus48UpgradeMessage(parsedVersion)
-          : formatClaudeOpus47UpgradeMessage(parsedVersion);
+  const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
   const capabilitiesOutcome: ClaudeCapabilitiesProbeOutcome = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings)
@@ -1110,13 +1089,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
 
   const capabilities = capabilitiesOutcome.capabilities;
   const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
-  const slashCommands = [
-    {
-      name: "compact",
-      description: "Summarize the conversation and reduce context usage",
-    },
-    ...(capabilities?.slashCommands ?? []),
-  ];
+  const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
   const diagnostics = {
@@ -1147,6 +1120,14 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     authenticated === true
       ? versionUpgradeMessage
       : "Could not verify Claude authentication status from initialization result.";
+  const usageLimits = !capabilities?.usage
+    ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
+    : scopedLimitNames
+      ? yield* recordClaudeUsageResponse(scopedLimitNames, {
+          response: capabilities.usage,
+          checkedAt,
+        })
+      : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits;
   return buildClaudeProvider({
     presentation: CLAUDE_PRESENTATION,
     enabled: claudeSettings.enabled,
@@ -1170,6 +1151,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       },
       diagnostics,
       ...(message ? { message } : {}),
+      usageLimits,
     },
   });
 });
@@ -1178,13 +1160,20 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 export const makePendingClaudeProvider = (
   claudeSettings: ClaudeSettings,
+  catalog: ClaudeModelCatalog | GatewayCatalogSnapshot = BUNDLED_CLAUDE_MODEL_CATALOG,
   gatewayCatalog?: GatewayCatalogSnapshot,
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
+    const modelCatalog = "source" in catalog ? BUNDLED_CLAUDE_MODEL_CATALOG : catalog;
+    const resolvedGatewayCatalog = "source" in catalog ? catalog : gatewayCatalog;
     const checkedAt = yield* nowIso;
-    const models = claudeModelsFromSettings(claudeSettings, gatewayCatalog);
+    const models = claudeModelsFromSettings(
+      claudeSettings,
+      resolvedGatewayCatalog,
+      modelCatalog.models.map((entry) => entry.model),
+    );
     const buildClaudeProvider = (input: Parameters<typeof buildServerProvider>[0]) =>
-      stampClaudeCatalogAuthority(buildServerProvider(input), gatewayCatalog);
+      stampClaudeCatalogAuthority(buildServerProvider(input), resolvedGatewayCatalog);
 
     if (!claudeSettings.enabled) {
       return buildClaudeProvider({

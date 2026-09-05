@@ -54,6 +54,7 @@ export interface SidecarDiffInput {
   readonly toCheckpointRef: CheckpointRef;
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;
+  readonly format?: "patch" | "numstat";
 }
 
 export interface SidecarImportLegacyInput {
@@ -230,6 +231,7 @@ export const make = Effect.gen(function* () {
       readonly env?: NodeJS.ProcessEnv;
       readonly allowNonZeroExit?: boolean;
       readonly maxOutputBytes?: number;
+      readonly outputMode?: "error" | "truncate";
     },
   ) =>
     process.run({
@@ -245,6 +247,7 @@ export const make = Effect.gen(function* () {
         : { allowNonZeroExit: options.allowNonZeroExit }),
       timeoutMs: 30_000,
       maxOutputBytes: options?.maxOutputBytes ?? 16 * 1024 * 1024,
+      outputMode: options?.outputMode ?? "truncate",
     });
 
   const sidecarGitArgs = (gitDir: string, worktree: string, args: ReadonlyArray<string>) => [
@@ -1003,8 +1006,7 @@ export const make = Effect.gen(function* () {
           input.cwd,
           sidecarGitArgs(gitDir, identity.worktreeRoot, [
             "diff",
-            "--binary",
-            "--patch",
+            ...(input.format === "numstat" ? ["--numstat", "-z"] : ["--binary", "--patch"]),
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
@@ -1012,7 +1014,11 @@ export const make = Effect.gen(function* () {
             fromCommit,
             toCommit,
           ]),
-          { allowNonZeroExit: true, maxOutputBytes: 10_000_000 },
+          {
+            allowNonZeroExit: true,
+            maxOutputBytes: 10_000_000,
+            outputMode: input.format === "numstat" ? "error" : "truncate",
+          },
         );
         if (result.exitCode !== 0)
           return yield* checkpointError(

@@ -1,26 +1,17 @@
-import { connectionStatusText } from "@t3tools/client-runtime/connection";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { CloudIcon, LaptopIcon, MonitorIcon, TerminalIcon } from "lucide-react";
+import { connectionStatusTitle } from "@t3tools/client-runtime/connection";
+import { resolveEnvironmentMachineKind, type EnvironmentId } from "@t3tools/contracts";
+import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 
-import { isDesktopLocalConnectionTarget } from "../../connection/desktopLocal";
-import { cn } from "../../lib/utils";
 import type { EnvironmentPresentation } from "../../state/environments";
+import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import {
   ConnectionStatusDot,
   connectionPhaseDotClassName,
   connectionPhasePingClassName,
 } from "../ConnectionStatusDot";
 import { ScrollArea } from "../ui/scroll-area";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { providerSettingsTabClassName } from "./providerSettingsTabs";
-
-function environmentIcon(environment: EnvironmentPresentation) {
-  if (environment.entry.target._tag === "PrimaryConnectionTarget") return MonitorIcon;
-  if (environment.entry.target._tag === "RelayConnectionTarget") return CloudIcon;
-  if (environment.entry.target._tag === "SshConnectionTarget") return TerminalIcon;
-  if (isDesktopLocalConnectionTarget(environment.entry.target)) return LaptopIcon;
-  return CloudIcon;
-}
 
 function environmentDetail(environment: EnvironmentPresentation): string {
   if (environment.entry.target._tag === "PrimaryConnectionTarget") return "Primary device";
@@ -46,29 +37,31 @@ export function EnvironmentSettingsTabs({
   if (onlyPrimaryDevice || environments.length === 0) return null;
 
   return (
-    <ScrollArea hideScrollbars scrollFade className="mx-3 h-11 min-w-0 rounded-none sm:mx-4">
-      <div
-        role="group"
+    <ScrollArea hideScrollbars scrollFade className="mx-3 h-11 min-w-0 flex-1 rounded-none sm:mx-4">
+      <ToggleGroup
         aria-label="Devices"
-        className="flex h-full w-max min-w-full border-b border-border/70 px-1"
+        variant="segmented"
+        className="my-2"
+        value={selectedEnvironmentId ? [selectedEnvironmentId] : []}
+        disabled={disabled}
+        onValueChange={(next) => {
+          const environment = environments.find((entry) => entry.environmentId === next[0]);
+          if (environment) onSelect(environment.environmentId);
+        }}
       >
         {environments.map((environment) => {
-          const Icon = environmentIcon(environment);
-          const selected = environment.environmentId === selectedEnvironmentId;
           const detail = environmentDetail(environment);
-          const statusText = connectionStatusText(environment.connection);
+          const statusText = connectionStatusTitle(environment.connection);
           return (
             <Tooltip key={environment.environmentId}>
               <TooltipTrigger
                 render={
-                  <button
-                    type="button"
-                    aria-pressed={selected}
-                    className={cn(providerSettingsTabClassName(selected), "gap-2 text-left")}
-                    disabled={disabled}
-                    onClick={() => onSelect(environment.environmentId)}
-                  >
-                    <Icon className="size-3.5 shrink-0" aria-hidden />
+                  <Toggle value={environment.environmentId} className="gap-2 text-left">
+                    <EnvironmentMachineIcon
+                      kind={resolveEnvironmentMachineKind(environment.serverConfig)}
+                      className="size-3.5 shrink-0"
+                      aria-hidden
+                    />
                     <span className="max-w-40 truncate">{environment.label}</span>
                     {environment.connection.phase !== "connected" ? (
                       <ConnectionStatusDot
@@ -79,7 +72,7 @@ export function EnvironmentSettingsTabs({
                     <span className="sr-only">
                       {detail}, {statusText}
                     </span>
-                  </button>
+                  </Toggle>
                 }
               />
               <TooltipPopup side="top">
@@ -88,7 +81,7 @@ export function EnvironmentSettingsTabs({
             </Tooltip>
           );
         })}
-      </div>
+      </ToggleGroup>
     </ScrollArea>
   );
 }

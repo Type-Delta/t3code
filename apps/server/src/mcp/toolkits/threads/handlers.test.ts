@@ -938,7 +938,13 @@ it.effect("management-key waits ignore messages on an unrelated caller thread", 
     const engine = OrchestrationEngine.OrchestrationEngineService.of({
       dispatch: () => Effect.die("unused"),
       readEvents: () => Stream.empty,
+      readThreadEvents: () => Stream.empty,
+      getThreadReplayStats: () =>
+        Effect.succeed({ eventCount: 0, payloadBytes: 0, hasCreateEvent: false }),
       streamDomainEvents: Stream.fromPubSub(events),
+      subscribeDomainEvents: PubSub.subscribe(events).pipe(
+        Effect.map((subscription) => Stream.fromSubscription(subscription)),
+      ),
       latestSequence: Effect.succeed(8),
     });
 
@@ -975,7 +981,11 @@ it.effect("waits from a thread sequence cursor and exits for a caller message", 
     const engine = OrchestrationEngine.OrchestrationEngineService.of({
       dispatch: () => Effect.die("unused"),
       readEvents: () => Stream.empty,
+      readThreadEvents: () => Stream.empty,
+      getThreadReplayStats: () =>
+        Effect.succeed({ eventCount: 0, payloadBytes: 0, hasCreateEvent: false }),
       streamDomainEvents: Stream.make(callerMessage),
+      subscribeDomainEvents: Effect.succeed(Stream.make(callerMessage)),
       latestSequence: Effect.succeed(7),
     });
 
@@ -1053,7 +1063,11 @@ it.effect("ignores non-user caller events when the caller is not a target", () =
     const engine = OrchestrationEngine.OrchestrationEngineService.of({
       dispatch: () => Effect.die("unused"),
       readEvents: () => Stream.empty,
+      readThreadEvents: () => Stream.empty,
+      getThreadReplayStats: () =>
+        Effect.succeed({ eventCount: 0, payloadBytes: 0, hasCreateEvent: false }),
       streamDomainEvents: Stream.make(callerEvent, targetEvent),
+      subscribeDomainEvents: Effect.succeed(Stream.make(callerEvent, targetEvent)),
       latestSequence: Effect.succeed(7),
     });
 
@@ -1106,7 +1120,13 @@ it.effect("subscribes to hot wait events before loading target state", () =>
     const engine = OrchestrationEngine.OrchestrationEngineService.of({
       dispatch: () => Effect.die("unused"),
       readEvents: () => Stream.empty,
+      readThreadEvents: () => Stream.empty,
+      getThreadReplayStats: () =>
+        Effect.succeed({ eventCount: 0, payloadBytes: 0, hasCreateEvent: false }),
       streamDomainEvents: Stream.fromPubSub(eventPubSub),
+      subscribeDomainEvents: PubSub.subscribe(eventPubSub).pipe(
+        Effect.map((subscription) => Stream.fromSubscription(subscription)),
+      ),
       latestSequence: Effect.succeed(7),
     });
 
@@ -1158,9 +1178,15 @@ it.effect("coalesces hot target events while preserving caller-message exit", ()
     const engine = OrchestrationEngine.OrchestrationEngineService.of({
       dispatch: () => Effect.die("unused"),
       readEvents: () => Stream.empty,
+      readThreadEvents: () => Stream.empty,
+      getThreadReplayStats: () =>
+        Effect.succeed({ eventCount: 0, payloadBytes: 0, hasCreateEvent: false }),
       streamDomainEvents: Stream.make(
         ...Array.from({ length: 200 }, () => targetEvent),
         callerMessage,
+      ),
+      subscribeDomainEvents: Effect.succeed(
+        Stream.make(...Array.from({ length: 200 }, () => targetEvent), callerMessage),
       ),
       latestSequence: Effect.succeed(7),
     });
@@ -1226,7 +1252,13 @@ it.effect("refreshes a target again when an event lands during its state load", 
     const engine = OrchestrationEngine.OrchestrationEngineService.of({
       dispatch: () => Effect.die("unused"),
       readEvents: () => Stream.empty,
+      readThreadEvents: () => Stream.empty,
+      getThreadReplayStats: () =>
+        Effect.succeed({ eventCount: 0, payloadBytes: 0, hasCreateEvent: false }),
       streamDomainEvents: Stream.concat(Stream.make(targetEvent), Stream.fromPubSub(followups)),
+      subscribeDomainEvents: Effect.succeed(
+        Stream.concat(Stream.make(targetEvent), Stream.fromPubSub(followups)),
+      ),
       latestSequence: Effect.succeed(8),
     });
 

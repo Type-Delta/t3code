@@ -1,8 +1,9 @@
 import {
   FILL_PREVIEW_VIEWPORT,
-  PreviewAutomationOpenInput,
-  PreviewNavStatus,
-  PreviewSessionSnapshot,
+  type PreviewAutomationOperation,
+  type PreviewAutomationOpenInput,
+  type PreviewNavStatus,
+  type PreviewSessionSnapshot,
   type PreviewViewportSetting,
 } from "@t3tools/contracts";
 
@@ -28,6 +29,20 @@ export function shouldOpenPreviewMiniPlayer(
   autoShowFloatingPreview = true,
 ): boolean {
   return input.open ?? input.show ?? autoShowFloatingPreview;
+}
+
+export function shouldAutoShowPreviewForAutomationUse(input: {
+  readonly operation: PreviewAutomationOperation;
+  readonly autoShowFloatingPreview: boolean;
+  readonly presentationSuppressed: boolean;
+}): boolean {
+  return (
+    input.operation !== "open" && input.autoShowFloatingPreview && !input.presentationSuppressed
+  );
+}
+
+export function explicitlySuppressesPreviewMiniPlayer(input: PreviewAutomationOpenInput): boolean {
+  return (input.open ?? input.show) === false;
 }
 
 export function previewAutomationOpenNeedsOverlay(

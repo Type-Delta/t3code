@@ -18,7 +18,10 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import type { ServerProviderUsage, ServerProviderUsageWindow } from "@t3tools/contracts";
+import type {
+  ServerProviderSubscriptionUsageWindow,
+  ServerProviderUsage,
+} from "@t3tools/contracts";
 
 const FETCH_TIMEOUT_MS = 10_000;
 
@@ -35,7 +38,10 @@ function toIsoOrNull(value: unknown): string | null {
   return null;
 }
 
-function makeWindow(usedPercent: unknown, resetsAt: unknown): ServerProviderUsageWindow | null {
+function makeWindow(
+  usedPercent: unknown,
+  resetsAt: unknown,
+): ServerProviderSubscriptionUsageWindow | null {
   if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) return null;
   return {
     usedPercent: Math.max(0, Math.min(100, usedPercent)),

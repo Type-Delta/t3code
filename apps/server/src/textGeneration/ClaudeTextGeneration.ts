@@ -41,13 +41,22 @@ import {
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
 import {
-  getClaudeModelCapabilities,
+  BUNDLED_CLAUDE_MODEL_CATALOG,
+  type ClaudeModelCatalog,
+  getClaudeCatalogModelCapabilities,
+  isClaudeCatalogUltracodeEffort,
+  normalizeClaudeCatalogEffort,
+  resolveClaudeCatalogApiModelId,
+  resolveClaudeModelSlug,
+  scopeClaudeModelCatalog,
+} from "../provider/ClaudeModelCatalog.ts";
+import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
+import {
   isClaudeUltracodeEffort,
   normalizeClaudeCliEffort,
   resolveClaudeApiModelId,
   resolveClaudeEffort,
 } from "../provider/Layers/ClaudeProvider.ts";
-import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
 
 const CLAUDE_TIMEOUT_MS = 180_000;
 
@@ -66,9 +75,13 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   claudeSettings: ClaudeSettings,
   environment?: NodeJS.ProcessEnv,
   resolveModel?: (slug: string) => Effect.Effect<ServerProviderModel | undefined>,
+  modelCatalog: Effect.Effect<ClaudeModelCatalog> = Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG),
 ) {
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, environment);
+  const scopedModelCatalog = modelCatalog.pipe(
+    Effect.map((catalog) => scopeClaudeModelCatalog(catalog, claudeSettings.customModels)),
+  );
 
   const readStreamAsString = <E>(
     operation: string,
@@ -126,22 +139,33 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     outputSchemaJson: S;
     modelSelection: ModelSelection;
   }): Effect.fn.Return<S["Type"], TextGenerationError, S["DecodingServices"]> {
+    const catalog = yield* scopedModelCatalog;
+    const resolvedModelSelection = {
+      ...modelSelection,
+      model: resolveClaudeModelSlug(catalog, modelSelection.model),
+    };
     const jsonSchemaStr = yield* encodeJsonForOperation(
       operation,
       toJsonSchemaObject(outputSchemaJson),
       "Failed to encode structured output schema.",
     );
     const resolvedModel = yield* resolveModel?.(modelSelection.model) ?? Effect.succeed(undefined);
-    const caps = resolvedModel?.capabilities ?? getClaudeModelCapabilities(modelSelection.model);
+    const caps =
+      resolvedModel?.capabilities ??
+      getClaudeCatalogModelCapabilities(catalog, resolvedModelSelection.model);
     const descriptors = getProviderOptionDescriptors({
       caps,
-      selections: modelSelection.options,
+      selections: resolvedModelSelection.options,
     });
     const findDescriptor = (id: string) => descriptors.find((descriptor) => descriptor.id === id);
-    const rawEffortSelection = getModelSelectionStringOptionValue(modelSelection, "effort");
+    const rawEffortSelection = getModelSelectionStringOptionValue(resolvedModelSelection, "effort");
     const resolvedEffort = resolveClaudeEffort(caps, rawEffortSelection);
-    const cliEffort = normalizeClaudeCliEffort(resolvedEffort, modelSelection.model, resolvedModel);
-    const ultracode = isClaudeUltracodeEffort(resolvedEffort);
+    const cliEffort = resolvedModel
+      ? normalizeClaudeCliEffort(resolvedEffort, resolvedModelSelection.model, resolvedModel)
+      : normalizeClaudeCatalogEffort(catalog, resolvedEffort, resolvedModelSelection.model);
+    const ultracode = resolvedModel
+      ? isClaudeUltracodeEffort(resolvedEffort)
+      : isClaudeCatalogUltracodeEffort(resolvedEffort);
     const thinkingDescriptor = findDescriptor("thinking");
     const fastModeDescriptor = findDescriptor("fastMode");
     const thinking =
@@ -172,7 +196,9 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "--json-schema",
           jsonSchemaStr,
           "--model",
-          resolveClaudeApiModelId(modelSelection, resolvedModel),
+          resolvedModel
+            ? resolveClaudeApiModelId(resolvedModelSelection, resolvedModel)
+            : resolveClaudeCatalogApiModelId(catalog, resolvedModelSelection),
           ...(cliEffort ? ["--effort", cliEffort] : []),
           ...(settingsJson ? ["--settings", settingsJson] : []),
           "--dangerously-skip-permissions",

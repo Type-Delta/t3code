@@ -151,12 +151,10 @@ const makeScenario = (mode: DispatchMode, job: AutoResumeJob = JOB): Effect.Effe
       start: Effect.void,
       ready: Effect.void,
       getSettings: Ref.get(enabled).pipe(
-        Effect.map(
-          (autoResumeOnUsageLimit): ServerSettings => ({
-            ...DEFAULT_SERVER_SETTINGS,
-            autoResumeOnUsageLimit,
-          }),
-        ),
+        Effect.map((autoResumeOnUsageLimit): ServerSettings => ({
+          ...DEFAULT_SERVER_SETTINGS,
+          autoResumeOnUsageLimit,
+        })),
       ),
       updateSettings: (patch) =>
         Effect.gen(function* () {
@@ -178,7 +176,11 @@ const makeScenario = (mode: DispatchMode, job: AutoResumeJob = JOB): Effect.Effe
 
     const engine: OrchestrationEngineShape = {
       readEvents: () => Stream.empty,
+      readThreadEvents: () => Stream.empty,
+      getThreadReplayStats: () =>
+        Effect.succeed({ eventCount: 0, payloadBytes: 0, hasCreateEvent: false }),
       streamDomainEvents: Stream.empty,
+      subscribeDomainEvents: Effect.succeed(Stream.empty),
       latestSequence: Effect.succeed(0),
       dispatch: (command) =>
         Effect.gen(function* () {

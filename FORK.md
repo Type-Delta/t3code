@@ -6,7 +6,7 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `0bfb6df34b26dfe0162db6c09dca00bc8c5a5ec4`). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `2fb99a7a6`, the upstream parent of the 2026-09-05 merge). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -32,17 +32,17 @@ The upstream draft hero remains the empty-state headline. The fork adds `On <mac
 
 **Last updated:** 2026-09-01
 
-### DL003 — Subscription usage for Claude and Codex
+### DL003 — Compact Claude and Codex subscription meters
 
-Authenticated Claude and Codex snapshots carry best-effort session and weekly quota windows (`usedPercent` and `resetsAt`). The drivers read their CLI-managed OAuth credentials and enrich the regular snapshot cycle; missing credentials, scopes, network access, or endpoint failures leave `usage` absent without affecting provider health. Cursor and Grok are intentionally excluded.
+The fork retains session and weekly subscription meters in the active thread header and provider settings cards. A separate best-effort `usage` snapshot supplies these compact meters from Claude and Codex CLI-managed credentials; missing credentials, scopes, network access, or endpoint failures leave it absent without affecting provider health.
 
-Provider settings show session and weekly bars, and the active thread header shows matching remaining-quota meters with low-quota thresholds and reset-time details.
+Upstream owns the richer `usageLimits` data and the Usage page's Limits tab, including its account and hub sources. The fork's compact presentation remains available alongside that page.
 
 **Implementation evidence:** `packages/contracts/src/server.ts`, `apps/server/src/provider/subscriptionUsage.ts`, `apps/server/src/provider/Drivers/{ClaudeDriver,CodexDriver}.ts`, `apps/web/src/components/SubscriptionUsage.tsx`, `apps/web/src/components/chat/ChatHeader.tsx`, and `apps/web/src/components/settings/ProviderInstanceCard.tsx`.
 
-**Recorded validation:** subscription-usage mapping tests, live Claude and Codex fetcher smoke tests, and contracts/server/web typecheck and lint coverage.
+**Recorded validation:** subscription-usage mapping tests, live Claude and Codex fetcher smoke tests, and contracts/server/web typecheck and lint coverage from the original feature.
 
-**Last updated:** 2026-07-17
+**Last updated:** 2026-09-05
 
 ### DL004 — Preview navigation and automation hardening
 
@@ -54,21 +54,23 @@ Browser development's single-origin Vite proxy behavior, including shared and Ta
 
 **Implementation evidence:** `apps/desktop/src/preview/Manager.ts`, `apps/web/src/components/preview/`, `apps/server/src/mcp/PreviewAutomationBroker.ts`, `apps/server/src/mcp/toolkits/preview/handlers.ts`, and `packages/contracts/src/previewAutomation.ts`.
 
+Upstream owns the pinned Electron debugger reference and bounded screenshot retries. Those fixes compose with the fork's stale-session detection and control deadlines; a screenshot that succeeds on retry keeps its debugger session.
+
 **Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage, including same-tab recovery from stalled CDP and capture work, stale-host failover, and `LoadFailed`; `vp check` and `vp run typecheck`. The 2026-09-01 merge-focused suites reran the affected desktop, server, and web preview recovery paths.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-05
 
 ### DL005 — Windows portability in CLI fixtures, Git, and tests
 
-The shared fixture launcher dispatches by shebang: shell fixtures use Git for Windows `sh.exe` and Node fixtures use the current Node executable. Windows-specific expectations cover command shims, temporary and canonical Git paths, `.exe` names, CRLF checkout conversion, process shutdown, and slower polling or temporary-repository deadlines. POSIX-only FIFO, signal-handler, and filename assertions stay conditionally gated.
+The shared fixture launcher dispatches by shebang: shell fixtures use Git for Windows `sh.exe` and Node fixtures use the current Node executable. These dispatch rules and the remaining platform-specific test expectations compose with upstream's broader Windows fixture portability fixes.
 
 Git worktree comparison uses native realpaths and case-folding on Windows so Git for Windows path canonicalization cannot mistake the main checkout for another worktree.
 
-**Implementation evidence:** `packages/shared/src/shell.ts`, `apps/server/src/git/GitManager.ts`, affected provider/text-generation/orchestration/Git test suites, desktop environment tests, `packages/tailscale/src/tailscale.test.ts`, and `oxlint-plugin-t3code/test/utils.ts`.
+**Implementation evidence:** `packages/shared/src/shell.ts`, `apps/server/src/git/GitManager.ts`, their remaining fork-specific fixture and canonical-path tests, `packages/tailscale/src/tailscale.test.ts`, and `oxlint-plugin-t3code/test/utils.ts`.
 
 **Recorded validation:** targeted Cursor/Grok ACP, provider-runtime ingestion, checkpoint, Git PR-selector, desktop, relay, workspace, Tailscale, and oxlint suites on Windows; `vp check` and `vp run typecheck`.
 
-**Last updated:** 2026-07-15
+**Last updated:** 2026-09-05
 
 ### DL006 — Durable sidecar checkpoints and recoverable navigation
 
@@ -76,21 +78,19 @@ Checkpoint capture and navigation are durable server services. Private bare-Git 
 
 SQLite persists capture jobs, immutable checkpoint entries, timeline generations and cursors, provider bindings, retention data, and restart-recoverable navigation journals. Undo, redo, and rewind share a compensating navigation saga; providers without a verified non-destructive branch capability are explicitly limited, and filesystem-only rollback requires confirmation without moving the provider conversation cursor.
 
-Fork migrations `036`–`038` establish the durable checkpoint state (`036_CheckpointDurableState`, `037_CheckpointLegacyMigration`, and `038_CheckpointCaptureProviderMetadata`). Upstream lifecycle and title-regeneration migrations retain canonical IDs `033`–`035`; idempotent migration `039_ReconcileCheckpointAndTitleHistory` replays the `036`–`038` checkpoint schema before supplying checkpoint navigation mode and title-regeneration columns for upstream-ledger databases that skipped those fork migrations.
+Fork migrations `036`–`038` establish durable checkpoint state. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
 
-Migration `046_ReconcileUpstream41History` extends that repair path for databases already carrying upstream ledger entries `036`–`041`: it idempotently restores checkpoint state, navigation metadata, and both subagent projection columns before upstream auth-session client metadata runs as migration `047`.
-
-Upstream linked-pull-request and unsettled-thread columns follow this deployed fork history as migrations `048_ProjectionThreadLinkedPullRequest` and `049_ProjectionThreadsUnsettledAt`. Both migrations check the existing schema before adding their columns, so upgraded and partially reconciled databases remain safe.
+Migration `053_ReconcileUpstream47History` repairs a database carrying upstream history through `047`, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at `050`–`052`. Incoming upstream behavior then runs as `054_ClearAutomaticProjectModelDefaults`, `055_ProjectionProjectsAutoPull`, `056_RepairAutomaticSettlementTimestamps`, and `057_ProjectionProjectIcon`. Schema checks keep these changes safe for both fork and upstream database histories.
 
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
-**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,047_AuthSessionClientConnection,048_ProjectionThreadLinkedPullRequest,049_ProjectionThreadsUnsettledAt}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
+**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,047_AuthSessionClientConnection,048_ProjectionThreadLinkedPullRequest,049_ProjectionThreadsUnsettledAt,053_ReconcileUpstream47History,054_ClearAutomaticProjectModelDefaults,055_ProjectionProjectsAutoPull,056_RepairAutomaticSettlementTimestamps,057_ProjectionProjectIcon}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
 
 **Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-05
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -128,27 +128,29 @@ App-server errors are classified by scope: retryable transport errors remain war
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 
+Sidecar summary requests use upstream's NUL-delimited numstat format, including the repository-HEAD compatibility fallback, and reject output overflow rather than publishing an incomplete file list. Full patch requests remain available for the diff viewer.
+
 Turn diff summaries are published only for successfully captured, loadable sidecar checkpoints. Each summary and DiffPanel query compares the completed full turn against the immediately preceding turn boundary; an empty turn remains loadable but produces no diff card. Provider-reported `file_change` items are not synthesized into checkpoint references, and the client hides legacy non-ready rows that cannot load a diff.
 
 Diff queries use the active checkpoint timeline generation and the stable pre-turn sidecar identity. For an older thread with no captured baseline, the remaining compatibility fallback compares against repository `HEAD`. This absorbs only the surviving baseline-fallback behavior from former DL011; provider-derived summary fallback is not retained.
 
-**Implementation evidence:** `apps/server/src/checkpointing/{CheckpointIds,CheckpointDiffQuery,CheckpointStore}.ts`, `apps/server/src/orchestration/Layers/{CheckpointReactor,ProjectionSnapshotQuery}.ts`, `apps/server/src/git/Utils.ts`, and `apps/web/src/hooks/useTurnDiffSummaries.ts` with their tests.
+**Implementation evidence:** `apps/server/src/checkpointing/{CheckpointIds,CheckpointDiffQuery,CheckpointStore}.ts`, `apps/server/src/orchestration/Layers/{CheckpointReactor,ProjectionSnapshotQuery}.ts`, `apps/web/src/hooks/useTurnDiffSummaries.ts` with their tests.
 
 **Recorded validation:** focused checkpoint query, nested-worktree, projection, and web-summary tests; rapid multi-turn orchestration integration covering pre-thread changes, consecutive edit turns, a no-edit turn, durable capture, projection summaries, and DiffPanel queries; `vp check`; and `vp run typecheck`.
 
-**Last updated:** 2026-07-30
+**Last updated:** 2026-09-05
 
 ### DL015 — Live project-scoped working tree diffs
 
 Diff previews for an active project are authorized against that registered project root, including projects outside the server startup directory. The web client no longer substitutes the environment startup repository when the selected project is outside that directory.
 
-While DiffPanel is open, working-tree and branch previews refresh once per second. Its implicit scope also follows the resolved Git status, so a panel mounted before status arrives changes from branch to working-tree view when the checkout is dirty; an explicit user scope selection still wins.
+While DiffPanel is open, working-tree and branch previews refresh once per second. The panel's Git-status-based scope selection is upstream behavior.
 
-**Implementation evidence:** `apps/server/src/review/ReviewService.ts`, `apps/server/src/ws.ts`, `apps/web/src/components/DiffPanel.tsx`, and `packages/client-runtime/src/state/review.ts`.
+**Implementation evidence:** `apps/server/src/review/ReviewService.ts`, `apps/server/src/ws.ts`, and `packages/client-runtime/src/state/review.ts`.
 
 **Recorded validation:** focused review-service authorization and DiffPanel store tests; controlled-browser reproduction and verification with an external registered project, including a file modification made while the panel remained open; `vp check`; and `vp run typecheck`.
 
-**Last updated:** 2026-07-27
+**Last updated:** 2026-09-05
 
 ### DL016 — Project-selecting local thread shortcut
 
@@ -217,8 +219,7 @@ interrupted, failed, and finished subagent operations instead of grouping them u
 task label. Only spawn/resume events can establish child routing, so a child message sent back to
 the parent cannot capture the parent thread or suppress its final completion. The stale-session
 reaper also settles an old active turn when no live provider session owns it, while preserving
-genuinely live long-running turns. Codex and Claude are supported; other provider adapters remain
-unchanged.
+genuinely live long-running turns. Fork transcript correlation supports Codex and Claude. Antigravity retains upstream's task and batch presentation.
 
 **Implementation evidence:** `packages/contracts/src/{provider,providerRuntime,orchestration}.ts`,
 `apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter,ClaudeAdapter,ProviderSessionReaper}.ts`,
@@ -245,7 +246,7 @@ full native lifecycle and terminal output through projection. The 2026-09-01 int
 coverage for the single bounded metadata lookup, newer child settings and reroutes, and model and
 effort propagation through every task event.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-05
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
@@ -255,9 +256,11 @@ On Windows, the standalone service launcher terminates the known server PID and 
 
 **Implementation evidence:** desktop lifecycle and native tray/status-item modules and their focused tests under `apps/desktop/src/`, dedicated macOS template-image assets and packaging checks, `apps/server/src/orchestration/http.ts`, `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts`, `packages/contracts/src/environmentHttp.ts`, and `apps/server/src/serviceLauncher.ts`.
 
+Updater-controlled exits retain upstream's synchronous window destruction before process shutdown. Closing the last UI window still keeps the fork's tray-backed backend available.
+
 **Recorded validation:** focused desktop tray, lifecycle, running-count projection, packaging, and Windows process-tree integration tests; Windows notification-area runtime verification of the count, open, and graceful quit controls; `vp check`; `vp run typecheck`; and `git diff --check`. The 2026-09-01 merge-focused desktop and server suites reran tray continuity and running-count behavior with upstream activity-liveness fixes.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-05
 
 ### DL020 — Provider turns survive stalled checkpoint captures
 
@@ -331,31 +334,6 @@ setup.
 
 **Last updated:** 2026-09-02
 
-### DL024 — Progressive multi-environment usage
-
-The web Usage page shows totals as soon as one environment reports them. A device progress strip
-keeps the remaining scans visible, and the page updates the merged totals as later results arrive.
-Mobile already follows the same progressive behavior.
-
-**Implementation evidence:** `apps/web/src/components/usage/UsagePage.tsx`,
-`apps/web/src/components/usage/UsagePage.test.tsx`, and `docs/user/usage.md`.
-
-**Recorded validation:** focused Usage page regression coverage, an isolated two-environment
-browser pass that displayed first-host totals while the second host was still scanning,
-`vp check`, and `vp run typecheck`.
-
-**Last updated:** 2026-08-25
-
-### DL025 — Cross-platform service launcher durability
-
-The service launcher keeps file fsync on writable handles before durable state replacement and database backup or restore. It also routes state replacement through the shared directory-sync path. Windows skips directory fsync because Node rejects it with `EPERM`; platforms that support directory fsync retain it.
-
-**Implementation evidence:** `apps/server/src/serviceLauncher.ts`, `apps/server/src/serviceLauncher.test.ts`, and `docs/internals/server-updates.md`.
-
-**Recorded validation:** focused service-launcher persistence, update, rollback, and Windows replacement tests under Node `24.13.1`; `vp check`; and `vp run typecheck`.
-
-**Last updated:** 2026-08-30
-
 ### DL026 — Per-instance API gateway model catalogs
 
 Codex and Claude provider instances can declare a compatible API gateway in the add-instance
@@ -364,8 +342,11 @@ provider-environment credential reference, normalizes model context and reasonin
 caches the last successful response per instance. The gateway form accepts opaque API keys in a
 password field and stores them through the sensitive provider environment path under a generated
 safe variable name. It also migrates invalid key values written by the earlier variable-name field.
+Gateway settings respect the environment's read-only session controls.
 Catalog failure retains cached or provider models and does not make an otherwise healthy provider
 unavailable.
+
+Gateway and manual metadata compose with upstream's custom-model display-name and option-descriptor editor.
 
 Models carry usable context, theoretical maximum context, maximum output, and metadata provenance.
 Every visible model accepts manual display, context, output, and reasoning overrides; manual values
@@ -400,7 +381,7 @@ tests, settings and server contract tests, provider-settings component tests, `v
 and model-detail tooltips. The 2026-09-03 add-instance dialog scroll fix was verified in a browser at
 1000x720 and 390x700 with the gateway section expanded.
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-05
 
 ### DL027 — Remote editor links select the server account
 
@@ -438,20 +419,22 @@ available because this workflow deliberately does not publish a matching `t3` pa
 
 **Implementation evidence:** `.github/workflows/fork-windows-release.yml`.
 
+The Windows job also uses upstream's corrected Visual Studio Spectre runtime component identifier when installing packaging prerequisites.
+
 **Recorded validation:** workflow syntax and action-policy checks, `vp check`, and
 `vp run typecheck`.
 
-**Last updated:** 2026-09-02
+**Last updated:** 2026-09-05
 
 ### DL029 — User messages promote active sidebar threads
 
 The current sidebar moves an active thread to the top when the user sends it a new message. Other thread updates do not change its position. Creation and un-settle timestamps remain lifecycle anchors, and equal anchors use environment and thread IDs for deterministic ordering.
 
-**Implementation evidence:** `apps/web/src/components/Sidebar.logic.ts` and `apps/web/src/components/Sidebar.logic.test.ts`.
+**Implementation evidence:** `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/components/Sidebar.logic.test.ts`, `packages/client-runtime/src/state/threadSort.ts`, and its thread-sort tests.
 
 **Recorded validation:** focused shared, web, and mobile thread-sort tests covering user-message promotion, non-message updates, creation fallback, un-settle re-entry, and deterministic ties; `vp check`; and `vp run typecheck`.
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-05
 
 ### DL030 — Isolated macOS GitHub releases
 
@@ -474,6 +457,8 @@ the workflow can adopt upstream's `--signed` path once those secrets exist.
 **Last updated:** 2026-09-03
 
 ### DL031 — Durable management API keys for external MCP clients
+
+Management-key HTTP requests use request-time authorization and relay endpoint resolution, including one credential renewal retry for an invalid credential. Insufficient-scope errors do not retry.
 
 Integrations settings can select any known machine and create environment-wide management API keys
 there with named read-only, thread-orchestration, or custom scopes and explicit expiration. The
@@ -530,7 +515,7 @@ environment, created separate keys on the primary and remote machines, showed ea
 MCP endpoint, kept the two lists isolated while switching the selector, and revoked both disposable
 keys. Repository-wide `vp check` and `vp run typecheck` passed.
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-05
 
 ### DL032 — Automatic resume after native provider usage limits
 
@@ -566,6 +551,20 @@ settings-contract, and server-settings tests.
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-09-05 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `e6d4fa2ce8b0f7c8d6c597b221ab6e70882bcb8e` (fork) and `2fb99a7a664faf045f1884f38c620016b34874cb` (upstream/main)
+
+- Preserved deployed fork migrations `036` through `052`. Migration `053` reconciles overlapping upstream history; incoming project defaults, auto-pull, settlement timestamp repair, and project icons run as `054` through `057`.
+- Retained durable sidecar checkpoints, navigation barriers, child transcript correlation, split workspaces, API gateway catalogs, management keys, and automatic usage-limit resume. Sidecar summaries now use upstream numstat parsing, including the repository-HEAD fallback.
+- Adopted upstream Usage and Limits, provider authentication and catalog changes, Antigravity presentation, async-question retention, replay and settlement fixes, panel lifecycle, custom-model editing, citations, and media updates. Compact fork subscription meters remain alongside Limits. Retired DL024 and DL025 because upstream now provides progressive Usage results and service-file durability.
+- Restored upstream primary-turn pull-request refresh while retaining fork branch-specific status refresh. Removed the unreachable legacy revert handler; normalized checkpoint commands run through the durable navigation reactor.
+- Retained the patched Claude SDK at `0.3.170` and handled newer wire values structurally. Fixed ACP completion draining exposed by the merged Grok tests. Management-key requests now share upstream request-time DPoP renewal and relay endpoint refresh; read-only sessions cannot edit gateways.
+- Preserved desktop tray-backed backend lifetime and preview reattachment safeguards while adopting synchronous updater window destruction, pinned debugger capture retries, and Linux browser-secret packaging. Windows release setup uses upstream's Spectre runtime component. Timeline status indicators use the app tooltip component.
+- Validation passed provider/contracts, web, mobile, client-runtime, desktop, packaging, backend, and migration tests. Final focused checkpoint and navigation suites passed 59 tests, checkpoint storage passed 24, and migration reconciliation/repair passed 3. Repository-wide `vp check` and `vp run typecheck` passed. `vp run lint:mobile` completed, but SwiftLint, ktlint, and detekt were unavailable and skipped.
+- An isolated copy of the real database migrated through `057`, passed SQLite integrity checks, and retained all 52 existing threads. A paired web client completed two real Codex turns, loaded the correct sidecar diff, opened and detached split panes, loaded Usage costs and rendered Limits at desktop and phone widths, persisted and removed a gateway setting, and created and revoked a temporary management key. A narrowed session-response fixture verified read-only gateway controls block interaction. Files-only checkpoint restore changed the isolated project's file to its earlier contents while preserving chat history. No browser exceptions occurred during these final flows. Native mobile runtime verification was unavailable because this Linux host has no Android SDK or emulator and cannot run iOS Simulator.
 
 ### 2026-09-01 — Merge upstream/main into main
 

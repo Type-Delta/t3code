@@ -597,6 +597,7 @@ const waitThreads = Effect.fn("ThreadToolkit.waitThreads")(function* (input: {
   const events = yield* Queue.bounded<ThreadId>(targetIds.size);
   const pendingTargetIds = yield* Ref.make(new Set<ThreadId>());
   const callerMessage = yield* Deferred.make<void>();
+  const domainEvents = yield* engine.subscribeDomainEvents;
   const enqueueTarget = Effect.fn("ThreadToolkit.waitThreads.enqueueTarget")(function* (
     threadId: ThreadId,
   ) {
@@ -609,7 +610,7 @@ const waitThreads = Effect.fn("ThreadToolkit.waitThreads")(function* (input: {
     }
   });
   yield* Effect.forkScoped(
-    engine.streamDomainEvents.pipe(
+    domainEvents.pipe(
       Stream.filter((event) => {
         if (event.aggregateKind !== "thread") return false;
         if (targetIds.has(ThreadId.make(event.aggregateId))) return true;

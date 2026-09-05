@@ -1,11 +1,13 @@
 import type {
   ApiGatewaySettings,
+  CustomModelSetting,
   ModelMetadata,
   ModelMetadataOverride,
   ProviderInstanceId,
   ProviderOptionDescriptor,
   ServerProviderModel,
 } from "@t3tools/contracts";
+import { readCustomModelEntries } from "@t3tools/shared/model";
 import * as NodeCrypto from "node:crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -407,7 +409,7 @@ const applyOverride = (
 export function mergeGatewayModelCatalog(input: {
   readonly baseModels: ReadonlyArray<ServerProviderModel>;
   readonly catalog: GatewayCatalogSnapshot;
-  readonly customModels: ReadonlyArray<string>;
+  readonly customModels: ReadonlyArray<CustomModelSetting>;
   readonly modelOverrides: Readonly<Record<string, ModelMetadataOverride>>;
   readonly reasoningOptionId: string;
   readonly emptyCustomCapabilities?: ServerProviderModel["capabilities"];
@@ -451,19 +453,18 @@ export function mergeGatewayModelCatalog(input: {
     for (const model of input.baseModels) seen.add(model.slug);
   }
 
-  for (const rawSlug of input.customModels) {
-    const slug = rawSlug.trim();
-    if (!slug || seen.has(slug)) continue;
-    const base = baseBySlug.get(slug);
+  for (const entry of readCustomModelEntries(input.customModels)) {
+    if (seen.has(entry.slug)) continue;
+    const base = baseBySlug.get(entry.slug);
     models.push(
       base ?? {
-        slug,
-        name: slug,
+        slug: entry.slug,
+        name: entry.name,
         isCustom: true,
-        capabilities: input.emptyCustomCapabilities ?? null,
+        capabilities: entry.capabilities ?? input.emptyCustomCapabilities ?? null,
       },
     );
-    seen.add(slug);
+    seen.add(entry.slug);
   }
 
   return models.map((model) =>
