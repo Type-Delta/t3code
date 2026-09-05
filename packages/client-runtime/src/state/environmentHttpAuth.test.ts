@@ -228,7 +228,7 @@ describe("authenticated environment HTTP requests", () => {
       expect(call.init.method).toBe(loader.method);
       expect(new Headers(call.init.headers).get("authorization")).toBe("DPoP current-token");
       expect(new Headers(call.init.headers).get("dpop")).toBe("proof-1");
-      expect(call.init.credentials).toBeUndefined();
+      expect(call.init.credentials).toBe("omit");
       expect(harness.authorizations).toEqual([{ expectedEnvironmentId: TARGET.environmentId }]);
       expect(harness.proofs).toEqual([
         {
@@ -416,7 +416,7 @@ describe("authenticated environment HTTP requests", () => {
           authorization === null ? null : "Bearer bearer-token",
         );
         expect(harness.calls[0]!.init.credentials).toBe(
-          authorization === null ? "include" : undefined,
+          authorization === null ? "include" : "omit",
         );
       }),
   );

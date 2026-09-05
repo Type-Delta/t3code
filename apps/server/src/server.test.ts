@@ -4469,22 +4469,53 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       const pairingResponse = yield* HttpClient.post("/api/auth/pairing-token", {
         headers: { cookie: ownerCookie },
-        body: yield* HttpBody.json({ scopes: ["access:read"] }),
+        body: yield* HttpBody.json({}),
       });
+      assert.equal(pairingResponse.status, 200);
       const pairingBody = (yield* pairingResponse.json) as { readonly credential: string };
-      const readCookie = yield* getAuthenticatedSessionCookieHeader(pairingBody.credential);
-      const readListResponse = yield* HttpClient.get("/api/management/keys", {
-        headers: { cookie: readCookie },
+      const standardClient = yield* exchangeAccessToken(pairingBody.credential, {
+        scope: AuthStandardClientScopes.join(" "),
       });
-      const readCreateResponse = yield* HttpClient.post("/api/management/keys", {
-        headers: { cookie: readCookie },
+      assert.equal(standardClient.response.status, 200);
+      assert.equal(standardClient.body.scope, AuthStandardClientScopes.join(" "));
+      const standardClientHeaders = {
+        authorization: `Bearer ${standardClient.body.access_token ?? ""}`,
+      };
+      const sessionResponse = yield* HttpClient.get("/api/auth/session", {
+        headers: standardClientHeaders,
+      });
+      const sessionBody = (yield* sessionResponse.json) as { readonly authenticated: boolean };
+      assert.equal(sessionResponse.status, 200);
+      assert.equal(sessionBody.authenticated, true);
+
+      const sessionCookieName = ownerCookie.split("=", 1)[0];
+      assert.isDefined(sessionCookieName);
+      const staleCookieResponse = yield* HttpClient.get("/api/management/keys", {
+        headers: {
+          ...standardClientHeaders,
+          cookie: `${sessionCookieName}=stale`,
+        },
+      });
+      const staleCookieBody = (yield* staleCookieResponse.json) as {
+        readonly _tag: string;
+        readonly reason: string;
+      };
+      assert.equal(staleCookieResponse.status, 401);
+      assert.equal(staleCookieBody._tag, "EnvironmentAuthInvalidError");
+      assert.equal(staleCookieBody.reason, "invalid_credential");
+
+      const standardClientListResponse = yield* HttpClient.get("/api/management/keys", {
+        headers: standardClientHeaders,
+      });
+      const standardClientCreateResponse = yield* HttpClient.post("/api/management/keys", {
+        headers: standardClientHeaders,
         body: yield* HttpBody.json({
           name: key.name,
           scopes: key.scopes,
         }),
       });
-      assert.equal(readListResponse.status, 200);
-      assert.equal(readCreateResponse.status, 200);
+      assert.equal(standardClientListResponse.status, 200);
+      assert.equal(standardClientCreateResponse.status, 200);
 
       const unauthenticatedResponse = yield* HttpClient.get("/api/management/keys");
       assert.equal(unauthenticatedResponse.status, 401);
@@ -4495,18 +4526,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(managementAuthResponse.status, 401);
 
       const rotateResponse = yield* HttpClient.post(`/api/management/keys/${keyId}/rotate`, {
-        headers: { cookie: ownerCookie },
+        headers: standardClientHeaders,
       });
       const rotateBody = (yield* rotateResponse.json) as { readonly secret: string };
       assert.equal(rotateResponse.status, 200);
       assert.equal(rotateBody.secret, rotatedSecret);
 
       const revokeResponse = yield* HttpClient.post(`/api/management/keys/${keyId}/revoke`, {
-        headers: { cookie: ownerCookie },
+        headers: standardClientHeaders,
       });
       const revokeBody = (yield* revokeResponse.json) as { readonly revoked: boolean };
       const revokeAgainResponse = yield* HttpClient.post(`/api/management/keys/${keyId}/revoke`, {
-        headers: { cookie: ownerCookie },
+        headers: standardClientHeaders,
       });
       const revokeAgainBody = (yield* revokeAgainResponse.json) as { readonly revoked: boolean };
       assert.equal(revokeResponse.status, 200);

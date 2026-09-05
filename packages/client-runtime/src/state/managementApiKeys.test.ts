@@ -177,7 +177,7 @@ describe("environment management API keys", () => {
       calls.forEach(([request, init], index) => {
         expect([init.method, String(request)]).toEqual(expected[index]);
         expect(new Headers(init.headers).get("authorization")).toBe("Bearer environment-token");
-        expect(init.credentials).toBeUndefined();
+        expect(init.credentials).toBe("omit");
       });
     }).pipe(Effect.provide(remoteHttpClientLayer(fetchFn)));
   });

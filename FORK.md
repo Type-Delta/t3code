@@ -458,7 +458,7 @@ the workflow can adopt upstream's `--signed` path once those secrets exist.
 
 ### DL031 — Durable management API keys for external MCP clients
 
-Management-key HTTP requests use request-time authorization and relay endpoint resolution, including one credential renewal retry for an invalid credential. Insufficient-scope errors do not retry.
+Management-key HTTP requests use request-time authorization and relay endpoint resolution, including one credential renewal retry for an invalid credential. Insufficient-scope errors do not retry. Bearer and DPoP requests explicitly omit browser cookies so a stale session cookie cannot override the selected environment credential; cookie-authenticated requests continue to include cookies. Regression coverage checks the credential modes and reproduces the collision against the server.
 
 Integrations settings can select any known machine and create environment-wide management API keys
 there with named read-only, thread-orchestration, or custom scopes and explicit expiration. The
