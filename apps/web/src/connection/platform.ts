@@ -21,7 +21,7 @@ import {
   PrimaryConnectionTarget,
   Wakeups,
 } from "@t3tools/client-runtime/connection";
-import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
+import { fetchRemoteSessionState } from "@t3tools/client-runtime/authorization";
 import { fetchRemoteEnvironmentDescriptor } from "@t3tools/client-runtime/environment";
 import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import { EnvironmentRpcRequestObserver } from "@t3tools/client-runtime/rpc";
@@ -309,15 +309,11 @@ const loadPrimaryConnectionRegistration = Effect.fn(
 
 // A desktop-local secondary backend (e.g. a parallel WSL backend) lives on its
 // own loopback origin, so — unlike the same-origin primary — it authenticates
-// with a bearer token minted from the bootstrap credential the desktop issues.
-const loadSecondaryConnectionRegistration = Effect.fn(
+// with the bearer token shared by the desktop main process for that backend.
+export const loadSecondaryConnectionRegistration = Effect.fn(
   "web.connectionPlatform.loadSecondaryConnectionRegistration",
 )(function* (entry: DesktopEnvironmentBootstrap) {
-  if (
-    entry.httpBaseUrl === null ||
-    entry.wsBaseUrl === null ||
-    entry.bootstrapToken === undefined
-  ) {
+  if (entry.httpBaseUrl === null || entry.wsBaseUrl === null) {
     return yield* new ConnectionTransientError({
       reason: "endpoint-unavailable",
       detail: `Desktop-local backend ${entry.id} is not ready yet.`,
@@ -328,13 +324,33 @@ const loadSecondaryConnectionRegistration = Effect.fn(
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({ httpBaseUrl }).pipe(
     Effect.mapError(mapRemoteEnvironmentError),
   );
-  const issuedAtEpochMs = yield* Clock.currentTimeMillis;
-  const access = yield* bootstrapRemoteBearerSession({
+  const bridge = window.desktopBridge;
+  if (bridge === undefined) {
+    return yield* new ConnectionBlockedError({
+      reason: "unsupported",
+      detail: "Desktop-local environments are only available in the desktop app.",
+    });
+  }
+  const bearerToken = yield* Effect.tryPromise({
+    try: () => bridge.getLocalEnvironmentBearerToken(entry.id),
+    catch: (cause) =>
+      new ConnectionTransientError({
+        reason: "remote-unavailable",
+        detail: `Could not load the desktop credential for ${entry.id}: ${String(cause)}`,
+      }),
+  });
+  const session = yield* fetchRemoteSessionState({
     httpBaseUrl,
-    credential: entry.bootstrapToken,
-    scopes: AuthStandardClientScopes,
-    clientMetadata: clientMetadata(),
+    bearerToken,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+  if (!session.authenticated) {
+    return yield* new ConnectionBlockedError({
+      reason: "authentication",
+      detail: `The desktop credential for ${entry.id} is not authenticated.`,
+    });
+  }
+  const issuedAtEpochMs = yield* Clock.currentTimeMillis;
+  const expiresAtEpochMs = session.expiresAt?.epochMilliseconds;
   // Keep the desktop pool's stable backend id in the connection id. The
   // descriptor environment id still scopes projects and RPC state, while the
   // backend id lets desktop-only operations (notably the WSL folder picker)
@@ -358,16 +374,26 @@ const loadSecondaryConnectionRegistration = Effect.fn(
         httpBaseUrl,
         wsBaseUrl,
       }),
-      credential: new BearerConnectionCredential({ token: access.access_token }),
+      credential: new BearerConnectionCredential({ token: bearerToken }),
     }),
-    expiresAtEpochMs: secondaryBearerExpiresAtEpochMs(issuedAtEpochMs, access.expires_in),
-    refreshAtEpochMs: secondaryBearerRefreshAtEpochMs(issuedAtEpochMs, access.expires_in),
+    ...(expiresAtEpochMs === undefined
+      ? {}
+      : {
+          expiresAtEpochMs,
+          refreshAtEpochMs: Math.max(
+            issuedAtEpochMs,
+            expiresAtEpochMs - SECONDARY_BEARER_REFRESH_SKEW_MS,
+          ),
+        }),
   };
 });
 
 // Poll cadence for the desktop bootstrap topology. There is no change event on
 // the bridge, so the renderer polls; successful registrations are cached by a
-// signature of their endpoint + token until bearer credentials approach expiry.
+// signature of their endpoint + bootstrap credential until the shared bearer
+// credential approaches expiry. The bootstrap credential remains in the
+// signature so a backend restart/configuration change cannot silently keep the
+// previous renderer registration alive.
 const PLATFORM_POLL_INTERVAL = "3 seconds";
 const SECONDARY_BEARER_REFRESH_SKEW_MS = 5_000;
 

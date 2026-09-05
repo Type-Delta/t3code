@@ -161,12 +161,14 @@ function extractWslDistroFromEnvironmentId(envId: string): string | null {
 
 export const getLocalEnvironmentBearerToken = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL,
-  payload: Schema.Void,
+  payload: Schema.UndefinedOr(Schema.String),
   result: Schema.String,
-  handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBearerToken")(function* () {
-    const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
-    return yield* localAuth.getBearerToken;
-  }),
+  handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBearerToken")(
+    function* (environmentId) {
+      const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      return yield* localAuth.getBearerToken(environmentId);
+    },
+  ),
 });
 
 export const pickFolder = DesktopIpc.makeIpcMethod({
