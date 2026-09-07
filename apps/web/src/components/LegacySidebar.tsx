@@ -109,10 +109,14 @@ import {
 } from "../keybindings";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { useShortcutModifierState } from "../shortcutModifierState";
-import { ensureLocalApi, readLocalApi } from "../localApi";
+import { readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
+import {
+  formatDesktopLocalUpdateProgress,
+  useDesktopLocalUpdateState,
+} from "../state/desktopLocalUpdate";
 
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
@@ -2974,6 +2978,7 @@ interface SidebarProjectsContentProps {
   showArm64IntelBuildWarning: boolean;
   arm64IntelBuildWarningDescription: string | null;
   desktopUpdateActionPending: boolean;
+  desktopUpdateButtonLabel: string;
   handleDesktopUpdateButtonClick: () => void;
   projectSortOrder: SidebarProjectSortOrder;
   threadSortOrder: SidebarThreadSortOrder;
@@ -3019,6 +3024,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     showArm64IntelBuildWarning,
     arm64IntelBuildWarningDescription,
     desktopUpdateActionPending,
+    desktopUpdateButtonLabel,
     handleDesktopUpdateButtonClick,
     projectSortOrder,
     threadSortOrder,
@@ -3130,7 +3136,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 disabled={desktopUpdateActionPending}
                 onClick={handleDesktopUpdateButtonClick}
               >
-                {desktopUpdateActionPending ? "Starting update…" : "Update local T3 Code"}
+                {desktopUpdateButtonLabel}
               </Button>
             </AlertAction>
           </Alert>
@@ -3303,7 +3309,9 @@ export default function LegacySidebar() {
   const suppressProjectClickAfterDragRef = useRef(false);
   const suppressProjectClickForContextMenuRef = useRef(false);
   const desktopUpdateState = useDesktopUpdateState();
-  const [desktopUpdateActionPending, setDesktopUpdateActionPending] = useState(false);
+  const localUpdateState = useDesktopLocalUpdateState();
+  const [isStartingLocalUpdate, setIsStartingLocalUpdate] = useState(false);
+  const previousLocalUpdateStatus = useRef(localUpdateState?.status);
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const platform = navigator.platform;
@@ -3793,21 +3801,16 @@ export default function LegacySidebar() {
     newThreadShortcutLabelOptions,
   );
   // This fork updates from a local checkout rather than downloading a release
-  // (see SidebarUpdatePill), so the legacy sidebar shares that same flow.
-  const handleDesktopUpdateButtonClick = useCallback(async () => {
-    const bridge = window.desktopBridge;
-    if (!bridge || desktopUpdateActionPending) return;
-
-    const sourceDirectory = await ensureLocalApi().dialogs.pickFolder();
-    if (sourceDirectory === null) return;
-    const confirmed = await ensureLocalApi().dialogs.confirm(
-      "This fetches and merges the selected local T3 Code checkout, then runs checks and creates an installer. It never pushes changes. Continue?",
-    );
-    if (!confirmed) return;
-
-    setDesktopUpdateActionPending(true);
-    try {
-      await bridge.startLocalUpdate(sourceDirectory);
+  // (see SidebarUpdatePill), so the legacy sidebar shares that same flow. The
+  // update runs in the background and streams progress through localUpdateState.
+  const isLocalUpdateRunning = isStartingLocalUpdate || localUpdateState?.status === "running";
+  const desktopUpdateButtonLabel = isLocalUpdateRunning
+    ? formatDesktopLocalUpdateProgress(localUpdateState)
+    : "Update local Type-Delta";
+  useEffect(() => {
+    const previousStatus = previousLocalUpdateStatus.current;
+    previousLocalUpdateStatus.current = localUpdateState?.status;
+    if (previousStatus === "running" && localUpdateState?.status === "completed") {
       toastManager.add(
         stackedThreadToast({
           type: "success",
@@ -3815,6 +3818,24 @@ export default function LegacySidebar() {
           description: "The installer was opened. Continue with its setup steps.",
         }),
       );
+    }
+    if (previousStatus === "running" && localUpdateState?.status === "error") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not complete local update",
+          description: localUpdateState.message ?? "An unexpected error occurred.",
+        }),
+      );
+    }
+  }, [localUpdateState]);
+  const handleDesktopUpdateButtonClick = useCallback(async () => {
+    const bridge = window.desktopBridge;
+    if (!bridge || isLocalUpdateRunning) return;
+
+    setIsStartingLocalUpdate(true);
+    try {
+      await bridge.startLocalUpdate();
     } catch (error) {
       toastManager.add(
         stackedThreadToast({
@@ -3824,9 +3845,9 @@ export default function LegacySidebar() {
         }),
       );
     } finally {
-      setDesktopUpdateActionPending(false);
+      setIsStartingLocalUpdate(false);
     }
-  }, [desktopUpdateActionPending]);
+  }, [isLocalUpdateRunning]);
 
   const expandThreadListForProject = useCallback((projectKey: string) => {
     setExpandedThreadListsByProject((current) => {
@@ -3892,7 +3913,8 @@ export default function LegacySidebar() {
       <SidebarProjectsContent
         showArm64IntelBuildWarning={showArm64IntelBuildWarning}
         arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
-        desktopUpdateActionPending={desktopUpdateActionPending}
+        desktopUpdateActionPending={isLocalUpdateRunning}
+        desktopUpdateButtonLabel={desktopUpdateButtonLabel}
         handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
         projectSortOrder={sidebarProjectSortOrder}
         threadSortOrder={sidebarThreadSortOrder}

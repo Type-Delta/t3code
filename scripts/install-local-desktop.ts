@@ -12,6 +12,24 @@ import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/ho
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
+const LOCAL_UPDATE_SOURCE_ENV = "T3CODE_LOCAL_UPDATE_SOURCE";
+
+/**
+ * Per-platform command that opens the built installer. Windows goes through
+ * `cmd /c start` because a directly spawned installer dies with this script;
+ * the empty title argument keeps a quoted path from being read as the window
+ * title, so paths with spaces still launch.
+ */
+export function resolveInstallerLaunch(
+  platform: NodeJS.Platform,
+  artifactPath: string,
+): { readonly command: string; readonly args: ReadonlyArray<string> } {
+  if (platform === "win32") {
+    return { command: "cmd", args: ["/c", "start", "", artifactPath] };
+  }
+  return { command: platform === "darwin" ? "open" : "xdg-open", args: [artifactPath] };
+}
+
 /** Per-platform artifact the local installer flow builds and then opens. */
 export function resolveLocalInstallerTarget(
   platform: NodeJS.Platform,
@@ -86,6 +104,8 @@ const program = Effect.gen(function* () {
       ChildProcess.make(build.command, build.args, {
         cwd: repoRoot,
         shell: build.shell,
+        env: { [LOCAL_UPDATE_SOURCE_ENV]: repoRoot },
+        extendEnv: true,
         stdout: "inherit",
         stderr: "inherit",
       }),
@@ -106,14 +126,16 @@ const program = Effect.gen(function* () {
   }
 
   yield* Effect.log(`[install-local] Opening ${artifactPath}`);
-  const open =
-    platform === "win32"
-      ? { command: artifactPath, args: [] as ReadonlyArray<string>, shell: false }
-      : platform === "darwin"
-        ? { command: "open", args: [artifactPath], shell: false }
-        : { command: "xdg-open", args: [artifactPath], shell: false };
+  const open = resolveInstallerLaunch(platform, artifactPath);
+  // Detached with no inherited pipes: the installer must outlive this script,
+  // which exits as soon as the build finishes.
   yield* spawner.spawn(
-    ChildProcess.make(open.command, [...open.args], { cwd: repoRoot, shell: open.shell }),
+    ChildProcess.make(open.command, [...open.args], {
+      cwd: repoRoot,
+      shell: false,
+      detached: true,
+      stdin: "ignore",
+    }),
   );
   yield* Effect.log("[install-local] Installer launched. Close T3 Code before continuing setup.");
 });

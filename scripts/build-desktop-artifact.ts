@@ -53,6 +53,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.t3tools.t3code";
+const LOCAL_UPDATE_SOURCE_ENV = "T3CODE_LOCAL_UPDATE_SOURCE";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -395,7 +396,8 @@ const WINDOWS_DESKTOP_BUILD_PREREQUISITES = [
   { id: "python", description: "Python 3 for node-gyp" },
   {
     id: "msvc",
-    description: "Visual Studio Build Tools with C++, Windows SDK, and Spectre libraries",
+    description:
+      "Visual Studio Build Tools with C++ and the Windows SDK (Spectre-mitigated libs only when T3CODE_DESKTOP_REQUIRE_SPECTRE is set)",
   },
   { id: "tar", description: "tar for the bundled WSL runtime" },
 ] as const;
@@ -934,11 +936,21 @@ interface ResolvedBuildOptions {
   readonly wslPrebuild: string | undefined;
 }
 
+export function resolveLocalUpdatePackageMetadata(
+  isLocalUpdateBuild: boolean,
+  repoRoot: string,
+): {
+  readonly t3codeLocalUpdateSource?: string;
+} {
+  return isLocalUpdateBuild ? { t3codeLocalUpdateSource: repoRoot } : {};
+}
+
 interface StagePackageJson {
   readonly name: string;
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
+  readonly t3codeLocalUpdateSource?: string;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
@@ -1837,7 +1849,14 @@ export const preflightMacDesktopBuild = Effect.fn("preflightMacDesktopBuild")(fu
   }
 });
 
-function windowsVswherePrerequisiteScript(arch: typeof BuildArch.Type): string {
+// The Spectre-mitigated libs are not actually linked against (nothing passes
+// /Qspectre), so they are only required when T3CODE_DESKTOP_REQUIRE_SPECTRE is
+// set — e.g. the official reproducible-release pipeline. Local and in-app
+// ("Build from this checkout") builds pass without that opt-in component.
+function windowsVswherePrerequisiteScript(
+  arch: typeof BuildArch.Type,
+  requireSpectre: boolean,
+): string {
   const toolComponents =
     arch === "arm64"
       ? ["Microsoft.VisualStudio.Component.VC.Tools.ARM64"]
@@ -1852,7 +1871,11 @@ function windowsVswherePrerequisiteScript(arch: typeof BuildArch.Type): string {
     "if (!$kitsRoot -or !(Test-Path (Join-Path $kitsRoot 'Lib'))) { exit 1 }",
     "$msvcToolset = Get-ChildItem (Join-Path $install 'VC\\Tools\\MSVC') -Directory | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1",
     "if (!$msvcToolset) { exit 1 }",
-    `if (!(Test-Path (Join-Path $msvcToolset.FullName 'lib\\spectre\\${spectreArch}'))) { exit 1 }`,
+    ...(requireSpectre
+      ? [
+          `if (!(Test-Path (Join-Path $msvcToolset.FullName 'lib\\spectre\\${spectreArch}'))) { exit 1 }`,
+        ]
+      : []),
   ].join("; ");
 }
 
@@ -1862,6 +1885,9 @@ export const preflightWindowsDesktopBuild = Effect.fn("preflightWindowsDesktopBu
     const reuseResourceMonitor = yield* Config.boolean(
       "T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR",
     ).pipe(Config.withDefault(false));
+    const requireSpectre = yield* Config.boolean("T3CODE_DESKTOP_REQUIRE_SPECTRE").pipe(
+      Config.withDefault(false),
+    );
     const python = yield* resolvePythonForNodeGyp();
     const checks = yield* Effect.all(
       {
@@ -1880,7 +1906,7 @@ export const preflightWindowsDesktopBuild = Effect.fn("preflightWindowsDesktopBu
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                windowsVswherePrerequisiteScript(input.arch),
+                windowsVswherePrerequisiteScript(input.arch, requireSpectre),
               ]),
               "Visual Studio Build Tools",
             ),
@@ -3396,6 +3422,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const repoRoot = yield* RepoRoot;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
+  const localUpdateBuild = Option.isSome(
+    yield* Config.string(LOCAL_UPDATE_SOURCE_ENV).pipe(Config.option),
+  );
   const hostPlatform = yield* HostProcessPlatform;
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);
@@ -3702,6 +3731,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
+    ...resolveLocalUpdatePackageMetadata(localUpdateBuild, repoRoot),
     private: true,
     packageManager: rootPackageJson.packageManager,
     description: "T3 Code desktop build",

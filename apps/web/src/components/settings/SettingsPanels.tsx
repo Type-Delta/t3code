@@ -64,6 +64,10 @@ import {
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
+import {
+  formatDesktopLocalUpdateProgress,
+  useDesktopLocalUpdateState,
+} from "../../state/desktopLocalUpdate";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
   getCustomModelOptionsByInstance,
@@ -246,8 +250,9 @@ function AboutVersionTitle() {
 
 function AboutVersionSection() {
   const updateState = useDesktopUpdateState();
+  const localUpdateState = useDesktopLocalUpdateState();
   const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
-  const [isUpdateActionPending, setIsUpdateActionPending] = useState(false);
+  const [isStartingLocalUpdate, setIsStartingLocalUpdate] = useState(false);
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
@@ -283,46 +288,45 @@ function AboutVersionSection() {
     [selectedUpdateChannel],
   );
 
-  const handleButtonClick = useCallback(async () => {
-    const bridge = window.desktopBridge;
-    if (!bridge) return;
-    if (isUpdateActionPending) return;
+  const isUpdateActionPending = isStartingLocalUpdate || localUpdateState?.status === "running";
+  const [pendingAction, setPendingAction] = useState<"update" | "build" | null>(null);
+  const runLocalAction = useCallback(
+    async (action: "update" | "build") => {
+      const bridge = window.desktopBridge;
+      if (!bridge || isUpdateActionPending) return;
 
-    const sourceDirectory = await ensureLocalApi().dialogs.pickFolder();
-    if (sourceDirectory === null) return;
-    const confirmed = await ensureLocalApi().dialogs.confirm(
-      "This fetches and merges the selected local T3 Code checkout, then runs checks and creates an installer. It never pushes changes. Continue?",
-    );
-    if (!confirmed) return;
+      setIsStartingLocalUpdate(true);
+      setPendingAction(action);
+      try {
+        await (action === "update" ? bridge.startLocalUpdate() : bridge.startLocalBuild());
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title:
+              action === "update" ? "Could not start local update" : "Could not start local build",
+            description: error instanceof Error ? error.message : "An unexpected error occurred.",
+          }),
+        );
+      } finally {
+        setIsStartingLocalUpdate(false);
+        setPendingAction(null);
+      }
+    },
+    [isUpdateActionPending],
+  );
+  const handleButtonClick = useCallback(() => void runLocalAction("update"), [runLocalAction]);
+  const handleBuildClick = useCallback(() => void runLocalAction("build"), [runLocalAction]);
 
-    setIsUpdateActionPending(true);
-    try {
-      await bridge.startLocalUpdate(sourceDirectory);
-      toastManager.add(
-        stackedThreadToast({
-          type: "success",
-          title: "Local update completed",
-          description: "The installer was opened. Continue with its setup steps.",
-        }),
-      );
-    } catch (error) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not complete local update",
-          description: error instanceof Error ? error.message : "An unexpected error occurred.",
-        }),
-      );
-    } finally {
-      setIsUpdateActionPending(false);
-    }
-  }, [isUpdateActionPending]);
-
-  const buttonTooltip = "Update this local T3 Code checkout and build a new installer.";
-  const buttonDisabled = isUpdateActionPending;
-  const buttonLabel = isUpdateActionPending ? "Updating…" : "Update from Type-Delta";
+  const progressLabel = formatDesktopLocalUpdateProgress(localUpdateState);
+  const buttonLabel =
+    isUpdateActionPending && pendingAction !== "build" ? progressLabel : "Update from Type-Delta";
+  const buildButtonLabel =
+    isUpdateActionPending && pendingAction === "build" ? progressLabel : "Build from this checkout";
   const description =
-    "Fetch the latest Type-Delta code from GitHub and merge it with the current version of this local checkout. Verify the combined code, build a new installer, then open it so you can choose whether to install it now.";
+    "Fetches and merges the Type-Delta checkout linked to this local installation, verifies the code, builds a new installer, and opens it. Uncommitted changes are stashed first and restored afterward. Progress updates after each completed step.";
+  const buildDescription =
+    "Builds and opens an installer from the linked checkout exactly as it is, including uncommitted changes. Nothing is fetched, merged, or verified.";
 
   return (
     <>
@@ -336,17 +340,37 @@ function AboutVersionSection() {
                 <Button
                   size="xs"
                   variant="outline"
-                  disabled={buttonDisabled || isUpdateActionPending}
+                  disabled={isUpdateActionPending}
                   onClick={handleButtonClick}
                 >
                   {buttonLabel}
                 </Button>
               }
             />
-            {buttonTooltip ? <TooltipPopup>{buttonTooltip}</TooltipPopup> : null}
+            <TooltipPopup>
+              {isUpdateActionPending
+                ? progressLabel
+                : "Update the local Type-Delta checkout and build a new installer."}
+            </TooltipPopup>
           </Tooltip>
         }
       />
+      {hasDesktopBridge ? (
+        <SettingsRow
+          title="Build from this checkout"
+          description={buildDescription}
+          control={
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={isUpdateActionPending}
+              onClick={handleBuildClick}
+            >
+              {buildButtonLabel}
+            </Button>
+          }
+        />
+      ) : null}
       {hasDesktopBridge ? (
         <SettingsRow
           title="Update track"

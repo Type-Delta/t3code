@@ -276,6 +276,58 @@ export const DesktopUpdateCheckResultSchema = Schema.Struct({
   state: DesktopUpdateStateSchema,
 });
 
+export type DesktopLocalUpdateStatus = "idle" | "running" | "completed" | "error";
+
+export type DesktopLocalUpdateStep =
+  | "idle"
+  | "resolve-source"
+  | "inspect-checkout"
+  | "stash"
+  | "fetch"
+  | "merge"
+  | "check"
+  | "typecheck"
+  | "build"
+  | "open-installer"
+  | "restore"
+  | "completed";
+
+export const DesktopLocalUpdateStatusSchema = Schema.Literals([
+  "idle",
+  "running",
+  "completed",
+  "error",
+]);
+
+export const DesktopLocalUpdateStepSchema = Schema.Literals([
+  "idle",
+  "resolve-source",
+  "inspect-checkout",
+  "stash",
+  "fetch",
+  "merge",
+  "check",
+  "typecheck",
+  "build",
+  "open-installer",
+  "restore",
+  "completed",
+]);
+
+export interface DesktopLocalUpdateState {
+  status: DesktopLocalUpdateStatus;
+  step: DesktopLocalUpdateStep;
+  progressPercent: number;
+  message: string | null;
+}
+
+export const DesktopLocalUpdateStateSchema = Schema.Struct({
+  status: DesktopLocalUpdateStatusSchema,
+  step: DesktopLocalUpdateStepSchema,
+  progressPercent: Schema.Number,
+  message: Schema.NullOr(Schema.String),
+});
+
 // Stable id for the Windows-native primary backend. Desktop side wraps
 // this with a brand inside DesktopBackendManager; web side keeps it as
 // a plain string so the env-runtime can compare against it without
@@ -1150,8 +1202,12 @@ export interface DesktopBridge {
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
-  /** Opens a visible terminal that updates a user-selected local T3 Code checkout. */
-  startLocalUpdate: (sourceDirectory: string) => Promise<void>;
+  /** Starts the local Type-Delta update associated with this desktop build. */
+  startLocalUpdate: () => Promise<void>;
+  /** Builds and opens an installer from the linked checkout as-is, without fetching or merging. */
+  startLocalBuild: () => Promise<void>;
+  getLocalUpdateState: () => Promise<DesktopLocalUpdateState>;
+  onLocalUpdateState: (listener: (state: DesktopLocalUpdateState) => void) => () => void;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
   /** Present when the desktop shell accepts `t3 app` activation requests. */
   appActivation?: {
