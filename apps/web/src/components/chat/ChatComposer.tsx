@@ -2945,9 +2945,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   /**
    * Queues the current composer text to run as its own turn after the active
-   * one finishes, then clears the prompt. Distinct from steering (Enter / the
-   * running send button), which injects text into the running turn. Queued
-   * prompts are text-only; attachments and contexts stay in the composer.
+   * one finishes, then clears the prompt. Triggered by the Queue button and by
+   * Enter while a turn is running. Steering (injecting into the running turn)
+   * stays on the running send button. Queued prompts are text-only; attachments
+   * and contexts stay in the composer.
    */
   const queueComposerPrompt = useCallback(() => {
     if (!onQueuePrompt) return;
@@ -3084,6 +3085,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           })
         : null;
     if (submissionIntent) {
+      // While a turn is running, Enter queues the prompt to run next (matching
+      // the Queue button) instead of steering into the running turn — but only
+      // in the plain composing state, never over a pending approval / input
+      // request or the plan follow-up prompt, where Enter has its own meaning.
+      if (
+        key === "Enter" &&
+        phase === "running" &&
+        onQueuePrompt &&
+        !activePendingProgress &&
+        !showPlanFollowUpPrompt &&
+        !isComposerApprovalState &&
+        pendingUserInputs.length === 0 &&
+        activePendingApproval === null &&
+        promptRef.current.trim().length > 0
+      ) {
+        queueComposerPrompt();
+        return true;
+      }
       submitComposer(undefined, submissionIntent);
       return true;
     }
