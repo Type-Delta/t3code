@@ -12,8 +12,6 @@ export default Effect.gen(function* () {
       secret_hash TEXT NOT NULL UNIQUE,
       secret_prefix TEXT NOT NULL,
       scopes TEXT NOT NULL,
-      default_runtime_mode TEXT NOT NULL,
-      maximum_runtime_mode TEXT NOT NULL,
       created_at TEXT NOT NULL,
       expires_at TEXT,
       last_used_at TEXT,

@@ -1,8 +1,5 @@
-import {
-  MANAGEMENT_API_KEY_RUNTIME_MODE_ORDER,
-  type ManagementApiKeyRuntimeMode,
-  type ManagementApiKeyScope as ContractManagementApiKeyScope,
-} from "@t3tools/contracts";
+import { type ManagementApiKeyScope as ContractManagementApiKeyScope } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 
 export const MANAGEMENT_API_KEY_SCOPES = [
   "models:read",
@@ -16,6 +13,49 @@ export const MANAGEMENT_API_KEY_SCOPES = [
 export type ManagementApiKeyScope = ContractManagementApiKeyScope;
 export type ManagementApiKeyPreset = "read-only" | "thread-orchestration" | "custom";
 export type ManagementApiKeyExpiration = "30-days" | "90-days" | "1-year" | "never";
+
+export interface ManagementApiKeyEnvironmentOption {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+}
+
+/** Keep the primary machine prominent while making every other machine easy to find. */
+export function buildManagementApiKeyEnvironmentOptions<
+  T extends ManagementApiKeyEnvironmentOption,
+>(environments: ReadonlyArray<T>, primaryEnvironmentId: EnvironmentId | null): ReadonlyArray<T> {
+  return environments.toSorted((left, right) => {
+    const leftIsPrimary = left.environmentId === primaryEnvironmentId;
+    const rightIsPrimary = right.environmentId === primaryEnvironmentId;
+    if (leftIsPrimary !== rightIsPrimary) return leftIsPrimary ? -1 : 1;
+    return (
+      left.label.localeCompare(right.label) ||
+      String(left.environmentId).localeCompare(String(right.environmentId))
+    );
+  });
+}
+
+/** Preserve the user's disconnected choice, falling back to primary then the first machine. */
+export function resolveSelectedManagementApiKeyEnvironmentId<
+  T extends ManagementApiKeyEnvironmentOption,
+>(
+  environments: ReadonlyArray<T>,
+  selectedEnvironmentId: EnvironmentId | null,
+  primaryEnvironmentId: EnvironmentId | null,
+): EnvironmentId | null {
+  if (
+    selectedEnvironmentId !== null &&
+    environments.some((environment) => environment.environmentId === selectedEnvironmentId)
+  ) {
+    return selectedEnvironmentId;
+  }
+  if (
+    primaryEnvironmentId !== null &&
+    environments.some((environment) => environment.environmentId === primaryEnvironmentId)
+  ) {
+    return primaryEnvironmentId;
+  }
+  return environments[0]?.environmentId ?? null;
+}
 
 export const MANAGEMENT_API_KEY_SCOPE_DETAILS: ReadonlyArray<{
   readonly scope: ManagementApiKeyScope;
@@ -76,28 +116,6 @@ export const MANAGEMENT_API_KEY_PRESETS: ReadonlyArray<{
   },
 ];
 
-export const MANAGEMENT_API_KEY_RUNTIME_MODES: ReadonlyArray<{
-  readonly value: Exclude<ManagementApiKeyRuntimeMode, "auto">;
-  readonly label: string;
-  readonly description: string;
-  readonly rank: number;
-}> = [
-  {
-    value: "approval-required",
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
-    rank: 0,
-  },
-  {
-    value: "auto-accept-edits",
-    label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    rank: 1,
-  },
-];
-
-const MANAGEMENT_API_KEY_RUNTIME_MODE_RANK = MANAGEMENT_API_KEY_RUNTIME_MODE_ORDER;
-
 export function orderedManagementApiKeyScopes(
   scopes: ReadonlyArray<string>,
 ): ReadonlyArray<ManagementApiKeyScope> {
@@ -137,31 +155,6 @@ export function managementApiKeyPresetForScopes(
   return "custom";
 }
 
-export function managementApiKeyRuntimeModeRank(mode: string): number {
-  return mode in MANAGEMENT_API_KEY_RUNTIME_MODE_RANK
-    ? MANAGEMENT_API_KEY_RUNTIME_MODE_RANK[mode as ManagementApiKeyRuntimeMode]
-    : Number.POSITIVE_INFINITY;
-}
-
-export function isManagementApiKeyRuntimeModeWithinCeiling(
-  defaultRuntimeMode: string,
-  maximumRuntimeMode: string,
-): boolean {
-  return (
-    managementApiKeyRuntimeModeRank(defaultRuntimeMode) <=
-    managementApiKeyRuntimeModeRank(maximumRuntimeMode)
-  );
-}
-
-export function clampManagementApiKeyDefaultRuntimeMode(
-  defaultRuntimeMode: Exclude<ManagementApiKeyRuntimeMode, "auto">,
-  maximumRuntimeMode: Exclude<ManagementApiKeyRuntimeMode, "auto">,
-): Exclude<ManagementApiKeyRuntimeMode, "auto"> {
-  return isManagementApiKeyRuntimeModeWithinCeiling(defaultRuntimeMode, maximumRuntimeMode)
-    ? defaultRuntimeMode
-    : maximumRuntimeMode;
-}
-
 export function resolveManagementApiKeyExpiration(
   expiration: ManagementApiKeyExpiration,
   now = new Date(),
@@ -180,13 +173,6 @@ export function managementApiKeyScopeSummary(scopes: ReadonlyArray<string>): str
   if (preset === "thread-orchestration") return "Thread orchestration";
   const count = orderedManagementApiKeyScopes(scopes).length;
   return `${count} custom ${count === 1 ? "scope" : "scopes"}`;
-}
-
-export function managementApiKeyRuntimeModeLabel(mode: string): string {
-  if (mode === "auto") return "Auto";
-  return (
-    MANAGEMENT_API_KEY_RUNTIME_MODES.find((candidate) => candidate.value === mode)?.label ?? mode
-  );
 }
 
 export function canRotateManagementApiKey(expiresAt: string | null, nowMs = Date.now()): boolean {

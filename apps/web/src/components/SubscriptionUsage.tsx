@@ -1,4 +1,7 @@
-import type { ServerProviderUsage, ServerProviderUsageWindow } from "@t3tools/contracts";
+import type {
+  ServerProviderSubscriptionUsageWindow,
+  ServerProviderUsage,
+} from "@t3tools/contracts";
 
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -17,17 +20,17 @@ function usageColor(remainingPercent: number): string {
   return "var(--color-muted-foreground)";
 }
 
-const remainingPercent = (window: ServerProviderUsageWindow): number =>
+const remainingPercent = (window: ServerProviderSubscriptionUsageWindow): number =>
   Math.max(0, Math.min(100, 100 - window.usedPercent));
 
-function usageTooltipText(kind: UsageKind, window: ServerProviderUsageWindow): string {
+function usageTooltipText(kind: UsageKind, window: ServerProviderSubscriptionUsageWindow): string {
   const left = `${Math.round(remainingPercent(window))}% left`;
   const resetTime = usageResetTime(window);
   if (!resetTime) return `${WINDOW_LABELS[kind]}: ${left}`;
   return `${WINDOW_LABELS[kind]}: ${left} · resets ${resetTime}`;
 }
 
-function usageResetTime(window: ServerProviderUsageWindow): string | null {
+function usageResetTime(window: ServerProviderSubscriptionUsageWindow): string | null {
   if (!window.resetsAt) return null;
   return new Date(window.resetsAt).toLocaleString(undefined, {
     weekday: "short",
@@ -40,7 +43,10 @@ function usageResetTime(window: ServerProviderUsageWindow): string | null {
  * Circular remaining-quota indicator (same geometry as ContextWindowMeter)
  * with a `s`/`w` letter in the middle.
  */
-function SubscriptionUsageRing(props: { kind: UsageKind; window: ServerProviderUsageWindow }) {
+function SubscriptionUsageRing(props: {
+  kind: UsageKind;
+  window: ServerProviderSubscriptionUsageWindow;
+}) {
   const remaining = remainingPercent(props.window);
   const radius = 19;
   const circumference = 2 * Math.PI * radius;
@@ -135,7 +141,10 @@ export function SubscriptionUsageRings(props: { usage: ServerProviderUsage | nul
   );
 }
 
-function SubscriptionUsageBar(props: { kind: UsageKind; window: ServerProviderUsageWindow }) {
+function SubscriptionUsageBar(props: {
+  kind: UsageKind;
+  window: ServerProviderSubscriptionUsageWindow;
+}) {
   const remaining = remainingPercent(props.window);
   return (
     <Tooltip>

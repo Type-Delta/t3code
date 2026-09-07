@@ -40,9 +40,50 @@ describe("deriveProviderModelsForDisplay", () => {
     expect(
       deriveProviderModelsForDisplay({
         liveModels,
-        customModels: ["kept-custom"],
+        customModels: [{ slug: "kept-custom", name: "kept-custom", capabilities: null }],
       }).map((model) => model.slug),
     ).toEqual(["server-model", "kept-custom"]);
+  });
+
+  it("prefers the entry's name and capabilities over the stale live custom row", () => {
+    const liveCapabilities = { optionDescriptors: [] };
+    const customCapabilities = {
+      optionDescriptors: [
+        {
+          id: "reasoningEffort",
+          label: "Reasoning",
+          type: "select" as const,
+          options: [{ id: "high", label: "High", isDefault: true }],
+          currentValue: "high",
+        },
+      ],
+    };
+    const liveModels: ReadonlyArray<ServerProviderModel> = [
+      { slug: "bare", name: "bare", isCustom: true, capabilities: liveCapabilities },
+      { slug: "named", name: "named", isCustom: true, capabilities: liveCapabilities },
+    ];
+
+    const display = deriveProviderModelsForDisplay({
+      liveModels,
+      customModels: [
+        { slug: "bare", name: "bare", capabilities: null },
+        { slug: "named", name: "My Model", capabilities: customCapabilities },
+      ],
+    });
+
+    // A bare entry keeps the driver default the server filled in.
+    expect(display[0]).toEqual({
+      slug: "bare",
+      name: "bare",
+      isCustom: true,
+      capabilities: liveCapabilities,
+    });
+    expect(display[1]).toEqual({
+      slug: "named",
+      name: "My Model",
+      isCustom: true,
+      capabilities: customCapabilities,
+    });
   });
 
   it("keeps gateway-discovered rows without reviving stale configured custom rows", () => {
@@ -61,12 +102,7 @@ describe("deriveProviderModelsForDisplay", () => {
         capabilities: null,
         metadata: { source: "gateway" },
       },
-      {
-        slug: "stale-custom",
-        name: "Stale Custom",
-        isCustom: true,
-        capabilities: null,
-      },
+      { slug: "stale-custom", name: "Stale Custom", isCustom: true, capabilities: null },
     ];
 
     expect(
@@ -83,14 +119,10 @@ describe("deriveProviderModelsForDisplay", () => {
         includeDiscoveredModels: false,
       }).map((model) => model.slug),
     ).toEqual([]);
-
     expect(
       deriveProviderModelsForDisplay({
         liveModels: [
-          {
-            ...liveModels[0]!,
-            metadata: { contextWindowTokens: 180_000, source: "manual" },
-          },
+          { ...liveModels[0]!, metadata: { contextWindowTokens: 180_000, source: "manual" } },
         ],
         customModels: [],
         includeDiscoveredModels: true,
@@ -98,32 +130,22 @@ describe("deriveProviderModelsForDisplay", () => {
       }).map((model) => model.slug),
     ).toEqual(["gateway-model"]);
   });
-});
 
-describe("readConfigModelOverrides", () => {
   it("reads only the model override record from provider config", () => {
     expect(
       readConfigModelOverrides({
         customModels: ["custom"],
         modelOverrides: {
-          custom: {
-            displayName: "Custom Model",
-            contextWindowTokens: 200_000,
-          },
+          custom: { displayName: "Custom Model", contextWindowTokens: 200_000 },
         },
       }),
     ).toEqual({
-      custom: {
-        displayName: "Custom Model",
-        contextWindowTokens: 200_000,
-      },
+      custom: { displayName: "Custom Model", contextWindowTokens: 200_000 },
     });
     expect(readConfigModelOverrides({ modelOverrides: [] })).toEqual({});
     expect(readConfigModelOverrides(undefined)).toEqual({});
   });
-});
 
-describe("ProviderInstanceCard", () => {
   it("shows a redacted provider email in the editor header status line", () => {
     const instanceId = ProviderInstanceId.make("codex");
     const driver = ProviderDriverKind.make("codex");

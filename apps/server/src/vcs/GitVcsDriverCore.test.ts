@@ -1,5 +1,7 @@
-// @effect-diagnostics nodeBuiltinImport:off - Tests compare Node-canonicalized Git cache keys.
+// @effect-diagnostics nodeBuiltinImport:off - realpathSync.native resolves Windows 8.3 short names, which the Effect realPath does not.
+import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -14,7 +16,6 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import * as NodeFSP from "node:fs/promises";
 
 import { GitCommandError, type ReviewDiffFileContentsInput } from "@t3tools/contracts";
 import { ServerConfig } from "../config.ts";
@@ -612,11 +613,11 @@ it.effect("backs off failed upstream refreshes across linked worktrees", () =>
         "rev-parse",
         "--git-common-dir",
       ])).stdout.trim();
+      // Native realpath, since git reports the long form of a directory the
+      // temp dir may name by its 8.3 short form on Windows.
       assert.equal(
-        yield* Effect.promise(() => NodeFSP.realpath(pathService.resolve(cwd, rootCommonDir))),
-        yield* Effect.promise(() =>
-          NodeFSP.realpath(pathService.resolve(worktreePath, linkedCommonDir)),
-        ),
+        NodeFS.realpathSync.native(pathService.resolve(cwd, rootCommonDir)),
+        NodeFS.realpathSync.native(pathService.resolve(worktreePath, linkedCommonDir)),
       );
       yield* Ref.set(fetchAttempts, 0);
 
@@ -824,6 +825,34 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           ignored.sources.find((source) => source.kind === "branch-range")?.diff,
           "",
         );
+      }),
+    );
+
+    it.effect("keeps a/ and b/ patch prefixes when the repository disables them", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* git(cwd, ["config", "diff.noprefix", "true"]);
+        yield* git(cwd, ["config", "diff.mnemonicPrefix", "true"]);
+        yield* git(cwd, ["checkout", "-b", "feature/noprefix"]);
+        yield* writeTextFile(cwd, "README.md", "# committed change\n");
+        yield* git(cwd, ["add", "README.md"]);
+        yield* git(cwd, ["commit", "-m", "committed change"]);
+        yield* writeTextFile(cwd, "README.md", "# dirty change\n");
+        yield* writeTextFile(cwd, "untracked.txt", "untracked\n");
+
+        const preview = yield* driver.getReviewDiffPreview({
+          cwd,
+          baseRef: initialBranch,
+          ignoreWhitespace: false,
+        });
+
+        const workingTree = preview.sources.find((source) => source.kind === "working-tree")?.diff;
+        const branchRange = preview.sources.find((source) => source.kind === "branch-range")?.diff;
+        assert.include(workingTree, "diff --git a/README.md b/README.md");
+        assert.include(workingTree, "+++ b/untracked.txt");
+        assert.include(branchRange, "diff --git a/README.md b/README.md");
       }),
     );
 
@@ -1456,14 +1485,14 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect.skipIf(process.env.OS === "Windows_NT")(
+    // NTFS rejects a newline in a file name, so there is nothing to preserve there.
+    it.effect.skipIf(HostProcessPlatform.defaultValue() === "win32")(
       "preserves newline characters in worktree paths when listing refs",
       () =>
         Effect.gen(function* () {
           const cwd = yield* makeTmpDir();
           yield* initRepoWithCommit(cwd);
           const worktreesRoot = yield* makeTmpDir("git-vcs-driver-worktrees-");
-          const fileSystem = yield* FileSystem.FileSystem;
           const pathService = yield* Path.Path;
           const worktreePath = pathService.join(worktreesRoot, "linked\nworktree");
           const driver = yield* GitVcsDriver.GitVcsDriver;
@@ -1479,8 +1508,8 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
             return assert.fail("expected the linked branch to include its worktree path");
           }
           assert.equal(
-            yield* fileSystem.realPath(listedPath),
-            yield* fileSystem.realPath(worktreePath),
+            NodeFS.realpathSync.native(listedPath),
+            NodeFS.realpathSync.native(worktreePath),
           );
         }),
     );
@@ -1603,6 +1632,51 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           refs.refs.some((ref) => ref.name === "feature/worktree"),
           false,
         );
+      }),
+    );
+
+    it.effect("allows worktree removal to run longer than the default command timeout", () =>
+      Effect.gen(function* () {
+        const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const removalStarted = yield* Deferred.make<void>();
+        const delayedRemovalSpawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            if (
+              ChildProcess.isStandardCommand(command) &&
+              command.args[0] === "worktree" &&
+              command.args[1] === "remove"
+            ) {
+              yield* Deferred.succeed(removalStarted, undefined);
+              yield* Effect.sleep("31 seconds");
+            }
+            return yield* delegate.spawn(command);
+          }),
+        );
+        const driver = yield* makeGitVcsDriverCore().pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, delayedRemovalSpawner),
+          Effect.provide(ServerConfigLayer),
+        );
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+        const worktreePath = pathService.join(yield* makeTmpDir("git-worktrees-"), "slow-removal");
+
+        yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/slow-removal",
+        });
+
+        const removal = yield* driver
+          .removeWorktree({ cwd, path: worktreePath, force: true })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(removalStarted);
+        yield* TestClock.adjust("31 seconds");
+        yield* Fiber.join(removal);
+
+        assert.equal(yield* fileSystem.exists(worktreePath), false);
       }),
     );
 
@@ -1781,6 +1855,23 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
 
         const driver = yield* GitVcsDriver.GitVcsDriver;
         yield* driver.fetchRemote({ cwd, remoteName: "origin" });
+
+        assert.equal(
+          yield* driver.remoteBranchExists({
+            cwd,
+            remoteName: "origin",
+            refName: initialBranch,
+          }),
+          true,
+        );
+        assert.equal(
+          yield* driver.remoteBranchExists({
+            cwd,
+            remoteName: "origin",
+            refName: "local-only",
+          }),
+          false,
+        );
 
         const resolvedBase = yield* driver.resolveRemoteTrackingCommit({
           cwd,

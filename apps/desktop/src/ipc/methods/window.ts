@@ -9,6 +9,7 @@ import {
   PickFolderOptionsSchema,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   REMOTE_CAPABLE_EDITOR_IDS,
+  SystemSettingsPaneSchema,
   type DesktopEnvironmentBootstrap,
   type PickedThemeFile,
 } from "@t3tools/contracts";
@@ -160,12 +161,14 @@ function extractWslDistroFromEnvironmentId(envId: string): string | null {
 
 export const getLocalEnvironmentBearerToken = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.GET_LOCAL_ENVIRONMENT_BEARER_TOKEN_CHANNEL,
-  payload: Schema.Void,
+  payload: Schema.UndefinedOr(Schema.String),
   result: Schema.String,
-  handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBearerToken")(function* () {
-    const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
-    return yield* localAuth.getBearerToken;
-  }),
+  handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBearerToken")(
+    function* (environmentId) {
+      const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+      return yield* localAuth.getBearerToken(environmentId);
+    },
+  ),
 });
 
 export const pickFolder = DesktopIpc.makeIpcMethod({
@@ -295,6 +298,16 @@ export const openExternal = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.window.openExternal")(function* (url) {
     const shell = yield* ElectronShell.ElectronShell;
     return yield* shell.openExternal(url);
+  }),
+});
+
+export const openSystemSettings = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.OPEN_SYSTEM_SETTINGS_CHANNEL,
+  payload: SystemSettingsPaneSchema,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.openSystemSettings")(function* (pane) {
+    const shell = yield* ElectronShell.ElectronShell;
+    return yield* shell.openSystemSettings(pane);
   }),
 });
 

@@ -5,7 +5,6 @@ import {
   type OrchestrationClientOrigin,
   PreviewAutomationUnavailableError,
   ProviderInstanceId,
-  type RuntimeMode,
   ThreadId,
   ThreadToolOperationFailureError,
 } from "@t3tools/contracts";
@@ -34,8 +33,6 @@ export type McpPrincipal =
       readonly keyId: ManagementApiKeyId;
       readonly name: string;
       readonly scopes: ReadonlySet<ManagementApiKeyScope>;
-      readonly defaultRuntimeMode: RuntimeMode;
-      readonly maximumRuntimeMode: RuntimeMode;
     };
 
 export interface McpInvocationScope {

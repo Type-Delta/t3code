@@ -1,4 +1,3 @@
-import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
 import {
   executeEnvironmentHttpRequest,
   makeEnvironmentHttpApiClient,
@@ -18,6 +17,7 @@ import * as Electron from "electron";
 
 import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
+import * as DesktopLocalEnvironmentAuth from "../backend/DesktopLocalEnvironmentAuth.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
@@ -78,6 +78,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const assets = yield* DesktopAssets.DesktopAssets;
     const backendPool = yield* DesktopBackendPool.DesktopBackendPool;
+    const localAuth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     const electronApp = yield* ElectronApp.ElectronApp;
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -85,7 +86,6 @@ export const layer = Layer.effect(
     const httpClient = yield* HttpClient.HttpClient;
     const context = yield* Effect.context<DesktopWindow.DesktopWindow | ElectronApp.ElectronApp>();
     const runEffect = Effect.runPromiseWith(context);
-    const bearerTokens = new Map<string, { readonly credential: string; readonly token: string }>();
     const lastCounts = new Map<string, number>();
     const failedBackendIds = new Set<string>();
 
@@ -95,27 +95,7 @@ export const layer = Layer.effect(
       const config = yield* instance.currentConfig;
       if (Option.isNone(config)) return Option.none<number>();
 
-      const { desktopBootstrapToken: credential } = config.value.bootstrap;
-      const cached = bearerTokens.get(instance.id);
-      const token =
-        cached?.credential === credential
-          ? cached.token
-          : yield* bootstrapRemoteBearerSession({
-              httpBaseUrl: config.value.httpBaseUrl.href,
-              credential,
-              scopes: ["orchestration:read"],
-              clientMetadata: {
-                label: "T3 Code Desktop Tray",
-                deviceType: "desktop",
-              },
-              timeoutMs: REQUEST_TIMEOUT_MS,
-            }).pipe(
-              Effect.provideService(HttpClient.HttpClient, httpClient),
-              Effect.map((session) => {
-                bearerTokens.set(instance.id, { credential, token: session.access_token });
-                return session.access_token;
-              }),
-            );
+      const token = yield* localAuth.getBearerToken(instance.id);
       const client = yield* makeEnvironmentHttpApiClient(config.value.httpBaseUrl.href);
       const count = yield* executeEnvironmentHttpRequest(
         new URL("/api/orchestration/running-thread-count", config.value.httpBaseUrl).href,
@@ -197,9 +177,6 @@ export const layer = Layer.effect(
         for (const id of lastCounts.keys()) {
           if (!instanceIds.has(id)) lastCounts.delete(id);
         }
-        for (const id of bearerTokens.keys()) {
-          if (!instanceIds.has(id)) bearerTokens.delete(id);
-        }
         for (const id of failedBackendIds) {
           if (!instanceIds.has(id)) failedBackendIds.delete(id);
         }
@@ -221,7 +198,6 @@ export const layer = Layer.effect(
               }),
               Effect.catchCause((cause) =>
                 Effect.gen(function* () {
-                  bearerTokens.delete(instance.id);
                   if (!failedBackendIds.has(instance.id)) {
                     yield* logWarning("Failed to refresh tray thread count", {
                       backendId: instance.id,

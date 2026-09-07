@@ -331,6 +331,32 @@ describe("gateway model catalog merging", () => {
     expect(model?.metadata).toEqual({ contextWindowTokens: 96_000 });
   });
 
+  it("keeps structured custom model presentation and capabilities", () => {
+    const [model] = mergeGatewayModelCatalog({
+      baseModels: [],
+      catalog: { source: "none", models: [] },
+      customModels: [
+        {
+          slug: "manual-only",
+          name: "Manual model",
+          capabilities: {
+            optionDescriptors: [{ id: "fastMode", label: "Fast mode", type: "boolean" }],
+          },
+        },
+      ],
+      modelOverrides: {},
+      reasoningOptionId: "effort",
+    });
+
+    expect(model).toMatchObject({
+      slug: "manual-only",
+      name: "Manual model",
+      capabilities: {
+        optionDescriptors: [{ id: "fastMode", label: "Fast mode", type: "boolean" }],
+      },
+    });
+  });
+
   it("relays only usable context and includes overrides for models outside the catalog", () => {
     expect(
       usableModelContextWindows({

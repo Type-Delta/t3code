@@ -26,12 +26,13 @@ describe("ProviderModelsSection", () => {
         instanceId={ProviderInstanceId.make("codex_test")}
         driverKind={null}
         models={models}
-        customModels={["custom"]}
+        customModels={[{ slug: "custom", name: "Custom", capabilities: null }]}
         modelOverrides={{}}
         hiddenModels={[]}
         favoriteModels={[]}
         modelOrder={[]}
-        onCustomModelsChange={() => undefined}
+        onChange={() => undefined}
+        onModelOverridesChange={() => undefined}
         onHiddenModelsChange={() => undefined}
         onFavoriteModelsChange={() => undefined}
         onModelOrderChange={() => undefined}

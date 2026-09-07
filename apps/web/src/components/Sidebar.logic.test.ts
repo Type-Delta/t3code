@@ -4,6 +4,7 @@ import {
   animatePinnedLayoutChanges,
   archiveSelectedThreadEntries,
   buildBulkTitleRegenerationContextMenuItem,
+  buildBulkUnpinContextMenuItem,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
   filterSidebarProjectScopeItems,
@@ -35,6 +36,7 @@ import {
   formatWorkingDurationLabel,
   shouldNavigateAfterProjectRemoval,
   shouldClearThreadSelectionOnMouseDown,
+  shouldRecedeSidebarThread,
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebar,
   pinOrderKeyBetween,
@@ -193,6 +195,19 @@ describe("archiveSelectedThreadEntries", () => {
   });
 });
 
+describe("buildBulkUnpinContextMenuItem", () => {
+  it("counts only the pinned rows of a mixed selection", () => {
+    expect(buildBulkUnpinContextMenuItem({ pinnedCount: 2 })).toEqual({
+      id: "unpin",
+      label: "Unpin (2)",
+    });
+  });
+
+  it("omits the action when nothing selected is pinned", () => {
+    expect(buildBulkUnpinContextMenuItem({ pinnedCount: 0 })).toBeNull();
+  });
+});
+
 describe("buildBulkTitleRegenerationContextMenuItem", () => {
   it("counts only threads that can start a new regeneration", () => {
     expect(
@@ -286,6 +301,51 @@ describe("hasUnseenCompletion", () => {
         session: null,
       }),
     ).toBe(false);
+  });
+});
+
+describe("shouldRecedeSidebarThread", () => {
+  it.each(["working", "monitoring"] as const)(
+    "recedes an inactive %s thread even when it is unread and woke",
+    (status) => {
+      expect(
+        shouldRecedeSidebarThread({
+          status,
+          isUnread: true,
+          isWoke: true,
+          isActive: false,
+          isSelected: false,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.each(["ready", "approval", "input"] as const)(
+    "keeps an unread %s thread prominent",
+    (status) => {
+      expect(
+        shouldRecedeSidebarThread({
+          status,
+          isUnread: true,
+          isWoke: false,
+          isActive: false,
+          isSelected: false,
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it("keeps active and selected working threads prominent", () => {
+    const input = {
+      status: "working" as const,
+      isUnread: true,
+      isWoke: true,
+      isActive: false,
+      isSelected: false,
+    };
+
+    expect(shouldRecedeSidebarThread({ ...input, isActive: true })).toBe(false);
+    expect(shouldRecedeSidebarThread({ ...input, isSelected: true })).toBe(false);
   });
 });
 
@@ -1001,15 +1061,17 @@ describe("sortThreadsForSidebar", () => {
     id: string;
     createdAt: string;
     updatedAt?: string;
+    latestUserMessageAt?: string | null;
     environmentId?: EnvironmentId;
   }) => ({
     environmentId: input.environmentId ?? localEnvironmentId,
     id: input.id,
     createdAt: input.createdAt,
     updatedAt: input.updatedAt ?? input.createdAt,
+    latestUserMessageAt: input.latestUserMessageAt ?? null,
   });
 
-  it("moves an older active thread above newer threads after new activity", () => {
+  it("moves an older active thread above newer threads after a new user message", () => {
     const sorted = sortThreadsForSidebar([
       sortable({
         id: "newer-thread",
@@ -1020,10 +1082,27 @@ describe("sortThreadsForSidebar", () => {
         id: "recently-messaged",
         createdAt: "2026-03-09T08:00:00.000Z",
         updatedAt: "2026-03-09T13:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T13:00:00.000Z",
       }),
     ]);
 
     expect(sorted.map((thread) => thread.id)).toEqual(["recently-messaged", "newer-thread"]);
+  });
+
+  it("does not move a thread after a non-message update", () => {
+    const sorted = sortThreadsForSidebar([
+      sortable({
+        id: "newer-thread",
+        createdAt: "2026-03-09T12:00:00.000Z",
+      }),
+      sortable({
+        id: "recently-updated",
+        createdAt: "2026-03-09T08:00:00.000Z",
+        updatedAt: "2026-03-09T13:00:00.000Z",
+      }),
+    ]);
+
+    expect(sorted.map((thread) => thread.id)).toEqual(["newer-thread", "recently-updated"]);
   });
 
   it("falls back to creation time when modification matches creation", () => {
@@ -1691,6 +1770,18 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
   };
 }
 
+function makeUserMessage(id: string, createdAt: string): Thread["messages"][number] {
+  return {
+    id: id as never,
+    role: "user",
+    text: "Message",
+    turnId: null,
+    createdAt,
+    updatedAt: createdAt,
+    streaming: false,
+  };
+}
+
 describe("getFallbackThreadIdAfterDelete", () => {
   it("returns the top remaining thread in the deleted thread's project sidebar order", () => {
     const fallbackThreadId = getFallbackThreadIdAfterDelete({
@@ -1888,6 +1979,7 @@ describe("sortProjectsForSidebar", () => {
           id: ThreadId.make("thread-visible"),
           projectId: ProjectId.make("project-1"),
           updatedAt: "2026-03-09T10:02:00.000Z",
+          messages: [makeUserMessage("message-visible", "2026-03-09T10:02:00.000Z")],
           archivedAt: null,
         }),
         makeThread({
@@ -1938,11 +2030,13 @@ describe("sortScopedProjectsForSidebar", () => {
         environmentId: localEnvironmentId,
         projectId: sharedProjectId,
         updatedAt: "2026-03-09T10:02:00.000Z",
+        messages: [makeUserMessage("message-local", "2026-03-09T10:02:00.000Z")],
       }),
       makeThread({
         environmentId: remoteEnvironmentId,
         projectId: sharedProjectId,
         updatedAt: "2026-03-09T10:10:00.000Z",
+        messages: [makeUserMessage("message-remote", "2026-03-09T10:10:00.000Z")],
       }),
     ];
 
@@ -1969,6 +2063,7 @@ describe("sortScopedProjectsForSidebar", () => {
         id: ThreadId.make("thread-visible"),
         projectId: ProjectId.make("project-visible"),
         updatedAt: "2026-03-09T10:02:00.000Z",
+        messages: [makeUserMessage("message-visible", "2026-03-09T10:02:00.000Z")],
       }),
       makeThread({
         id: ThreadId.make("thread-archived"),

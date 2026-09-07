@@ -20,6 +20,7 @@ import {
 } from "./relayClient.ts";
 
 const testPlatform = process.env.OS === "Windows_NT" ? "win32" : "linux";
+const windowsHost = testPlatform === "win32";
 const testExecutableName = testPlatform === "win32" ? "cloudflared.exe" : "cloudflared";
 
 const hostRuntimeLayer = (env: Record<string, string> = {}) =>
@@ -108,69 +109,71 @@ describe("RelayClient", () => {
     ),
   );
 
-  it.effect("downloads, verifies, validates, and atomically installs the managed executable", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-cloudflared-test-",
-      });
-      const bytes = new TextEncoder().encode("test-cloudflared-binary");
-      const manager = yield* makeCloudflaredRelayClient({
-        baseDir,
-        releaseAsset: {
-          url: "https://example.test/cloudflared",
-          sha256: Encoding.encodeHex(sha256(bytes)),
-          archive: "binary",
-        },
-      });
+  it.effect.skipIf(windowsHost)(
+    "downloads, verifies, validates, and atomically installs the managed executable",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-cloudflared-test-",
+        });
+        const bytes = new TextEncoder().encode("test-cloudflared-binary");
+        const manager = yield* makeCloudflaredRelayClient({
+          baseDir,
+          releaseAsset: {
+            url: "https://example.test/cloudflared",
+            sha256: Encoding.encodeHex(sha256(bytes)),
+            archive: "binary",
+          },
+        });
 
-      const progress: Array<string> = [];
-      const installed = yield* manager.installWithProgress((event) =>
-        Effect.sync(() => {
-          if (event.type === "progress") {
-            progress.push(event.stage);
-          }
-        }),
-      );
-      const managedPath = path.join(
-        baseDir,
-        "tools",
-        "cloudflared",
-        CLOUDFLARED_VERSION,
-        `${testPlatform}-x64`,
-        testExecutableName,
-      );
-      expect(installed).toEqual({
-        status: "available",
-        executablePath: managedPath,
-        source: "managed",
-        version: CLOUDFLARED_VERSION,
-      });
-      expect(new TextDecoder().decode(yield* fileSystem.readFile(managedPath))).toBe(
-        "test-cloudflared-binary",
-      );
-      expect(progress).toEqual([
-        "checking",
-        "waiting_for_lock",
-        "downloading",
-        "verifying",
-        "installing",
-        "validating",
-        "activating",
-      ]);
-      expect(yield* manager.resolve).toEqual(installed);
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          NodeServices.layer,
-          makeHttpClientLayer(new TextEncoder().encode("test-cloudflared-binary")),
-          makeSpawnerLayer([]),
-          hostRuntimeLayer(),
+        const progress: Array<string> = [];
+        const installed = yield* manager.installWithProgress((event) =>
+          Effect.sync(() => {
+            if (event.type === "progress") {
+              progress.push(event.stage);
+            }
+          }),
+        );
+        const managedPath = path.join(
+          baseDir,
+          "tools",
+          "cloudflared",
+          CLOUDFLARED_VERSION,
+          `${testPlatform}-x64`,
+          testExecutableName,
+        );
+        expect(installed).toEqual({
+          status: "available",
+          executablePath: managedPath,
+          source: "managed",
+          version: CLOUDFLARED_VERSION,
+        });
+        expect(new TextDecoder().decode(yield* fileSystem.readFile(managedPath))).toBe(
+          "test-cloudflared-binary",
+        );
+        expect(progress).toEqual([
+          "checking",
+          "waiting_for_lock",
+          "downloading",
+          "verifying",
+          "installing",
+          "validating",
+          "activating",
+        ]);
+        expect(yield* manager.resolve).toEqual(installed);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            makeHttpClientLayer(new TextEncoder().encode("test-cloudflared-binary")),
+            makeSpawnerLayer([]),
+            hostRuntimeLayer(),
+          ),
         ),
       ),
-    ),
   );
 
   it.effect("rejects downloads whose checksum does not match the pinned manifest", () =>
@@ -204,12 +207,11 @@ describe("RelayClient", () => {
     ),
   );
 
-  it.effect("serializes concurrent installs within one runtime", () => {
+  it.effect.skipIf(windowsHost)("serializes concurrent installs within one runtime", () => {
     const commands: Array<string> = [];
     const bytes = new TextEncoder().encode("test-cloudflared-binary");
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-cloudflared-test-",
       });

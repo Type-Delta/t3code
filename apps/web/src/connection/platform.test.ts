@@ -5,12 +5,14 @@ import {
   type DesktopBridge,
   type DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "@effect/vitest";
+import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import { FetchHttpClient } from "effect/unstable/http";
 
 import {
   canRetainCachedPlatformRegistrationAfterRefreshFailure,
   canReuseCachedPlatformRegistration,
+  loadSecondaryConnectionRegistration,
   primaryRegistrationToRetainAfterTopologyRead,
   provisionDesktopSshEnvironment,
   readPrimaryEnvironmentTargetResult,
@@ -18,6 +20,10 @@ import {
   secondaryBearerExpiresAtEpochMs,
   secondaryBearerRefreshAtEpochMs,
 } from "./platform.ts";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 const TARGET: DesktopSshEnvironmentTarget = {
   alias: "devbox",
@@ -93,6 +99,76 @@ describe("desktop SSH pairing", () => {
       ).pipe(Effect.flip);
 
       expect(calls).toEqual(["ensure", "descriptor"]);
+    }),
+  );
+});
+
+describe("desktop-local bearer registration", () => {
+  it.effect("uses the main-process token for the selected backend", () =>
+    Effect.gen(function* () {
+      const getLocalEnvironmentBearerToken = vi
+        .fn<(environmentId?: string) => Promise<string>>()
+        .mockResolvedValue("shared-secondary-token");
+      vi.stubGlobal("window", {
+        desktopBridge: { getLocalEnvironmentBearerToken },
+      });
+      const authorizationHeaders: Array<string | null> = [];
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          const requestHeaders =
+            typeof input === "object" && "headers" in input
+              ? new Headers(input.headers)
+              : new Headers(init?.headers);
+          if (url.includes("/.well-known/t3/environment")) {
+            return new Response(
+              JSON.stringify({
+                environmentId: "environment-wsl",
+                label: "WSL environment",
+                platform: { os: "linux", arch: "x64" },
+                serverVersion: "0.0.0-test",
+                capabilities: { repositoryIdentity: true },
+              }),
+              { headers: { "content-type": "application/json" } },
+            );
+          }
+          if (url.includes("/api/auth/session")) {
+            authorizationHeaders.push(requestHeaders?.get("authorization") ?? null);
+            return new Response(
+              JSON.stringify({
+                authenticated: true,
+                auth: {
+                  policy: "desktop-managed-local",
+                  bootstrapMethods: ["desktop-bootstrap"],
+                  sessionMethods: ["bearer-access-token"],
+                  sessionCookieName: "t3_session",
+                },
+                scopes: AuthStandardClientScopes,
+                sessionMethod: "bearer-access-token",
+                expiresAt: "2026-09-05T00:00:00.000Z",
+              }),
+              { headers: { "content-type": "application/json" } },
+            );
+          }
+          throw new Error(`Unexpected URL: ${url}`);
+        }),
+      );
+
+      const result = yield* loadSecondaryConnectionRegistration({
+        id: "wsl:Ubuntu",
+        label: "WSL: Ubuntu",
+        httpBaseUrl: "http://127.0.0.1:4000",
+        wsBaseUrl: "ws://127.0.0.1:4000",
+      }).pipe(Effect.provide(FetchHttpClient.layer));
+
+      expect(getLocalEnvironmentBearerToken).toHaveBeenCalledOnce();
+      expect(getLocalEnvironmentBearerToken).toHaveBeenCalledWith("wsl:Ubuntu");
+      expect(authorizationHeaders).toEqual(["Bearer shared-secondary-token"]);
+      expect(result.registration.credential.token).toBe("shared-secondary-token");
+      expect(result.expiresAtEpochMs).toBe(Date.parse("2026-09-05T00:00:00.000Z"));
     }),
   );
 });

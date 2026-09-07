@@ -26,8 +26,6 @@ const decodeStoredScopes = Schema.decodeUnknownEffect(
 const createInput = {
   name: "CI integration",
   scopes: ["models:read", "threads:list", "threads:read"] as const,
-  defaultRuntimeMode: "approval-required" as const,
-  maximumRuntimeMode: "auto-accept-edits" as const,
 };
 
 it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
@@ -67,8 +65,6 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
           type: "management-key",
           keyId: issued.key.id,
           name: createInput.name,
-          defaultRuntimeMode: createInput.defaultRuntimeMode,
-          maximumRuntimeMode: createInput.maximumRuntimeMode,
         });
         expect([...resolved.value.scopes]).toEqual([...createInput.scopes]);
       }
@@ -98,8 +94,6 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
         name: issued.key.name,
         prefix: issued.key.prefix,
         scopes: issued.key.scopes,
-        defaultRuntimeMode: issued.key.defaultRuntimeMode,
-        maximumRuntimeMode: issued.key.maximumRuntimeMode,
         createdAt: issued.key.createdAt,
         expiresAt: issued.key.expiresAt,
       });
@@ -151,7 +145,7 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
     }).pipe(Effect.provide(serviceLayer)),
   );
 
-  it.effect("validates scopes, expiration, and runtime-mode ordering", () =>
+  it.effect("validates scopes and expiration", () =>
     Effect.gen(function* () {
       const service = yield* ManagementApiKeyService.ManagementApiKeyService;
 
@@ -161,29 +155,6 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
       expect(duplicateScopes._tag).toBe("ManagementApiKeyValidationError");
       if (duplicateScopes._tag === "ManagementApiKeyValidationError") {
         expect(duplicateScopes.reason).toBe("duplicate_scopes");
-      }
-
-      const unsafeOrdering = yield* service
-        .create({
-          ...createInput,
-          defaultRuntimeMode: "auto-accept-edits",
-          maximumRuntimeMode: "approval-required",
-        })
-        .pipe(Effect.flip);
-      expect(unsafeOrdering._tag).toBe("ManagementApiKeyValidationError");
-      if (unsafeOrdering._tag === "ManagementApiKeyValidationError") {
-        expect(unsafeOrdering.reason).toBe("default_runtime_mode_exceeds_maximum");
-      }
-
-      const unsafeMode = yield* service
-        .create({
-          ...createInput,
-          maximumRuntimeMode: "auto" as never,
-        })
-        .pipe(Effect.flip);
-      expect(unsafeMode._tag).toBe("ManagementApiKeyValidationError");
-      if (unsafeMode._tag === "ManagementApiKeyValidationError") {
-        expect(unsafeMode.reason).toBe("unsafe_runtime_mode");
       }
     }).pipe(Effect.provide(serviceLayer)),
   );

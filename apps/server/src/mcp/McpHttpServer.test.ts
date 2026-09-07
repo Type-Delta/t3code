@@ -107,8 +107,6 @@ const managementPrincipal: ManagementApiKeyService.ManagementApiKeyPrincipal = {
   keyId: ManagementApiKeyId.make("mcp-http-management-key"),
   name: "HTTP management key",
   scopes: new Set(managementScopes),
-  defaultRuntimeMode: "approval-required",
-  maximumRuntimeMode: "auto-accept-edits",
 };
 
 const emptyMcpRegistry = McpSessionRegistry.McpSessionRegistry.of({
@@ -284,8 +282,6 @@ it.effect("authenticates a persisted key after rebuilding the service and HTTP t
       const issued = yield* firstService.create({
         name: "Persisted HTTP integration",
         scopes: managementScopes,
-        defaultRuntimeMode: "approval-required",
-        maximumRuntimeMode: "auto-accept-edits",
       });
       const rebuiltService = yield* ManagementApiKeyService.make;
       expect(rebuiltService).not.toBe(firstService);

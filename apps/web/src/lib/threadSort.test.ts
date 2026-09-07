@@ -84,7 +84,7 @@ describe("sortThreads", () => {
     ]);
   });
 
-  it("falls back to thread timestamps when there is no user message", () => {
+  it("uses creation time when there is no user message", () => {
     const sorted = sortThreads(
       [
         makeThread({
@@ -118,7 +118,7 @@ describe("sortThreads", () => {
     ]);
   });
 
-  it("falls back to createdAt when updatedAt is invalid", () => {
+  it("ignores updatedAt when there is no user message", () => {
     const sorted = sortThreads(
       [
         makeThread({
@@ -130,7 +130,7 @@ describe("sortThreads", () => {
         makeThread({
           id: ThreadId.make("thread-2"),
           createdAt: "2026-03-09T09:00:00.000Z",
-          updatedAt: "2026-03-09T09:30:00.000Z",
+          updatedAt: "2026-03-09T11:30:00.000Z",
           messages: [],
         }),
       ],
@@ -191,7 +191,7 @@ describe("sortThreads", () => {
     ]);
   });
 
-  it("uses updatedAt as a fallback for created_at sorting when createdAt is invalid", () => {
+  it("does not use updatedAt as a fallback for created_at sorting", () => {
     const sorted = sortThreads(
       [
         makeThread({
@@ -209,8 +209,8 @@ describe("sortThreads", () => {
     );
 
     expect(sorted.map((thread) => thread.id)).toEqual([
-      ThreadId.make("thread-1"),
       ThreadId.make("thread-2"),
+      ThreadId.make("thread-1"),
     ]);
   });
 

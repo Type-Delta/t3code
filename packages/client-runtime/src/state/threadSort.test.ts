@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   planPinnedMove,
+  resolveSettledThreadTimestamp,
   sortPinnedThreadsByOrderKey,
   sortThreads,
   type ThreadSortInput,
@@ -20,15 +21,47 @@ function makeThread(overrides: Partial<TestThread> = {}): TestThread {
   };
 }
 
+describe("resolveSettledThreadTimestamp", () => {
+  it("prefers the persisted settlement stamp over later activity", () => {
+    expect(
+      resolveSettledThreadTimestamp({
+        settledAt: "2026-03-09T10:00:00.000Z",
+        latestUserMessageAt: "2026-03-09T11:00:00.000Z",
+        latestTurn: null,
+        updatedAt: "2026-03-09T12:00:00.000Z",
+      }),
+    ).toBe("2026-03-09T10:00:00.000Z");
+  });
+
+  it("falls back to the latest activity when the stamp is missing or malformed", () => {
+    expect(
+      resolveSettledThreadTimestamp({
+        settledAt: "invalid",
+        latestUserMessageAt: "2026-03-09T11:00:00.000Z",
+        latestTurn: null,
+        updatedAt: "2026-03-09T12:00:00.000Z",
+      }),
+    ).toBe("2026-03-09T11:00:00.000Z");
+    expect(
+      resolveSettledThreadTimestamp({
+        settledAt: null,
+        latestUserMessageAt: null,
+        latestTurn: null,
+        updatedAt: "2026-03-09T12:00:00.000Z",
+      }),
+    ).toBe("2026-03-09T12:00:00.000Z");
+  });
+});
+
 describe("sortThreads", () => {
-  it("falls back to updatedAt and createdAt when latestUserMessageAt is invalid and there are no messages", () => {
+  it("does not promote threads for non-message updates", () => {
     const sorted = sortThreads(
       [
         makeThread({
           id: "thread-1",
           latestUserMessageAt: "not-a-date",
           createdAt: "2026-03-09T10:00:00.000Z",
-          updatedAt: "2026-03-09T10:05:00.000Z",
+          updatedAt: "2026-03-09T10:30:00.000Z",
         }),
         makeThread({
           id: "thread-2",

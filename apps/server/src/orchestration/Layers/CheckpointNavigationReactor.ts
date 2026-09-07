@@ -170,7 +170,8 @@ const make = Effect.gen(function* () {
             Effect.logError("Checkpoint navigation recovery failed", cause),
           ),
         );
-      yield* Stream.runForEach(engine.streamDomainEvents, (event) =>
+      const domainEvents = yield* engine.subscribeDomainEvents;
+      yield* Stream.runForEach(domainEvents, (event) =>
         event.type === "thread.checkpoint-navigation-requested"
           ? handleRequested(event)
           : Effect.void,

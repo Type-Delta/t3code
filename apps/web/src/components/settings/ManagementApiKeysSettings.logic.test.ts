@@ -1,18 +1,53 @@
+import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildManagementApiKeyCodexExample,
   buildManagementApiKeyJsonExample,
+  buildManagementApiKeyEnvironmentOptions,
   canRotateManagementApiKey,
-  clampManagementApiKeyDefaultRuntimeMode,
   clearManagementApiKeyReveal,
-  MANAGEMENT_API_KEY_RUNTIME_MODES,
   managementApiKeyPresetForScopes,
   orderedManagementApiKeyScopes,
   revealManagementApiKey,
   resolveManagementApiKeyExpiration,
+  resolveSelectedManagementApiKeyEnvironmentId,
   scopesForManagementApiKeyPreset,
 } from "./ManagementApiKeysSettings.logic";
+
+const environment = (environmentId: string, label: string) => ({
+  environmentId: EnvironmentId.make(environmentId),
+  label,
+});
+
+describe("management API key environment selection", () => {
+  it("sorts the primary machine first, then labels with an id tie-breaker", () => {
+    const options = buildManagementApiKeyEnvironmentOptions(
+      [environment("z", "Zulu"), environment("b", "Alpha"), environment("a", "Alpha")],
+      EnvironmentId.make("z"),
+    );
+    expect(options.map(({ environmentId }) => environmentId)).toEqual(["z", "a", "b"]);
+  });
+
+  it("preserves a known selection and falls back to primary then first", () => {
+    const options = [environment("primary", "Primary"), environment("remote", "Remote")];
+    expect(
+      resolveSelectedManagementApiKeyEnvironmentId(
+        options,
+        EnvironmentId.make("remote"),
+        EnvironmentId.make("primary"),
+      ),
+    ).toBe("remote");
+    expect(
+      resolveSelectedManagementApiKeyEnvironmentId(
+        options,
+        EnvironmentId.make("missing"),
+        EnvironmentId.make("primary"),
+      ),
+    ).toBe("primary");
+    expect(resolveSelectedManagementApiKeyEnvironmentId([], null, null)).toBeNull();
+  });
+});
 
 describe("management API key access presets", () => {
   it("keeps scopes in permission order and maps the built-in presets", () => {
@@ -34,23 +69,7 @@ describe("management API key access presets", () => {
   });
 });
 
-describe("management API key safety settings", () => {
-  it("offers only supervised and auto-accept-edits modes", () => {
-    expect(MANAGEMENT_API_KEY_RUNTIME_MODES.map((mode) => mode.value)).toEqual([
-      "approval-required",
-      "auto-accept-edits",
-    ]);
-  });
-
-  it("clamps the default mode when the ceiling is lowered", () => {
-    expect(clampManagementApiKeyDefaultRuntimeMode("auto-accept-edits", "approval-required")).toBe(
-      "approval-required",
-    );
-    expect(clampManagementApiKeyDefaultRuntimeMode("approval-required", "auto-accept-edits")).toBe(
-      "approval-required",
-    );
-  });
-
+describe("management API key lifecycle helpers", () => {
   it("resolves explicit expiration choices from a stable clock", () => {
     const now = new Date("2026-01-15T12:00:00.000Z");
     expect(resolveManagementApiKeyExpiration("30-days", now)).toBe("2026-02-14T12:00:00.000Z");

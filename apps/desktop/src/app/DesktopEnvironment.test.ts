@@ -1,6 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -28,7 +27,11 @@ const makeEnvironmentLayer = (
   DesktopEnvironment.layer({
     ...defaultInput,
     ...overrides,
-  }).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest(env))));
+  }).pipe(
+    Layer.provide(
+      Layer.mergeAll(NodeServices.layer, NodePath.layerPosix, DesktopConfig.layerTest(env)),
+    ),
+  );
 
 const makeEnvironment = (
   overrides: Partial<DesktopEnvironment.MakeDesktopEnvironmentInput> = {},
@@ -53,41 +56,23 @@ describe("DesktopEnvironment", () => {
       );
 
       assert.equal(environment.isDevelopment, true);
-      assert.equal(
-        environment.appDataDirectory,
-        NodePath.join("/Users/alice", "Library", "Application Support"),
-      );
+      assert.equal(environment.appDataDirectory, "/Users/alice/Library/Application Support");
       assert.equal(environment.baseDir, "/tmp/t3");
-      assert.equal(environment.stateDir, NodePath.join("/tmp/t3", "userdata"));
-      assert.equal(
-        environment.desktopSettingsPath,
-        NodePath.join("/tmp/t3", "userdata", "desktop-settings.json"),
-      );
-      assert.equal(
-        environment.clientSettingsPath,
-        NodePath.join("/tmp/t3", "userdata", "client-settings.json"),
-      );
+      assert.equal(environment.stateDir, "/tmp/t3/userdata");
+      assert.equal(environment.desktopSettingsPath, "/tmp/t3/userdata/desktop-settings.json");
+      assert.equal(environment.clientSettingsPath, "/tmp/t3/userdata/client-settings.json");
       assert.equal(
         environment.savedEnvironmentRegistryPath,
-        NodePath.join("/tmp/t3", "userdata", "saved-environments.json"),
+        "/tmp/t3/userdata/saved-environments.json",
       );
-      assert.equal(
-        environment.serverSettingsPath,
-        NodePath.join("/tmp/t3", "userdata", "settings.json"),
-      );
-      assert.equal(environment.logDir, NodePath.join("/tmp/t3", "userdata", "logs"));
-      assert.equal(
-        environment.browserArtifactsDir,
-        NodePath.join("/tmp/t3", "userdata", "browser-artifacts"),
-      );
-      assert.equal(environment.rootDir, NodePath.resolve("/repo"));
-      assert.equal(environment.appRoot, NodePath.resolve("/repo"));
-      assert.equal(
-        environment.backendEntryPath,
-        NodePath.resolve("/repo", "apps", "server", "dist", "bin.mjs"),
-      );
-      assert.equal(environment.backendCwd, NodePath.resolve("/repo"));
-      assert.equal(environment.serverRoot, NodePath.resolve("/repo"));
+      assert.equal(environment.serverSettingsPath, "/tmp/t3/userdata/settings.json");
+      assert.equal(environment.logDir, "/tmp/t3/userdata/logs");
+      assert.equal(environment.browserArtifactsDir, "/tmp/t3/userdata/browser-artifacts");
+      assert.equal(environment.rootDir, "/repo");
+      assert.equal(environment.appRoot, "/repo");
+      assert.equal(environment.serverRoot, "/repo");
+      assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
+      assert.equal(environment.backendCwd, "/repo");
       assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev");
       assert.equal(environment.linuxWmClass, "t3code-dev");
       assert.deepEqual(
@@ -112,16 +97,10 @@ describe("DesktopEnvironment", () => {
       );
 
       assert.equal(environment.isDevelopment, false);
-      assert.equal(environment.stateDir, NodePath.join("/tmp/t3", "userdata"));
-      assert.equal(environment.logDir, NodePath.join("/tmp/t3", "userdata", "logs"));
-      assert.equal(
-        environment.browserArtifactsDir,
-        NodePath.join("/tmp/t3", "userdata", "browser-artifacts"),
-      );
-      assert.equal(
-        environment.serverSettingsPath,
-        NodePath.join("/tmp/t3", "userdata", "settings.json"),
-      );
+      assert.equal(environment.stateDir, "/tmp/t3/userdata");
+      assert.equal(environment.logDir, "/tmp/t3/userdata/logs");
+      assert.equal(environment.browserArtifactsDir, "/tmp/t3/userdata/browser-artifacts");
+      assert.equal(environment.serverSettingsPath, "/tmp/t3/userdata/settings.json");
     }),
   );
 
@@ -151,8 +130,8 @@ describe("DesktopEnvironment", () => {
       );
       const production = yield* makeEnvironment();
 
-      assert.equal(development.stateDir, NodePath.join("/Users/alice", ".t3", "dev"));
-      assert.equal(production.stateDir, NodePath.join("/Users/alice", ".t3", "userdata"));
+      assert.equal(development.stateDir, "/Users/alice/.t3/dev");
+      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
     }),
   );
 
@@ -185,7 +164,7 @@ describe("DesktopEnvironment", () => {
       );
       assert.deepEqual(
         environment.resolvePickFolderDefaultPath({ initialPath: "~/project" }),
-        Option.some(NodePath.join("/Users", "alice", "project")),
+        Option.some("/Users/alice/project"),
       );
     }),
   );

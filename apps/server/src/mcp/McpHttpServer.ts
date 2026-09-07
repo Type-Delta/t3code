@@ -48,6 +48,14 @@ type AuthenticatedHttpEffect = Effect.Effect<
   McpInvocationContext.McpInvocationContext
 >;
 
+type McpAuthMiddleware = (
+  httpEffect: AuthenticatedHttpEffect,
+) => Effect.Effect<
+  HttpServerResponse.HttpServerResponse,
+  Types.unhandled,
+  HttpServerRequest.HttpServerRequest
+>;
+
 export const normalizeMcpHttpResponse = (
   response: HttpServerResponse.HttpServerResponse,
 ): HttpServerResponse.HttpServerResponse => {
@@ -74,7 +82,11 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
 
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (
     httpEffect: AuthenticatedHttpEffect,
-  ) {
+  ): Effect.fn.Return<
+    HttpServerResponse.HttpServerResponse,
+    Types.unhandled,
+    HttpServerRequest.HttpServerRequest
+  > {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const authorization = request.headers.authorization;
     const token =
@@ -88,11 +100,13 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
     let invocation = providerInvocation;
     if (!invocation && hasManagementTokenShape(token)) {
       const managementPrincipal = yield* managementKeys.resolveToken(token).pipe(
-        Effect.catchTag("ManagementApiKeyServiceInternalError", (error) =>
-          Effect.logWarning("management MCP credential lookup failed", {
-            reason: error.operation,
-          }).pipe(Effect.as(Option.none())),
-        ),
+        Effect.catchTags({
+          ManagementApiKeyServiceInternalError: (error) =>
+            Effect.logWarning("management MCP credential lookup failed", {
+              reason: error.operation,
+            }).pipe(Effect.as(Option.none())),
+          ManagementApiKeyValidationError: () => Effect.succeed(Option.none()),
+        }),
       );
       if (Option.isSome(managementPrincipal)) {
         invocation = {
@@ -122,7 +136,10 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
       Effect.map(normalizeMcpHttpResponse),
     );
   });
-}).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
+}).pipe(
+  Effect.map((middleware): McpAuthMiddleware => middleware),
+  Effect.withSpan("McpHttpServer.makeAuthMiddleware"),
+);
 
 const McpAuthMiddlewareLive = HttpRouter.middleware<{
   provides: McpInvocationContext.McpInvocationContext;

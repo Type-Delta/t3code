@@ -37,11 +37,10 @@
 //   - reconcileLocalSecondaryEnvironments() runs at app boot and after
 //     WSL settings changes. It reads getLocalEnvironmentBootstraps(),
 //     skips the primary (which the existing primary/ runtime owns),
-//     and for every other entry POSTs the shared bootstrap token to
-//     /api/auth/bootstrap/bearer on that backend's URL, fetches the
-//     descriptor, builds a SavedEnvironmentRecord marked desktopLocal,
-//     writes the bearer to the secret store, and opens a connection
-//     through the same saved-env path remote envs use.
+//     and for every other entry asks the main-process auth owner for the
+//     shared bearer, fetches the descriptor, builds a SavedEnvironmentRecord
+//     marked desktopLocal, writes the bearer to the secret store, and opens a
+//     connection through the same saved-env path remote envs use.
 //   - The desktopLocal marker filters records out of saved-env
 //     persistence, so toggling WSL off or switching distros doesn't
 //     pollute the user's settings file. The sidebar, CommandPalette,

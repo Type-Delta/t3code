@@ -4,8 +4,6 @@ export {
   resetPrimaryEnvironmentDescriptorForTests,
   resolveInitialPrimaryEnvironmentDescriptor,
   writePrimaryEnvironmentDescriptor,
-  __resetPrimaryEnvironmentBootstrapForTests,
-  __resetPrimaryEnvironmentDescriptorBootstrapForTests,
 } from "./context";
 
 export {
@@ -39,19 +37,6 @@ export {
 export { refreshPrimarySessionState, usePrimarySessionState } from "./sessionState";
 
 export { PrimaryEnvironmentHttpClient } from "./httpClient";
-
-export {
-  createManagementApiKey,
-  listManagementApiKeys,
-  ManagementApiKeyRequestError,
-  revokeManagementApiKey,
-  rotateManagementApiKey,
-  type ManagementApiKeyCreateInput,
-  type ManagementApiKeyCreateResult,
-  type ManagementApiKeyRecord,
-  type ManagementApiKeyRotateResult,
-  type ManagementApiKeySafeRuntimeMode,
-} from "./managementApiKeys";
 
 export {
   DesktopEnvironmentBootstrapIncompleteError,

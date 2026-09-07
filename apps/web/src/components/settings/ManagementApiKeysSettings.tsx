@@ -8,21 +8,26 @@ import {
   RotateCwIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { EnvironmentId } from "@t3tools/contracts";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
+import * as Option from "effect/Option";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestampFormat";
 import {
-  createManagementApiKey,
-  listManagementApiKeys,
+  createEnvironmentManagementApiKey,
+  listEnvironmentManagementApiKeys,
   ManagementApiKeyRequestError,
-  revokeManagementApiKey,
-  rotateManagementApiKey,
+  revokeEnvironmentManagementApiKey,
+  rotateEnvironmentManagementApiKey,
+  type ManagementApiKeyCreateInput,
   type ManagementApiKeyCreateResult,
   type ManagementApiKeyRecord,
-  type ManagementApiKeySafeRuntimeMode,
-} from "~/environments/primary";
+} from "~/environments/managementApiKeys";
+import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
+import { usePreparedConnection } from "~/state/session";
 import { cn } from "~/lib/utils";
 
 import {
@@ -52,18 +57,18 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Spinner } from "../ui/spinner";
 import { Textarea } from "../ui/textarea";
 import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { EnvironmentSettingsTabs } from "./EnvironmentSettingsTabs";
 import {
   buildManagementApiKeyCodexExample,
+  buildManagementApiKeyEnvironmentOptions,
   buildManagementApiKeyJsonExample,
   canRotateManagementApiKey,
-  clampManagementApiKeyDefaultRuntimeMode,
   clearManagementApiKeyReveal,
   MANAGEMENT_API_KEY_PRESETS,
-  MANAGEMENT_API_KEY_RUNTIME_MODES,
   MANAGEMENT_API_KEY_SCOPE_DETAILS,
-  managementApiKeyRuntimeModeLabel,
   managementApiKeyScopeSummary,
   resolveManagementApiKeyExpiration,
+  resolveSelectedManagementApiKeyEnvironmentId,
   revealManagementApiKey,
   scopesForManagementApiKeyPreset,
   type ManagementApiKeyExpiration,
@@ -74,10 +79,11 @@ import {
 
 const DEFAULT_EXPIRATION: ManagementApiKeyExpiration = "90-days";
 const DEFAULT_PRESET: ManagementApiKeyPreset = "read-only";
-const DEFAULT_RUNTIME_MODE: ManagementApiKeySafeRuntimeMode = "approval-required";
-const DEFAULT_MAXIMUM_RUNTIME_MODE: ManagementApiKeySafeRuntimeMode = "auto-accept-edits";
 
-type SecretRevealState = NonNullable<ManagementApiKeyRevealState<ManagementApiKeyCreateResult>>;
+type SecretRevealState = NonNullable<ManagementApiKeyRevealState<ManagementApiKeyCreateResult>> & {
+  readonly environmentId: EnvironmentId;
+  readonly environmentLabel: string;
+};
 
 const EXPIRATION_OPTIONS: ReadonlyArray<{
   readonly value: ManagementApiKeyExpiration;
@@ -135,12 +141,14 @@ function KeyRow({
   keyRecord,
   nowMs,
   busyAction,
+  canMutate,
   onRotate,
   onRevoke,
 }: {
   readonly keyRecord: ManagementApiKeyRecord;
   readonly nowMs: number;
   readonly busyAction: "rotate" | "revoke" | null;
+  readonly canMutate: boolean;
   readonly onRotate: () => void;
   readonly onRevoke: () => void;
 }) {
@@ -169,7 +177,7 @@ function KeyRow({
             <Button
               size="xs"
               variant="outline"
-              disabled={isBusy}
+              disabled={isBusy || !canMutate}
               onClick={onRotate}
               aria-label={`Rotate ${keyRecord.name}`}
             >
@@ -180,7 +188,7 @@ function KeyRow({
           <Button
             size="xs"
             variant="destructive-outline"
-            disabled={isBusy}
+            disabled={isBusy || !canMutate}
             onClick={onRevoke}
             aria-label={`Revoke ${keyRecord.name}`}
           >
@@ -189,21 +197,13 @@ function KeyRow({
           </Button>
         </div>
       </div>
-      <div className="mt-3 grid min-w-0 gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+      <div className="mt-3 grid min-w-0 gap-2 text-xs text-muted-foreground sm:grid-cols-2">
         <div className="min-w-0">
           <span className="block text-[11px] uppercase tracking-wide text-muted-foreground/70">
             Access
           </span>
           <span className="break-words text-foreground/85">
             {managementApiKeyScopeSummary(keyRecord.scopes)}
-          </span>
-        </div>
-        <div className="min-w-0">
-          <span className="block text-[11px] uppercase tracking-wide text-muted-foreground/70">
-            Permission ceiling
-          </span>
-          <span className="break-words text-foreground/85">
-            {managementApiKeyRuntimeModeLabel(keyRecord.maximumRuntimeMode)}
           </span>
         </div>
         <div className="min-w-0">
@@ -222,20 +222,20 @@ function KeyRow({
 
 function CreateManagementApiKeyDialog({
   open,
+  environmentLabel,
   isSubmitting,
   error,
   onOpenChange,
   onSubmit,
 }: {
   readonly open: boolean;
+  readonly environmentLabel: string;
   readonly isSubmitting: boolean;
   readonly error: string | null;
   readonly onOpenChange: (open: boolean) => void;
   readonly onSubmit: (input: {
     readonly name: string;
     readonly scopes: ReadonlyArray<ManagementApiKeyScope>;
-    readonly defaultRuntimeMode: ManagementApiKeySafeRuntimeMode;
-    readonly maximumRuntimeMode: ManagementApiKeySafeRuntimeMode;
     readonly expiresAt: string | null;
   }) => void;
 }) {
@@ -245,11 +245,6 @@ function CreateManagementApiKeyDialog({
   const [customScopes, setCustomScopes] = useState<ReadonlyArray<ManagementApiKeyScope>>(
     scopesForManagementApiKeyPreset(DEFAULT_PRESET),
   );
-  const [defaultRuntimeMode, setDefaultRuntimeMode] =
-    useState<ManagementApiKeySafeRuntimeMode>(DEFAULT_RUNTIME_MODE);
-  const [maximumRuntimeMode, setMaximumRuntimeMode] = useState<ManagementApiKeySafeRuntimeMode>(
-    DEFAULT_MAXIMUM_RUNTIME_MODE,
-  );
 
   useEffect(() => {
     if (!open) return;
@@ -257,18 +252,9 @@ function CreateManagementApiKeyDialog({
     setExpiration(DEFAULT_EXPIRATION);
     setPreset(DEFAULT_PRESET);
     setCustomScopes(scopesForManagementApiKeyPreset(DEFAULT_PRESET));
-    setDefaultRuntimeMode(DEFAULT_RUNTIME_MODE);
-    setMaximumRuntimeMode(DEFAULT_MAXIMUM_RUNTIME_MODE);
   }, [open]);
 
   const selectedScopes = scopesForManagementApiKeyPreset(preset, customScopes);
-  const allowedDefaultModes = MANAGEMENT_API_KEY_RUNTIME_MODES.filter(
-    (mode) =>
-      mode.rank <=
-      MANAGEMENT_API_KEY_RUNTIME_MODES.find((candidate) => candidate.value === maximumRuntimeMode)!
-        .rank,
-  );
-
   const toggleScope = (scope: ManagementApiKeyScope, checked: boolean) => {
     setCustomScopes((current) => {
       const next = checked
@@ -287,8 +273,6 @@ function CreateManagementApiKeyDialog({
     onSubmit({
       name: trimmedName,
       scopes: selectedScopes,
-      defaultRuntimeMode,
-      maximumRuntimeMode,
       expiresAt: resolveManagementApiKeyExpiration(expiration),
     });
   };
@@ -297,9 +281,9 @@ function CreateManagementApiKeyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Create management API key</DialogTitle>
+          <DialogTitle>Create management API key for {environmentLabel}</DialogTitle>
           <DialogDescription>
-            Create a durable credential for an external MCP client. The full secret is shown once.
+            Create a durable credential for {environmentLabel}. The full secret is shown once.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit}>
@@ -408,72 +392,6 @@ function CreateManagementApiKeyDialog({
               </fieldset>
             ) : null}
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="min-w-0 space-y-2">
-                <Label htmlFor="management-api-key-default-mode">Default permission mode</Label>
-                <Select
-                  value={defaultRuntimeMode}
-                  onValueChange={(value) => {
-                    if (!value) return;
-                    const next = value as ManagementApiKeySafeRuntimeMode;
-                    setDefaultRuntimeMode(next);
-                    if (!isRuntimeModeWithinOptions(next, maximumRuntimeMode)) {
-                      setMaximumRuntimeMode(next);
-                    }
-                  }}
-                >
-                  <SelectTrigger id="management-api-key-default-mode" className="w-full">
-                    <SelectValue>
-                      {managementApiKeyRuntimeModeLabel(defaultRuntimeMode)}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {allowedDefaultModes.map((mode) => (
-                      <SelectItem key={mode.value} value={mode.value}>
-                        <span className="flex flex-col gap-0.5">
-                          <span>{mode.label}</span>
-                          <span className="text-xs text-muted-foreground">{mode.description}</span>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              </div>
-              <div className="min-w-0 space-y-2">
-                <Label htmlFor="management-api-key-maximum-mode">Maximum permission mode</Label>
-                <Select
-                  value={maximumRuntimeMode}
-                  onValueChange={(value) => {
-                    if (!value) return;
-                    const next = value as ManagementApiKeySafeRuntimeMode;
-                    setMaximumRuntimeMode(next);
-                    setDefaultRuntimeMode(
-                      clampManagementApiKeyDefaultRuntimeMode(defaultRuntimeMode, next),
-                    );
-                  }}
-                >
-                  <SelectTrigger id="management-api-key-maximum-mode" className="w-full">
-                    <SelectValue>
-                      {managementApiKeyRuntimeModeLabel(maximumRuntimeMode)}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {MANAGEMENT_API_KEY_RUNTIME_MODES.map((mode) => (
-                      <SelectItem key={mode.value} value={mode.value}>
-                        <span className="flex flex-col gap-0.5">
-                          <span>{mode.label}</span>
-                          <span className="text-xs text-muted-foreground">{mode.description}</span>
-                        </span>
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
-              </div>
-            </div>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Permission modes apply when this key creates a thread and cap messages sent to
-              existing threads. Full access is intentionally unavailable for management keys.
-            </p>
             {error ? (
               <p className="text-sm text-destructive" role="alert">
                 {error}
@@ -495,21 +413,6 @@ function CreateManagementApiKeyDialog({
         </form>
       </DialogPopup>
     </Dialog>
-  );
-}
-
-function isRuntimeModeWithinOptions(
-  defaultRuntimeMode: ManagementApiKeySafeRuntimeMode,
-  maximumRuntimeMode: ManagementApiKeySafeRuntimeMode,
-): boolean {
-  const defaultMode = MANAGEMENT_API_KEY_RUNTIME_MODES.find(
-    (mode) => mode.value === defaultRuntimeMode,
-  );
-  const maximumMode = MANAGEMENT_API_KEY_RUNTIME_MODES.find(
-    (mode) => mode.value === maximumRuntimeMode,
-  );
-  return (
-    defaultMode !== undefined && maximumMode !== undefined && defaultMode.rank <= maximumMode.rank
   );
 }
 
@@ -555,6 +458,10 @@ function SecretRevealDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-5">
+          <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm">
+            Environment:{" "}
+            <span className="font-medium text-foreground">{result.environmentLabel}</span>
+          </div>
           <div className="rounded-lg border border-warning/40 bg-warning/8 p-3 text-sm text-warning-foreground">
             <div className="flex items-start gap-2">
               <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
@@ -630,13 +537,62 @@ function SecretRevealDialog({
 }
 
 type PendingAction =
-  | { readonly kind: "rotate"; readonly key: ManagementApiKeyRecord }
-  | { readonly kind: "revoke"; readonly key: ManagementApiKeyRecord }
+  | {
+      readonly kind: "rotate";
+      readonly key: ManagementApiKeyRecord;
+      readonly target: ManagementApiKeyTarget;
+    }
+  | {
+      readonly kind: "revoke";
+      readonly key: ManagementApiKeyRecord;
+      readonly target: ManagementApiKeyTarget;
+    }
   | null;
 
+interface ManagementApiKeyTarget {
+  readonly environmentId: EnvironmentId;
+  readonly environmentLabel: string;
+  readonly prepared: PreparedConnection;
+}
+
+interface ManagementApiKeyEnvironmentState {
+  readonly keys: ReadonlyArray<ManagementApiKeyRecord>;
+  readonly isLoading: boolean;
+  readonly error: string | null;
+}
+
+const EMPTY_ENVIRONMENT_STATE: ManagementApiKeyEnvironmentState = {
+  keys: [],
+  isLoading: false,
+  error: null,
+};
+
 export function ManagementApiKeysSettings() {
-  const [keys, setKeys] = useState<ReadonlyArray<ManagementApiKeyRecord>>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const { environments } = useEnvironments();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const environmentOptions = useMemo(
+    () => buildManagementApiKeyEnvironmentOptions(environments, primaryEnvironmentId),
+    [environments, primaryEnvironmentId],
+  );
+  const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<EnvironmentId | null>(
+    primaryEnvironmentId,
+  );
+  const effectiveEnvironmentId = resolveSelectedManagementApiKeyEnvironmentId(
+    environmentOptions,
+    selectedEnvironmentId,
+    primaryEnvironmentId,
+  );
+  const selectedEnvironment =
+    environmentOptions.find(({ environmentId }) => environmentId === effectiveEnvironmentId) ??
+    null;
+  const prepared = usePreparedConnection(effectiveEnvironmentId);
+  const [stateByEnvironment, setStateByEnvironment] = useState<
+    Readonly<Record<string, ManagementApiKeyEnvironmentState>>
+  >({});
+  const requestGeneration = useRef(new Map<string, number>());
+  const selectedState =
+    (effectiveEnvironmentId && stateByEnvironment[effectiveEnvironmentId]) ??
+    EMPTY_ENVIRONMENT_STATE;
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
   const [busyKey, setBusyKey] = useState<{
@@ -645,57 +601,201 @@ export function ManagementApiKeysSettings() {
   } | null>(null);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [secretResult, setSecretResult] = useState<SecretRevealState | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [createTarget, setCreateTarget] = useState<ManagementApiKeyTarget | null>(null);
+  const mutationInFlightRef = useRef(false);
+  const connectionGeneration = useRef(
+    new Map<
+      string,
+      { readonly prepared: PreparedConnection | null; readonly generation: number }
+    >(),
+  );
+  const activeEnvironmentId = useRef<EnvironmentId | null>(null);
   const nowMs = useRelativeTimeTick(60_000);
 
-  const refreshKeys = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      setKeys(await listManagementApiKeys());
-      setError(null);
-    } catch (cause) {
-      setError(readErrorMessage(cause));
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+  const refreshKeys = useCallback(
+    async (environmentId: EnvironmentId, environmentPrepared: PreparedConnection) => {
+      const expectedConnection = connectionGeneration.current.get(environmentId);
+      if (expectedConnection?.prepared !== environmentPrepared) return;
+      const generation = (requestGeneration.current.get(environmentId) ?? 0) + 1;
+      requestGeneration.current.set(environmentId, generation);
+      const expectedConnectionGeneration = expectedConnection.generation;
+      setStateByEnvironment((current) => ({
+        ...current,
+        [environmentId]: { ...EMPTY_ENVIRONMENT_STATE, isLoading: true },
+      }));
+      const isCurrentRequest = () => {
+        const currentConnection = connectionGeneration.current.get(environmentId);
+        return (
+          requestGeneration.current.get(environmentId) === generation &&
+          currentConnection?.prepared === environmentPrepared &&
+          currentConnection.generation === expectedConnectionGeneration
+        );
+      };
+      try {
+        const keys = await listEnvironmentManagementApiKeys({ prepared: environmentPrepared });
+        if (!isCurrentRequest()) return;
+        setStateByEnvironment((current) => ({
+          ...current,
+          [environmentId]: { keys, isLoading: false, error: null },
+        }));
+      } catch (cause) {
+        if (!isCurrentRequest()) return;
+        setStateByEnvironment((current) => ({
+          ...current,
+          [environmentId]: { keys: [], isLoading: false, error: readErrorMessage(cause) },
+        }));
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
-    void refreshKeys();
-  }, [refreshKeys]);
+    const previousEnvironmentId = activeEnvironmentId.current;
+    if (previousEnvironmentId !== null && previousEnvironmentId !== effectiveEnvironmentId) {
+      requestGeneration.current.set(
+        previousEnvironmentId,
+        (requestGeneration.current.get(previousEnvironmentId) ?? 0) + 1,
+      );
+      const previousConnection = connectionGeneration.current.get(previousEnvironmentId);
+      if (previousConnection !== undefined) {
+        connectionGeneration.current.set(previousEnvironmentId, {
+          prepared: null,
+          generation: previousConnection.generation + 1,
+        });
+      }
+    }
+    activeEnvironmentId.current = effectiveEnvironmentId;
+    if (effectiveEnvironmentId === null) return;
+    const environmentPrepared = Option.isSome(prepared) ? prepared.value : null;
+    const previousConnection = connectionGeneration.current.get(effectiveEnvironmentId);
+    if (previousConnection?.prepared !== environmentPrepared) {
+      connectionGeneration.current.set(effectiveEnvironmentId, {
+        prepared: environmentPrepared,
+        generation: (previousConnection?.generation ?? 0) + 1,
+      });
+    }
+    setStateByEnvironment((current) => ({
+      ...current,
+      [effectiveEnvironmentId]: EMPTY_ENVIRONMENT_STATE,
+    }));
+    if (Option.isSome(prepared)) {
+      void refreshKeys(effectiveEnvironmentId, prepared.value);
+    } else {
+      requestGeneration.current.set(
+        effectiveEnvironmentId,
+        (requestGeneration.current.get(effectiveEnvironmentId) ?? 0) + 1,
+      );
+    }
+  }, [effectiveEnvironmentId, prepared, refreshKeys]);
 
-  const handleCreate = async (input: Parameters<typeof createManagementApiKey>[0]) => {
+  const selectedTarget: ManagementApiKeyTarget | null =
+    selectedEnvironment !== null && Option.isSome(prepared)
+      ? {
+          environmentId: selectedEnvironment.environmentId,
+          environmentLabel: selectedEnvironment.label,
+          prepared: prepared.value,
+        }
+      : null;
+  const canListSelectedEnvironment = selectedTarget !== null;
+  const canMutateSelectedEnvironment = selectedTarget !== null;
+  const mutationInFlight = isMutating || busyKey !== null;
+  const selectEnvironment = (environmentId: EnvironmentId) => {
+    setSelectedEnvironmentId(environmentId);
+    requestGeneration.current.set(
+      environmentId,
+      (requestGeneration.current.get(environmentId) ?? 0) + 1,
+    );
+    setStateByEnvironment((current) => ({
+      ...current,
+      [environmentId]: EMPTY_ENVIRONMENT_STATE,
+    }));
+    setPendingAction(null);
+    setBusyKey(null);
+  };
+  const openCreateDialog = () => {
+    if (!canMutateSelectedEnvironment || selectedTarget === null || mutationInFlight) return;
+    setCreateTarget(selectedTarget);
+    setIsCreateDialogOpen(true);
+  };
+  const handleCreate = async (input: ManagementApiKeyCreateInput) => {
+    const target = createTarget;
+    if (target === null || mutationInFlightRef.current) return;
+    mutationInFlightRef.current = true;
+    const environmentId = target.environmentId;
     setIsMutating(true);
-    setError(null);
+    setStateByEnvironment((current) => ({
+      ...current,
+      [environmentId]: { ...(current[environmentId] ?? EMPTY_ENVIRONMENT_STATE), error: null },
+    }));
     try {
-      const result = await createManagementApiKey(input);
+      const result = await createEnvironmentManagementApiKey({
+        prepared: target.prepared,
+        payload: input,
+      });
       setIsCreateDialogOpen(false);
-      setSecretResult(revealManagementApiKey(result, "created"));
-      await refreshKeys();
+      setCreateTarget(null);
+      setSecretResult({
+        ...revealManagementApiKey(result, "created"),
+        environmentId: target.environmentId,
+        environmentLabel: target.environmentLabel,
+      });
+      await refreshKeys(environmentId, target.prepared);
     } catch (cause) {
-      setError(readErrorMessage(cause));
+      setStateByEnvironment((current) => ({
+        ...current,
+        [environmentId]: {
+          ...(current[environmentId] ?? EMPTY_ENVIRONMENT_STATE),
+          isLoading: false,
+          error: readErrorMessage(cause),
+        },
+      }));
     } finally {
+      mutationInFlightRef.current = false;
       setIsMutating(false);
     }
   };
 
   const handlePendingAction = async () => {
-    if (!pendingAction) return;
+    if (!pendingAction || mutationInFlightRef.current) return;
+    mutationInFlightRef.current = true;
     const action = pendingAction;
+    const target = action.target;
+    const environmentId = target.environmentId;
     setPendingAction(null);
     setBusyKey({ id: action.key.id, kind: action.kind });
-    setError(null);
+    setStateByEnvironment((current) => ({
+      ...current,
+      [environmentId]: { ...(current[environmentId] ?? EMPTY_ENVIRONMENT_STATE), error: null },
+    }));
     try {
       if (action.kind === "revoke") {
-        await revokeManagementApiKey(action.key.id);
+        await revokeEnvironmentManagementApiKey({
+          prepared: target.prepared,
+          id: action.key.id,
+        });
       } else {
-        const result = await rotateManagementApiKey(action.key.id);
-        setSecretResult(revealManagementApiKey(result, "rotated"));
+        const result = await rotateEnvironmentManagementApiKey({
+          prepared: target.prepared,
+          id: action.key.id,
+        });
+        setSecretResult({
+          ...revealManagementApiKey(result, "rotated"),
+          environmentId: target.environmentId,
+          environmentLabel: target.environmentLabel,
+        });
       }
-      await refreshKeys();
+      await refreshKeys(environmentId, target.prepared);
     } catch (cause) {
-      setError(readErrorMessage(cause));
+      setStateByEnvironment((current) => ({
+        ...current,
+        [environmentId]: {
+          ...(current[environmentId] ?? EMPTY_ENVIRONMENT_STATE),
+          isLoading: false,
+          error: readErrorMessage(cause),
+        },
+      }));
     } finally {
+      mutationInFlightRef.current = false;
       setBusyKey(null);
     }
   };
@@ -707,43 +807,71 @@ export function ManagementApiKeysSettings() {
         title="Management API keys"
         icon={<KeyRoundIcon className="size-4 text-muted-foreground" aria-hidden />}
         headerAction={
-          <Button size="sm" onClick={() => setIsCreateDialogOpen(true)}>
+          <Button
+            size="sm"
+            onClick={openCreateDialog}
+            disabled={!canMutateSelectedEnvironment || mutationInFlight}
+          >
             <PlusIcon aria-hidden />
             Create key
           </Button>
         }
       >
+        <EnvironmentSettingsTabs
+          environments={environmentOptions}
+          selectedEnvironmentId={effectiveEnvironmentId}
+          onSelect={selectEnvironment}
+          disabled={mutationInFlight}
+        />
         <SettingsRow
           title="External MCP access"
-          description="Durable environment-wide credentials for MCP clients. Keys only expose the thread tools selected below; they never grant project administration, terminal, filesystem, preview, or settings access."
+          description="Create a separate credential for a third-party MCP client that cannot use a normal T3 connection. Each key belongs to this machine and only exposes the thread tools selected below."
         />
-        {error && !isCreateDialogOpen ? (
+        {selectedState.error && !isCreateDialogOpen ? (
           <div
             className="mx-3 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive sm:mx-4"
             role="alert"
           >
-            {error}
+            {selectedState.error}
           </div>
         ) : null}
         <div className="space-y-2 px-3 sm:px-4">
-          {isLoading ? (
-            <div className="flex items-center gap-2 py-5 text-sm text-muted-foreground">
-              <Spinner /> Loading management API keys…
+          {selectedEnvironment === null ? (
+            <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
+              No environments are available. Connect a machine before managing its API keys.
             </div>
-          ) : keys.length === 0 ? (
+          ) : Option.isNone(prepared) ? (
+            <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
+              {selectedEnvironment.label} is currently unavailable. Reconnect to this machine to
+              manage its API keys.
+            </div>
+          ) : selectedState.isLoading ? (
+            <div className="flex items-center gap-2 py-5 text-sm text-muted-foreground">
+              <Spinner /> Loading management API keys for {selectedEnvironment.label}…
+            </div>
+          ) : selectedState.keys.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
               No management API keys yet. Create one when an external MCP client needs access to
               this environment.
             </div>
           ) : (
-            keys.map((keyRecord) => (
+            selectedState.keys.map((keyRecord) => (
               <KeyRow
                 key={keyRecord.id}
                 keyRecord={keyRecord}
                 nowMs={nowMs}
+                canMutate={canMutateSelectedEnvironment && !mutationInFlight}
                 busyAction={busyKey?.id === keyRecord.id ? busyKey.kind : null}
-                onRotate={() => setPendingAction({ kind: "rotate", key: keyRecord })}
-                onRevoke={() => setPendingAction({ kind: "revoke", key: keyRecord })}
+                onRotate={() => {
+                  if (selectedTarget) {
+                    setPendingAction({ kind: "rotate", key: keyRecord, target: selectedTarget });
+                  }
+                }}
+                onRevoke={() => {
+                  if (selectedTarget) {
+                    setPendingAction({ kind: "revoke", key: keyRecord, target: selectedTarget });
+                  }
+                }}
               />
             ))
           )}
@@ -752,10 +880,14 @@ export function ManagementApiKeysSettings() {
           <Button
             size="xs"
             variant="ghost-muted"
-            onClick={() => void refreshKeys()}
-            disabled={isLoading}
+            onClick={() => {
+              if (selectedTarget !== null && canListSelectedEnvironment) {
+                void refreshKeys(selectedTarget.environmentId, selectedTarget.prepared);
+              }
+            }}
+            disabled={!canListSelectedEnvironment || selectedState.isLoading || mutationInFlight}
           >
-            <RefreshCwIcon className={cn(isLoading && "animate-spin")} aria-hidden />
+            <RefreshCwIcon className={cn(selectedState.isLoading && "animate-spin")} aria-hidden />
             Refresh
           </Button>
         </div>
@@ -763,11 +895,29 @@ export function ManagementApiKeysSettings() {
 
       <CreateManagementApiKeyDialog
         open={isCreateDialogOpen}
-        isSubmitting={isMutating}
-        error={isCreateDialogOpen ? error : null}
+        environmentLabel={
+          createTarget?.environmentLabel ?? selectedEnvironment?.label ?? "the selected environment"
+        }
+        isSubmitting={mutationInFlight}
+        error={
+          isCreateDialogOpen && createTarget !== null
+            ? (stateByEnvironment[createTarget.environmentId]?.error ?? null)
+            : null
+        }
         onOpenChange={(open) => {
+          if (!open && isMutating) return;
           setIsCreateDialogOpen(open);
-          if (open) setError(null);
+          if (!open && !isMutating) setCreateTarget(null);
+          if (open && selectedTarget !== null) {
+            setCreateTarget(selectedTarget);
+            setStateByEnvironment((current) => ({
+              ...current,
+              [selectedTarget.environmentId]: {
+                ...(current[selectedTarget.environmentId] ?? EMPTY_ENVIRONMENT_STATE),
+                error: null,
+              },
+            }));
+          }
         }}
         onSubmit={(input) => void handleCreate(input)}
       />
@@ -789,8 +939,8 @@ export function ManagementApiKeysSettings() {
           <AlertDialogHeader>
             <AlertDialogTitle>
               {pendingAction?.kind === "rotate"
-                ? "Rotate this management API key?"
-                : "Revoke this management API key?"}
+                ? `Rotate this management API key on ${pendingAction.target.environmentLabel}?`
+                : `Revoke this management API key on ${pendingAction?.target.environmentLabel ?? "this environment"}?`}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {pendingAction?.kind === "rotate"
@@ -802,7 +952,7 @@ export function ManagementApiKeysSettings() {
             <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
             <Button
               variant={pendingAction?.kind === "rotate" ? "default" : "destructive"}
-              disabled={busyKey !== null}
+              disabled={mutationInFlight}
               onClick={() => void handlePendingAction()}
             >
               {pendingAction?.kind === "rotate" ? "Rotate key" : "Revoke key"}

@@ -116,6 +116,7 @@ describe("DesktopLifecycle", () => {
           activateCount += 1;
         }),
       });
+      let windowsDestroyed = false;
       const environmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
         platform,
         isDevelopment: false,
@@ -124,7 +125,13 @@ describe("DesktopLifecycle", () => {
       const layer = DesktopLifecycle.layer.pipe(
         Layer.provideMerge(electronAppLayer),
         Layer.provideMerge(electronThemeLayer),
-        Layer.provideMerge(makeElectronWindowLayer()),
+        Layer.provideMerge(
+          makeElectronWindowLayer(
+            Effect.sync(() => {
+              windowsDestroyed = true;
+            }),
+          ),
+        ),
         Layer.provideMerge(desktopWindowLayer),
         Layer.provideMerge(environmentLayer),
         Layer.provideMerge(DesktopShutdown.layer),
@@ -148,6 +155,7 @@ describe("DesktopLifecycle", () => {
           );
 
           appListeners.get("before-quit-for-update")?.();
+          yield* Effect.yieldNow;
 
           let prevented = false;
           const event = {
@@ -161,6 +169,7 @@ describe("DesktopLifecycle", () => {
             prevented,
             "cancelling this event prevents the updater from completing its relaunch",
           );
+          assert.isTrue(windowsDestroyed);
 
           const state = yield* DesktopState.DesktopState;
           assert.isTrue(yield* Ref.get(state.quitting));
