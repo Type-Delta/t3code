@@ -25,6 +25,7 @@ import {
   ProviderSessionStartInput,
   ThreadId,
   TurnId,
+  type ServerSettingsError,
 } from "@t3tools/contracts";
 import {
   expandAssistantCitationsForProvider,
@@ -455,6 +456,7 @@ function makeProviderServiceLayer(
     readonly supportsConversationRollback?: boolean;
     readonly analyticsLayer?: Layer.Layer<AnalyticsService.AnalyticsService>;
     readonly registry?: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"];
+    readonly settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService, ServerSettingsError>;
   } = {},
 ) {
   const codex = makeFakeCodexAdapter(CODEX_DRIVER, input.supportsConversationRollback);
@@ -486,7 +488,7 @@ function makeProviderServiceLayer(
         Layer.provide(NodeServices.layer),
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
-        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(input.settingsLayer ?? defaultServerSettingsLayer),
         Layer.provide(serverConfigTestLayer),
         Layer.provideMerge(input.analyticsLayer ?? AnalyticsService.layerTest),
         Layer.provide(
@@ -509,6 +511,56 @@ function makeProviderServiceLayer(
     cursor,
     layer,
   };
+}
+
+for (const enabled of [false, true]) {
+  const harness = makeProviderServiceLayer({
+    settingsLayer: ServerSettings.ServerSettingsService.layerTest({
+      enablePromptSuggestion: enabled,
+      promptSuggestionInstructions: "Suggest a focused test.",
+    }),
+  });
+  harness.layer(`prompt suggestion routing enabled=${enabled}`, (it) => {
+    it.effect("gates startup, recovery, and turn instructions by provider", () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        for (const fake of [harness.codex, harness.claude, harness.cursor]) {
+          const driver = fake.adapter.provider;
+          const threadId = asThreadId(`suggestion-${driver}-${enabled}`);
+          const instanceId = ProviderInstanceId.make(driver);
+          yield* provider.startSession(threadId, {
+            threadId,
+            provider: driver,
+            providerInstanceId: instanceId,
+            runtimeMode: "full-access",
+          });
+          const expected = enabled && driver !== CURSOR_DRIVER;
+          assert.equal(
+            fake.startSession.mock.calls
+              .at(-1)?.[0]
+              .promptSuggestionInstructions?.includes("Suggest a focused test.") ?? false,
+            expected,
+          );
+          yield* fake.adapter.stopSession(threadId);
+          yield* provider.sendTurn({ threadId, input: "Continue" });
+          assert.equal(fake.startSession.mock.calls.length, 2);
+          assert.equal(
+            fake.startSession.mock.calls
+              .at(-1)?.[0]
+              .promptSuggestionInstructions?.includes("<t3_prompt_suggestion>") ?? false,
+            expected,
+          );
+          assert.equal(
+            fake.sendTurn.mock.calls
+              .at(-1)?.[0]
+              .promptSuggestionInstructions?.includes("<t3_prompt_suggestion>") ?? false,
+            enabled && driver === CODEX_DRIVER,
+          );
+          yield* provider.stopSession({ threadId });
+        }
+      }),
+    );
+  });
 }
 
 for (const [enabled, completed] of [

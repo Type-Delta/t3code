@@ -1064,6 +1064,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : previousMessage?.subagentId !== undefined
                 ? { subagentId: previousMessage.subagentId }
                 : {}),
+            ...(event.payload.suggestion !== undefined
+              ? { suggestion: event.payload.suggestion }
+              : previousMessage?.suggestion !== undefined
+                ? { suggestion: previousMessage.suggestion }
+                : {}),
             role: event.payload.role,
             text: nextText,
             ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),

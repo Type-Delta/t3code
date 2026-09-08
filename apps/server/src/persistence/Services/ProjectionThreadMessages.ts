@@ -28,6 +28,7 @@ export const ProjectionThreadMessage = Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.NullOr(TurnId),
   subagentId: Schema.optional(TrimmedNonEmptyString),
+  suggestion: Schema.optional(TrimmedNonEmptyString),
   role: OrchestrationMessageRole,
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),

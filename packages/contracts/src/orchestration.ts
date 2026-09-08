@@ -360,6 +360,8 @@ export const OrchestrationMessage = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   subagentId: Schema.optional(TrimmedNonEmptyString),
   streaming: Schema.Boolean,
+  /** Agent-proposed next user prompt, extracted from the reply on completion. */
+  suggestion: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1216,6 +1218,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   messageId: MessageId,
   turnId: Schema.optional(TurnId),
   subagentId: Schema.optional(TrimmedNonEmptyString),
+  suggestion: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
 });
 
@@ -1532,6 +1535,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   subagentId: Schema.optional(TrimmedNonEmptyString),
   streaming: Schema.Boolean,
+  suggestion: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

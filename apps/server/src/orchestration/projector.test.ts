@@ -7,6 +7,7 @@ import {
   type OrchestrationEvent,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import { it as effectIt } from "@effect/vitest";
 import { describe, expect, it } from "vite-plus/test";
 
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
@@ -39,6 +40,79 @@ function makeEvent(input: {
 }
 
 describe("orchestration projector", () => {
+  for (const existing of [false, true]) {
+    effectIt.effect(
+      `preserves suggestions on completion and clears on re-stream, existing=${existing}`,
+      () =>
+        Effect.gen(function* () {
+          const now = "2026-01-01T00:00:00.000Z";
+          let sequence = 0;
+          const event = (type: OrchestrationEvent["type"], payload: unknown) =>
+            makeEvent({
+              sequence: ++sequence,
+              type,
+              occurredAt: now,
+              aggregateKind: "thread",
+              aggregateId: "thread-1",
+              commandId: null,
+              payload,
+            });
+          let model = yield* projectEvent(
+            createEmptyReadModel(now),
+            event("thread.created", {
+              threadId: "thread-1",
+              projectId: "project-1",
+              title: "demo",
+              modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt: now,
+              updatedAt: now,
+            }),
+          );
+          const payload = {
+            threadId: "thread-1",
+            messageId: "message-1",
+            role: "assistant",
+            text: "Done.",
+            turnId: null,
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          };
+          if (existing) {
+            model = yield* projectEvent(
+              model,
+              event("thread.message-sent", { ...payload, streaming: true }),
+            );
+          }
+          model = yield* projectEvent(
+            model,
+            event("thread.message-sent", {
+              ...payload,
+              text: existing ? "" : "Done.",
+              suggestion: "Run tests",
+            }),
+          );
+          expect(model.threads[0]?.messages[0]).toMatchObject({
+            text: "Done.",
+            suggestion: "Run tests",
+          });
+          model = yield* projectEvent(
+            model,
+            event("thread.message-sent", { ...payload, text: "" }),
+          );
+          expect(model.threads[0]?.messages[0]?.suggestion).toBe("Run tests");
+          model = yield* projectEvent(
+            model,
+            event("thread.message-sent", { ...payload, text: "More.", streaming: true }),
+          );
+          expect(model.threads[0]?.messages[0]?.suggestion).toBeUndefined();
+        }),
+    );
+  }
+
   it("applies thread.created events", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const model = createEmptyReadModel(now);

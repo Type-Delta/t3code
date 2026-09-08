@@ -2387,6 +2387,65 @@ describe("ProviderRuntimeIngestion", () => {
     expect(proposedPlan?.planMarkdown).toBe("## Buffered plan\n\n- first\n- second");
   });
 
+  it.each([
+    { streaming: false, text: "Done.", tagged: true, subagentId: undefined },
+    { streaming: true, text: "Done.", tagged: true, subagentId: undefined },
+    { streaming: false, text: "a".repeat(24_001), tagged: true, subagentId: undefined },
+    { streaming: false, text: "Done.", tagged: true, subagentId: "child-1" },
+    { streaming: true, text: "Done.", tagged: true, subagentId: "child-1" },
+    { streaming: false, text: "  Plain <text> reply.\n", tagged: false, subagentId: undefined },
+    { streaming: true, text: "  Plain <text> reply.\n", tagged: false, subagentId: undefined },
+  ])(
+    "strips suggestions with streaming=$streaming, tagged=$tagged, subagent=$subagentId",
+    async ({ streaming, text, tagged, subagentId }) => {
+      const harness = await createHarness({
+        serverSettings: { enableLegacyTokenStreaming: streaming },
+      });
+      const common = {
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-suggestion"),
+        itemId: asItemId("item-suggestion"),
+        ...(subagentId ? { subagentId } : {}),
+      };
+      const chunks = tagged
+        ? [`${text}<t3_prompt_sug`, "gestion>Run tests", "</t3_prompt_", "suggestion>"]
+        : [text];
+      for (const [index, delta] of chunks.entries()) {
+        await harness.emitAndDrain([
+          {
+            ...common,
+            type: "content.delta",
+            eventId: asEventId(`suggestion-delta-${index}`),
+            payload: { streamKind: "assistant_text", delta },
+          },
+        ]);
+      }
+      await harness.emitAndDrain([
+        {
+          ...common,
+          type: "item.completed",
+          eventId: asEventId("suggestion-completed"),
+          payload: { itemType: "assistant_message", status: "completed" },
+        },
+      ]);
+      const events = await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0)));
+      const messages = Array.from(events).filter((event) => event.type === "thread.message-sent");
+      expect(messages.map((event) => event.payload.text).join("")).toBe(text);
+      for (const event of messages) {
+        expect(event.payload.text).not.toContain("<t3_");
+        expect(event.payload.text).not.toContain("</t3_");
+      }
+      expect(messages.at(-1)?.payload).toMatchObject({ streaming: false });
+      expect(messages.at(-1)?.payload.suggestion).toBe(
+        tagged && !subagentId ? "Run tests" : undefined,
+      );
+      const snapshot = await harness.readModel();
+      expect(snapshot.threads[0]?.messages.at(-1)?.text).toBe(text);
+    },
+  );
+
   it("buffers assistant deltas with one lifecycle query per event until completion", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

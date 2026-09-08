@@ -3696,6 +3696,76 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 
+  it.effect("persists message suggestions for thread detail snapshots", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const projectId = ProjectId.make("project-suggestion");
+      const threadId = ThreadId.make("thread-suggestion");
+      const modelSelection = {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      };
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-suggestion-project"),
+        projectId,
+        title: "Suggestion project",
+        workspaceRoot: "/tmp/project-suggestion",
+        defaultModelSelection: modelSelection,
+        createdAt: now,
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-suggestion-thread"),
+        threadId,
+        projectId,
+        title: "Suggestion thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      });
+      yield* engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-suggestion-message"),
+        threadId,
+        messageId: MessageId.make("message-with-suggestion"),
+        suggestion: "Run the focused tests",
+        createdAt: now,
+      });
+      yield* engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-no-suggestion-message"),
+        threadId,
+        messageId: MessageId.make("message-without-suggestion"),
+        createdAt: now,
+      });
+
+      const snapshot = yield* snapshotQuery.getThreadDetailSnapshot(threadId);
+      assert.equal(snapshot._tag, "Some");
+      if (snapshot._tag !== "Some") {
+        return;
+      }
+      const withSuggestion = snapshot.value.thread.messages.find(
+        (message) => message.id === "message-with-suggestion",
+      );
+      const withoutSuggestion = snapshot.value.thread.messages.find(
+        (message) => message.id === "message-without-suggestion",
+      );
+      assert.equal(withSuggestion?.suggestion, "Run the focused tests");
+      assert.notEqual(withoutSuggestion, undefined);
+      if (withoutSuggestion === undefined) {
+        return;
+      }
+      assert.equal(Object.hasOwn(withoutSuggestion, "suggestion"), false);
+    }),
+  );
+
   it.effect("projects persist updated scripts from project.meta.update", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngineService;

@@ -884,6 +884,18 @@ export const ServerSettings = Schema.Struct({
    * between a desktop window and a phone attached to the same server.
    */
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Prompt suggestion: the agent is asked to end each turn with a short
+   * proposal for the user's next prompt, which the server strips from the
+   * reply and the composer shows as ghost text. Opt-in because it adds a
+   * standing instruction to every session prompt.
+   */
+  enablePromptSuggestion: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Optional extra guidance appended to the built-in prompt suggestion
+   * instruction. Empty means the built-in wording alone.
+   */
+  promptSuggestionInstructions: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -1145,6 +1157,8 @@ const OpenCodeSettingsPatch = Schema.Struct({
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
+  enablePromptSuggestion: Schema.optionalKey(Schema.Boolean),
+  promptSuggestionInstructions: Schema.optionalKey(TrimmedString),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   autoResumeOnUsageLimit: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),

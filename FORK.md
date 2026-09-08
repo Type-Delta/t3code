@@ -561,6 +561,35 @@ search, and switching groups preserves the query. Provider and continuation rest
 
 **Last updated:** 2026-09-07
 
+### DL034 — Prompt suggestion ghost text from the agent's own turn
+
+When the server setting `enablePromptSuggestion` is on (default off), Codex and Claude sessions
+receive a standing instruction to end each reply with a tagged one-line proposal for the user's
+next prompt. The agent writes it from its real context (repository instructions, memory, and the
+conversation so far); no separate model call, provider session, or transcript summary is made.
+`ProviderRuntimeIngestion` withholds any partial or open tag from streamed and buffered deltas,
+strips every tagged block at completion, and carries the sanitized text as `suggestion` on the
+assistant message through the decider, projector, client reducer, and SQLite projection
+(migration `058`). The web composer shows it as ghost text once the thread is idle and the
+composer is empty; Tab accepts it, typing dismisses it for that message, and a new message or
+thread resets it. Cursor, Grok, OpenCode, and Antigravity receive no instruction. Mobile has no
+toggle or ghost text. An optional `promptSuggestionInstructions` setting appends extra guidance to
+the built-in instruction. Both settings live under Settings → General → Prompt suggestion.
+
+**Implementation evidence:** `packages/shared/src/promptSuggestion.ts`,
+`packages/contracts/src/{settings,orchestration,provider}.ts`,
+`apps/server/src/provider/Layers/{ProviderService,CodexSessionRuntime,ClaudeAdapter}.ts`,
+`apps/server/src/provider/CodexDeveloperInstructions.ts`,
+`apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`,
+`apps/server/src/orchestration/{decider,projector}.ts`,
+`apps/server/src/persistence/Migrations/058_ProjectionThreadMessageSuggestions.ts`,
+`packages/client-runtime/src/state/threadReducer.ts`,
+`apps/web/src/promptSuggestion.logic.ts`, `apps/web/src/components/chat/usePromptSuggestion.ts`,
+`apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/ComposerPromptEditor.tsx`,
+and `apps/web/src/components/settings/SettingsPanels.tsx`.
+
+**Last updated:** 2026-09-08
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

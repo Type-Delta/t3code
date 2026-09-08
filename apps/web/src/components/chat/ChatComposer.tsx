@@ -177,6 +177,7 @@ import {
   ComposerSelectControl,
 } from "./ComposerControl";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
+import { usePromptSuggestion } from "./usePromptSuggestion";
 import {
   searchSlashCommandItems,
   slashCommandItemsForPromptPosition,
@@ -2053,6 +2054,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const isComposerApprovalState = activePendingApproval !== null;
+  const lastThreadMessage = activeThread?.messages.at(-1) ?? null;
+  // Ghost text for the agent's proposed next prompt; the suggestion rides along
+  // with the message, so this only decides whether to show it.
+  const promptSuggestion = usePromptSuggestion({
+    enabled: settings.enablePromptSuggestion && !isMobileViewport,
+    disabled:
+      isConnecting ||
+      isSendBusy ||
+      isComposerApprovalState ||
+      projectSelectionRequired ||
+      activePendingProgress !== null ||
+      pendingUserInputs.length > 0,
+    threadIdle: phase === "ready" && activeThread?.session?.activeTurnId == null,
+    threadId: activeThreadId,
+    lastMessage: lastThreadMessage,
+    prompt,
+    trigger: composerTrigger,
+  });
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const isChoiceOnlyPendingQuestion =
     activePendingProgress?.activeQuestion?.allowCustomAnswer === false;
@@ -3028,6 +3047,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if ((key === "Enter" || key === "Tab") && selectedItem) {
         onSelectComposerItem(selectedItem);
         return true;
+      }
+    }
+    if (key === "Tab" && !event.shiftKey) {
+      const suggestion = promptSuggestion.accept();
+      if (suggestion) {
+        return applyPromptReplacement(0, promptRef.current.length, suggestion);
       }
     }
     const submissionIntent =
@@ -5402,6 +5427,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       : []
                   }
                   skills={selectedProviderSkills}
+                  ghostText={promptSuggestion.ghostText}
                   containerClassName={cn(isComposerResting && "min-w-0 flex-1")}
                   className={cn(
                     showMobilePendingAnswerActions && "max-sm:pb-11",

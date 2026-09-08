@@ -383,6 +383,32 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("appends prompt suggestion instructions to the session system prompt", () => {
+    const harness = makeHarness();
+    const block =
+      "<prompt_suggestion>End with <t3_prompt_suggestion>one line</t3_prompt_suggestion>.</prompt_suggestion>";
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        promptSuggestionInstructions: block,
+      });
+
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.systemPrompt, {
+        type: "preset",
+        preset: "claude_code",
+        append:
+          "<runtime_info>In case you're asked: you are running in T3 Code through the Claude Code harness. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>" +
+          `\n\n${block}`,
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("derives bypass permission mode from full-access runtime policy", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

@@ -106,6 +106,7 @@ import {
 } from "../ui/dialog";
 import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import {
   DEFAULT_CODE_FONT_STACK,
   DEFAULT_SANS_FONT_STACK,
@@ -595,6 +596,13 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
         ? ["Agent browser access"]
         : []),
+      ...(settings.enablePromptSuggestion !== DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion
+        ? ["Prompt suggestion"]
+        : []),
+      ...(settings.promptSuggestionInstructions !==
+      DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions
+        ? ["Suggestion instructions"]
+        : []),
     ],
     [
       isTextGenerationModelDirty,
@@ -607,6 +615,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.browserAutoShowFloatingPreview,
       settings.appearanceContrast,
       settings.enableAgentBrowserAccess,
+      settings.enablePromptSuggestion,
+      settings.promptSuggestionInstructions,
       settings.confirmQuit,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
@@ -762,6 +772,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       // name, so a user restoring defaults is told the agent regains access
       // rather than discovering it later.
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
+      enablePromptSuggestion: DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion,
+      promptSuggestionInstructions: DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions,
     });
     onRestored?.();
   }, [
@@ -2908,6 +2920,71 @@ export function GeneralSettingsPanel() {
             )
           }
         />
+      </SettingsSection>
+
+      <SettingsSection id="prompt-suggestion" title="Prompt suggestion">
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("prompt-suggestion")}
+          description="After each turn the agent proposes your next prompt as ghost text in the composer. Tab accepts it."
+          resetAction={
+            settings.enablePromptSuggestion !== DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion ? (
+              <SettingResetButton
+                label="prompt suggestion"
+                onClick={() =>
+                  updateSettings({
+                    enablePromptSuggestion: DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.enablePromptSuggestion}
+              onCheckedChange={(checked) =>
+                updateSettings({ enablePromptSuggestion: Boolean(checked) })
+              }
+              aria-label="Enable prompt suggestion"
+            />
+          }
+        />
+
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("prompt-suggestion-instructions")}
+          description="Optional extra guidance appended to the built-in instruction. Empty keeps the built-in wording alone."
+          resetAction={
+            settings.promptSuggestionInstructions !==
+            DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions ? (
+              <SettingResetButton
+                label="suggestion instructions"
+                onClick={() =>
+                  updateSettings({
+                    promptSuggestionInstructions:
+                      DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions,
+                  })
+                }
+              />
+            ) : null
+          }
+        >
+          <div className="mt-3 max-w-2xl pb-3.5">
+            <Textarea
+              key={settings.promptSuggestionInstructions}
+              defaultValue={settings.promptSuggestionInstructions}
+              onBlur={(event) => {
+                const next = event.target.value.trim();
+                if (next !== settings.promptSuggestionInstructions) {
+                  updateSettings({ promptSuggestionInstructions: next });
+                }
+              }}
+              rows={4}
+              placeholder="Favor the next verification step over new work."
+              aria-label="Suggestion instructions"
+            />
+          </div>
+        </SettingsRow>
       </SettingsSection>
 
       <SettingsSection id="about" title="About">

@@ -30,6 +30,7 @@ import {
   type ProviderSession,
 } from "@t3tools/contracts";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
+import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
@@ -727,6 +728,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
+  const promptSuggestionInstructions = serverSettings.getSettings.pipe(
+    Effect.map((settings) =>
+      settings.enablePromptSuggestion
+        ? buildPromptSuggestionInstructions(settings.promptSuggestionInstructions)
+        : undefined,
+    ),
+    Effect.catch((cause) =>
+      Effect.logWarning("Could not read server settings; disabling prompt suggestions.", {
+        cause,
+      }).pipe(Effect.as(undefined)),
+    ),
+  );
+
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
     Effect.gen(function* () {
       if (!(yield* agentBrowserAccessEnabled)) {
@@ -1035,6 +1049,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId: input.binding.threadId,
           provider: input.binding.provider,
           providerInstanceId: bindingInstanceId,
+          promptSuggestionInstructions:
+            adapter.provider === "codex" || adapter.provider === "claudeAgent"
+              ? yield* promptSuggestionInstructions
+              : undefined,
           ...(persistedCwd ? { cwd: persistedCwd } : {}),
           ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
@@ -1265,6 +1283,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           .startSession({
             ...input,
             providerInstanceId: resolvedInstanceId,
+            promptSuggestionInstructions:
+              adapter.provider === "codex" || adapter.provider === "claudeAgent"
+                ? yield* promptSuggestionInstructions
+                : undefined,
             ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
             ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
           })
@@ -1436,7 +1458,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }),
         (turnMetadata) =>
           Effect.gen(function* () {
-            const turn = yield* routed.adapter.sendTurn(input);
+            const turnInput = { ...input };
+            delete turnInput.promptSuggestionInstructions;
+            const instructions =
+              routed.adapter.provider === "codex" ? yield* promptSuggestionInstructions : undefined;
+            const turn = yield* routed.adapter.sendTurn({
+              ...turnInput,
+              ...(instructions ? { promptSuggestionInstructions: instructions } : {}),
+            });
             yield* associateTurnAnalytics({
               providerInstanceId: routed.instanceId,
               threadId: input.threadId,
