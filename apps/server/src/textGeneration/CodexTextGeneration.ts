@@ -23,6 +23,7 @@ import { codexExecLaunchArgs, resolveCodexLaunchArgs } from "../provider/Layers/
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
+  buildComposerSuggestionPrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
@@ -30,6 +31,7 @@ import {
 import {
   normalizeCliError,
   sanitizeCommitSubject,
+  sanitizeComposerSuggestion,
   sanitizePrTitle,
   sanitizeThreadTitle,
   toJsonSchemaObject,
@@ -101,7 +103,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateComposerSuggestion",
     value: unknown,
   ): Effect.Effect<string, TextGenerationError> =>
     encodeJsonString(value).pipe(
@@ -162,7 +165,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateComposerSuggestion";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -405,10 +409,30 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateComposerSuggestion: TextGeneration.TextGeneration["Service"]["generateComposerSuggestion"] =
+    Effect.fn("CodexTextGeneration.generateComposerSuggestion")(function* (input) {
+      const { prompt, outputSchema } = buildComposerSuggestionPrompt(input);
+      const generated = yield* runCodexJson({
+        operation: "generateComposerSuggestion",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      const text = sanitizeComposerSuggestion(generated.text);
+      if (!text)
+        return yield* new TextGenerationError({
+          operation: "generateComposerSuggestion",
+          detail: "Codex returned an unusable composer suggestion.",
+        });
+      return { text };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateComposerSuggestion,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

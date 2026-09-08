@@ -317,6 +317,9 @@ export const ClientSettingsSchema = Schema.Struct({
   // default UI; this beta flag restores it (plus the /plan and /default slash
   // commands) for users who still rely on the old workflow.
   planModeEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // After a turn settles, sends that thread's recent messages to the selected provider to
+  // propose the user's next prompt. Keep this opt-in: it makes automatic model requests.
+  composerSuggestionEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // Legacy context window meter. The composer hides it by default; users who
   // still want the old usage indicator can restore it from Settings.
   contextWindowMeterEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -952,6 +955,20 @@ export const ServerSettings = Schema.Struct({
   sourceControlWriterModelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  // Dedicated model for the composer's post-turn QA suggestion. Null means the
+  // suggestion follows the thread's own model (the historical behavior).
+  composerSuggestionModelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  // Renames the suggestion feature in the UI. Empty keeps the "QA suggestions"
+  // default, so a reviewer can call it "Docs" or "Security" instead.
+  composerSuggestionLabel: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  // Replaces the built-in QA persona and focus rules in the suggestion prompt.
+  // Empty keeps the QA wording; the output format and the untrusted-transcript
+  // guard are always enforced regardless of what is written here.
+  composerSuggestionInstructions: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+  ),
 
   // Legacy single-instance-per-driver settings. Continues to be the source
   // of truth until `providerInstances` (below) lands per-driver migration
@@ -1175,6 +1192,9 @@ export const ServerSettingsPatch = Schema.Struct({
     }),
   ),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  composerSuggestionModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  composerSuggestionLabel: Schema.optionalKey(TrimmedString),
+  composerSuggestionInstructions: Schema.optionalKey(TrimmedString),
   observability: Schema.optionalKey(
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
@@ -1259,6 +1279,7 @@ export const ClientSettingsPatch = Schema.Struct({
     ),
   ),
   planModeEnabled: Schema.optionalKey(Schema.Boolean),
+  composerSuggestionEnabled: Schema.optionalKey(Schema.Boolean),
   contextWindowMeterEnabled: Schema.optionalKey(Schema.Boolean),
   composerCollapseOnBlur: Schema.optionalKey(Schema.Boolean),
   composerCollapseOnScroll: Schema.optionalKey(Schema.Boolean),

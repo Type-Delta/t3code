@@ -46,6 +46,7 @@ const clientSettings: ClientSettings = {
   glassOpacity: 80,
   panelAnimationDurationMs: 0,
   planModeEnabled: false,
+  composerSuggestionEnabled: false,
   proactivePanelsEnabled: true,
   showSkillsInSlashMenu: false,
   providerModelPreferences: {},

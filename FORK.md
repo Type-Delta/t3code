@@ -32,6 +32,16 @@ The upstream draft hero remains the empty-state headline. The fork adds `On <mac
 
 **Last updated:** 2026-09-01
 
+### DL007 — Opt-in next-prompt suggestions
+
+Once a turn settles, the web composer can ask a model what the user would plausibly send next, with the model acting as a senior QA expert that prioritizes concrete validation and release-risk reduction. By default the request uses the thread's own model; a dedicated "QA suggestion model" (Settings → General) locks suggestions to one configurable model regardless of the thread — a nullable `composerSuggestionModelSelection` setting mirroring `sourceControlWriterModelSelection`. The feature is also renamable (`composerSuggestionLabel`) and its focus is rewritable (`composerSuggestionInstructions`), so it can act as a docs, security, or UX reviewer instead; custom instructions replace only the QA persona and focus rules, while the JSON output contract, the one-line length limit, and the untrusted-transcript guard are always appended after them. The suggestion renders as faded text in the empty composer; Tab accepts it. The server reads an end-preserving tail of the requested thread through the existing projection query and text-generation boundary, so no thread turn, event, message, or provider session is created. Requests are bound to the latest completed assistant message, rejected before project lookup when stale or active, and checked again immediately before provider launch; worktree-backed threads skip the project lookup entirely. Suggestions clear as soon as the user types, remain dismissed for that turn even if the draft is erased, and reset only when the model, thread, or latest message changes. Mobile has no toggle or request path.
+
+**Implementation evidence:** `packages/contracts/src/composerSuggestion.ts`, `packages/contracts/src/settings.ts` (`composerSuggestionModelSelection`), `apps/server/src/textGeneration/`, `apps/server/src/ws.ts`, `apps/web/src/components/chat/useComposerSuggestion.ts`, `apps/web/src/components/chat/ChatComposer.tsx`, and `apps/web/src/components/settings/SettingsPanels.tsx`.
+
+**Recorded validation:** focused web gating, RPC stale-turn/worktree/recheck, text-generation prompt, authorization, and command single-flight tests; settings round-trip tests for the dedicated-model setting; repository-wide `vp check` and `vp run typecheck`; integrated web pass against an isolated environment seeded from a real database snapshot, covering opt-in, ghost text after a settled Codex reply, Tab acceptance, whitespace drafts, and no repeat request after typing then erasing.
+
+**Last updated:** 2026-09-07
+
 ### DL003 — Compact Claude and Codex subscription meters
 
 The fork retains session and weekly subscription meters in the active thread header and provider settings cards. A separate best-effort `usage` snapshot supplies these compact meters from Claude and Codex CLI-managed credentials; missing credentials, scopes, network access, or endpoint failures leave it absent without affecting provider health.

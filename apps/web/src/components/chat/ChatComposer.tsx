@@ -177,6 +177,7 @@ import {
   ComposerSelectControl,
 } from "./ComposerControl";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
+import { useComposerSuggestion } from "./useComposerSuggestion";
 import {
   searchSlashCommandItems,
   slashCommandItemsForPromptPosition,
@@ -801,7 +802,11 @@ import {
   sortProviderInstanceEntries,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
-import { type AppModelOption, getAppModelOptionsForInstance } from "../../modelSelection";
+import {
+  type AppModelOption,
+  getAppModelOptionsForInstance,
+  resolveAppModelSelectionState,
+} from "../../modelSelection";
 import type { UnifiedSettings } from "@t3tools/contracts/settings";
 import { type SessionPhase, type Thread, videoMimeType } from "../../types";
 import type { PendingUserInputDraftAnswer } from "../../pendingUserInput";
@@ -1736,6 +1741,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
   );
+  // QA suggestions use a dedicated model when configured (Settings → QA
+  // suggestion model), otherwise they follow the thread's own model.
+  const composerSuggestionModelSelection = useMemo<ModelSelection>(() => {
+    const configured = settings.composerSuggestionModelSelection;
+    if (!configured) return selectedModelSelection;
+    const resolved = resolveAppModelSelectionState(
+      { ...settings, textGenerationModelSelection: configured },
+      providerStatuses,
+    );
+    return resolved.model ? resolved : selectedModelSelection;
+  }, [settings, providerStatuses, selectedModelSelection]);
   const selectedModelForPicker = selectedModel;
   // Instance-keyed option list so the picker can show each configured
   // instance (built-in + custom) as a first-class sidebar entry. The
@@ -1852,6 +1868,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
    * the next draft.
    */
   const pendingImageCompressionsRef = useRef<Map<ThreadId, number>>(new Map());
+  const isComposerApprovalState = activePendingApproval !== null;
+
+  const lastThreadMessage = activeThread?.messages.at(-1) ?? null;
+  const composerSuggestionState = useComposerSuggestion({
+    enabled: settings.composerSuggestionEnabled && !isMobileViewport,
+    disabled:
+      isConnecting ||
+      isSendBusy ||
+      isComposerApprovalState ||
+      projectSelectionRequired ||
+      activePendingProgress !== null ||
+      pendingUserInputs.length > 0,
+    threadIdle: phase === "ready" && activeThread?.session?.activeTurnId == null,
+    environmentId,
+    threadId: activeThreadId,
+    lastMessageId: lastThreadMessage?.id ?? null,
+    hasAssistantReply: lastThreadMessage?.role === "assistant" && !lastThreadMessage.streaming,
+    prompt,
+    trigger: composerTrigger,
+    modelSelection: composerSuggestionModelSelection,
+  });
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -2052,7 +2089,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [nonPersistedComposerImageIds],
   );
 
-  const isComposerApprovalState = activePendingApproval !== null;
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const isChoiceOnlyPendingQuestion =
     activePendingProgress?.activeQuestion?.allowCustomAnswer === false;
@@ -3028,6 +3064,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if ((key === "Enter" || key === "Tab") && selectedItem) {
         onSelectComposerItem(selectedItem);
         return true;
+      }
+    }
+    if (key === "Tab" && !event.shiftKey) {
+      const suggestion = composerSuggestionState.accept();
+      if (suggestion) {
+        return applyPromptReplacement(0, promptRef.current.length, suggestion);
       }
     }
     const submissionIntent =
@@ -5402,6 +5444,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       : []
                   }
                   skills={selectedProviderSkills}
+                  ghostText={composerSuggestionState.ghostText}
                   containerClassName={cn(isComposerResting && "min-w-0 flex-1")}
                   className={cn(
                     showMobilePendingAnswerActions && "max-sm:pb-11",

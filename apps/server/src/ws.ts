@@ -12,6 +12,7 @@ import {
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
   type AuthEnvironmentScope,
+  type ComposerSuggestionResult,
   AuthSessionId,
   ClientConnectionMethod,
   ClientDeviceType,
@@ -26,8 +27,11 @@ import {
   type OrchestrationCommand,
   type GitActionProgressEvent,
   type GitManagerServiceError,
+  type MessageId,
   OrchestrationDispatchCommandError,
   type OrchestrationEvent,
+  type OrchestrationThread,
+  type OrchestrationThreadShell,
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
   OrchestrationGetFullThreadDiffError,
@@ -124,6 +128,8 @@ import { requiredScopeForRpcMethod } from "./auth/RpcAuthorization.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
+import * as TextGeneration from "./textGeneration/TextGeneration.ts";
+import { formatComposerSuggestionConversation } from "./textGeneration/TextGenerationPrompts.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
@@ -148,6 +154,45 @@ const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchComma
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
+
+function isComposerSuggestionSessionIdle(session: OrchestrationThread["session"]): boolean {
+  return (
+    session !== null &&
+    (session.status === "idle" || session.status === "ready") &&
+    session.activeTurnId === null
+  );
+}
+
+function hasCurrentComposerSuggestionTurn(
+  thread: Pick<OrchestrationThread, "latestTurn" | "session">,
+  lastMessageId: MessageId,
+): boolean {
+  return (
+    isComposerSuggestionSessionIdle(thread.session) &&
+    thread.latestTurn?.state === "completed" &&
+    thread.latestTurn.assistantMessageId === lastMessageId
+  );
+}
+
+export function isComposerSuggestionThreadCurrent(
+  thread: Pick<OrchestrationThread, "latestTurn" | "messages" | "session">,
+  lastMessageId: MessageId,
+): boolean {
+  const lastMessage = thread.messages.at(-1);
+  return (
+    hasCurrentComposerSuggestionTurn(thread, lastMessageId) &&
+    lastMessage?.id === lastMessageId &&
+    lastMessage.role === "assistant" &&
+    !lastMessage.streaming
+  );
+}
+
+export function isComposerSuggestionThreadShellCurrent(
+  thread: Pick<OrchestrationThreadShell, "latestTurn" | "session">,
+  lastMessageId: MessageId,
+): boolean {
+  return hasCurrentComposerSuggestionTurn(thread, lastMessageId);
+}
 
 const resolveDiscoveryForConfig = <A, E, R>(
   discovery: Effect.Effect<A, E, R>,
@@ -485,6 +530,7 @@ const makeWsRpcLayer = (
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerService = yield* ProviderService.ProviderService;
+      const textGeneration = yield* Effect.serviceOption(TextGeneration.TextGeneration);
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const providerAuth = yield* ProviderAuthService;
       const providerInstances = yield* ProviderInstanceRegistry;
@@ -1471,6 +1517,73 @@ const makeWsRpcLayer = (
               ),
             ),
             { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.composerSuggestion]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.composerSuggestion,
+            Effect.gen(function* () {
+              const service = Option.getOrUndefined(textGeneration);
+              if (!service?.generateComposerSuggestion) {
+                return { kind: "unavailable" } satisfies ComposerSuggestionResult;
+              }
+              const snapshot = yield* projectionSnapshotQuery
+                .getThreadDetailSnapshot(input.threadId, { turnLimit: 2 })
+                .pipe(Effect.orElseSucceed(() => Option.none()));
+              if (Option.isNone(snapshot)) {
+                return { kind: "none" } satisfies ComposerSuggestionResult;
+              }
+              const thread = snapshot.value.thread;
+              if (!isComposerSuggestionThreadCurrent(thread, input.lastMessageId)) {
+                return { kind: "none" } satisfies ComposerSuggestionResult;
+              }
+              const conversation = formatComposerSuggestionConversation(thread.messages);
+              if (conversation.length === 0) {
+                return { kind: "none" } satisfies ComposerSuggestionResult;
+              }
+              const project = thread.worktreePath
+                ? Option.none()
+                : yield* projectionSnapshotQuery
+                    .getProjectShellById(thread.projectId)
+                    .pipe(Effect.orElseSucceed(() => Option.none()));
+              const cwd = thread.worktreePath ?? Option.getOrUndefined(project)?.workspaceRoot;
+              if (!cwd) {
+                return { kind: "none" } satisfies ComposerSuggestionResult;
+              }
+              const currentThread = yield* projectionSnapshotQuery
+                .getThreadShellById(input.threadId)
+                .pipe(Effect.orElseSucceed(() => Option.none()));
+              if (
+                Option.isNone(currentThread) ||
+                !isComposerSuggestionThreadShellCurrent(currentThread.value, input.lastMessageId)
+              ) {
+                return { kind: "none" } satisfies ComposerSuggestionResult;
+              }
+              // A settings read failure must not fail the suggestion; fall back
+              // to the built-in QA wording.
+              const composerSuggestionInstructions = yield* serverSettings.getSettings.pipe(
+                Effect.map((current) => current.composerSuggestionInstructions),
+                Effect.orElseSucceed(() => ""),
+              );
+              return yield* service
+                .generateComposerSuggestion({
+                  cwd,
+                  conversation,
+                  instructions: composerSuggestionInstructions,
+                  modelSelection: input.modelSelection,
+                })
+                .pipe(
+                  Effect.map(
+                    (result) =>
+                      ({
+                        kind: "suggestion",
+                        text: result.text,
+                      }) satisfies ComposerSuggestionResult,
+                  ),
+                  Effect.timeout(Duration.seconds(20)),
+                  Effect.orElseSucceed(() => ({ kind: "none" }) satisfies ComposerSuggestionResult),
+                );
+            }),
+            { "rpc.aggregate": "composer" },
           ),
         [WS_METHODS.serverUpdateProvider]: (input) =>
           observeRpcEffect(
