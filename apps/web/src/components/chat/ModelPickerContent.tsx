@@ -47,7 +47,7 @@ import {
 } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
 
-type ModelPickerItem = {
+export type ModelPickerItem = {
   slug: string;
   name: string;
   shortName?: string;
@@ -61,6 +61,82 @@ type ModelPickerItem = {
   isLegacy?: boolean | undefined;
   isUnavailable?: boolean | undefined;
 };
+
+type ModelPickerSelection = ProviderInstanceId | "favorites" | ":all";
+
+export function filterModelPickerModels(input: {
+  models: ReadonlyArray<ModelPickerItem>;
+  selection: ModelPickerSelection;
+  searchQuery: string;
+  favorites: ReadonlySet<string>;
+  lockedProvider: ProviderDriverKind | null;
+  lockedContinuationGroupKey?: string | null | undefined;
+  instanceOrder: ReadonlyArray<ProviderInstanceId>;
+}): ModelPickerItem[] {
+  const matchesLockedProvider = (model: ModelPickerItem) =>
+    input.lockedProvider === null ||
+    (model.driverKind === input.lockedProvider &&
+      (!input.lockedContinuationGroupKey ||
+        model.continuationGroupKey === input.lockedContinuationGroupKey));
+  const scopedModels = input.models.filter((model) => {
+    if (!matchesLockedProvider(model)) return false;
+    if (input.selection === ":all") return true;
+    if (input.selection === "favorites") {
+      return input.favorites.has(providerModelKey(model.instanceId, model.slug));
+    }
+    return model.instanceId === input.selection;
+  });
+  const query = input.searchQuery.trim();
+
+  if (query) {
+    return scopedModels
+      .map((model) => ({
+        model,
+        score: scoreModelPickerSearch(
+          {
+            name: model.name,
+            ...(model.shortName ? { shortName: model.shortName } : {}),
+            ...(model.subProvider ? { subProvider: model.subProvider } : {}),
+            driverKind: model.driverKind,
+            providerDisplayName: model.instanceDisplayName,
+            isFavorite: input.favorites.has(providerModelKey(model.instanceId, model.slug)),
+          },
+          query,
+        ),
+        isFavorite: input.favorites.has(providerModelKey(model.instanceId, model.slug)),
+        tieBreaker: buildModelPickerSearchText({
+          name: model.name,
+          ...(model.shortName ? { shortName: model.shortName } : {}),
+          ...(model.subProvider ? { subProvider: model.subProvider } : {}),
+          driverKind: model.driverKind,
+          providerDisplayName: model.instanceDisplayName,
+        }),
+      }))
+      .filter(
+        (
+          rankedModel,
+        ): rankedModel is {
+          model: ModelPickerItem;
+          score: number;
+          isFavorite: boolean;
+          tieBreaker: string;
+        } => rankedModel.score !== null,
+      )
+      .toSorted((a, b) => {
+        const scoreDelta = a.score - b.score;
+        if (scoreDelta !== 0) return scoreDelta;
+        if (a.isFavorite !== b.isFavorite) return a.isFavorite ? -1 : 1;
+        return a.tieBreaker.localeCompare(b.tieBreaker);
+      })
+      .map((rankedModel) => rankedModel.model);
+  }
+
+  return sortProviderModelItems(scopedModels, {
+    favoriteModelKeys: input.favorites,
+    groupFavorites: input.selection !== "favorites",
+    instanceOrder: input.selection === "favorites" ? input.instanceOrder : [],
+  });
+}
 
 export function resolveModelPickerSelectedModel(input: {
   driverKind: ProviderDriverKind | undefined;
@@ -197,19 +273,17 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       activeEntry,
       modelOptionsByInstance.get(props.activeInstanceId) ?? [],
     );
-  const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | "favorites">(
-    () => {
-      if (
-        props.lockedProvider !== null ||
-        activeInstanceHasSelectableUnavailableModel ||
-        activeInstanceNeedsSetup
-      ) {
-        // Keep the active instance visible when it is locked or needs setup.
-        return props.activeInstanceId;
-      }
-      return favorites.length > 0 ? "favorites" : props.activeInstanceId;
-    },
-  );
+  const [selectedInstanceId, setSelectedInstanceId] = useState<ModelPickerSelection>(() => {
+    if (
+      props.lockedProvider !== null ||
+      activeInstanceHasSelectableUnavailableModel ||
+      activeInstanceNeedsSetup
+    ) {
+      // Keep the active instance visible when it is locked or needs setup.
+      return props.activeInstanceId;
+    }
+    return favorites.length > 0 ? "favorites" : props.activeInstanceId;
+  });
   const [expandedLegacyInstances, setExpandedLegacyInstances] = useState(
     () =>
       new Set<ProviderInstanceId>(
@@ -229,7 +303,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   }, []);
 
   const handleSelectInstance = useCallback(
-    (instanceId: ProviderInstanceId | "favorites") => {
+    (instanceId: ModelPickerSelection) => {
       setSelectedInstanceId(instanceId);
       window.requestAnimationFrame(() => {
         focusSearchInput();
@@ -378,120 +452,38 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     }
     return [...available, ...disabled];
   }, [instanceEntries, isLocked, matchesLockedProvider]);
-  const showSidebar = !isSearching && sidebarInstanceEntries.length > 0;
+  const showSidebar = sidebarInstanceEntries.length > 0;
   const instanceOrder = useMemo(
     () => instanceEntries.map((entry) => entry.instanceId),
     [instanceEntries],
   );
 
-  // Filter models based on search query and selected instance
-  const filteredModels = useMemo(() => {
-    let result = flatModels;
-
-    // Apply tokenized fuzzy search across the combined provider/model search fields.
-    if (searchQuery.trim()) {
-      const rankedMatches = result
-        .map((model) => ({
-          model,
-          score: scoreModelPickerSearch(
-            {
-              name: model.name,
-              ...(model.shortName ? { shortName: model.shortName } : {}),
-              ...(model.subProvider ? { subProvider: model.subProvider } : {}),
-              driverKind: model.driverKind,
-              providerDisplayName: model.instanceDisplayName,
-              isFavorite: favoritesSet.has(providerModelKey(model.instanceId, model.slug)),
-            },
-            searchQuery,
-          ),
-          isFavorite: favoritesSet.has(providerModelKey(model.instanceId, model.slug)),
-          tieBreaker: buildModelPickerSearchText({
-            name: model.name,
-            ...(model.shortName ? { shortName: model.shortName } : {}),
-            ...(model.subProvider ? { subProvider: model.subProvider } : {}),
-            driverKind: model.driverKind,
-            providerDisplayName: model.instanceDisplayName,
-          }),
-        }))
-        .filter(
-          (
-            rankedModel,
-          ): rankedModel is {
-            model: ModelPickerItem;
-            score: number;
-            isFavorite: boolean;
-            tieBreaker: string;
-          } => rankedModel.score !== null,
-        );
-
-      // When searching, we only respect locked provider (by driver kind),
-      // ignoring sidebar selection so account-scoped searches can find a
-      // model before the user chooses a specific instance rail item.
-      if (props.lockedProvider !== null) {
-        const lockedProviderMatches: Array<(typeof rankedMatches)[number]> = [];
-        for (const rankedModel of rankedMatches) {
-          if (matchesLockedProvider(rankedModel.model)) {
-            lockedProviderMatches.push(rankedModel);
-          }
-        }
-        return lockedProviderMatches
-          .toSorted((a, b) => {
-            const scoreDelta = a.score - b.score;
-            if (scoreDelta !== 0) {
-              return scoreDelta;
-            }
-            if (a.isFavorite !== b.isFavorite) {
-              return a.isFavorite ? -1 : 1;
-            }
-            return a.tieBreaker.localeCompare(b.tieBreaker);
-          })
-          .map((rankedModel) => rankedModel.model);
-      }
-
-      return rankedMatches
-        .toSorted((a, b) => {
-          const scoreDelta = a.score - b.score;
-          if (scoreDelta !== 0) {
-            return scoreDelta;
-          }
-          if (a.isFavorite !== b.isFavorite) {
-            return a.isFavorite ? -1 : 1;
-          }
-          return a.tieBreaker.localeCompare(b.tieBreaker);
-        })
-        .map((rankedModel) => rankedModel.model);
-    }
-
-    if (props.lockedProvider !== null) {
-      result = result.filter((m) => matchesLockedProvider(m));
-      if (selectedInstanceId === "favorites") {
-        result = result.filter((m) => favoritesSet.has(providerModelKey(m.instanceId, m.slug)));
-      } else {
-        result = result.filter((m) => m.instanceId === selectedInstanceId);
-      }
-    } else if (selectedInstanceId === "favorites") {
-      result = result.filter((m) => favoritesSet.has(providerModelKey(m.instanceId, m.slug)));
-    } else {
-      result = result.filter((m) => m.instanceId === selectedInstanceId);
-    }
-
-    return sortProviderModelItems(result, {
-      favoriteModelKeys: favoritesSet,
-      groupFavorites: selectedInstanceId !== "favorites",
-      instanceOrder: selectedInstanceId === "favorites" ? instanceOrder : [],
-    });
-  }, [
-    favoritesSet,
-    flatModels,
-    instanceOrder,
-    matchesLockedProvider,
-    props.lockedProvider,
-    searchQuery,
-    selectedInstanceId,
-  ]);
+  // Scope before ranking so a query remains within the selected rail group.
+  // Select All explicitly when a cross-provider search is intended.
+  const filteredModels = useMemo(
+    () =>
+      filterModelPickerModels({
+        models: flatModels,
+        selection: selectedInstanceId,
+        searchQuery,
+        favorites: favoritesSet,
+        lockedProvider: props.lockedProvider,
+        lockedContinuationGroupKey: props.lockedContinuationGroupKey,
+        instanceOrder,
+      }),
+    [
+      favoritesSet,
+      flatModels,
+      instanceOrder,
+      props.lockedContinuationGroupKey,
+      props.lockedProvider,
+      searchQuery,
+      selectedInstanceId,
+    ],
+  );
 
   const legacySection = useMemo(() => {
-    if (isSearching || selectedInstanceId === "favorites") {
+    if (isSearching || selectedInstanceId === "favorites" || selectedInstanceId === ":all") {
       return null;
     }
     const currentModels = filteredModels.filter((model) => !model.isLegacy);
@@ -518,7 +510,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   }, [filteredModels, legacySection]);
 
   const selectedEntry =
-    selectedInstanceId === "favorites" ? undefined : entryByInstanceId.get(selectedInstanceId);
+    selectedInstanceId === "favorites" || selectedInstanceId === ":all"
+      ? undefined
+      : entryByInstanceId.get(selectedInstanceId);
   const providerSetupEntries =
     !isSearching && props.onOpenProviderSetup
       ? instanceEntries.filter(
@@ -739,6 +733,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
             onSelectInstance={handleSelectInstance}
             instanceEntries={sidebarInstanceEntries}
             showFavorites
+            showAll={!isLocked}
             {...(selectableUnavailableInstanceIds ? { selectableUnavailableInstanceIds } : {})}
             {...(lockedDisabledInstanceIds
               ? {
