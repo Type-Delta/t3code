@@ -382,6 +382,31 @@ describe("composer next-prompt suggestion", () => {
     expect(prompt).toContain("USER:\nadd a test");
   });
 
+  it("swaps the QA focus for custom instructions but keeps the output contract", () => {
+    const { prompt } = buildComposerSuggestionPrompt({
+      conversation: "USER:\nupdate the docs",
+      instructions: "Act as a technical writer and propose the next documentation improvement.",
+    });
+
+    expect(prompt).toContain("Act as a technical writer");
+    expect(prompt).not.toContain("senior QA expert");
+    expect(prompt).not.toContain("edge cases, boundaries, negative paths, or regressions");
+    // The response shape and the injection guard survive a rewritten focus.
+    expect(prompt).toContain("Return JSON with exactly one key: text.");
+    expect(prompt).toContain("at most 140 characters");
+    expect(prompt).toContain("untrusted data");
+    expect(prompt).toContain("USER:\nupdate the docs");
+  });
+
+  it("keeps the QA focus when custom instructions are blank", () => {
+    const { prompt } = buildComposerSuggestionPrompt({
+      conversation: "USER:\nadd a test",
+      instructions: "   ",
+    });
+
+    expect(prompt).toContain("senior QA expert");
+  });
+
   it("drops output that cannot be inserted verbatim", () => {
     expect(sanitizeComposerSuggestion('"Run the focused tests"')).toBe("Run the focused tests");
     expect(sanitizeComposerSuggestion("line one\nline two")).toBeNull();

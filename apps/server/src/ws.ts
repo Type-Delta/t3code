@@ -1558,10 +1558,17 @@ const makeWsRpcLayer = (
               ) {
                 return { kind: "none" } satisfies ComposerSuggestionResult;
               }
+              // A settings read failure must not fail the suggestion; fall back
+              // to the built-in QA wording.
+              const composerSuggestionInstructions = yield* serverSettings.getSettings.pipe(
+                Effect.map((current) => current.composerSuggestionInstructions),
+                Effect.orElseSucceed(() => ""),
+              );
               return yield* service
                 .generateComposerSuggestion({
                   cwd,
                   conversation,
+                  instructions: composerSuggestionInstructions,
                   modelSelection: input.modelSelection,
                 })
                 .pipe(

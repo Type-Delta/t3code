@@ -191,6 +191,24 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["qa ghost text follow up suggestion tab ai composer next prompt"],
   },
   {
+    id: "composer-suggestion-label",
+    title: "Suggestion name",
+    to: "/settings/general",
+    searchTerms: ["rename qa suggestion label name ghost text custom title"],
+  },
+  {
+    id: "composer-suggestion-instructions",
+    title: "Suggestion instructions",
+    to: "/settings/general",
+    searchTerms: ["qa ghost text custom instructions prompt rules persona docs security focus"],
+  },
+  {
+    id: "composer-suggestion-model",
+    title: "QA suggestion model",
+    to: "/settings/general",
+    searchTerms: ["qa suggestion model dedicated ghost text composer provider lock"],
+  },
+  {
     id: "diff-layout",
     title: "Diff layout",
     to: "/settings/general",

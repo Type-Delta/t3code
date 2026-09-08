@@ -77,6 +77,8 @@ export interface ComposerSuggestionGenerationInput {
   cwd: string;
   /** Recent thread transcript tail, already truncated by the caller. */
   conversation: string;
+  /** Replaces the built-in QA persona and focus rules when set. */
+  instructions?: string | undefined;
   modelSelection: ModelSelection;
 }
 
