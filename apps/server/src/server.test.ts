@@ -20,6 +20,7 @@ import {
   MessageId,
   ManagementApiKeyId,
   ExternalLauncherCommandNotFoundError,
+  type OrchestrationThread,
   OrchestrationShellSnapshot,
   type OrchestrationShellStreamItem,
   OrchestrationThreadDetailSnapshot,
@@ -174,6 +175,7 @@ import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as Data from "effect/Data";
 
 import { makeOrchestrationIntegrationHarness } from "../integration/OrchestrationEngineHarness.integration.ts";
@@ -376,6 +378,65 @@ const makeDefaultOrchestrationThreadShell = (
   };
 };
 
+const makeComposerSuggestionThread = (input: {
+  threadId: ThreadId;
+  lastMessageId: MessageId;
+  worktreePath?: string | null;
+  status?: "idle" | "ready" | "running";
+  activeTurnId?: TurnId | null;
+}): OrchestrationThread => {
+  const now = "2026-01-01T00:00:00.000Z";
+  const turnId = TurnId.make(`turn-${input.threadId}`);
+  return {
+    ...(makeDefaultOrchestrationReadModel().threads[0] as OrchestrationThread),
+    id: input.threadId,
+    worktreePath: input.worktreePath ?? null,
+    latestTurn: {
+      turnId,
+      state: "completed",
+      requestedAt: now,
+      startedAt: now,
+      completedAt: now,
+      assistantMessageId: input.lastMessageId,
+    },
+    messages: [
+      {
+        id: input.lastMessageId,
+        role: "assistant",
+        text: `Completed ${input.threadId}`,
+        turnId,
+        streaming: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    session: {
+      threadId: input.threadId,
+      status: input.status ?? "ready",
+      providerName: "Codex",
+      providerInstanceId: defaultModelSelection.instanceId,
+      runtimeMode: "full-access",
+      activeTurnId: input.activeTurnId ?? null,
+      lastError: null,
+      updatedAt: now,
+    },
+  };
+};
+
+const makeComposerSuggestionThreadShell = (
+  thread: OrchestrationThread,
+  overrides: Partial<OrchestrationThreadShell> = {},
+): OrchestrationThreadShell =>
+  makeDefaultOrchestrationThreadShell({
+    id: thread.id,
+    projectId: thread.projectId,
+    modelSelection: thread.modelSelection,
+    worktreePath: thread.worktreePath,
+    latestTurn: thread.latestTurn,
+    session: thread.session,
+    ...overrides,
+  });
+
 const browserOtlpTracingLayer = Layer.mergeAll(
   FetchHttpClient.layer,
   OtlpSerialization.layerJson,
@@ -522,6 +583,7 @@ const buildAppUnderTest = (options?: {
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     threadDeletionReactor?: Partial<ThreadDeletionReactor["Service"]>;
     analyticsService?: Partial<AnalyticsService.AnalyticsService["Service"]>;
+    textGeneration?: Partial<TextGeneration.TextGeneration["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
     browserTraceCollector?: Partial<BrowserTraceCollector.BrowserTraceCollector["Service"]>;
@@ -949,6 +1011,11 @@ const buildAppUnderTest = (options?: {
             ...options?.layers?.threadDeletionReactor,
           }),
         ),
+      ),
+      Layer.provide(
+        Layer.mock(TextGeneration.TextGeneration)({
+          ...options?.layers?.textGeneration,
+        }),
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
@@ -2939,6 +3006,150 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assert.equal(body.linked, false);
       assert.equal(body.publishAgentActivity, false);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("guards composer suggestion generation against stale and active threads", () =>
+    Effect.gen(function* () {
+      const staleThreadId = ThreadId.make("composer-stale");
+      const activeThreadId = ThreadId.make("composer-active");
+      const worktreeThreadId = ThreadId.make("composer-worktree");
+      const racedThreadId = ThreadId.make("composer-raced");
+      const stableThreadId = ThreadId.make("composer-stable");
+      const staleCurrentMessageId = MessageId.make("composer-stale-current");
+      const staleRequestedMessageId = MessageId.make("composer-stale-requested");
+      const activeMessageId = MessageId.make("composer-active-message");
+      const worktreeMessageId = MessageId.make("composer-worktree-message");
+      const racedMessageId = MessageId.make("composer-raced-message");
+      const stableMessageId = MessageId.make("composer-stable-message");
+      const threads = new Map<ThreadId, OrchestrationThread>([
+        [
+          staleThreadId,
+          makeComposerSuggestionThread({
+            threadId: staleThreadId,
+            lastMessageId: staleCurrentMessageId,
+          }),
+        ],
+        [
+          activeThreadId,
+          makeComposerSuggestionThread({
+            threadId: activeThreadId,
+            lastMessageId: activeMessageId,
+            status: "running",
+            activeTurnId: TurnId.make("composer-active-turn"),
+          }),
+        ],
+        [
+          worktreeThreadId,
+          makeComposerSuggestionThread({
+            threadId: worktreeThreadId,
+            lastMessageId: worktreeMessageId,
+            worktreePath: "/tmp/composer-worktree",
+          }),
+        ],
+        [
+          racedThreadId,
+          makeComposerSuggestionThread({
+            threadId: racedThreadId,
+            lastMessageId: racedMessageId,
+          }),
+        ],
+        [
+          stableThreadId,
+          makeComposerSuggestionThread({
+            threadId: stableThreadId,
+            lastMessageId: stableMessageId,
+          }),
+        ],
+      ]);
+      let projectLookupCount = 0;
+      const generatedCwds: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadDetailSnapshot: (threadId) =>
+              Effect.succeed(
+                Option.fromNullishOr(threads.get(threadId)).pipe(
+                  Option.map((thread) => ({ snapshotSequence: 1, thread })),
+                ),
+              ),
+            getProjectShellById: () =>
+              Effect.sync(() => {
+                projectLookupCount++;
+                return Option.some(makeDefaultOrchestrationReadModel().projects[0]!);
+              }),
+            getThreadShellById: (threadId) =>
+              Effect.succeed(
+                Option.fromNullishOr(threads.get(threadId)).pipe(
+                  Option.map((thread) =>
+                    makeComposerSuggestionThreadShell(
+                      thread,
+                      threadId === racedThreadId
+                        ? {
+                            session: {
+                              ...thread.session!,
+                              status: "running",
+                              activeTurnId: TurnId.make("composer-raced-turn"),
+                            },
+                          }
+                        : {},
+                    ),
+                  ),
+                ),
+              ),
+          },
+          textGeneration: {
+            generateComposerSuggestion: (input) =>
+              Effect.sync(() => {
+                generatedCwds.push(input.cwd);
+                return { text: `Verify ${input.cwd}` };
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const request = (threadId: ThreadId, lastMessageId: MessageId) =>
+              client[WS_METHODS.composerSuggestion]({
+                threadId,
+                lastMessageId,
+                modelSelection: defaultModelSelection,
+              });
+
+            assert.deepEqual(yield* request(staleThreadId, staleRequestedMessageId), {
+              kind: "none",
+            });
+            assert.equal(projectLookupCount, 0);
+            assert.deepEqual(generatedCwds, []);
+
+            assert.deepEqual(yield* request(activeThreadId, activeMessageId), { kind: "none" });
+            assert.equal(projectLookupCount, 0);
+            assert.deepEqual(generatedCwds, []);
+
+            assert.deepEqual(yield* request(worktreeThreadId, worktreeMessageId), {
+              kind: "suggestion",
+              text: "Verify /tmp/composer-worktree",
+            });
+            assert.equal(projectLookupCount, 0);
+            assert.deepEqual(generatedCwds, ["/tmp/composer-worktree"]);
+
+            assert.deepEqual(yield* request(racedThreadId, racedMessageId), { kind: "none" });
+            assert.equal(projectLookupCount, 1);
+            assert.deepEqual(generatedCwds, ["/tmp/composer-worktree"]);
+
+            assert.deepEqual(yield* request(stableThreadId, stableMessageId), {
+              kind: "suggestion",
+              text: "Verify /tmp/default-project",
+            });
+            assert.equal(projectLookupCount, 2);
+            assert.deepEqual(generatedCwds, ["/tmp/composer-worktree", "/tmp/default-project"]);
+          }),
+        ),
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

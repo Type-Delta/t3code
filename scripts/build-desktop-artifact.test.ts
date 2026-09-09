@@ -57,6 +57,7 @@ import {
   resolveWindowsServerAsarIgnoreGlobs,
   resourceMonitorExecutableName,
   resolveGitHubPublishConfig,
+  resolveLocalUpdatePackageMetadata,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
   resolvePackageManagerUserAgent,
@@ -2272,5 +2273,18 @@ it("ignores trailing separators", () => {
   assert.deepStrictEqual(
     ancestorNodeModulesPaths("C:\\tmp\\probe\\app\\", "\\"),
     ancestorNodeModulesPaths("C:\\tmp\\probe\\app", "\\"),
+  );
+});
+
+it("stamps local checkout provenance only into local-update installers", () => {
+  assert.deepStrictEqual(
+    resolveLocalUpdatePackageMetadata(false, "C:\\Users\\a\\Projects\\t3code"),
+    {},
+  );
+  assert.deepStrictEqual(
+    resolveLocalUpdatePackageMetadata(true, "C:\\Users\\a\\Projects\\t3code"),
+    {
+      t3codeLocalUpdateSource: "C:\\Users\\a\\Projects\\t3code",
+    },
   );
 });

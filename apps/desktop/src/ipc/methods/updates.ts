@@ -1,5 +1,6 @@
 import {
   DesktopUpdateActionResultSchema,
+  DesktopLocalUpdateStateSchema,
   DesktopUpdateChannelSchema,
   DesktopUpdateCheckResultSchema,
   DesktopUpdateStateSchema,
@@ -8,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import * as DesktopUpdates from "../../updates/DesktopUpdates.ts";
+import * as LocalDesktopUpdate from "../../updates/LocalDesktopUpdate.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 
@@ -58,5 +60,35 @@ export const checkForUpdate = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.updates.check")(function* () {
     const updates = yield* DesktopUpdates.DesktopUpdates;
     return yield* updates.check("web-ui");
+  }),
+});
+
+export const getLocalUpdateState = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.LOCAL_UPDATE_GET_STATE_CHANNEL,
+  payload: Schema.Void,
+  result: DesktopLocalUpdateStateSchema,
+  handler: Effect.fn("desktop.ipc.updates.getLocalState")(function* () {
+    const updates = yield* LocalDesktopUpdate.LocalDesktopUpdates;
+    return yield* updates.getState;
+  }),
+});
+
+export const startLocalUpdate = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.LOCAL_UPDATE_START_CHANNEL,
+  payload: Schema.Void,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.updates.startLocal")(function* () {
+    const updates = yield* LocalDesktopUpdate.LocalDesktopUpdates;
+    yield* updates.start;
+  }),
+});
+
+export const startLocalBuild = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.LOCAL_BUILD_START_CHANNEL,
+  payload: Schema.Void,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.updates.startLocalBuild")(function* () {
+    const updates = yield* LocalDesktopUpdate.LocalDesktopUpdates;
+    yield* updates.startBuild;
   }),
 });

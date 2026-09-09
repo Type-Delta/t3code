@@ -226,6 +226,7 @@ import {
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
 import { ZrokShareStatus } from "./remoteAccess.ts";
+import { ComposerSuggestionInput, ComposerSuggestionResult } from "./composerSuggestion.ts";
 
 export const WS_METHODS = {
   // Project registry methods
@@ -249,6 +250,7 @@ export const WS_METHODS = {
 
   // Provider methods
   providerUploadFeedback: "provider.uploadFeedback",
+  composerSuggestion: "composer.suggestNextPrompt",
   providerAuthStart: "provider.auth.start",
   providerConsumeResetCredit: "provider.consumeResetCredit",
   providerAuthComplete: "provider.auth.complete",
@@ -871,6 +873,12 @@ export const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFee
   error: Schema.Union([ProviderUploadFeedbackError, EnvironmentAuthorizationError]),
 });
 
+export const WsComposerSuggestionRpc = Rpc.make(WS_METHODS.composerSuggestion, {
+  payload: ComposerSuggestionInput,
+  success: ComposerSuggestionResult,
+  error: EnvironmentAuthorizationError,
+});
+
 export const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusInput,
   success: VcsStatusStreamEvent,
@@ -1279,6 +1287,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,
   WsProviderUploadFeedbackRpc,
+  WsComposerSuggestionRpc,
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,

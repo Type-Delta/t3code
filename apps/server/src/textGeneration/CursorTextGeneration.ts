@@ -13,12 +13,14 @@ import { TextGenerationError } from "@t3tools/contracts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
+  buildComposerSuggestionPrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
+  sanitizeComposerSuggestion,
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
@@ -54,7 +56,8 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateComposerSuggestion";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -259,10 +262,30 @@ export const makeCursorTextGeneration = Effect.fn("makeCursorTextGeneration")(fu
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateComposerSuggestion: TextGeneration.TextGeneration["Service"]["generateComposerSuggestion"] =
+    Effect.fn("CursorTextGeneration.generateComposerSuggestion")(function* (input) {
+      const { prompt, outputSchema } = buildComposerSuggestionPrompt(input);
+      const generated = yield* runCursorJson({
+        operation: "generateComposerSuggestion",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      const text = sanitizeComposerSuggestion(generated.text);
+      if (!text)
+        return yield* new TextGenerationError({
+          operation: "generateComposerSuggestion",
+          detail: "Cursor returned an unusable composer suggestion.",
+        });
+      return { text };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateComposerSuggestion,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

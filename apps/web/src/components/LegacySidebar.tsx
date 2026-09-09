@@ -109,10 +109,14 @@ import {
 } from "../keybindings";
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { useShortcutModifierState } from "../shortcutModifierState";
-import { ensureLocalApi, readLocalApi } from "../localApi";
+import { readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
+import {
+  formatDesktopLocalUpdateProgress,
+  useDesktopLocalUpdateState,
+} from "../state/desktopLocalUpdate";
 
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
@@ -130,14 +134,8 @@ import { formatRelativeTimeLabel } from "../timestampFormat";
 import { Kbd } from "./ui/kbd";
 import {
   getArm64IntelBuildWarningDescription,
-  getDesktopUpdateActionError,
-  getDesktopUpdateInstallConfirmationMessage,
-  isDesktopUpdateButtonDisabled,
-  resolveDesktopUpdateButtonAction,
   shouldShowArm64IntelBuildWarning,
-  shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
-import { showDesktopUpdateDownloadedToast } from "./desktopUpdate.toast";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
 import {
@@ -2979,9 +2977,8 @@ function SortableProjectItem({
 interface SidebarProjectsContentProps {
   showArm64IntelBuildWarning: boolean;
   arm64IntelBuildWarningDescription: string | null;
-  desktopUpdateButtonAction: "download" | "install" | "none";
-  desktopUpdateButtonDisabled: boolean;
   desktopUpdateActionPending: boolean;
+  desktopUpdateButtonLabel: string;
   handleDesktopUpdateButtonClick: () => void;
   projectSortOrder: SidebarProjectSortOrder;
   threadSortOrder: SidebarThreadSortOrder;
@@ -3026,9 +3023,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
   const {
     showArm64IntelBuildWarning,
     arm64IntelBuildWarningDescription,
-    desktopUpdateButtonAction,
-    desktopUpdateButtonDisabled,
     desktopUpdateActionPending,
+    desktopUpdateButtonLabel,
     handleDesktopUpdateButtonClick,
     projectSortOrder,
     threadSortOrder,
@@ -3133,20 +3129,16 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             <TriangleAlertIcon />
             <AlertTitle>Intel build on Apple Silicon</AlertTitle>
             <AlertDescription>{arm64IntelBuildWarningDescription}</AlertDescription>
-            {desktopUpdateButtonAction !== "none" ? (
-              <AlertAction>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={desktopUpdateButtonDisabled || desktopUpdateActionPending}
-                  onClick={handleDesktopUpdateButtonClick}
-                >
-                  {desktopUpdateButtonAction === "download"
-                    ? "Download ARM build"
-                    : "Install ARM build"}
-                </Button>
-              </AlertAction>
-            ) : null}
+            <AlertAction>
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={desktopUpdateActionPending}
+                onClick={handleDesktopUpdateButtonClick}
+              >
+                {desktopUpdateButtonLabel}
+              </Button>
+            </AlertAction>
           </Alert>
         </SidebarGroup>
       ) : null}
@@ -3317,7 +3309,9 @@ export default function LegacySidebar() {
   const suppressProjectClickAfterDragRef = useRef(false);
   const suppressProjectClickForContextMenuRef = useRef(false);
   const desktopUpdateState = useDesktopUpdateState();
-  const [desktopUpdateActionPending, setDesktopUpdateActionPending] = useState(false);
+  const localUpdateState = useDesktopLocalUpdateState();
+  const [isStartingLocalUpdate, setIsStartingLocalUpdate] = useState(false);
+  const previousLocalUpdateStatus = useRef(localUpdateState?.status);
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const platform = navigator.platform;
@@ -3795,10 +3789,6 @@ export default function LegacySidebar() {
     };
   }, [clearSelection]);
 
-  const desktopUpdateButtonDisabled = isDesktopUpdateButtonDisabled(desktopUpdateState);
-  const desktopUpdateButtonAction = desktopUpdateState
-    ? resolveDesktopUpdateButtonAction(desktopUpdateState)
-    : "none";
   const showArm64IntelBuildWarning =
     isElectron && shouldShowArm64IntelBuildWarning(desktopUpdateState);
   const arm64IntelBuildWarningDescription =
@@ -3810,102 +3800,65 @@ export default function LegacySidebar() {
     "commandPalette.toggle",
     newThreadShortcutLabelOptions,
   );
+  // This fork updates from a local checkout rather than downloading a release
+  // (see SidebarUpdatePill), so the legacy sidebar shares that same flow. The
+  // update runs in the background and streams progress through localUpdateState.
+  const isLocalUpdateRunning = isStartingLocalUpdate || localUpdateState?.status === "running";
+  const desktopUpdateButtonLabel = isLocalUpdateRunning
+    ? formatDesktopLocalUpdateProgress(localUpdateState)
+    : localUpdateState?.status === "up-to-date"
+      ? "Up to date. Check again"
+      : "Check and update Type-Delta";
+  useEffect(() => {
+    const previousStatus = previousLocalUpdateStatus.current;
+    previousLocalUpdateStatus.current = localUpdateState?.status;
+    if (previousStatus === "running" && localUpdateState?.status === "completed") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "Local update completed",
+          description: "The installer was opened. Continue with its setup steps.",
+        }),
+      );
+    }
+    if (previousStatus === "running" && localUpdateState?.status === "up-to-date") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "Already up to date",
+          description: "This installation matches the latest Type-Delta commit.",
+        }),
+      );
+    }
+    if (previousStatus === "running" && localUpdateState?.status === "error") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not complete local update",
+          description: localUpdateState.message ?? "An unexpected error occurred.",
+        }),
+      );
+    }
+  }, [localUpdateState]);
   const handleDesktopUpdateButtonClick = useCallback(async () => {
     const bridge = window.desktopBridge;
-    if (!bridge || !desktopUpdateState) return;
-    if (
-      desktopUpdateButtonDisabled ||
-      desktopUpdateButtonAction === "none" ||
-      desktopUpdateActionPending
-    ) {
-      return;
-    }
+    if (!bridge || isLocalUpdateRunning) return;
 
-    setDesktopUpdateActionPending(true);
-
-    if (desktopUpdateButtonAction === "download") {
-      void bridge
-        .downloadUpdate()
-        .then((result) => {
-          if (result.completed) {
-            showDesktopUpdateDownloadedToast(bridge, result.state);
-          }
-          if (!shouldToastDesktopUpdateActionResult(result)) return;
-          const actionError = getDesktopUpdateActionError(result);
-          if (!actionError) return;
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not download update",
-              description: actionError,
-            }),
-          );
-        })
-        .catch((error) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not start update download",
-              description: error instanceof Error ? error.message : "An unexpected error occurred.",
-            }),
-          );
-        })
-        .finally(() => setDesktopUpdateActionPending(false));
-      return;
+    setIsStartingLocalUpdate(true);
+    try {
+      await bridge.startLocalUpdate();
+    } catch (error) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not start local update",
+          description: error instanceof Error ? error.message : "An unexpected error occurred.",
+        }),
+      );
+    } finally {
+      setIsStartingLocalUpdate(false);
     }
-
-    if (desktopUpdateButtonAction === "install") {
-      let confirmed = false;
-      try {
-        confirmed = await ensureLocalApi().dialogs.confirm(
-          getDesktopUpdateInstallConfirmationMessage(desktopUpdateState),
-        );
-      } catch (error) {
-        setDesktopUpdateActionPending(false);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not confirm update",
-            description: error instanceof Error ? error.message : "Update confirmation failed.",
-          }),
-        );
-        return;
-      }
-      if (!confirmed) {
-        setDesktopUpdateActionPending(false);
-        return;
-      }
-      void bridge
-        .installUpdate()
-        .then((result) => {
-          if (!shouldToastDesktopUpdateActionResult(result)) return;
-          const actionError = getDesktopUpdateActionError(result);
-          if (!actionError) return;
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not install update",
-              description: actionError,
-            }),
-          );
-        })
-        .catch((error) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not install update",
-              description: error instanceof Error ? error.message : "An unexpected error occurred.",
-            }),
-          );
-        })
-        .finally(() => setDesktopUpdateActionPending(false));
-    }
-  }, [
-    desktopUpdateActionPending,
-    desktopUpdateButtonAction,
-    desktopUpdateButtonDisabled,
-    desktopUpdateState,
-  ]);
+  }, [isLocalUpdateRunning]);
 
   const expandThreadListForProject = useCallback((projectKey: string) => {
     setExpandedThreadListsByProject((current) => {
@@ -3971,9 +3924,8 @@ export default function LegacySidebar() {
       <SidebarProjectsContent
         showArm64IntelBuildWarning={showArm64IntelBuildWarning}
         arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
-        desktopUpdateButtonAction={desktopUpdateButtonAction}
-        desktopUpdateButtonDisabled={desktopUpdateButtonDisabled}
-        desktopUpdateActionPending={desktopUpdateActionPending}
+        desktopUpdateActionPending={isLocalUpdateRunning}
+        desktopUpdateButtonLabel={desktopUpdateButtonLabel}
         handleDesktopUpdateButtonClick={handleDesktopUpdateButtonClick}
         projectSortOrder={sidebarProjectSortOrder}
         threadSortOrder={sidebarThreadSortOrder}

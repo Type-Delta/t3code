@@ -16,6 +16,7 @@ import * as ServerConfig from "../config.ts";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import {
   buildBranchNamePrompt,
+  buildComposerSuggestionPrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
@@ -23,6 +24,7 @@ import {
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   sanitizeCommitSubject,
+  sanitizeComposerSuggestion,
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
@@ -34,6 +36,7 @@ const OpenCodeTextGenerationOperation = Schema.Literals([
   "generatePrContent",
   "generateBranchName",
   "generateThreadTitle",
+  "generateComposerSuggestion",
 ]);
 
 type OpenCodeTextGenerationOperation = typeof OpenCodeTextGenerationOperation.Type;
@@ -451,10 +454,30 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
       };
     });
 
+  const generateComposerSuggestion: TextGeneration.TextGeneration["Service"]["generateComposerSuggestion"] =
+    Effect.fn("OpenCodeTextGeneration.generateComposerSuggestion")(function* (input) {
+      const { prompt, outputSchema } = buildComposerSuggestionPrompt(input);
+      const generated = yield* runOpenCodeJson({
+        operation: "generateComposerSuggestion",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      const text = sanitizeComposerSuggestion(generated.text);
+      if (!text)
+        return yield* new TextGenerationError({
+          operation: "generateComposerSuggestion",
+          detail: "OpenCode returned an unusable composer suggestion.",
+        });
+      return { text };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateComposerSuggestion,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

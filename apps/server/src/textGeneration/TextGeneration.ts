@@ -73,6 +73,19 @@ export interface ThreadTitleGenerationResult {
   title: string;
 }
 
+export interface ComposerSuggestionGenerationInput {
+  cwd: string;
+  /** Recent thread transcript tail, already truncated by the caller. */
+  conversation: string;
+  /** Replaces the built-in QA persona and focus rules when set. */
+  instructions?: string | undefined;
+  modelSelection: ModelSelection;
+}
+
+export interface ComposerSuggestionGenerationResult {
+  text: string;
+}
+
 /**
  * TextGeneration - Service tag for commit and change request text generation.
  */
@@ -104,6 +117,9 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+    readonly generateComposerSuggestion?: (
+      input: ComposerSuggestionGenerationInput,
+    ) => Effect.Effect<ComposerSuggestionGenerationResult, TextGenerationError>;
   }
 >()("t3/textGeneration/TextGeneration") {}
 
@@ -111,7 +127,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateComposerSuggestion";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -150,6 +167,19 @@ export const makeTextGenerationFromRegistry = (
     generateThreadTitle: (input) =>
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+      ),
+    generateComposerSuggestion: (input) =>
+      resolveInstance(registry, "generateComposerSuggestion", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) =>
+          textGeneration.generateComposerSuggestion
+            ? textGeneration.generateComposerSuggestion(input)
+            : Effect.fail(
+                new TextGenerationError({
+                  operation: "generateComposerSuggestion",
+                  detail: "Provider does not support composer suggestions.",
+                }),
+              ),
+        ),
       ),
   });
 

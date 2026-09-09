@@ -45,14 +45,12 @@ import { createModelSelection } from "@t3tools/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
-import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import {
-  canCheckForUpdate,
-  getDesktopUpdateButtonTooltip,
-  getDesktopUpdateInstallConfirmationMessage,
-  isDesktopUpdateButtonDisabled,
-  resolveDesktopUpdateButtonAction,
-} from "../../components/desktopUpdate.logic";
+  APP_BUILD_AT,
+  APP_VERSION,
+  HOSTED_APP_CHANNEL,
+  HOSTED_APP_CHANNEL_LABEL,
+} from "../../branding";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import {
@@ -71,6 +69,10 @@ import {
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
+import {
+  formatDesktopLocalUpdateProgress,
+  useDesktopLocalUpdateState,
+} from "../../state/desktopLocalUpdate";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
   getCustomModelOptionsByInstance,
@@ -106,6 +108,7 @@ import {
 } from "../ui/dialog";
 import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import {
   DEFAULT_CODE_FONT_STACK,
   DEFAULT_SANS_FONT_STACK,
@@ -212,6 +215,8 @@ const BACKGROUND_ACTIVITY_PROFILE_DESCRIPTIONS: Record<BackgroundActivityProfile
 const ADVANCED_BACKGROUND_ACTIVITY_DESCRIPTION = "Uses custom intervals.";
 
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+/** Shown when the suggestion feature has not been renamed. */
+const DEFAULT_COMPOSER_SUGGESTION_LABEL = "QA suggestions";
 const BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES: ReadonlyArray<{
   readonly key:
     | "pauseWhenHostLocked"
@@ -243,18 +248,29 @@ function backgroundActivityProfileSettings(profile: BackgroundActivityProfile) {
 }
 
 function AboutVersionTitle() {
+  const buildDate = new Date(APP_BUILD_AT);
+  const buildDateLabel = Number.isNaN(buildDate.getTime())
+    ? null
+    : new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(buildDate);
   return (
     <span className="inline-flex items-baseline gap-2">
       <span>Version</span>
       <code className="text-[11px] font-medium text-muted-foreground">{APP_VERSION}</code>
+      {buildDateLabel ? (
+        <span className="text-xs font-normal text-muted-foreground">Built {buildDateLabel}</span>
+      ) : null}
     </span>
   );
 }
 
 function AboutVersionSection() {
   const updateState = useDesktopUpdateState();
+  const localUpdateState = useDesktopLocalUpdateState();
   const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
-  const [isUpdateActionPending, setIsUpdateActionPending] = useState(false);
+  const [isStartingLocalUpdate, setIsStartingLocalUpdate] = useState(false);
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
@@ -290,110 +306,51 @@ function AboutVersionSection() {
     [selectedUpdateChannel],
   );
 
-  const handleButtonClick = useCallback(async () => {
-    const bridge = window.desktopBridge;
-    if (!bridge) return;
+  const isUpdateActionPending = isStartingLocalUpdate || localUpdateState?.status === "running";
+  const [pendingAction, setPendingAction] = useState<"update" | "build" | null>(null);
+  const runLocalAction = useCallback(
+    async (action: "update" | "build") => {
+      const bridge = window.desktopBridge;
+      if (!bridge || isUpdateActionPending) return;
 
-    const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
-
-    if (action === "download") {
-      void bridge.downloadUpdate().catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not download update",
-            description: error instanceof Error ? error.message : "Download failed.",
-          }),
-        );
-      });
-      return;
-    }
-
-    if (action === "install") {
-      if (isUpdateActionPending) return;
-      setIsUpdateActionPending(true);
-      let confirmed = false;
+      setIsStartingLocalUpdate(true);
+      setPendingAction(action);
       try {
-        confirmed = await ensureLocalApi().dialogs.confirm(
-          getDesktopUpdateInstallConfirmationMessage(
-            updateState ?? { availableVersion: null, downloadedVersion: null },
-          ),
-        );
+        await (action === "update" ? bridge.startLocalUpdate() : bridge.startLocalBuild());
       } catch (error) {
-        setIsUpdateActionPending(false);
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not confirm update",
-            description: error instanceof Error ? error.message : "Update confirmation failed.",
+            title:
+              action === "update" ? "Could not start local update" : "Could not start local build",
+            description: error instanceof Error ? error.message : "An unexpected error occurred.",
           }),
         );
-        return;
+      } finally {
+        setIsStartingLocalUpdate(false);
+        setPendingAction(null);
       }
-      if (!confirmed) {
-        setIsUpdateActionPending(false);
-        return;
-      }
-      void bridge
-        .installUpdate()
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not install update",
-              description: error instanceof Error ? error.message : "Install failed.",
-            }),
-          );
-        })
-        .finally(() => setIsUpdateActionPending(false));
-      return;
-    }
+    },
+    [isUpdateActionPending],
+  );
+  const handleButtonClick = useCallback(() => void runLocalAction("update"), [runLocalAction]);
+  const handleBuildClick = useCallback(() => void runLocalAction("build"), [runLocalAction]);
 
-    if (typeof bridge.checkForUpdate !== "function") return;
-    void bridge
-      .checkForUpdate()
-      .then((result) => {
-        if (!result.checked) {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not check for updates",
-              description:
-                result.state.message ?? "Automatic updates are not available in this build.",
-            }),
-          );
-        }
-      })
-      .catch((error: unknown) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not check for updates",
-            description: error instanceof Error ? error.message : "Update check failed.",
-          }),
-        );
-      });
-  }, [isUpdateActionPending, updateState]);
-
-  const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
-  const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
-  const buttonDisabled =
-    action === "none"
-      ? !canCheckForUpdate(updateState)
-      : isDesktopUpdateButtonDisabled(updateState);
-
-  const actionLabel: Record<string, string> = { download: "Download", install: "Install" };
-  const statusLabel: Record<string, string> = {
-    checking: "Checking…",
-    downloading: "Downloading…",
-    "up-to-date": "Up to Date",
-  };
+  const progressLabel = formatDesktopLocalUpdateProgress(localUpdateState);
   const buttonLabel =
-    actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
+    isUpdateActionPending && pendingAction !== "build"
+      ? progressLabel
+      : localUpdateState?.status === "up-to-date"
+        ? "Check again"
+        : "Check and update";
+  const buildButtonLabel =
+    isUpdateActionPending && pendingAction === "build" ? progressLabel : "Build from this checkout";
   const description =
-    action === "download" || action === "install"
-      ? "Update available."
-      : "Current version of the application.";
+    localUpdateState?.status === "up-to-date"
+      ? "This installation matches the latest commit on the Type-Delta update branch."
+      : "Checks the Type-Delta checkout linked to this installation. When an update exists, it merges the changes, verifies the code, builds a new installer, and opens it.";
+  const buildDescription =
+    "Builds and opens an installer from the linked checkout exactly as it is, including uncommitted changes. Nothing is fetched, merged, or verified.";
 
   return (
     <>
@@ -405,19 +362,39 @@ function AboutVersionSection() {
             <TooltipTrigger
               render={
                 <Button
-                  size="sm"
+                  size="xs"
                   variant="outline"
-                  disabled={buttonDisabled || isUpdateActionPending}
+                  disabled={isUpdateActionPending}
                   onClick={handleButtonClick}
                 >
                   {buttonLabel}
                 </Button>
               }
             />
-            {buttonTooltip ? <TooltipPopup>{buttonTooltip}</TooltipPopup> : null}
+            <TooltipPopup>
+              {isUpdateActionPending
+                ? progressLabel
+                : "Update the local Type-Delta checkout and build a new installer."}
+            </TooltipPopup>
           </Tooltip>
         }
       />
+      {hasDesktopBridge ? (
+        <SettingsRow
+          title="Build from this checkout"
+          description={buildDescription}
+          control={
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={isUpdateActionPending}
+              onClick={handleBuildClick}
+            >
+              {buildButtonLabel}
+            </Button>
+          }
+        />
+      ) : null}
       {hasDesktopBridge ? (
         <SettingsRow
           title="Update track"
@@ -500,6 +477,10 @@ export function useSettingsRestore(onRestored?: () => void) {
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
+  const isComposerSuggestionModelDirty = !Equal.equals(
+    settings.composerSuggestionModelSelection ?? null,
+    DEFAULT_UNIFIED_SETTINGS.composerSuggestionModelSelection ?? null,
+  );
   const isBackgroundActivityDirty = hasChangedBackgroundActivitySettings(settings);
 
   const changedSettingLabels = useMemo(
@@ -539,6 +520,17 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...getChangedTypographySettingLabels(settings),
       ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
         ? ["Diff whitespace changes"]
+        : []),
+      ...(settings.composerSuggestionEnabled !== DEFAULT_UNIFIED_SETTINGS.composerSuggestionEnabled
+        ? ["Ghost text suggestions"]
+        : []),
+      ...(isComposerSuggestionModelDirty ? ["QA suggestion model"] : []),
+      ...(settings.composerSuggestionLabel !== DEFAULT_UNIFIED_SETTINGS.composerSuggestionLabel
+        ? ["Suggestion name"]
+        : []),
+      ...(settings.composerSuggestionInstructions !==
+      DEFAULT_UNIFIED_SETTINGS.composerSuggestionInstructions
+        ? ["Suggestion instructions"]
         : []),
       ...(settings.diffLayout !== DEFAULT_UNIFIED_SETTINGS.diffLayout ? ["Diff layout"] : []),
       ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
@@ -639,6 +631,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.sidebarAutoSettleOnMerge,
       settings.sidebarProjectGroupingMode,
       settings.sidebarThreadPreviewCount,
+      settings.composerSuggestionEnabled,
+      isComposerSuggestionModelDirty,
+      settings.composerSuggestionLabel,
+      settings.composerSuggestionInstructions,
       settings.showSkillsInSlashMenu,
       settings.timestampFormat,
       settings.wordWrap,
@@ -715,6 +711,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
+      composerSuggestionEnabled: DEFAULT_UNIFIED_SETTINGS.composerSuggestionEnabled,
+      composerSuggestionModelSelection: DEFAULT_UNIFIED_SETTINGS.composerSuggestionModelSelection,
+      composerSuggestionLabel: DEFAULT_UNIFIED_SETTINGS.composerSuggestionLabel,
+      composerSuggestionInstructions: DEFAULT_UNIFIED_SETTINGS.composerSuggestionInstructions,
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
@@ -2078,6 +2078,33 @@ export function GeneralSettingsPanel() {
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
+  // The feature can be renamed (and its prompt rewritten) for non-QA uses, so
+  // every label here follows the configured name and falls back to "QA".
+  const composerSuggestionLabel =
+    settings.composerSuggestionLabel.trim() || DEFAULT_COMPOSER_SUGGESTION_LABEL;
+  // QA suggestion model picker: null follows the thread's own model; a dedicated
+  // selection locks suggestions to one model regardless of the thread.
+  const usesDedicatedComposerSuggestionModel = settings.composerSuggestionModelSelection !== null;
+  const composerSuggestionActiveSelection = resolveAppModelSelectionState(
+    {
+      ...settings,
+      textGenerationModelSelection:
+        settings.composerSuggestionModelSelection ?? settings.textGenerationModelSelection,
+    },
+    textGenerationProviders,
+  );
+  const composerSuggestionModelOptionsByInstance = getCustomModelOptionsByInstance(
+    settings,
+    textGenerationProviders,
+    composerSuggestionActiveSelection.instanceId,
+    composerSuggestionActiveSelection.model,
+  );
+  const canEnableComposerSuggestionModel = textGenerationModelInstanceEntries.some(
+    (entry) =>
+      entry.instanceId === textGenerationModelSelection.instanceId &&
+      entry.enabled &&
+      entry.isAvailable,
+  );
   const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
   const activeBackgroundActivityProfile = resolvedBackgroundActivity.profile;
   const backgroundActivityProfileOption = resolveBackgroundActivityProfileOption(settings);
@@ -2334,6 +2361,162 @@ export function GeneralSettingsPanel() {
               }
               aria-label="Proactive panels"
             />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("next-prompt-suggestions")}
+          title={composerSuggestionLabel}
+          description="After the agent finishes a turn, suggest the next message as faded text in an empty composer. Press Tab to accept. Recent messages from that thread are sent to the selected provider."
+          resetAction={
+            settings.composerSuggestionEnabled !==
+            DEFAULT_UNIFIED_SETTINGS.composerSuggestionEnabled ? (
+              <SettingResetButton
+                label={composerSuggestionLabel}
+                onClick={() =>
+                  updateSettings({
+                    composerSuggestionEnabled: DEFAULT_UNIFIED_SETTINGS.composerSuggestionEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.composerSuggestionEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ composerSuggestionEnabled: Boolean(checked) })
+              }
+              aria-label={`Enable ${composerSuggestionLabel}`}
+            />
+          }
+        />
+
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("composer-suggestion-label")}
+          title="Suggestion name"
+          description={`What to call this feature in settings. Empty uses "${DEFAULT_COMPOSER_SUGGESTION_LABEL}".`}
+          resetAction={
+            settings.composerSuggestionLabel !==
+            DEFAULT_UNIFIED_SETTINGS.composerSuggestionLabel ? (
+              <SettingResetButton
+                label="suggestion name"
+                onClick={() =>
+                  updateSettings({
+                    composerSuggestionLabel: DEFAULT_UNIFIED_SETTINGS.composerSuggestionLabel,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <DraftInput
+              size="sm"
+              className="w-full sm:w-72"
+              value={settings.composerSuggestionLabel}
+              onCommit={(next) => updateSettings({ composerSuggestionLabel: next })}
+              placeholder={DEFAULT_COMPOSER_SUGGESTION_LABEL}
+              aria-label="Suggestion name"
+            />
+          }
+        />
+
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("composer-suggestion-instructions")}
+          title="Suggestion instructions"
+          description="Replaces the built-in QA focus with your own rules. The one-line format and the untrusted-transcript guard always apply. Empty keeps the QA wording."
+          resetAction={
+            settings.composerSuggestionInstructions !==
+            DEFAULT_UNIFIED_SETTINGS.composerSuggestionInstructions ? (
+              <SettingResetButton
+                label="suggestion instructions"
+                onClick={() =>
+                  updateSettings({
+                    composerSuggestionInstructions:
+                      DEFAULT_UNIFIED_SETTINGS.composerSuggestionInstructions,
+                  })
+                }
+              />
+            ) : null
+          }
+        >
+          <div className="mt-3 max-w-2xl pb-3.5">
+            <Textarea
+              key={settings.composerSuggestionInstructions}
+              defaultValue={settings.composerSuggestionInstructions}
+              onBlur={(event) => {
+                const next = event.target.value.trim();
+                if (next !== settings.composerSuggestionInstructions) {
+                  updateSettings({ composerSuggestionInstructions: next });
+                }
+              }}
+              rows={4}
+              placeholder="Act as a senior technical writer and propose the next message that improves the documentation."
+              aria-label="Suggestion instructions"
+            />
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("composer-suggestion-model")}
+          title={`${composerSuggestionLabel} model`}
+          description={`Model that writes ${composerSuggestionLabel.toLowerCase()}. Off follows the thread's own model.`}
+          control={
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {usesDedicatedComposerSuggestionModel && !canEnableComposerSuggestionModel ? (
+                <span className="text-sm text-muted-foreground">
+                  No text generation providers available.
+                </span>
+              ) : null}
+              {usesDedicatedComposerSuggestionModel && canEnableComposerSuggestionModel ? (
+                <ProviderModelPicker
+                  activeInstanceId={composerSuggestionActiveSelection.instanceId}
+                  model={composerSuggestionActiveSelection.model}
+                  lockedProvider={null}
+                  instanceEntries={textGenerationModelInstanceEntries}
+                  modelOptionsByInstance={composerSuggestionModelOptionsByInstance}
+                  triggerVariant="outline"
+                  triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                  triggerAriaLabel={`${composerSuggestionLabel} model`}
+                  {...(environmentId
+                    ? {
+                        onOpenProviderSetup: (instanceId) => {
+                          void navigate({
+                            to: "/settings/providers",
+                            search: { environmentId, instanceId },
+                          });
+                        },
+                      }
+                    : {})}
+                  onInstanceModelChange={(instanceId, model) => {
+                    updateSettings({
+                      composerSuggestionModelSelection: createModelSelection(instanceId, model),
+                    });
+                  }}
+                />
+              ) : null}
+              <Switch
+                checked={usesDedicatedComposerSuggestionModel}
+                disabled={
+                  !usesDedicatedComposerSuggestionModel && !canEnableComposerSuggestionModel
+                }
+                onCheckedChange={(checked) =>
+                  updateSettings({
+                    composerSuggestionModelSelection: checked
+                      ? createModelSelection(
+                          textGenerationModelSelection.instanceId,
+                          textGenerationModelSelection.model,
+                          textGenerationModelSelection.options,
+                        )
+                      : null,
+                  })
+                }
+                aria-label={`Use a dedicated ${composerSuggestionLabel.toLowerCase()} model`}
+              />
+            </div>
           }
         />
 
