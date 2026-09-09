@@ -25,5 +25,8 @@ describe("formatDesktopLocalUpdateProgress", () => {
     expect(formatDesktopLocalUpdateProgress(stateForStep("completed", 100))).toBe(
       "100% — Completed",
     );
+    expect(formatDesktopLocalUpdateProgress(stateForStep("up-to-date", 100))).toBe(
+      "100% — Already up to date",
+    );
   });
 });

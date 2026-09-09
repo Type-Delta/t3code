@@ -9,6 +9,11 @@ import {
 describe("local desktop update", () => {
   it("fetches and merges locally before the required checks and installer build", () => {
     expect(localDesktopUpdatePowerShell).toContain("git fetch $remote");
+    expect(localDesktopUpdatePowerShell).toContain('git rev-parse --verify "$remoteHead^{commit}"');
+    expect(localDesktopUpdatePowerShell).toContain(
+      "git merge-base --is-ancestor $remoteCommit $installedCommit",
+    );
+    expect(localDesktopUpdatePowerShell).toContain("::t3-local-update::up-to-date");
     expect(localDesktopUpdatePowerShell).toContain("git merge --no-edit $remoteHead");
     expect(localDesktopUpdatePowerShell).toContain("vp check");
     expect(localDesktopUpdatePowerShell).toContain("vp run typecheck");
@@ -52,6 +57,11 @@ describe("local desktop update", () => {
     expect(getDesktopLocalUpdateStateForStep("completed")).toMatchObject({
       status: "completed",
       step: "completed",
+      progressPercent: 100,
+    });
+    expect(getDesktopLocalUpdateStateForStep("up-to-date")).toMatchObject({
+      status: "up-to-date",
+      step: "up-to-date",
       progressPercent: 100,
     });
   });

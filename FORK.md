@@ -44,7 +44,13 @@ Once a turn settles, the web composer can ask a model what the user would plausi
 
 ### DL028 — Local-source desktop update action
 
-The desktop sidebar and Settings → General → About update actions are replaced by a local-source update action that runs in the background and streams live progress into the app. The source checkout is resolved automatically — the running app's own root when unpackaged, or the `t3codeLocalUpdateSource` path stamped into a packaged build — so there is no folder picker. A hidden PowerShell process fetches and merges the tracked default branch locally, runs `vp check` and `vp run typecheck`, and invokes `vp run update:local` to build and open the installer, emitting `::t3-local-update::<step>` markers that the `LocalDesktopUpdates` service turns into a `DesktopLocalUpdateState` (step + `progressPercent`). That state is pushed over IPC (`LOCAL_UPDATE_STATE_CHANNEL`) to an Effect atom and rendered as a percent-and-step label (for example "40% — Merging changes") on the update pill and About buttons. A release installer built without this local provenance explains that it cannot rebuild itself rather than opening a folder picker or scanning the disk. Uncommitted work (including untracked files) is parked in a temporary stash keyed by exact object id and applied back with its index state, then dropped only after the exact stash object is confirmed restored; a failed merge is aborted before the restore, and a failed or ambiguous restore leaves the working tree untouched and reports the stash id for manual recovery. A separate Settings → General → "Build from this checkout" action packages an installer from the checkout as-is, with no fetch, merge, stash, or verification; both actions share one progress state and cannot run concurrently, and the built installer is launched detached so it outlives the build script. The Windows build preflight requires MSVC Spectre-mitigated libraries only when `T3CODE_DESKTOP_REQUIRE_SPECTRE` is set (the official release pipeline) — nothing links against them, so in-app builds succeed on machines without that opt-in component. The update source is `upstream` when that remote exists and `origin` otherwise; a missing remote HEAD is repaired with `git remote set-head --auto`. It never pushes to any remote repository.
+The desktop sidebar and Settings → General → About update actions use a local-source update flow. About shows the build timestamp beside the app version. The source checkout comes from the running app root during development or the `t3codeLocalUpdateSource` path stamped into a packaged build.
+
+A hidden PowerShell process fetches the tracked default branch and checks whether its commit is already contained in the commit stamped into the installed app. A match reports "Already up to date" without rebuilding. Otherwise, it merges, runs `vp check` and `vp run typecheck`, and invokes `vp run update:local` to build and open the installer. Progress markers become a `DesktopLocalUpdateState` and reach the client over `LOCAL_UPDATE_STATE_CHANNEL`.
+
+Uncommitted work, including untracked files, is parked in a temporary stash keyed by exact object id and restored with its index state. A failed merge is aborted before the restore. A failed or ambiguous restore leaves the working tree untouched and reports the stash id for manual recovery. The separate "Build from this checkout" action packages the checkout as-is without fetching, merging, stashing, or verifying it.
+
+The Windows build preflight requires MSVC Spectre-mitigated libraries only when `T3CODE_DESKTOP_REQUIRE_SPECTRE` is set. The update source is `upstream` when that remote exists and `origin` otherwise. A missing remote HEAD is repaired with `git remote set-head --auto`. The updater never pushes to a remote repository.
 
 The same local-source action drives the legacy sidebar's update entry point (its Intel-on-Apple-Silicon build warning now offers "Update local Type-Delta" and shows the same progress label), so both sidebars share one update flow.
 
@@ -52,7 +58,7 @@ The same local-source action drives the legacy sidebar's update entry point (its
 
 **Recorded validation:** focused local-update service, installer-script, settings, and progress-label tests; repository-wide `vp check` and `vp run typecheck`. A follow-up will add AI-assisted repair (a headless provider CLI) at the merge/check/build steps that fail.
 
-**Last updated:** 2026-09-07
+**Last updated:** 2026-09-09
 
 **Last updated:** 2026-09-03
 
