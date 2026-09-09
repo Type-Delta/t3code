@@ -421,6 +421,40 @@ it.effect("preserves explicit provider and runtime mode in thread.turn.start", (
   }),
 );
 
+it.effect("carries the client prompt suggestion preference through turn payloads", () =>
+  Effect.gen(function* () {
+    const preference = {
+      enabled: true,
+      instructions: " Suggest a focused next step. ",
+    };
+    const command = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-suggestion",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-suggestion",
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      promptSuggestion: preference,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(command.promptSuggestion, {
+      enabled: true,
+      instructions: "Suggest a focused next step.",
+    });
+
+    const requested = yield* decodeThreadTurnStartRequestedPayload({
+      threadId: "thread-1",
+      messageId: "msg-suggestion",
+      promptSuggestion: { enabled: false },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(requested.promptSuggestion, { enabled: false });
+  }),
+);
+
 it.effect("accepts bootstrap metadata in thread.turn.start", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({

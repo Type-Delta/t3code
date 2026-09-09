@@ -134,6 +134,7 @@ import {
   formatAttachmentUploadProgress,
 } from "../../lib/attachmentUploadState";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
+import { useClientSettings } from "../../hooks/useSettings";
 import { getTerminalFocusOwner } from "../../lib/terminalFocus";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../../keybindings";
@@ -2055,10 +2056,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const isComposerApprovalState = activePendingApproval !== null;
   const lastThreadMessage = activeThread?.messages.at(-1) ?? null;
+  const promptSuggestionEnabled = useClientSettings(
+    (clientSettings) => clientSettings.enablePromptSuggestion,
+  );
   // Ghost text for the agent's proposed next prompt; the suggestion rides along
   // with the message, so this only decides whether to show it.
   const promptSuggestion = usePromptSuggestion({
-    enabled: settings.enablePromptSuggestion && !isMobileViewport,
+    enabled: promptSuggestionEnabled && !isMobileViewport,
     disabled:
       isConnecting ||
       isSendBusy ||

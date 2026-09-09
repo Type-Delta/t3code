@@ -264,8 +264,14 @@ export function mergeEnvironmentSettings(
   clientSettings: ClientSettings,
 ): UnifiedSettings {
   // Decode drops retired client keys, but older untyped persistence adapters
-  // can still return them. Server-owned values must always win.
-  return { ...clientSettings, ...serverSettings };
+  // can still return them. Server-owned values win for server settings while
+  // the prompt suggestion preference remains local to this client.
+  return {
+    ...clientSettings,
+    ...serverSettings,
+    enablePromptSuggestion: clientSettings.enablePromptSuggestion,
+    promptSuggestionInstructions: clientSettings.promptSuggestionInstructions,
+  };
 }
 
 function useMergedSettings<T>(

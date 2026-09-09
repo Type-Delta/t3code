@@ -22,6 +22,7 @@ import {
   ProviderSessionStartInput,
   ProviderStopSessionInput,
   ProviderUploadFeedbackInput,
+  PromptSuggestionPreference,
   ThreadId,
   TurnId,
   type ProviderInstanceId,
@@ -30,7 +31,6 @@ import {
   type ProviderSession,
 } from "@t3tools/contracts";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
-import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
@@ -232,6 +232,7 @@ function toRuntimePayloadFromSession(
   session: ProviderSession,
   extra?: {
     readonly modelSelection?: unknown;
+    readonly claudePromptSuggestion?: PromptSuggestionPreference;
     readonly continueAfterServerUpdate?: TurnId;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
@@ -246,11 +247,31 @@ function toRuntimePayloadFromSession(
       ? { continueAfterServerUpdate: extra.continueAfterServerUpdate }
       : {}),
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
+    ...(extra?.claudePromptSuggestion !== undefined
+      ? { claudePromptSuggestion: extra.claudePromptSuggestion }
+      : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
       : {}),
   };
+}
+
+const isPromptSuggestionPreference = Schema.is(PromptSuggestionPreference);
+
+function readPersistedClaudePromptSuggestion(
+  runtimePayload: ProviderSessionDirectory.ProviderRuntimeBinding["runtimePayload"],
+): PromptSuggestionPreference | undefined {
+  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
+    return undefined;
+  }
+  const raw =
+    "claudePromptSuggestion" in runtimePayload ? runtimePayload.claudePromptSuggestion : undefined;
+  return isPromptSuggestionPreference(raw) ? raw : undefined;
+}
+
+function disabledPromptSuggestionPreference(): PromptSuggestionPreference {
+  return { enabled: false };
 }
 
 function readPersistedModelSelection(
@@ -728,19 +749,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
-  const promptSuggestionInstructions = serverSettings.getSettings.pipe(
-    Effect.map((settings) =>
-      settings.enablePromptSuggestion
-        ? buildPromptSuggestionInstructions(settings.promptSuggestionInstructions)
-        : undefined,
-    ),
-    Effect.catch((cause) =>
-      Effect.logWarning("Could not read server settings; disabling prompt suggestions.", {
-        cause,
-      }).pipe(Effect.as(undefined)),
-    ),
-  );
-
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
     Effect.gen(function* () {
       if (!(yield* agentBrowserAccessEnabled)) {
@@ -858,6 +866,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     threadId: ThreadId,
     extra?: {
       readonly modelSelection?: unknown;
+      readonly claudePromptSuggestion?: PromptSuggestionPreference;
       readonly continueAfterServerUpdate?: TurnId;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
@@ -1020,9 +1029,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           (session) => session.threadId === input.binding.threadId,
         );
         if (existing) {
+          const legacyClaudePromptSuggestion =
+            existing.provider === "claudeAgent" &&
+            readPersistedClaudePromptSuggestion(input.binding.runtimePayload) === undefined
+              ? disabledPromptSuggestionPreference()
+              : undefined;
           yield* upsertSessionBinding(
             { ...existing, providerInstanceId: bindingInstanceId },
             input.binding.threadId,
+            legacyClaudePromptSuggestion !== undefined
+              ? { claudePromptSuggestion: legacyClaudePromptSuggestion }
+              : undefined,
           );
           yield* analytics.record("provider.session.recovered", {
             provider: existing.provider,
@@ -1042,6 +1059,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const persistedClaudePromptSuggestion = readPersistedClaudePromptSuggestion(
+        input.binding.runtimePayload,
+      );
+      const claudePromptSuggestion =
+        adapter.provider === "claudeAgent"
+          ? (persistedClaudePromptSuggestion ?? disabledPromptSuggestionPreference())
+          : undefined;
 
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
       const resumed = yield* adapter
@@ -1049,10 +1073,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId: input.binding.threadId,
           provider: input.binding.provider,
           providerInstanceId: bindingInstanceId,
-          promptSuggestionInstructions:
-            adapter.provider === "codex" || adapter.provider === "claudeAgent"
-              ? yield* promptSuggestionInstructions
-              : undefined,
+          ...(claudePromptSuggestion !== undefined
+            ? { promptSuggestion: claudePromptSuggestion }
+            : {}),
           ...(persistedCwd ? { cwd: persistedCwd } : {}),
           ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
@@ -1070,6 +1093,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       yield* upsertSessionBinding(
         { ...resumed, providerInstanceId: bindingInstanceId },
         input.binding.threadId,
+        claudePromptSuggestion !== undefined ? { claudePromptSuggestion } : undefined,
       );
       yield* analytics.record("provider.session.recovered", {
         provider: resumed.provider,
@@ -1277,16 +1301,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           }
         }
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
+        const persistedClaudePromptSuggestion = readPersistedClaudePromptSuggestion(
+          persistedBinding?.runtimePayload,
+        );
+        const claudePromptSuggestion =
+          adapter.provider === "claudeAgent"
+            ? (persistedClaudePromptSuggestion ??
+              input.promptSuggestion ??
+              disabledPromptSuggestionPreference())
+            : undefined;
+        const { promptSuggestion: _requestPromptSuggestion, ...adapterInput } = input;
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
         yield* prepareMcpSession(threadId, resolvedInstanceId);
         const session = yield* adapter
           .startSession({
-            ...input,
+            ...adapterInput,
             providerInstanceId: resolvedInstanceId,
-            promptSuggestionInstructions:
-              adapter.provider === "codex" || adapter.provider === "claudeAgent"
-                ? yield* promptSuggestionInstructions
-                : undefined,
+            ...(claudePromptSuggestion !== undefined
+              ? { promptSuggestion: claudePromptSuggestion }
+              : {}),
             ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
             ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
           })
@@ -1310,6 +1343,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          ...(claudePromptSuggestion !== undefined ? { claudePromptSuggestion } : {}),
         });
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,
@@ -1459,13 +1493,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         (turnMetadata) =>
           Effect.gen(function* () {
             const turnInput = { ...input };
-            delete turnInput.promptSuggestionInstructions;
-            const instructions =
-              routed.adapter.provider === "codex" ? yield* promptSuggestionInstructions : undefined;
-            const turn = yield* routed.adapter.sendTurn({
-              ...turnInput,
-              ...(instructions ? { promptSuggestionInstructions: instructions } : {}),
-            });
+            delete turnInput.promptSuggestion;
+            const turn = yield* routed.adapter.sendTurn(
+              routed.adapter.provider === "codex"
+                ? {
+                    ...turnInput,
+                    promptSuggestion:
+                      input.promptSuggestion ?? disabledPromptSuggestionPreference(),
+                  }
+                : turnInput,
+            );
             yield* associateTurnAnalytics({
               providerInstanceId: routed.instanceId,
               threadId: input.threadId,

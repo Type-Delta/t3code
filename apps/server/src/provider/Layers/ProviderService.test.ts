@@ -513,55 +513,164 @@ function makeProviderServiceLayer(
   };
 }
 
-for (const enabled of [false, true]) {
-  const harness = makeProviderServiceLayer({
-    settingsLayer: ServerSettings.ServerSettingsService.layerTest({
-      enablePromptSuggestion: enabled,
-      promptSuggestionInstructions: "Suggest a focused test.",
+const promptSuggestionRouting = makeProviderServiceLayer();
+promptSuggestionRouting.layer("prompt suggestion routing", (it) => {
+  it.effect("forwards each client preference to Codex turns", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("suggestion-codex-per-client");
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "Client A",
+        promptSuggestion: { enabled: true, instructions: "Suggest a focused test." },
+      });
+      assert.deepEqual(
+        promptSuggestionRouting.codex.sendTurn.mock.calls.at(-1)?.[0].promptSuggestion,
+        {
+          enabled: true,
+          instructions: "Suggest a focused test.",
+        },
+      );
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "Client B",
+        promptSuggestion: { enabled: false },
+      });
+      assert.deepEqual(
+        promptSuggestionRouting.codex.sendTurn.mock.calls.at(-1)?.[0].promptSuggestion,
+        {
+          enabled: false,
+        },
+      );
+      yield* provider.stopSession({ threadId });
     }),
-  });
-  harness.layer(`prompt suggestion routing enabled=${enabled}`, (it) => {
-    it.effect("gates startup, recovery, and turn instructions by provider", () =>
-      Effect.gen(function* () {
-        const provider = yield* ProviderService.ProviderService;
-        for (const fake of [harness.codex, harness.claude, harness.cursor]) {
-          const driver = fake.adapter.provider;
-          const threadId = asThreadId(`suggestion-${driver}-${enabled}`);
-          const instanceId = ProviderInstanceId.make(driver);
-          yield* provider.startSession(threadId, {
-            threadId,
-            provider: driver,
-            providerInstanceId: instanceId,
-            runtimeMode: "full-access",
-          });
-          const expected = enabled && driver !== CURSOR_DRIVER;
-          assert.equal(
-            fake.startSession.mock.calls
-              .at(-1)?.[0]
-              .promptSuggestionInstructions?.includes("Suggest a focused test.") ?? false,
-            expected,
-          );
-          yield* fake.adapter.stopSession(threadId);
-          yield* provider.sendTurn({ threadId, input: "Continue" });
-          assert.equal(fake.startSession.mock.calls.length, 2);
-          assert.equal(
-            fake.startSession.mock.calls
-              .at(-1)?.[0]
-              .promptSuggestionInstructions?.includes("<t3_prompt_suggestion>") ?? false,
-            expected,
-          );
-          assert.equal(
-            fake.sendTurn.mock.calls
-              .at(-1)?.[0]
-              .promptSuggestionInstructions?.includes("<t3_prompt_suggestion>") ?? false,
-            enabled && driver === CODEX_DRIVER,
-          );
-          yield* provider.stopSession({ threadId });
-        }
-      }),
-    );
-  });
-}
+  );
+
+  it.effect("pins Claude's first client preference through restart and recovery", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("suggestion-claude-pinned");
+      const enabledPreference = {
+        enabled: true,
+        instructions: "Suggest a focused test.",
+      } as const;
+
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        runtimeMode: "full-access",
+        promptSuggestion: enabledPreference,
+      });
+      assert.deepEqual(
+        promptSuggestionRouting.claude.startSession.mock.calls.at(-1)?.[0].promptSuggestion,
+        enabledPreference,
+      );
+      const initialBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.deepEqual(
+        (initialBinding.runtimePayload as Record<string, unknown>).claudePromptSuggestion,
+        enabledPreference,
+      );
+
+      yield* provider.stopSession({ threadId });
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        runtimeMode: "full-access",
+        promptSuggestion: { enabled: false },
+      });
+      assert.deepEqual(
+        promptSuggestionRouting.claude.startSession.mock.calls.at(-1)?.[0].promptSuggestion,
+        enabledPreference,
+      );
+
+      yield* promptSuggestionRouting.claude.adapter.stopSession(threadId);
+      yield* provider.sendTurn({
+        threadId,
+        input: "Recover this session",
+        promptSuggestion: { enabled: false },
+      });
+      assert.deepEqual(
+        promptSuggestionRouting.claude.startSession.mock.calls.at(-1)?.[0].promptSuggestion,
+        enabledPreference,
+      );
+      assert.isUndefined(
+        promptSuggestionRouting.claude.sendTurn.mock.calls.at(-1)?.[0].promptSuggestion,
+      );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("keeps a disabled Claude pin when a later client enables suggestions", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("suggestion-claude-disabled-pin");
+      const disabledPreference = { enabled: false } as const;
+
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        runtimeMode: "full-access",
+        promptSuggestion: disabledPreference,
+      });
+      assert.deepEqual(
+        promptSuggestionRouting.claude.startSession.mock.calls.at(-1)?.[0].promptSuggestion,
+        disabledPreference,
+      );
+      const initialBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.deepEqual(
+        (initialBinding.runtimePayload as Record<string, unknown>).claudePromptSuggestion,
+        disabledPreference,
+      );
+
+      yield* provider.stopSession({ threadId });
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        runtimeMode: "full-access",
+        promptSuggestion: {
+          enabled: true,
+          instructions: "This must not be adopted by the existing Claude thread.",
+        },
+      });
+      assert.deepEqual(
+        promptSuggestionRouting.claude.startSession.mock.calls.at(-1)?.[0].promptSuggestion,
+        disabledPreference,
+      );
+
+      yield* promptSuggestionRouting.claude.adapter.stopSession(threadId);
+      yield* provider.sendTurn({
+        threadId,
+        input: "Recover the pinned session",
+        promptSuggestion: {
+          enabled: true,
+          instructions: "This must still be ignored during recovery.",
+        },
+      });
+      assert.deepEqual(
+        promptSuggestionRouting.claude.startSession.mock.calls.at(-1)?.[0].promptSuggestion,
+        disabledPreference,
+      );
+      assert.isUndefined(
+        promptSuggestionRouting.claude.sendTurn.mock.calls.at(-1)?.[0].promptSuggestion,
+      );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+});
 
 for (const [enabled, completed] of [
   [false, false],
@@ -1643,6 +1752,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.deepEqual(routing.codex.sendTurn.mock.calls.at(-1)?.[0], {
         threadId: codexThreadId,
         continuation: true,
+        promptSuggestion: { enabled: false },
       });
 
       const claudeThreadId = asThreadId("thread-promptless-continuation-unsupported");

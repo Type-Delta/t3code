@@ -225,6 +225,8 @@ import {
   sortProviderInstanceEntries,
 } from "../providerInstances";
 import {
+  ensureClientSettingsHydrated,
+  getClientSettings,
   useClientSettings,
   useClientSettingsHydrated,
   useEnvironmentSettings,
@@ -1425,7 +1427,30 @@ function ChatViewContent(props: ChatViewProps) {
   const setThreadInteractionMode = useAtomCommand(threadEnvironment.setInteractionMode, {
     reportFailure: false,
   });
-  const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const rawStartThreadTurn = useAtomCommand(threadEnvironment.startTurn, {
+    reportFailure: false,
+  });
+  // Prompt suggestion is a client preference. Read it after hydration at the
+  // command boundary so every web turn carries the preference to its target
+  // environment, including remote, retry, follow-up, and new-thread turns.
+  const startThreadTurn = useCallback(
+    async (commandInput: Parameters<typeof rawStartThreadTurn>[0]) => {
+      await ensureClientSettingsHydrated();
+      const clientSettings = getClientSettings();
+      const instructions = clientSettings.promptSuggestionInstructions.trim();
+      return rawStartThreadTurn({
+        ...commandInput,
+        input: {
+          ...commandInput.input,
+          promptSuggestion: {
+            enabled: clientSettings.enablePromptSuggestion,
+            ...(instructions ? { instructions } : {}),
+          },
+        },
+      });
+    },
+    [rawStartThreadTurn],
+  );
   const createAttachmentAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
     refresh: true,

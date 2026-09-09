@@ -73,44 +73,6 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
-  it.effect("persists, reloads, and resets prompt suggestion settings", () =>
-    Effect.gen(function* () {
-      const settings = yield* ServerSettingsModule.ServerSettingsService;
-      const config = yield* ServerConfig.ServerConfig;
-      const fs = yield* FileSystem.FileSystem;
-      const initial = yield* settings.getSettings;
-      assert.isFalse(initial.enablePromptSuggestion);
-      assert.equal(initial.promptSuggestionInstructions, "");
-
-      yield* settings.updateSettings(
-        yield* decodeSettingsPatch({
-          enablePromptSuggestion: true,
-          promptSuggestionInstructions: "  Keep it specific.  ",
-        }),
-      );
-      const updated = yield* settings.updateSettings({ enableLegacyTokenStreaming: true });
-      assert.isTrue(updated.enablePromptSuggestion);
-      assert.equal(updated.promptSuggestionInstructions, "Keep it specific.");
-      const reloaded = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings))(
-        yield* fs.readFileString(config.settingsPath),
-      );
-      assert.isTrue(reloaded.enablePromptSuggestion);
-      assert.equal(reloaded.promptSuggestionInstructions, "Keep it specific.");
-
-      const reset = yield* settings.updateSettings({
-        enablePromptSuggestion: false,
-        promptSuggestionInstructions: "",
-      });
-      assert.isFalse(reset.enablePromptSuggestion);
-      assert.equal(reset.promptSuggestionInstructions, "");
-      const persisted = yield* Schema.decodeUnknownEffect(
-        Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
-      )(yield* fs.readFileString(config.settingsPath));
-      assert.notProperty(persisted, "enablePromptSuggestion");
-      assert.notProperty(persisted, "promptSuggestionInstructions");
-    }).pipe(Effect.provide(makeServerSettingsLayer())),
-  );
-
   it.effect("preserves context when reading a provider environment secret fails", () => {
     const platformCause = PlatformError.systemError({
       _tag: "PermissionDenied",
@@ -195,6 +157,29 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         },
       );
     }),
+  );
+
+  it.effect("ignores retired prompt suggestion fields in server settings", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        '{"enablePromptSuggestion":true,"promptSuggestionInstructions":"This preference belongs to a client."}',
+      );
+
+      const loaded = yield* serverSettings.getSettings;
+      assert.notProperty(loaded, "enablePromptSuggestion");
+      assert.notProperty(loaded, "promptSuggestionInstructions");
+
+      yield* serverSettings.updateSettings({ enableLegacyTokenStreaming: true });
+      const persisted = yield* Schema.decodeUnknownEffect(
+        Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+      )(yield* fileSystem.readFileString(serverConfig.settingsPath));
+      assert.notProperty(persisted, "enablePromptSuggestion");
+      assert.notProperty(persisted, "promptSuggestionInstructions");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
   it.effect(

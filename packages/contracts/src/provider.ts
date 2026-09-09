@@ -18,6 +18,7 @@ import {
   ProviderInteractionMode,
   ProviderRequestKind,
   ProviderSandboxMode,
+  PromptSuggestionPreference,
   ProviderUserInputAnswers,
   RuntimeMode,
 } from "./orchestration.ts";
@@ -51,7 +52,7 @@ export const ProviderSession = Schema.Struct({
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderSessionStartInput = Schema.Struct({
-  promptSuggestionInstructions: Schema.optional(TrimmedNonEmptyString),
+  promptSuggestion: Schema.optional(PromptSuggestionPreference),
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),
   // See ProviderSession for the migration story.
@@ -67,7 +68,7 @@ export const ProviderSessionStartInput = Schema.Struct({
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
-  promptSuggestionInstructions: Schema.optional(TrimmedNonEmptyString),
+  promptSuggestion: Schema.optional(PromptSuggestionPreference),
   threadId: ThreadId,
   /** Internal recovery signal. Allows an empty turn only for adapters that
       explicitly support promptless continuation. */

@@ -201,6 +201,8 @@ export interface CodexSessionRuntimeOptions {
 
 export interface CodexSessionRuntimeSendTurnInput {
   readonly promptSuggestionInstructions?: string;
+  /** Present on provider turns so an explicit disabled preference can reset a prior mode. */
+  readonly promptSuggestionEnabled?: boolean;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -637,12 +639,17 @@ function runtimeModeToTurnSandboxPolicy(
 
 function buildCodexCollaborationMode(input: {
   readonly promptSuggestionInstructions?: string;
+  readonly promptSuggestionEnabled?: boolean;
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly browserToolsAvailable?: boolean;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
-  if (input.interactionMode === undefined && !input.promptSuggestionInstructions) {
+  if (
+    input.interactionMode === undefined &&
+    !input.promptSuggestionInstructions &&
+    input.promptSuggestionEnabled === undefined
+  ) {
     return undefined;
   }
   const model = normalizeCodexModelSlug(input.model) ?? DEFAULT_MODEL;
@@ -664,6 +671,7 @@ function buildCodexCollaborationMode(input: {
 
 export function buildTurnStartParams(input: {
   readonly promptSuggestionInstructions?: string;
+  readonly promptSuggestionEnabled?: boolean;
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
@@ -696,6 +704,9 @@ export function buildTurnStartParams(input: {
   const collaborationMode = buildCodexCollaborationMode({
     ...(input.promptSuggestionInstructions
       ? { promptSuggestionInstructions: input.promptSuggestionInstructions }
+      : {}),
+    ...(input.promptSuggestionEnabled !== undefined
+      ? { promptSuggestionEnabled: input.promptSuggestionEnabled }
       : {}),
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.model ? { model: input.model } : {}),
@@ -2743,6 +2754,9 @@ export const makeCodexSessionRuntime = (
             ...(input.promptSuggestionInstructions
               ? { promptSuggestionInstructions: input.promptSuggestionInstructions }
               : {}),
+            ...(input.promptSuggestionEnabled !== undefined
+              ? { promptSuggestionEnabled: input.promptSuggestionEnabled }
+              : {}),
             threadId: providerThreadId,
             runtimeMode: options.runtimeMode,
             ...(input.input ? { prompt: input.input } : {}),
@@ -2751,7 +2765,8 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             // Promptless continuation turns normally omit collaboration mode;
-            // only force it when there is a suggestion block to deliver.
+            // explicit prompt suggestion state also forces one so disabling
+            // the feature clears any developer instructions from the prior turn.
             ...(input.interactionMode
               ? { interactionMode: input.interactionMode }
               : input.promptSuggestionInstructions

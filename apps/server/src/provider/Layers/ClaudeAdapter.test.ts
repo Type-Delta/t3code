@@ -22,6 +22,7 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
 import { assert, describe, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -385,15 +386,17 @@ describe("ClaudeAdapterLive", () => {
 
   it.effect("appends prompt suggestion instructions to the session system prompt", () => {
     const harness = makeHarness();
-    const block =
-      "<prompt_suggestion>End with <t3_prompt_suggestion>one line</t3_prompt_suggestion>.</prompt_suggestion>";
+    const customInstructions = "End with <t3_prompt_suggestion>one line</t3_prompt_suggestion>.";
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
       yield* adapter.startSession({
         threadId: THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
-        promptSuggestionInstructions: block,
+        promptSuggestion: {
+          enabled: true,
+          instructions: customInstructions,
+        },
       });
 
       assert.deepEqual(harness.getLastCreateQueryInput()?.options.systemPrompt, {
@@ -401,7 +404,7 @@ describe("ClaudeAdapterLive", () => {
         preset: "claude_code",
         append:
           "<runtime_info>In case you're asked: you are running in T3 Code through the Claude Code harness. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>" +
-          `\n\n${block}`,
+          `\n\n${buildPromptSuggestionInstructions(customInstructions)}`,
       });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

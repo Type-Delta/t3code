@@ -69,7 +69,12 @@ import {
   useTheme,
 } from "../../hooks/useTheme";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
-import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
+import {
+  useClientSettings,
+  usePrimarySettings,
+  useUpdateClientSettings,
+  useUpdatePrimarySettings,
+} from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
@@ -496,6 +501,8 @@ export function useSettingsRestore(onRestored?: () => void) {
   } = useTheme();
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
+  const clientSettings = useClientSettings();
+  const updateClientSettings = useUpdateClientSettings();
 
   const isTextGenerationModelDirty = !Equal.equals(
     settings.textGenerationModelSelection ?? null,
@@ -596,10 +603,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
         ? ["Agent browser access"]
         : []),
-      ...(settings.enablePromptSuggestion !== DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion
+      ...(clientSettings.enablePromptSuggestion !== DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion
         ? ["Prompt suggestion"]
         : []),
-      ...(settings.promptSuggestionInstructions !==
+      ...(clientSettings.promptSuggestionInstructions !==
       DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions
         ? ["Suggestion instructions"]
         : []),
@@ -615,8 +622,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.browserAutoShowFloatingPreview,
       settings.appearanceContrast,
       settings.enableAgentBrowserAccess,
-      settings.enablePromptSuggestion,
-      settings.promptSuggestionInstructions,
+      clientSettings.enablePromptSuggestion,
+      clientSettings.promptSuggestionInstructions,
       settings.confirmQuit,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
@@ -772,6 +779,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       // name, so a user restoring defaults is told the agent regains access
       // rather than discovering it later.
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
+    });
+    updateClientSettings({
       enablePromptSuggestion: DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion,
       promptSuggestionInstructions: DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions,
     });
@@ -785,6 +794,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setThemeHalf,
     theme,
     themeHalves,
+    updateClientSettings,
     updateSettings,
   ]);
 
@@ -2034,6 +2044,8 @@ function LegacyFeaturesSection() {
 export function GeneralSettingsPanel() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
+  const clientSettings = useClientSettings();
+  const updateClientSettings = useUpdateClientSettings();
   const navigate = useNavigate();
   const environmentId = usePrimaryEnvironmentId();
   const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
@@ -2924,15 +2936,15 @@ export function GeneralSettingsPanel() {
 
       <SettingsSection id="prompt-suggestion" title="Prompt suggestion">
         <SettingsRow
-          serverScoped
           {...searchableSetting("prompt-suggestion")}
-          description="After each turn the agent proposes your next prompt as ghost text in the composer. Tab accepts it."
+          description="Show a suggested next prompt; Tab accepts it. Saved on this client for local and remote threads. Codex follows each turn's setting. Claude keeps its initial choice for the thread; start a new thread to change it."
           resetAction={
-            settings.enablePromptSuggestion !== DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion ? (
+            clientSettings.enablePromptSuggestion !==
+            DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion ? (
               <SettingResetButton
                 label="prompt suggestion"
                 onClick={() =>
-                  updateSettings({
+                  updateClientSettings({
                     enablePromptSuggestion: DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion,
                   })
                 }
@@ -2941,9 +2953,9 @@ export function GeneralSettingsPanel() {
           }
           control={
             <Switch
-              checked={settings.enablePromptSuggestion}
+              checked={clientSettings.enablePromptSuggestion}
               onCheckedChange={(checked) =>
-                updateSettings({ enablePromptSuggestion: Boolean(checked) })
+                updateClientSettings({ enablePromptSuggestion: Boolean(checked) })
               }
               aria-label="Enable prompt suggestion"
             />
@@ -2951,16 +2963,15 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          serverScoped
           {...searchableSetting("prompt-suggestion-instructions")}
-          description="Optional extra guidance appended to the built-in instruction. Empty keeps the built-in wording alone."
+          description="Optional guidance. Codex uses changes next turn; Claude uses the guidance chosen at the thread's first session."
           resetAction={
-            settings.promptSuggestionInstructions !==
+            clientSettings.promptSuggestionInstructions !==
             DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions ? (
               <SettingResetButton
                 label="suggestion instructions"
                 onClick={() =>
-                  updateSettings({
+                  updateClientSettings({
                     promptSuggestionInstructions:
                       DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions,
                   })
@@ -2971,12 +2982,12 @@ export function GeneralSettingsPanel() {
         >
           <div className="mt-3 max-w-2xl pb-3.5">
             <Textarea
-              key={settings.promptSuggestionInstructions}
-              defaultValue={settings.promptSuggestionInstructions}
+              key={clientSettings.promptSuggestionInstructions}
+              defaultValue={clientSettings.promptSuggestionInstructions}
               onBlur={(event) => {
                 const next = event.target.value.trim();
-                if (next !== settings.promptSuggestionInstructions) {
-                  updateSettings({ promptSuggestionInstructions: next });
+                if (next !== clientSettings.promptSuggestionInstructions) {
+                  updateClientSettings({ promptSuggestionInstructions: next });
                 }
               }}
               rows={4}

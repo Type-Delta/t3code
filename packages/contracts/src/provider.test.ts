@@ -83,6 +83,23 @@ describe("ProviderSessionStartInput", () => {
     expect(parsed.runtimeMode).toBe("full-access");
   });
 
+  it("accepts a client prompt suggestion preference", () => {
+    const parsed = decodeProviderSessionStartInput({
+      threadId: "thread-1",
+      provider: "claudeAgent",
+      runtimeMode: "full-access",
+      promptSuggestion: {
+        enabled: true,
+        instructions: " Suggest a focused next step. ",
+      },
+    });
+
+    expect(parsed.promptSuggestion).toEqual({
+      enabled: true,
+      instructions: "Suggest a focused next step.",
+    });
+  });
+
   it("accepts cursor provider", () => {
     const parsed = decodeProviderSessionStartInput({
       threadId: "thread-1",
@@ -121,6 +138,19 @@ describe("ProviderSessionStartInput", () => {
 });
 
 describe("ProviderSendTurnInput", () => {
+  it("leaves an omitted prompt suggestion preference absent", () => {
+    expect(decodeProviderSendTurnInput({ threadId: "thread-1" }).promptSuggestion).toBeUndefined();
+  });
+
+  it("accepts an explicitly disabled prompt suggestion preference", () => {
+    expect(
+      decodeProviderSendTurnInput({
+        threadId: "thread-1",
+        promptSuggestion: { enabled: false },
+      }).promptSuggestion,
+    ).toEqual({ enabled: false });
+  });
+
   it("accepts codex modelSelection", () => {
     const parsed = decodeProviderSendTurnInput({
       threadId: "thread-1",

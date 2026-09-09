@@ -56,6 +56,23 @@ is unavailable or has changed, the saved quote remains readable.
 Mobile displays saved quotes and comments, but does not create citations or
 navigate to their sources.
 
+## Prompt suggestions
+
+On web and desktop, enable **Settings → General → Prompt suggestion** to show a
+proposed next message after the agent finishes. Press Tab to accept it, or type
+your own message. Suggestions are optional; the agent may leave one out.
+
+The toggle and optional suggestion instructions are saved on this client. They
+follow your requests to local and remote environments without changing another
+client's preferences. Turning the toggle off also hides suggestions on this client.
+
+Codex uses the submitting client's preference for each turn. Claude keeps the
+preference and instructions used when its first session starts in a thread,
+including after reconnecting or restarting the session. Start a new thread to
+change Claude's suggestion behavior. Existing Claude sessions without a saved
+preference default to disabled when recovered. Other providers and the mobile
+app do not currently offer prompt suggestions.
+
 ## Prompt stash
 
 On web and desktop, press `Cmd+S` on macOS or `Ctrl+S` on Windows and Linux to save

@@ -238,6 +238,10 @@ export const ClientSettingsSchema = Schema.Struct({
   browserAutoShowFloatingPreview: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW)),
   ),
+  /** Whether each client turn asks the provider for a next-prompt suggestion. */
+  enablePromptSuggestion: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Optional extra guidance sent with the client turn preference. */
+  promptSuggestionInstructions: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /**
    * User-created browser profiles. The built-in Default and Incognito profiles
    * are synthesized by `resolveBrowserProfiles`, not stored here, so they
@@ -884,18 +888,6 @@ export const ServerSettings = Schema.Struct({
    * between a desktop window and a phone attached to the same server.
    */
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  /**
-   * Prompt suggestion: the agent is asked to end each turn with a short
-   * proposal for the user's next prompt, which the server strips from the
-   * reply and the composer shows as ghost text. Opt-in because it adds a
-   * standing instruction to every session prompt.
-   */
-  enablePromptSuggestion: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  /**
-   * Optional extra guidance appended to the built-in prompt suggestion
-   * instruction. Empty means the built-in wording alone.
-   */
-  promptSuggestionInstructions: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -1157,8 +1149,6 @@ const OpenCodeSettingsPatch = Schema.Struct({
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
-  enablePromptSuggestion: Schema.optionalKey(Schema.Boolean),
-  promptSuggestionInstructions: Schema.optionalKey(TrimmedString),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   autoResumeOnUsageLimit: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
@@ -1232,6 +1222,8 @@ export const ClientSettingsPatch = Schema.Struct({
   browserRecordingFrameRate: Schema.optionalKey(BrowserRecordingFrameRate),
   browserLinkTarget: Schema.optionalKey(BrowserLinkTarget),
   browserAutoShowFloatingPreview: Schema.optionalKey(Schema.Boolean),
+  enablePromptSuggestion: Schema.optionalKey(Schema.Boolean),
+  promptSuggestionInstructions: Schema.optionalKey(TrimmedString),
   browserProfiles: Schema.optionalKey(Schema.Array(BrowserProfile)),
   browserDefaultProfileId: Schema.optionalKey(BrowserProfileId),
   confirmQuit: Schema.optionalKey(QuitConfirmationMode),

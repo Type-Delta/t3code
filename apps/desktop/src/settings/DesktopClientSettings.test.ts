@@ -20,6 +20,8 @@ const clientSettings: ClientSettings = {
   browserRecordingFrameRate: 60,
   browserLinkTarget: "app",
   browserAutoShowFloatingPreview: false,
+  enablePromptSuggestion: false,
+  promptSuggestionInstructions: "",
   browserProfiles: [{ id: "work", name: "Work", kind: "persistent" }],
   browserDefaultProfileId: "work",
   confirmQuit: "double-click",
