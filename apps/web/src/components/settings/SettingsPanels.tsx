@@ -45,7 +45,12 @@ import { createModelSelection } from "@t3tools/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
-import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
+import {
+  APP_BUILD_AT,
+  APP_VERSION,
+  HOSTED_APP_CHANNEL,
+  HOSTED_APP_CHANNEL_LABEL,
+} from "../../branding";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import {
@@ -243,10 +248,20 @@ function backgroundActivityProfileSettings(profile: BackgroundActivityProfile) {
 }
 
 function AboutVersionTitle() {
+  const buildDate = new Date(APP_BUILD_AT);
+  const buildDateLabel = Number.isNaN(buildDate.getTime())
+    ? null
+    : new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(buildDate);
   return (
     <span className="inline-flex items-baseline gap-2">
       <span>Version</span>
       <code className="text-[11px] font-medium text-muted-foreground">{APP_VERSION}</code>
+      {buildDateLabel ? (
+        <span className="text-xs font-normal text-muted-foreground">Built {buildDateLabel}</span>
+      ) : null}
     </span>
   );
 }
@@ -323,11 +338,17 @@ function AboutVersionSection() {
 
   const progressLabel = formatDesktopLocalUpdateProgress(localUpdateState);
   const buttonLabel =
-    isUpdateActionPending && pendingAction !== "build" ? progressLabel : "Update from Type-Delta";
+    isUpdateActionPending && pendingAction !== "build"
+      ? progressLabel
+      : localUpdateState?.status === "up-to-date"
+        ? "Check again"
+        : "Check and update";
   const buildButtonLabel =
     isUpdateActionPending && pendingAction === "build" ? progressLabel : "Build from this checkout";
   const description =
-    "Fetches and merges the Type-Delta checkout linked to this local installation, verifies the code, builds a new installer, and opens it. Uncommitted changes are stashed first and restored afterward. Progress updates after each completed step.";
+    localUpdateState?.status === "up-to-date"
+      ? "This installation matches the latest commit on the Type-Delta update branch."
+      : "Checks the Type-Delta checkout linked to this installation. When an update exists, it merges the changes, verifies the code, builds a new installer, and opens it.";
   const buildDescription =
     "Builds and opens an installer from the linked checkout exactly as it is, including uncommitted changes. Nothing is fetched, merged, or verified.";
 

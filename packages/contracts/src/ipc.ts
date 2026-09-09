@@ -276,7 +276,7 @@ export const DesktopUpdateCheckResultSchema = Schema.Struct({
   state: DesktopUpdateStateSchema,
 });
 
-export type DesktopLocalUpdateStatus = "idle" | "running" | "completed" | "error";
+export type DesktopLocalUpdateStatus = "idle" | "running" | "up-to-date" | "completed" | "error";
 
 export type DesktopLocalUpdateStep =
   | "idle"
@@ -290,11 +290,13 @@ export type DesktopLocalUpdateStep =
   | "build"
   | "open-installer"
   | "restore"
+  | "up-to-date"
   | "completed";
 
 export const DesktopLocalUpdateStatusSchema = Schema.Literals([
   "idle",
   "running",
+  "up-to-date",
   "completed",
   "error",
 ]);
@@ -311,6 +313,7 @@ export const DesktopLocalUpdateStepSchema = Schema.Literals([
   "build",
   "open-installer",
   "restore",
+  "up-to-date",
   "completed",
 ]);
 

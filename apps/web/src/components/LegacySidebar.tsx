@@ -3806,7 +3806,9 @@ export default function LegacySidebar() {
   const isLocalUpdateRunning = isStartingLocalUpdate || localUpdateState?.status === "running";
   const desktopUpdateButtonLabel = isLocalUpdateRunning
     ? formatDesktopLocalUpdateProgress(localUpdateState)
-    : "Update local Type-Delta";
+    : localUpdateState?.status === "up-to-date"
+      ? "Up to date. Check again"
+      : "Check and update Type-Delta";
   useEffect(() => {
     const previousStatus = previousLocalUpdateStatus.current;
     previousLocalUpdateStatus.current = localUpdateState?.status;
@@ -3816,6 +3818,15 @@ export default function LegacySidebar() {
           type: "success",
           title: "Local update completed",
           description: "The installer was opened. Continue with its setup steps.",
+        }),
+      );
+    }
+    if (previousStatus === "running" && localUpdateState?.status === "up-to-date") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "Already up to date",
+          description: "This installation matches the latest Type-Delta commit.",
         }),
       );
     }

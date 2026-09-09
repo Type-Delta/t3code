@@ -20,6 +20,7 @@ const LOCAL_UPDATE_STEP_LABELS = {
   build: "Building installer",
   "open-installer": "Opening installer",
   restore: "Restoring local changes",
+  "up-to-date": "Already up to date",
   completed: "Completed",
 } as const;
 

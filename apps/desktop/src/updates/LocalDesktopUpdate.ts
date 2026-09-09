@@ -15,11 +15,13 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 
 const LOCAL_UPDATE_SOURCE_ENV = "T3CODE_LOCAL_UPDATE_SOURCE";
+const INSTALLED_COMMIT_ENV = "T3CODE_LOCAL_UPDATE_INSTALLED_COMMIT";
 const PROGRESS_PREFIX = "::t3-local-update::";
 const FAILURE_PREFIX = "::t3-local-update-failed::";
 
 const LocalUpdatePackageMetadata = Schema.Struct({
   t3codeLocalUpdateSource: Schema.optional(Schema.String),
+  t3codeCommitHash: Schema.optional(Schema.String),
 });
 const decodeLocalUpdatePackageMetadata = Schema.decodeEffect(
   Schema.fromJsonString(LocalUpdatePackageMetadata),
@@ -36,6 +38,7 @@ const LOCAL_UPDATE_STEP_PROGRESS = {
   build: 85,
   "open-installer": 92,
   restore: 96,
+  "up-to-date": 100,
   completed: 100,
 } as const satisfies Partial<Record<DesktopLocalUpdateStep, number>>;
 
@@ -86,8 +89,10 @@ export class LocalDesktopUpdateProcessError extends Schema.TaggedErrorClass<Loca
 export const localDesktopUpdatePowerShell = String.raw`
 $ErrorActionPreference = "Continue"
 $SourceDirectory = $env:T3CODE_LOCAL_UPDATE_SOURCE
+$InstalledCommit = $env:T3CODE_LOCAL_UPDATE_INSTALLED_COMMIT
 $StashMessage = "t3code local update: temporary stash of uncommitted changes"
 $StashObject = $null
+$AlreadyUpToDate = $false
 
 function Invoke-UpdateStep {
   param([string]$Step, [string]$Label, [scriptblock]$Command)
@@ -157,11 +162,25 @@ try {
     if (-not $remoteHead) {
       throw "The $remote remote has no default branch. Run 'git remote set-head $remote --auto', then try again."
     }
-    Invoke-UpdateStep "merge" "Merging $remoteHead" { git merge --no-edit $remoteHead }
-    Invoke-UpdateStep "check" "Checking code" { vp check }
-    Invoke-UpdateStep "typecheck" "Checking types" { vp run typecheck }
-    Invoke-UpdateStep "build" "Building installer" { vp run update:local }
-    Write-Output "::t3-local-update::open-installer"
+    $remoteCommit = git rev-parse --verify "$remoteHead^{commit}"
+    if ($LASTEXITCODE -ne 0 -or -not $remoteCommit) {
+      throw "Could not resolve the latest commit from $remoteHead."
+    }
+    $installedCommit = if ($InstalledCommit -match '^[0-9a-fA-F]{7,40}$') {
+      git rev-parse --verify "$InstalledCommit^{commit}" 2>$null
+    } else { $null }
+    if ($LASTEXITCODE -eq 0 -and $installedCommit) {
+      git merge-base --is-ancestor $remoteCommit $installedCommit
+      $AlreadyUpToDate = $LASTEXITCODE -eq 0
+    }
+
+    if (-not $AlreadyUpToDate) {
+      Invoke-UpdateStep "merge" "Merging $remoteHead" { git merge --no-edit $remoteHead }
+      Invoke-UpdateStep "check" "Checking code" { vp check }
+      Invoke-UpdateStep "typecheck" "Checking types" { vp run typecheck }
+      Invoke-UpdateStep "build" "Building installer" { vp run update:local }
+      Write-Output "::t3-local-update::open-installer"
+    }
   } catch {
     $updateError = $_.Exception.Message
     git rev-parse --verify --quiet MERGE_HEAD | Out-Null
@@ -181,6 +200,7 @@ try {
     throw
   }
   if ($updateError) { throw $updateError }
+  if ($AlreadyUpToDate) { Write-Output "::t3-local-update::up-to-date" }
 } catch {
   Write-Output "::t3-local-update-failed::$($_.Exception.Message)"
   exit 1
@@ -214,7 +234,7 @@ export function getDesktopLocalUpdateStateForStep(
 ): DesktopLocalUpdateState {
   const progressPercent = step === "idle" ? 0 : LOCAL_UPDATE_STEP_PROGRESS[step];
   return {
-    status: step === "completed" ? "completed" : "running",
+    status: step === "completed" ? "completed" : step === "up-to-date" ? "up-to-date" : "running",
     step,
     progressPercent,
     message: null,
@@ -300,13 +320,25 @@ export const make = Effect.gen(function* () {
     const sourceDirectory = yield* resolveSourceDirectory();
     yield* validateSourceDirectory(sourceDirectory);
 
+    const packageJsonPath = environment.path.join(environment.appRoot, "package.json");
+    const packageJson = yield* fileSystem.readFileString(packageJsonPath).pipe(Effect.option);
+    const packageMetadata =
+      packageJson._tag === "Some"
+        ? yield* decodeLocalUpdatePackageMetadata(packageJson.value).pipe(Effect.option)
+        : packageJson;
+    const installedCommit =
+      packageMetadata._tag === "Some" ? (packageMetadata.value.t3codeCommitHash?.trim() ?? "") : "";
+
     const child = yield* spawner.spawn(
       ChildProcess.make(
         "powershell.exe",
         ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
         {
           cwd: sourceDirectory,
-          env: { [LOCAL_UPDATE_SOURCE_ENV]: sourceDirectory },
+          env: {
+            [LOCAL_UPDATE_SOURCE_ENV]: sourceDirectory,
+            [INSTALLED_COMMIT_ENV]: installedCommit,
+          },
           extendEnv: true,
           stdin: "ignore",
         },
@@ -314,6 +346,7 @@ export const make = Effect.gen(function* () {
     );
 
     let lastOutput = "";
+    let alreadyUpToDate = false;
     yield* child.all.pipe(
       Stream.decodeText(),
       Stream.splitLines,
@@ -321,6 +354,7 @@ export const make = Effect.gen(function* () {
         const trimmed = line.trim();
         const step = trimmed.slice(PROGRESS_PREFIX.length) as DesktopLocalUpdateStep;
         if (trimmed.startsWith(PROGRESS_PREFIX) && step in LOCAL_UPDATE_STEP_PROGRESS) {
+          if (step === "up-to-date") alreadyUpToDate = true;
           return setState(getDesktopLocalUpdateStateForStep(step));
         }
         if (trimmed.startsWith(FAILURE_PREFIX)) {
@@ -337,7 +371,9 @@ export const make = Effect.gen(function* () {
       return yield* new LocalDesktopUpdateProcessError({ exitCode, output: lastOutput });
     }
 
-    yield* setState(getDesktopLocalUpdateStateForStep("completed"));
+    yield* setState(
+      getDesktopLocalUpdateStateForStep(alreadyUpToDate ? "up-to-date" : "completed"),
+    );
   });
 
   const start = Effect.fn("desktop.localUpdates.start")(function* (script: string) {

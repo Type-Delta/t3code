@@ -37,6 +37,15 @@ function SidebarUpdateControl() {
         }),
       );
     }
+    if (previousStatus === "running" && localUpdateState?.status === "up-to-date") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "Already up to date",
+          description: "This installation matches the latest Type-Delta commit.",
+        }),
+      );
+    }
     if (previousStatus === "running" && localUpdateState?.status === "error") {
       toastManager.add(
         stackedThreadToast({
@@ -70,7 +79,9 @@ function SidebarUpdateControl() {
 
   const tooltip = isUpdateRunning
     ? formatDesktopLocalUpdateProgress(localUpdateState)
-    : "Update local Type-Delta";
+    : localUpdateState?.status === "up-to-date"
+      ? "Up to date. Click to check again"
+      : "Check and update Type-Delta";
 
   return (
     <SidebarMenuItem className="ml-auto shrink-0">
