@@ -6,7 +6,7 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `2fb99a7a6`, the upstream parent of the 2026-09-05 merge). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `0e0ddaeed`, the upstream parent of the 2026-09-13 merge). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -80,7 +80,7 @@ SQLite persists capture jobs, immutable checkpoint entries, timeline generations
 
 Fork migrations `036`–`038` establish durable checkpoint state. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
 
-Migration `053_ReconcileUpstream47History` repairs a database carrying upstream history through `047`, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at `050`–`052`. Incoming upstream behavior then runs as `054_ClearAutomaticProjectModelDefaults`, `055_ProjectionProjectsAutoPull`, `056_RepairAutomaticSettlementTimestamps`, and `057_ProjectionProjectIcon`. Schema checks keep these changes safe for both fork and upstream database histories.
+Migration `053_ReconcileUpstream47History` repairs a database carrying upstream history through `047`, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at `050`–`052`. Incoming upstream behavior then runs as `054_ClearAutomaticProjectModelDefaults`, `055_ProjectionProjectsAutoPull`, `056_RepairAutomaticSettlementTimestamps`, and `057_ProjectionProjectIcon`, followed by branch pull requests, active ordering, linked pull-request collections, and composer message context in `058`–`061`. Schema checks keep these changes safe for both fork and upstream database histories.
 
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
@@ -566,6 +566,17 @@ search, and switching groups preserves the query. Provider and continuation rest
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-09-13 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `12efb3f9c6ef0fb4e42cab26b4489bb7a7e2792e` (fork) and `0e0ddaeedf30698bec131caf040a8e8d7b2e3f37` (upstream/main)
+
+- Preserved durable fork checkpoints, sidecar recovery, undo/redo/jump navigation, split workspaces, Windows path handling, gateway catalogs, subscription meters, zrok sharing, management keys, and automatic usage-limit resume. Upstream's conversation rewind maps to the existing checkpoint jump flow with file restoration disabled when requested.
+- Adopted upstream thread notifications and sounds, inline previews and attachment chips, context-paste attachments, default diff state, provider account-home usage limits, screen-reader headings, linked pull-request collections, active-order persistence, and saved-environment disabling. Incoming migrations `058`–`061` were assigned after the fork's deployed migration history.
+- Combined provider lifecycle and adapter fixes: Claude retains fork rate-limit and terminal-reason handling alongside upstream outcome classification; Claude resolves packaged Windows binaries with the gateway model catalog; Codex keeps text-generation and MCP app-server capabilities. Provider runtime ingestion keeps fork assistant/proposed-plan correlation helpers.
+- Merged sidebar, subagent, right-panel, and composer changes while retaining split-pane ownership, checkpoint actions, and environment-scoped controls. Reconciled the upstream `conversation.revert` request with fork checkpoint controls and kept message context in turn-start queries.
+- Validation: `vp check`, serial `vp run --concurrency-limit 1 typecheck`, focused AgentSessionImporter and OrchestrationReactor tests, and web/server typechecks passed. The full CheckpointReactor suite was started but exceeded the local command window; no browser verification was run.
 
 ### 2026-09-05 — Merge upstream/main into main
 

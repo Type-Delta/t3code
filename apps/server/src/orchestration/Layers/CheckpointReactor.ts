@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import {
   CommandId,
+  type CheckpointRef,
   EventId,
   MessageId,
   type ProjectId,
@@ -41,7 +42,10 @@ import { CheckpointRepositoryIdentityResolver } from "../../checkpointing/Checkp
 import { WorkspaceMutationCoordinator } from "../../checkpointing/WorkspaceMutationCoordinator.ts";
 import { CheckpointCaptureJobRepository } from "../../persistence/Services/CheckpointCaptureJobs.ts";
 import { CheckpointTimelineRepository } from "../../persistence/Services/CheckpointTimeline.ts";
-import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import {
+  checkpointRefForThreadTurn,
+  resolveThreadWorkspaceCwd,
+} from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
@@ -456,6 +460,7 @@ const make = Effect.gen(function* () {
   const timeline = yield* CheckpointTimelineRepository;
   const mutationCoordinator = yield* WorkspaceMutationCoordinator;
   const checkpointIdentities = yield* CheckpointRepositoryIdentityResolver;
+  const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const activeProviderMutations = yield* Ref.make(new Map<string, PendingProviderMutation>());
   const startedTurns = new Map<ThreadId, TurnId>();
   const pendingTurnStarts = new Set<ThreadId>();
@@ -487,6 +492,35 @@ const make = Effect.gen(function* () {
               detail: input.detail,
             },
             turnId: input.turnId,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendRevertFailureActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly turnCount: number;
+    readonly detail: string;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("checkpoint-revert-failure"),
+      activityId: serverEventId,
+    }).pipe(
+      Effect.flatMap(({ commandId, activityId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: activityId,
+            tone: "error",
+            kind: "checkpoint.revert.failed",
+            summary: "Checkpoint revert failed",
+            payload: { turnCount: input.turnCount, detail: input.detail },
+            turnId: null,
             createdAt: input.createdAt,
           },
           createdAt: input.createdAt,
@@ -1043,6 +1077,120 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
+  ) {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const thread = yield* resolveThreadDetail(event.payload.threadId);
+    if (!thread) {
+      yield* appendRevertFailureActivity({
+        threadId: event.payload.threadId,
+        turnCount: event.payload.turnCount,
+        detail: "Thread was not found in read model.",
+        createdAt: now,
+      }).pipe(Effect.catch(() => Effect.void));
+      return;
+    }
+    const checkpointCwd = yield* resolveCheckpointCwd({
+      threadId: event.payload.threadId,
+      thread,
+      projects: yield* resolveThreadProjects(thread.projectId),
+      preferSessionRuntime: true,
+    }).pipe(
+      Effect.catch((error) =>
+        event.payload.restoreFiles === false ? Effect.succeed(undefined) : Effect.fail(error),
+      ),
+    );
+    const currentTurnCount = thread.checkpoints.reduce(
+      (max, checkpoint) => Math.max(max, checkpoint.checkpointTurnCount),
+      0,
+    );
+    if (event.payload.turnCount > currentTurnCount) {
+      yield* appendRevertFailureActivity({
+        threadId: event.payload.threadId,
+        turnCount: event.payload.turnCount,
+        detail: `Checkpoint turn count ${event.payload.turnCount} exceeds current turn count ${currentTurnCount}.`,
+        createdAt: now,
+      }).pipe(Effect.catch(() => Effect.void));
+      return;
+    }
+    yield* providerService.assertConversationRollbackSupported(event.payload.threadId);
+    if (event.payload.restoreFiles !== false) {
+      if (!checkpointCwd) {
+        yield* appendRevertFailureActivity({
+          threadId: event.payload.threadId,
+          turnCount: event.payload.turnCount,
+          detail: "Checkpoint workspace is unavailable or is not a git repository.",
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+      const targetCheckpointRef =
+        event.payload.turnCount === 0
+          ? checkpointRefForThreadTurn(event.payload.threadId, 0)
+          : thread.checkpoints.find(
+              (checkpoint) => checkpoint.checkpointTurnCount === event.payload.turnCount,
+            )?.checkpointRef;
+      if (!targetCheckpointRef) {
+        yield* appendRevertFailureActivity({
+          threadId: event.payload.threadId,
+          turnCount: event.payload.turnCount,
+          detail: `Checkpoint ref for turn ${event.payload.turnCount} is unavailable in read model.`,
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+      const restored = yield* checkpointStore.restoreCheckpoint({
+        cwd: checkpointCwd,
+        checkpointRef: targetCheckpointRef,
+        fallbackToHead: event.payload.turnCount === 0,
+      });
+      if (!restored) {
+        yield* appendRevertFailureActivity({
+          threadId: event.payload.threadId,
+          turnCount: event.payload.turnCount,
+          detail: `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+      yield* workspaceEntries.refresh(checkpointCwd);
+    }
+    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
+    if (rolledBackTurns > 0)
+      yield* providerService.rollbackConversation({
+        threadId: event.payload.threadId,
+        numTurns: rolledBackTurns,
+      });
+    const staleCheckpointRefs: Array<CheckpointRef> = thread.checkpoints
+      .filter((checkpoint) => checkpoint.checkpointTurnCount > event.payload.turnCount)
+      .map((checkpoint) => checkpoint.checkpointRef);
+    if (checkpointCwd && staleCheckpointRefs.length > 0)
+      yield* checkpointStore.deleteCheckpointRefs({
+        cwd: checkpointCwd,
+        checkpointRefs: staleCheckpointRefs,
+      });
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.revert.complete",
+        commandId: yield* serverCommandId("checkpoint-revert-complete"),
+        threadId: event.payload.threadId,
+        turnCount: event.payload.turnCount,
+        createdAt: now,
+      })
+      .pipe(
+        Effect.catch((error) =>
+          appendRevertFailureActivity({
+            threadId: event.payload.threadId,
+            turnCount: event.payload.turnCount,
+            detail: error.message,
+            createdAt: now,
+          }),
+        ),
+        Effect.asVoid,
+      );
+  });
+
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
     if (
       event.type === "thread.created" ||
@@ -1070,6 +1218,21 @@ const make = Effect.gen(function* () {
               detail: error.message,
               createdAt,
             }).pipe(Effect.catch(() => Effect.void)),
+          ),
+        ),
+      );
+    }
+
+    if (event.type === "thread.checkpoint-revert-requested") {
+      yield* handleRevertRequested(event).pipe(
+        Effect.catch((error) =>
+          Effect.flatMap(nowIso, (createdAt) =>
+            appendRevertFailureActivity({
+              threadId: event.payload.threadId,
+              turnCount: event.payload.turnCount,
+              detail: error.message,
+              createdAt,
+            }),
           ),
         ),
       );
@@ -1185,7 +1348,8 @@ const make = Effect.gen(function* () {
           event.type !== "thread.created" &&
           event.type !== "thread.turn-start-requested" &&
           event.type !== "thread.message-sent" &&
-          event.type !== "thread.turn-diff-completed"
+          event.type !== "thread.turn-diff-completed" &&
+          event.type !== "thread.checkpoint-revert-requested"
         ) {
           return Effect.void;
         }

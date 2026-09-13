@@ -25,7 +25,11 @@ import type {
 } from "@t3tools/contracts";
 import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/contracts";
 
-import { createModelCapabilities, readCustomModelEntries } from "@t3tools/shared/model";
+import {
+  codexModelFamily,
+  createModelCapabilities,
+  readCustomModelEntries,
+} from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
@@ -50,6 +54,10 @@ const RATE_LIMITS_PROBE_TIMEOUT_MS = 3_000;
 type CodexRateLimitsProbe =
   | {
       readonly snapshot: CodexRateLimitSnapshot;
+      readonly rateLimitsByLimitId?:
+        | Readonly<Record<string, CodexRateLimitSnapshot>>
+        | null
+        | undefined;
       readonly resetCredits: CodexResetCreditsSummary | null | undefined;
     }
   | { readonly failure: string };
@@ -63,6 +71,7 @@ const CODEX_CATALOG_PROBE_TIMEOUT_MS = 3_000;
 const CODEX_PRESENTATION = {
   displayName: "Codex",
   showInteractionModeToggle: true,
+  reportsContextWindow: true,
 } as const;
 
 export interface CodexAppServerProviderSnapshot {
@@ -142,7 +151,8 @@ export function mapCodexModelCapabilities(
   model: CodexSchema.V2ModelListResponse__Model,
 ): ModelCapabilities {
   const reasoningOptions = model.supportedReasoningEfforts.map(({ reasoningEffort }) =>
-    reasoningEffort === model.defaultReasoningEffort
+    reasoningEffort ===
+    (codexModelFamily(model.model) === "gpt-6-astra" ? "medium" : model.defaultReasoningEffort)
       ? {
           id: reasoningEffort,
           label: reasoningEffortLabel(reasoningEffort),
@@ -232,9 +242,9 @@ function parseCodexModelListResponse(
 export function applyPreferredCodexDefaultModel(
   models: ReadonlyArray<ServerProviderModel>,
 ): ReadonlyArray<ServerProviderModel> {
-  const preferredSlug = PREFERRED_DEFAULT_CODEX_MODELS.find((slug) =>
-    models.some((model) => model.slug === slug && !model.isCustom),
-  );
+  const preferredSlug = PREFERRED_DEFAULT_CODEX_MODELS.flatMap((slug) =>
+    models.filter((model) => !model.isCustom && codexModelFamily(model.slug) === slug),
+  )[0]?.slug;
   if (!preferredSlug) {
     return models;
   }
@@ -447,6 +457,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       client.request("account/rateLimits/read", undefined).pipe(
         Effect.map((response): CodexRateLimitsProbe => ({
           snapshot: response.rateLimits,
+          rateLimitsByLimitId: response.rateLimitsByLimitId,
           resetCredits: response.rateLimitResetCredits,
         })),
         Effect.timeoutOption(Duration.millis(RATE_LIMITS_PROBE_TIMEOUT_MS)),
@@ -685,6 +696,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
           })
         : codexRateLimitsToLimits({
             snapshot: snapshot.rateLimits.snapshot,
+            rateLimitsByLimitId: snapshot.rateLimits.rateLimitsByLimitId,
             resetCredits: snapshot.rateLimits.resetCredits,
             checkedAt,
           });

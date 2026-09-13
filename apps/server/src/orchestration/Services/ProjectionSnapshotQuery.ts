@@ -7,9 +7,12 @@
  * @module ProjectionSnapshotQuery
  */
 import type {
+  AgentSessionImportSource,
   ApprovalRequestId,
   CheckpointRef,
+  MessageId,
   OrchestrationCheckpointSummary,
+  OrchestrationMessage,
   OrchestrationProject,
   OrchestrationProjectShell,
   OrchestrationReadModel,
@@ -178,12 +181,25 @@ export interface ProjectionSnapshotQueryShape {
     projectId: ProjectId,
   ) => Effect.Effect<Option.Option<OrchestrationProjectShell>, ProjectionRepositoryError>;
 
+  readonly getProjectShells: (
+    projectIds?: ReadonlyArray<ProjectId>,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, ProjectionRepositoryError>;
+
   /**
    * Read the earliest active thread for a project.
    */
   readonly getFirstActiveThreadIdByProjectId: (
     projectId: ProjectId,
   ) => Effect.Effect<Option.Option<ThreadId>, ProjectionRepositoryError>;
+
+  /** Read completed import sources without loading thread history. */
+  readonly getImportedAgentSessionSources: (projectId: ProjectId) => Effect.Effect<
+    ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly source: AgentSessionImportSource;
+    }>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Read the checkpoint context needed to resolve a single thread diff.
@@ -220,7 +236,22 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadRuntimeContext: (
     threadId: ThreadId,
   ) => Effect.Effect<
-    Option.Option<Pick<OrchestrationThreadShell, "id" | "title" | "session">>,
+    Option.Option<Pick<OrchestrationThreadShell, "id" | "projectId" | "title" | "session">>,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * Read one requested message and whether another non-compaction user message exists.
+   * Newer queued messages count too, preserving first-turn title eligibility.
+   */
+  readonly getTurnStartMessage: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+  }) => Effect.Effect<
+    Option.Option<{
+      readonly message: OrchestrationMessage;
+      readonly hasOtherUserMessages: boolean;
+    }>,
     ProjectionRepositoryError
   >;
 

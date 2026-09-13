@@ -45,6 +45,10 @@ For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch
 arguments**.
 
+Claude Code's verbose mode can stay enabled when you use Claude for text generation, including
+thread titles, branch names, commit messages, and pull request descriptions. On a remote connection,
+T3 Code uses the Claude configuration on the connected server.
+
 ## Compact long conversations
 
 Set **Auto-compact after** in provider settings to an integer between `100000`

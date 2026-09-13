@@ -32,7 +32,7 @@ import { WorkspaceMutationCoordinator } from "./WorkspaceMutationCoordinator.ts"
 
 export type CheckpointNavigationKind = "undo" | "redo" | "jump";
 
-export class CheckpointNavigationError extends Schema.TaggedErrorClass<CheckpointNavigationError>()(
+export class CheckpointNavigationError extends Schema.TaggedError<CheckpointNavigationError>()(
   "CheckpointNavigationError",
   {
     code: Schema.String,

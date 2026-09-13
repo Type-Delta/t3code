@@ -10,7 +10,7 @@ import type { CheckpointCaptureJob } from "../persistence/Services/CheckpointCap
 import type { CheckpointTimelineRepository } from "../persistence/Services/CheckpointTimeline.ts";
 import type { ProviderConversationNavigation } from "../provider/Services/ProviderConversationNavigation.ts";
 
-export class CheckpointTimelinePublicationError extends Schema.TaggedErrorClass<CheckpointTimelinePublicationError>()(
+export class CheckpointTimelinePublicationError extends Schema.TaggedError<CheckpointTimelinePublicationError>()(
   "CheckpointTimelinePublicationError",
   {
     code: Schema.String,

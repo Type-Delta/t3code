@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  McpCapabilityUnavailableError,
   type ManagementApiKeyId,
   type ManagementApiKeyScope,
   type OrchestrationClientOrigin,
@@ -11,16 +12,9 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "preview" | "threads";
+export type McpCapability = "preview" | "device" | "pull-requests" | "threads";
 
-/**
- * The credential identity used for one MCP invocation.
- *
- * Provider sessions are intentionally thread-bound and carry the provider
- * identity needed by preview automation. Management keys are environment
- * credentials: they have no calling thread or provider session and are
- * authorized by the narrow management scopes persisted with the key.
- */
+/** The credential identity carried by one MCP invocation. */
 export type McpPrincipal =
   | {
       readonly type: "provider-session";
@@ -37,7 +31,13 @@ export type McpPrincipal =
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
-  readonly principal: McpPrincipal;
+  /** Present for fork management-key authorization; provider sessions use the native identity. */
+  readonly principal?: McpPrincipal;
+  /** Legacy callers may provide these directly; principals are preferred. */
+  readonly threadId?: ThreadId;
+  readonly providerSessionId?: string;
+  readonly providerInstanceId?: ProviderInstanceId;
+  readonly capabilities?: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
 }
 
@@ -48,10 +48,6 @@ export class McpInvocationContext extends Context.Service<
 
 export type McpThreadToolOperation = "create" | "list" | "list_models" | "read" | "send" | "wait";
 
-/**
- * Keep this map exhaustive. Every thread MCP operation must make an explicit
- * management authorization decision when a new tool is added.
- */
 export const managementScopeByThreadOperation = {
   create: "threads:create",
   list: "threads:list",
@@ -62,24 +58,47 @@ export const managementScopeByThreadOperation = {
 } as const satisfies Record<McpThreadToolOperation, ManagementApiKeyScope>;
 
 export const isProviderSessionPrincipal = (
-  principal: McpPrincipal,
+  principal: McpPrincipal | undefined,
 ): principal is Extract<McpPrincipal, { readonly type: "provider-session" }> =>
-  principal.type === "provider-session";
+  principal?.type === "provider-session";
 
 export const isManagementKeyPrincipal = (
-  principal: McpPrincipal,
+  principal: McpPrincipal | undefined,
 ): principal is Extract<McpPrincipal, { readonly type: "management-key" }> =>
-  principal.type === "management-key";
+  principal?.type === "management-key";
 
 export const getProviderSessionPrincipal = (
   invocation: McpInvocationScope,
 ): Extract<McpPrincipal, { readonly type: "provider-session" }> | undefined =>
-  isProviderSessionPrincipal(invocation.principal) ? invocation.principal : undefined;
+  invocation.principal && isProviderSessionPrincipal(invocation.principal)
+    ? invocation.principal
+    : undefined;
+
+const managementFallbackThreadId = ThreadId.make("mcp-management-key");
+const managementFallbackProviderInstanceId = ProviderInstanceId.make("mcp-management-key");
+
+/** Resolve legacy direct fields and the newer provider principal to one context. */
+export const getInvocationThreadId = (invocation: McpInvocationScope): ThreadId =>
+  invocation.threadId ??
+  getProviderSessionPrincipal(invocation)?.threadId ??
+  managementFallbackThreadId;
+
+export const getInvocationProviderSessionId = (invocation: McpInvocationScope): string =>
+  invocation.providerSessionId ??
+  getProviderSessionPrincipal(invocation)?.providerSessionId ??
+  "mcp-management-key";
+
+export const getInvocationProviderInstanceId = (
+  invocation: McpInvocationScope,
+): ProviderInstanceId =>
+  invocation.providerInstanceId ??
+  getProviderSessionPrincipal(invocation)?.providerInstanceId ??
+  managementFallbackProviderInstanceId;
 
 export const getManagementOrigin = (
   invocation: McpInvocationScope,
 ): { readonly origin: OrchestrationClientOrigin } | undefined =>
-  isManagementKeyPrincipal(invocation.principal)
+  invocation.principal && isManagementKeyPrincipal(invocation.principal)
     ? {
         origin: {
           managementKey: {
@@ -90,31 +109,41 @@ export const getManagementOrigin = (
       }
     : undefined;
 
-export const requireMcpCapability = Effect.fn("mcp.requireCapability")(function* (
-  capability: "preview",
-) {
-  const invocation = yield* McpInvocationContext;
-  const provider = getProviderSessionPrincipal(invocation);
-  if (!provider) {
-    return yield* new PreviewAutomationUnavailableError({
-      capability,
-      environmentId: invocation.environmentId,
-      // Preview is provider-session-only. The preview error contract predates
-      // management principals and still requires provider context; the
-      // adapter's management rejection is handled before broker invocation.
-      threadId: ThreadId.make("mcp-management-key"),
-      providerSessionId: "mcp-management-key",
-      providerInstanceId: ProviderInstanceId.make("mcp-management-key"),
-    });
-  }
-  return invocation;
-});
+/** The error a missing capability surfaces as; preview keeps its broker-specific error. */
+export type McpCapabilityError<C extends McpCapability> = C extends "preview"
+  ? PreviewAutomationUnavailableError
+  : McpCapabilityUnavailableError;
+
+const missingCapability = (
+  invocation: McpInvocationScope,
+  capability: McpCapability,
+): PreviewAutomationUnavailableError | McpCapabilityUnavailableError => {
+  const fields = {
+    capability,
+    environmentId: invocation.environmentId,
+    threadId: getInvocationThreadId(invocation),
+    providerSessionId: getInvocationProviderSessionId(invocation),
+    providerInstanceId: getInvocationProviderInstanceId(invocation),
+  };
+  if (capability === "preview")
+    return new PreviewAutomationUnavailableError({ ...fields, capability });
+  return new McpCapabilityUnavailableError({ ...fields, capability });
+};
+
+export const requireMcpCapability = <const C extends McpCapability>(
+  capability: C,
+): Effect.Effect<McpInvocationScope, McpCapabilityError<C>, McpInvocationContext> =>
+  Effect.flatMap(McpInvocationContext, (invocation) =>
+    invocation.capabilities?.has(capability) === true
+      ? Effect.succeed(invocation)
+      : Effect.fail(missingCapability(invocation, capability) as McpCapabilityError<C>),
+  ).pipe(Effect.withSpan("mcp.requireCapability"));
 
 export const requireThreadMcpCapability = Effect.fn("mcp.requireThreadCapability")(function* (
   operation: McpThreadToolOperation,
 ) {
   const invocation = yield* McpInvocationContext;
-  if (isProviderSessionPrincipal(invocation.principal)) return invocation;
+  if (!invocation.principal || isProviderSessionPrincipal(invocation.principal)) return invocation;
   const scope = managementScopeByThreadOperation[operation];
   if (!invocation.principal.scopes.has(scope)) {
     return yield* new ThreadToolOperationFailureError({

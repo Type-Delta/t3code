@@ -123,11 +123,11 @@ export function SubagentPanel(props: SubagentPanelProps) {
         timelineEntries={timelineEntries}
         latestTurn={null}
         runningTurnId={null}
-        turnDiffSummaryByAssistantMessageId={EMPTY_TURN_DIFF_SUMMARIES}
+        turnDiffSummaries={[]}
         routeThreadKey={props.routeThreadKey}
         onOpenTurnDiff={doNothing}
-        revertTurnCountByUserMessageId={EMPTY_REVERT_COUNTS}
-        onRevertUserMessage={doNothing}
+        supportsConversationRollback={false}
+        onRevertToTurnCount={doNothing}
         isRevertingCheckpoint={false}
         onImageExpand={doNothing}
         activeThreadEnvironmentId={props.environmentId}

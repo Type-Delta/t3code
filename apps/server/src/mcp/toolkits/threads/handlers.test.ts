@@ -133,6 +133,8 @@ const query = {
 } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
+  clientCapabilities: {},
+  clientInfo: { name: "thread-tools-test", version: "1.0.0" },
   protocolVersion: "2025-06-18",
   initializePayload: {
     protocolVersion: "2025-06-18",

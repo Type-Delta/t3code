@@ -73,6 +73,7 @@ const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabili
 const CLAUDE_PRESENTATION = {
   displayName: "Claude",
   showInteractionModeToggle: true,
+  reportsContextWindow: true,
 } as const;
 
 const CLAUDE_MODEL_CATALOG: ReadonlyArray<ServerProviderModel> = [

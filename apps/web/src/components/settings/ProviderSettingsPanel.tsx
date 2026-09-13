@@ -1,3 +1,4 @@
+import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
 import { connectionStatusTitle } from "@t3tools/client-runtime/connection";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
@@ -24,12 +25,16 @@ import * as Arr from "effect/Array";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Result from "effect/Result";
-import { PlusIcon, RefreshCwIcon } from "lucide-react";
+import { PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { isElectron } from "../../env";
 import { usePrimarySessionState } from "../../environments/primary";
-import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "../../hooks/useSettings";
+import {
+  useEnvironmentSettings,
+  useUpdateClientSettings,
+  useUpdateEnvironmentSettings,
+} from "../../hooks/useSettings";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { cn } from "../../lib/utils";
 import { resolveAppModelSelectionState } from "../../modelSelection";
@@ -247,6 +252,7 @@ function EnvironmentUnavailablePlaceholder({
 interface ProviderSettingsTarget {
   readonly environmentId?: EnvironmentId;
   readonly instanceId?: ProviderInstanceId;
+  readonly scoped?: boolean;
 }
 
 export function ProviderSettingsPanel(target: ProviderSettingsTarget) {
@@ -278,9 +284,10 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
     target.environmentId !== undefined &&
     selectedEnvironmentId === target.environmentId &&
     !options.some((environment) => environment.environmentId === target.environmentId);
-  const effectiveEnvironmentId = targetEnvironmentMissing
-    ? target.environmentId
-    : resolveSelectedProviderEnvironmentId(options, selectedEnvironmentId, primaryEnvironmentId);
+  const effectiveEnvironmentId =
+    target.scoped || targetEnvironmentMissing
+      ? target.environmentId
+      : resolveSelectedProviderEnvironmentId(options, selectedEnvironmentId, primaryEnvironmentId);
   const selectedEnvironment =
     options.find((environment) => environment.environmentId === effectiveEnvironmentId) ?? null;
   const selectedEnvironmentCanRenderSettings =
@@ -297,6 +304,7 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
   )?.environmentId;
   useEffect(() => {
     if (
+      !target.scoped &&
       (searchTargetId === searchableSetting("provider-health-check-interval").id ||
         searchTargetId === searchableSetting("usage-providers").id) &&
       !selectedEnvironmentCanRenderSettings &&
@@ -308,7 +316,7 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
   const deviceTabs = (
     <EnvironmentSettingsTabs
       environments={options}
-      selectedEnvironmentId={effectiveEnvironmentId}
+      selectedEnvironmentId={effectiveEnvironmentId ?? null}
       onSelect={setSelectedEnvironmentId}
     />
   );
@@ -500,7 +508,10 @@ export function EnvironmentProviderSettings({
   readonly readOnly?: boolean;
 }) {
   const settings = useEnvironmentSettings(environmentId);
+  // Provider instances hold per-machine credentials and binaries, so this
+  // page always edits exactly the environment it displays.
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
+  const updateClientSettings = useUpdateClientSettings();
   const serverProviders =
     useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
   const refreshServerProviders = useAtomCommand(serverEnvironment.refreshProviders, {
@@ -756,7 +767,7 @@ export function EnvironmentProviderSettings({
     const hiddenModels = [...new Set(next.hiddenModels.filter((slug) => slug.trim().length > 0))];
     const modelOrder = [...new Set(next.modelOrder.filter((slug) => slug.trim().length > 0))];
     const rest = withoutProviderInstanceKey(settings.providerModelPreferences, instanceId);
-    updateSettings({
+    updateClientSettings({
       providerModelPreferences:
         hiddenModels.length === 0 && modelOrder.length === 0
           ? rest
@@ -782,7 +793,7 @@ export function EnvironmentProviderSettings({
         }),
       ),
     ];
-    updateSettings({
+    updateClientSettings({
       favorites: [
         ...withoutProviderInstanceFavorites(settings.favorites ?? [], instanceId),
         ...favoriteModels.map((model) => ({ provider: instanceId, model })),
@@ -935,7 +946,7 @@ export function EnvironmentProviderSettings({
                         aria-busy={isRefreshingProviders}
                         onClick={() => void refreshProviders()}
                       >
-                        <RefreshCwIcon />
+                        <RefreshIcon refreshing={isRefreshingProviders} />
                         <span className="sr-only">Refresh provider status</span>
                         <span className="hidden min-w-0 truncate sm:inline">
                           {isRefreshingProviders ? (

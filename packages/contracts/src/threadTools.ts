@@ -247,7 +247,7 @@ export const ThreadWaitToolResult = Schema.Struct({
 });
 export type ThreadWaitToolResult = typeof ThreadWaitToolResult.Type;
 
-export class ThreadToolNotFoundError extends Schema.TaggedErrorClass<ThreadToolNotFoundError>()(
+export class ThreadToolNotFoundError extends Schema.TaggedError<ThreadToolNotFoundError>()(
   "ThreadToolNotFoundError",
   {
     operation: ThreadToolOperation,
@@ -260,7 +260,7 @@ export class ThreadToolNotFoundError extends Schema.TaggedErrorClass<ThreadToolN
   }
 }
 
-export class ThreadToolInvalidInputError extends Schema.TaggedErrorClass<ThreadToolInvalidInputError>()(
+export class ThreadToolInvalidInputError extends Schema.TaggedError<ThreadToolInvalidInputError>()(
   "ThreadToolInvalidInputError",
   {
     operation: ThreadToolOperation,
@@ -272,7 +272,7 @@ export class ThreadToolInvalidInputError extends Schema.TaggedErrorClass<ThreadT
   }
 }
 
-export class ThreadToolInvalidTargetError extends Schema.TaggedErrorClass<ThreadToolInvalidTargetError>()(
+export class ThreadToolInvalidTargetError extends Schema.TaggedError<ThreadToolInvalidTargetError>()(
   "ThreadToolInvalidTargetError",
   {
     reason: TrimmedNonEmptyString,
@@ -283,7 +283,7 @@ export class ThreadToolInvalidTargetError extends Schema.TaggedErrorClass<Thread
   }
 }
 
-export class ThreadToolSelfSendForbiddenError extends Schema.TaggedErrorClass<ThreadToolSelfSendForbiddenError>()(
+export class ThreadToolSelfSendForbiddenError extends Schema.TaggedError<ThreadToolSelfSendForbiddenError>()(
   "ThreadToolSelfSendForbiddenError",
   {
     sourceThreadId: ThreadId,
@@ -295,7 +295,7 @@ export class ThreadToolSelfSendForbiddenError extends Schema.TaggedErrorClass<Th
   }
 }
 
-export class ThreadToolOperationFailureError extends Schema.TaggedErrorClass<ThreadToolOperationFailureError>()(
+export class ThreadToolOperationFailureError extends Schema.TaggedError<ThreadToolOperationFailureError>()(
   "ThreadToolOperationFailureError",
   {
     operation: ThreadToolOperation,

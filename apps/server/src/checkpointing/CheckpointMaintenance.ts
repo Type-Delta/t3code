@@ -43,7 +43,7 @@ export interface ClaimedCheckpointDeletion {
   readonly checkpointRef: CheckpointRef;
 }
 
-export class CheckpointMaintenancePersistenceError extends Schema.TaggedErrorClass<CheckpointMaintenancePersistenceError>()(
+export class CheckpointMaintenancePersistenceError extends Schema.TaggedError<CheckpointMaintenancePersistenceError>()(
   "CheckpointMaintenancePersistenceError",
   {
     operation: Schema.String,

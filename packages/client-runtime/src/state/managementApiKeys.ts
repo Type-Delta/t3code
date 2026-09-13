@@ -11,10 +11,11 @@ import * as Effect from "effect/Effect";
 import { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
 import { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
-import { makeEnvironmentHttpApiUrlBuilder } from "../rpc/http.ts";
 import { executeAuthenticatedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
 
 const DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS = 6_000;
+const managementApiUrl = (httpBaseUrl: string, suffix = ""): string =>
+  `${httpBaseUrl.replace(/\/+$/, "")}/api/management/keys${suffix}`;
 
 /** Load management keys from the selected environment. */
 export const listEnvironmentManagementApiKeys = Effect.fn(
@@ -26,10 +27,11 @@ export const listEnvironmentManagementApiKeys = Effect.fn(
     prepared: input.prepared,
     signer,
     remoteAuthorization,
+    group: "management",
     method: "GET",
-    url: (httpBaseUrl) => makeEnvironmentHttpApiUrlBuilder(httpBaseUrl).management.keys(),
+    url: (httpBaseUrl) => managementApiUrl(httpBaseUrl),
     timeoutMs: input.timeoutMs ?? DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS,
-    request: ({ client, headers }) => client.management.keys({ headers }),
+    request: ({ client, headers }) => client.keys({ headers }),
   });
 });
 
@@ -47,11 +49,11 @@ export const createEnvironmentManagementApiKey = Effect.fn(
     prepared: input.prepared,
     signer,
     remoteAuthorization,
+    group: "management",
     method: "POST",
-    url: (httpBaseUrl) => makeEnvironmentHttpApiUrlBuilder(httpBaseUrl).management.createKey(),
+    url: (httpBaseUrl) => managementApiUrl(httpBaseUrl),
     timeoutMs: input.timeoutMs ?? DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS,
-    request: ({ client, headers }) =>
-      client.management.createKey({ headers, payload: input.payload }),
+    request: ({ client, headers }) => client.createKey({ headers, payload: input.payload }),
   });
 });
 
@@ -69,14 +71,13 @@ export const rotateEnvironmentManagementApiKey = Effect.fn(
     prepared: input.prepared,
     signer,
     remoteAuthorization,
+    group: "management",
     method: "POST",
     url: (httpBaseUrl) =>
-      makeEnvironmentHttpApiUrlBuilder(httpBaseUrl).management.rotateKey({
-        params: { id: input.id },
-      }),
+      managementApiUrl(httpBaseUrl, `/${encodeURIComponent(String(input.id))}/rotate`),
     timeoutMs: input.timeoutMs ?? DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS,
     request: ({ client, headers }) =>
-      client.management.rotateKey({
+      client.rotateKey({
         headers,
         params: { id: input.id },
       }),
@@ -97,14 +98,13 @@ export const revokeEnvironmentManagementApiKey = Effect.fn(
     prepared: input.prepared,
     signer,
     remoteAuthorization,
+    group: "management",
     method: "POST",
     url: (httpBaseUrl) =>
-      makeEnvironmentHttpApiUrlBuilder(httpBaseUrl).management.revokeKey({
-        params: { id: input.id },
-      }),
+      managementApiUrl(httpBaseUrl, `/${encodeURIComponent(String(input.id))}/revoke`),
     timeoutMs: input.timeoutMs ?? DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS,
     request: ({ client, headers }) =>
-      client.management.revokeKey({
+      client.revokeKey({
         headers,
         params: { id: input.id },
       }),

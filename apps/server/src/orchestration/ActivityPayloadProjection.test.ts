@@ -1,159 +1,17 @@
-import {
-  EventId,
-  TurnId,
-  type OrchestrationThreadActivity,
-  type OrchestrationThreadDetailSnapshot,
-} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import type { OrchestrationThreadActivity } from "@t3tools/contracts";
+import { projectActivityPayload } from "./ActivityPayloadProjection.ts";
 
-import {
-  projectActivityPayload,
-  projectThreadDetailSnapshot,
-} from "./ActivityPayloadProjection.js";
-
-function makeSubagentActivity(data: Record<string, unknown>): OrchestrationThreadActivity {
+function activity(payload: Record<string, unknown>): OrchestrationThreadActivity {
   return {
-    id: EventId.make("subagent-activity"),
-    tone: "tool",
-    kind: "tool.started",
-    summary: "Subagent task",
-    payload: {
-      itemType: "collab_agent_tool_call",
-      data,
-    },
-    turnId: null,
-    createdAt: "2026-08-04T00:00:00.000Z",
-  };
-}
-
-describe("projectActivityPayload", () => {
-  it("preserves Codex subagent model and reasoning effort", () => {
-    const projected = projectActivityPayload(
-      makeSubagentActivity({
-        item: {
-          type: "collabAgentToolCall",
-          tool: "spawnAgent",
-          prompt: "Review the change",
-          model: "gpt-5.6-sol",
-          reasoningEffort: "high",
-          receiverThreadIds: ["child-thread-1"],
-          status: "inProgress",
-          ignored: "large provider field",
-        },
-      }),
-    );
-
-    expect(projected.payload).toMatchObject({
-      data: {
-        item: {
-          model: "gpt-5.6-sol",
-          reasoningEffort: "high",
-        },
-      },
-    });
-    expect(JSON.stringify(projected.payload)).not.toContain("large provider field");
-  });
-
-  it("projects Codex v2 subagent activity into the shared subagent shape", () => {
-    const projected = projectActivityPayload({
-      ...makeSubagentActivity({
-        item: {
-          type: "subAgentActivity",
-          id: "spawn-1",
-          kind: "started",
-          agentThreadId: "child-thread-1",
-          agentPath: "/root/reviewer",
-        },
-      }),
-      payload: {
-        itemType: "collab_agent_tool_call",
-        status: "inProgress",
-        data: {
-          item: {
-            type: "subAgentActivity",
-            id: "spawn-1",
-            kind: "started",
-            agentThreadId: "child-thread-1",
-            agentPath: "/root/reviewer",
-          },
-        },
-      },
-    });
-
-    expect(projected.payload).toMatchObject({
-      data: {
-        item: {
-          type: "subAgentActivity",
-          tool: "spawnAgent",
-          kind: "started",
-          agentThreadId: "child-thread-1",
-          agentPath: "/root/reviewer",
-          receiverThreadIds: ["child-thread-1"],
-          status: "inProgress",
-        },
-      },
-    });
-  });
-
-  it("projects a Codex subagent interaction as a message rather than a spawn", () => {
-    const projected = projectActivityPayload(
-      makeSubagentActivity({
-        item: {
-          type: "subAgentActivity",
-          kind: "interacted",
-          agentThreadId: "parent-thread-1",
-          agentPath: "/root",
-        },
-      }),
-    );
-
-    expect(projected.payload).toMatchObject({
-      data: {
-        item: {
-          type: "subAgentActivity",
-          tool: "sendInput",
-          kind: "interacted",
-          agentThreadId: "parent-thread-1",
-        },
-      },
-    });
-  });
-
-  it("preserves Claude Task model and effort metadata", () => {
-    const projected = projectActivityPayload(
-      makeSubagentActivity({
-        toolName: "Task",
-        input: {
-          prompt: "Review the change",
-          model: "sonnet",
-          effort: "max",
-          ignored: "large provider field",
-        },
-      }),
-    );
-
-    expect(projected.payload).toMatchObject({
-      data: {
-        input: {
-          model: "sonnet",
-          effort: "max",
-        },
-      },
-    });
-    expect(JSON.stringify(projected.payload)).not.toContain("large provider field");
-  });
-});
-
-function makeActivity(payload: Record<string, unknown>): OrchestrationThreadActivity {
-  return {
-    id: EventId.make("activity-1"),
+    id: "activity-1",
     tone: "tool",
     kind: "tool.completed",
     summary: "Tool",
     payload,
     turnId: null,
     createdAt: "2026-08-01T10:00:00.000Z",
-  };
+  } as unknown as OrchestrationThreadActivity;
 }
 
 /**
@@ -165,7 +23,7 @@ function makeActivity(payload: Record<string, unknown>): OrchestrationThreadActi
 describe("projectActivityPayload", () => {
   it("preserves tool attribution (agentId/parentToolUseId) through data slimming", () => {
     const projected = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "command_execution",
         agentId: "task-123",
         parentToolUseId: "toolu_abc",
@@ -178,17 +36,17 @@ describe("projectActivityPayload", () => {
         },
       }),
     );
-
     const payload = projected.payload as Record<string, unknown>;
     expect(payload.agentId).toBe("task-123");
     expect(payload.parentToolUseId).toBe("toolu_abc");
+    // Slimming itself still applies to data.
     const data = payload.data as Record<string, unknown>;
     expect(data.somethingClientNeverReads).toBeUndefined();
   });
 
   it("keeps a bounded Codex command output summary", () => {
     const projected = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "command_execution",
         data: {
           item: {
@@ -208,13 +66,13 @@ describe("projectActivityPayload", () => {
 
   it("keeps preview normalization and fence-only fallback while scanning lines", () => {
     const preview = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "command_execution",
         data: { rawOutput: `\`\`\`\n  actual\tresult  \n${"x".repeat(5000)}` },
       }),
     );
     const fences = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "command_execution",
         data: { rawOutput: "```\r\n \t \n```\n" },
       }),
@@ -230,7 +88,7 @@ describe("projectActivityPayload", () => {
 
   it("keeps bounded Claude and ACP command output summaries", () => {
     const claude = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "command_execution",
         data: {
           command: "printf hello",
@@ -239,7 +97,7 @@ describe("projectActivityPayload", () => {
       }),
     );
     const acp = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "command_execution",
         data: {
           command: "printf hello",
@@ -263,7 +121,7 @@ describe("projectActivityPayload", () => {
 
   it("keeps bounded Claude command input and result summaries", () => {
     const claude = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "command_execution",
         toolCallId: "claude-call-1",
         data: {
@@ -280,7 +138,7 @@ describe("projectActivityPayload", () => {
       }),
     );
     const openCode = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "command_execution",
         toolCallId: "opencode-call-1",
         data: {
@@ -313,7 +171,7 @@ describe("projectActivityPayload", () => {
   it("keeps full Claude Read image paths through repeated projection", () => {
     const imagePath = `/workspace/${"nested folder/".repeat(16)}reference image.webp`;
     const projected = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "dynamic_tool_call",
         detail: 'Read: {"file_path":"truncated..."}',
         data: {
@@ -329,7 +187,7 @@ describe("projectActivityPayload", () => {
     expect(projectedAgain.payload).toMatchObject({ data: { imagePath } });
 
     const textRead = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "dynamic_tool_call",
         data: { toolName: "Read", input: { file_path: "/workspace/src/index.ts" } },
       }),
@@ -339,7 +197,7 @@ describe("projectActivityPayload", () => {
 
   it("slims Codex-shaped mcp_tool_call items to rendered fields plus a result summary", () => {
     const projected = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "mcp_tool_call",
         data: {
           item: {
@@ -359,7 +217,6 @@ describe("projectActivityPayload", () => {
         },
       }),
     );
-
     const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
     const item = data.item as Record<string, unknown>;
     expect(item.tool).toBe("fetch_pr");
@@ -370,9 +227,9 @@ describe("projectActivityPayload", () => {
     expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
   });
 
-  it("slims Claude-shaped mcp_tool_call data", () => {
+  it("slims Claude-shaped mcp_tool_call data (toolName/input/result block)", () => {
     const projected = projectActivityPayload(
-      makeActivity({
+      activity({
         itemType: "mcp_tool_call",
         data: {
           toolName: "mcp__github__fetch_pr",
@@ -385,7 +242,6 @@ describe("projectActivityPayload", () => {
         },
       }),
     );
-
     const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
     expect(data.toolName).toBe("mcp__github__fetch_pr");
     expect(data.input).toEqual({ pr: 42 });
@@ -393,8 +249,86 @@ describe("projectActivityPayload", () => {
     expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
   });
 
-  it("passes task lifecycle payloads through untouched", () => {
-    const source = makeActivity({
+  it.each([
+    {
+      item: {
+        server: "t3-code",
+        tool: "preview_open",
+        result: { structuredContent: { url: "https://example.com/" } },
+      },
+    },
+    {
+      toolName: "mcp__t3-code__preview_navigate",
+      result: { content: '{"url":"https://example.com/"}' },
+    },
+    { tool: "t3-code_preview_status", state: { output: '{"url":"https://example.com/"}' } },
+    {
+      toolName: "mcp__t3_code__preview_snapshot",
+      result: {
+        content: [
+          { type: "text", text: '{"url":"https://example.com/"}' },
+          { type: "text", text: "Snapshot text was bounded. Omitted: accessibilityTree." },
+        ],
+      },
+    },
+    {
+      toolName: "mcp__t3-code__preview_click",
+      result: { content: '{"toolIcon":{"_tag":"website","pageUrl":"https://example.com/"}}' },
+    },
+    {
+      toolName: "mcp__t3_code__preview_snapshot",
+      result: { content: '{"url":"https://example.com/"}\n{"accessibilityTree":"truncated' },
+    },
+    ...[false, true].map((truncated) => ({
+      toolName: "mcp__t3_code__preview_snapshot",
+      result: {
+        content: JSON.stringify({
+          content: [{ type: "text", text: '{"url":"https://example.com/"}' }],
+          structuredContent: { url: "https://example.com/", visibleText: "page" },
+        }).slice(0, truncated ? -5 : undefined),
+      },
+    })),
+    ...[
+      "type",
+      "press",
+      "scroll",
+      "resize",
+      "set_appearance",
+      "evaluate",
+      "wait_for",
+      "recording_start",
+      "recording_stop",
+    ].map((action) => ({
+      toolName: `mcp__t3_code__preview_${action}`,
+      result: { content: '{"toolIcon":{"_tag":"website","pageUrl":"https://example.com/"}}' },
+    })),
+  ])("preserves the preview page favicon through result slimming", (data) => {
+    const projected = projectActivityPayload(activity({ itemType: "mcp_tool_call", data }));
+    const icon = { _tag: "website", pageUrl: "https://example.com/" };
+    expect(projected.payload).toMatchObject({ toolIcon: icon });
+    expect(projectActivityPayload(projected).payload).toMatchObject({ toolIcon: icon });
+  });
+
+  it.each([
+    { toolName: "mcp__other__preview_open", result: { content: '{"url":"https://example.com/"}' } },
+    {
+      toolName: "mcp__t3-code__preview_evaluate",
+      result: { content: '{"url":"https://example.com/"}' },
+    },
+    {
+      toolName: "mcp__t3-code__preview_open",
+      result: { isError: true, content: '{"url":"https://example.com/"}' },
+    },
+    { toolName: "mcp__t3-code__preview_open", result: { content: "malformed JSON" } },
+    { toolName: "mcp__t3-code__preview_open", result: { content: '{"url":"about:blank"}' } },
+  ])("keeps the fallback for unrelated tools, failed navigation, and missing page URLs", (data) => {
+    expect(
+      projectActivityPayload(activity({ itemType: "mcp_tool_call", data })).payload,
+    ).not.toHaveProperty("toolIcon");
+  });
+
+  it("passes task lifecycle payloads (no data field) through untouched", () => {
+    const source = activity({
       taskId: "task-9",
       title: "Audit auth",
       role: "explorer",
@@ -406,25 +340,7 @@ describe("projectActivityPayload", () => {
       runHandles: { runId: "run-1", scriptPath: "/tmp/wf.js" },
       timelineBypass: true,
     });
-
-    expect(projectActivityPayload(source).payload).toEqual(source.payload);
-  });
-
-  it("matches superseded tool updates by their composite lifecycle key", () => {
-    const turnId = TurnId.make("turn-1");
-    const activity = (id: string, kind: "tool.updated" | "tool.completed") => ({
-      ...makeActivity({ itemType: "command_execution", title: "Run tests" }),
-      id: EventId.make(id),
-      kind,
-      turnId,
-    });
-    const projected = projectThreadDetailSnapshot({
-      snapshotSequence: 1,
-      thread: {
-        activities: [activity("update", "tool.updated"), activity("complete", "tool.completed")],
-      },
-    } as unknown as OrchestrationThreadDetailSnapshot);
-
-    expect(projected.thread.activities.map(({ id }) => id)).toEqual(["complete"]);
+    const projected = projectActivityPayload(source);
+    expect(projected.payload).toEqual(source.payload);
   });
 });

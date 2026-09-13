@@ -7,6 +7,10 @@ import {
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
   PreviewAutomationRemoteUnavailableError,
+  PreviewAutomationRecordingTransferError,
+  PreviewAutomationRecordingDesktopUpdateRequiredError,
+  PreviewAutomationRecordingTooLargeError,
+  PreviewAutomationRecordingDeadlineExpiredError,
   PreviewAutomationRequestQueueClosedError,
   PreviewAutomationResultTooLargeError,
   PreviewAutomationTabNotFoundError,
@@ -44,6 +48,10 @@ export interface PreviewAutomationInvokeInput {
   readonly input: unknown;
   readonly tabId?: PreviewTabId;
   readonly timeoutMs?: number;
+  /** Background metadata reads must not change the agent's current tab. */
+  readonly updateCurrentTab?: boolean;
+  /** Capture the routed tab before another request changes the current assignment. */
+  readonly onTargetTab?: (tabId: PreviewTabId | undefined) => void;
 }
 
 export class PreviewAutomationBroker extends Context.Service<
@@ -165,19 +173,29 @@ const selectorDiagnosticsFromInput = (
 
 const hostAssignmentKey = (scope: McpInvocationContext.McpInvocationScope): string =>
   `${scope.environmentId}\u0000${
-    scope.principal.type === "provider-session"
+    scope.principal?.type === "provider-session"
       ? scope.principal.providerSessionId
-      : `management-key:${scope.principal.keyId}`
+      : scope.principal?.type === "management-key"
+        ? `management-key:${scope.principal.keyId}`
+        : (scope.providerSessionId ?? "legacy")
   }`;
 
 const providerPreviewContext = (scope: McpInvocationContext.McpInvocationScope) =>
-  scope.principal.type === "provider-session"
+  scope.principal?.type === "provider-session"
     ? {
         threadId: scope.principal.threadId,
         providerSessionId: scope.principal.providerSessionId,
         providerInstanceId: scope.principal.providerInstanceId,
       }
-    : undefined;
+    : scope.threadId !== undefined &&
+        scope.providerSessionId !== undefined &&
+        scope.providerInstanceId !== undefined
+      ? {
+          threadId: scope.threadId,
+          providerSessionId: scope.providerSessionId,
+          providerInstanceId: scope.providerInstanceId,
+        }
+      : providerPreviewFallback;
 
 const isPreviewTabId = Schema.is(PreviewTabId);
 
@@ -220,6 +238,26 @@ const classifyResponseError = (
     cause: error,
   };
   switch (error._tag) {
+    case "PreviewAutomationRecordingDesktopUpdateRequiredError":
+      return new PreviewAutomationRecordingDesktopUpdateRequiredError({
+        threadId: context.threadId,
+        cause: error,
+      });
+    case "PreviewAutomationRecordingTooLargeError":
+      return new PreviewAutomationRecordingTooLargeError({
+        threadId: context.threadId,
+        cause: error,
+      });
+    case "PreviewAutomationRecordingDeadlineExpiredError":
+      return new PreviewAutomationRecordingDeadlineExpiredError({
+        threadId: context.threadId,
+        cause: error,
+      });
+    case "PreviewAutomationRecordingTransferError":
+      return new PreviewAutomationRecordingTransferError({
+        threadId: context.threadId,
+        cause: error,
+      });
     case "PreviewAutomationNoAvailableHostError":
       return new PreviewAutomationNoAvailableHostError({
         ...context,
@@ -594,6 +632,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       });
     }
     const { connection, requestId, requestContext, requestSequence } = route;
+    input.onTargetTab?.(requestContext.tabId);
     const removePending = SynchronizedRef.update(state, (next) => {
       if (!next.pending.has(requestId)) return next;
       const pending = new Map(next.pending);
@@ -638,6 +677,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       });
     });
     const result = yield* awaitResponse().pipe(Effect.ensuring(removePending));
+    if (input.updateCurrentTab === false) return result;
     const responseTabId = readResultTabId(result);
     const resultTabId = responseTabId === undefined ? input.tabId : responseTabId;
     if (resultTabId === undefined) return result;

@@ -153,7 +153,6 @@ export function useWorktreesOnce(target: Pick<VcsRefTarget, "environmentId" | "c
       : null,
   );
 }
-
 export function usePaginatedBranches(target: VcsRefTarget) {
   const query = target.query?.trim() ?? "";
   const targetKey =

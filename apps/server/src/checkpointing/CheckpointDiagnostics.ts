@@ -28,7 +28,7 @@ export interface CheckpointDiagnosticsSummary {
   };
 }
 
-export class CheckpointDiagnosticsError extends Schema.TaggedErrorClass<CheckpointDiagnosticsError>()(
+export class CheckpointDiagnosticsError extends Schema.TaggedError<CheckpointDiagnosticsError>()(
   "CheckpointDiagnosticsError",
   { operation: Schema.String, cause: Schema.Defect() },
 ) {}

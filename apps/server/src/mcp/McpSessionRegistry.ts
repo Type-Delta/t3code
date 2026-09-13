@@ -14,6 +14,7 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly capabilities: ReadonlySet<McpInvocationContext.McpCapability>;
 }
 
 export interface McpIssuedCredential {
@@ -68,7 +69,7 @@ export interface McpSessionRegistryOptions {
  *
  * The bound matters because `/mcp` is mounted outside the environment auth
  * stack and is reachable on whatever host the server binds to, so this token is
- * the only thing guarding the preview toolkit on a remote-reachable server.
+ * the only thing guarding the `t3-code` toolkits on a remote-reachable server.
  */
 const DEFAULT_LIVENESS_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
@@ -133,6 +134,13 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerSessionId,
           providerInstanceId,
         },
+        threadId,
+        providerSessionId,
+        providerInstanceId,
+        capabilities: new Set<McpInvocationContext.McpCapability>([
+          "pull-requests",
+          ...request.capabilities,
+        ]),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {
@@ -148,6 +156,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerInstanceId,
           endpoint,
           authorizationHeader: `Bearer ${rawToken}`,
+          capabilities: scope.capabilities ?? new Set(),
         },
       };
     },
@@ -177,7 +186,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         const next = new Map(current);
         for (const [tokenHash, record] of current) {
           if (
-            record.scope.principal.type === "provider-session" &&
+            McpInvocationContext.isProviderSessionPrincipal(record.scope.principal) &&
             record.scope.principal.threadId === threadId
           ) {
             next.set(tokenHash, { ...record, lastAliveAt: timestamp });
@@ -201,7 +210,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       function* (providerSessionId) {
         yield* revokeWhere(
           (record) =>
-            record.scope.principal.type === "provider-session" &&
+            McpInvocationContext.isProviderSessionPrincipal(record.scope.principal) &&
             record.scope.principal.providerSessionId === providerSessionId,
         );
       },
@@ -209,7 +218,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
       yield* revokeWhere(
         (record) =>
-          record.scope.principal.type === "provider-session" &&
+          McpInvocationContext.isProviderSessionPrincipal(record.scope.principal) &&
           record.scope.principal.threadId === threadId,
       );
     }),

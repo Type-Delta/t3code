@@ -1,23 +1,18 @@
 import {
   CommandId,
   EnvironmentId,
-  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
-  ProviderInstanceId,
   ThreadId,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import * as TestClock from "effect/testing/TestClock";
 
-import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
@@ -29,12 +24,10 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   archiveThread,
   createProject,
-  jumpThreadCheckpoint,
-  redoThreadCheckpoint,
+  revertThreadCheckpoint,
+  reorderActiveThread,
   settleThread,
-  startThreadTurn,
   stopThreadSession,
-  undoThreadCheckpoint,
   unsettleThread,
 } from "./commands.ts";
 
@@ -109,6 +102,27 @@ describe("environment commands", () => {
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
+  it.effect("uses a distinct command when keeping workspace changes", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+      for (const restoreFiles of [undefined, true, false]) {
+        yield* revertThreadCheckpoint({
+          commandId: CommandId.make("rewind-command"),
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 0,
+          ...(restoreFiles !== undefined ? { restoreFiles } : {}),
+          createdAt: "2026-06-06T00:01:00.000Z",
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      }
+      expect(dispatched.map((command) => command.type)).toEqual([
+        "thread.checkpoint.revert",
+        "thread.checkpoint.revert",
+        "thread.conversation.revert",
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
   it.effect("preserves caller metadata for idempotent queued commands", () =>
     Effect.gen(function* () {
       const dispatched: ClientOrchestrationCommand[] = [];
@@ -131,47 +145,6 @@ describe("environment commands", () => {
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
-  it.effect("fails an unacknowledged turn start instead of leaving it optimistic forever", () =>
-    Effect.gen(function* () {
-      const supervisor = yield* makeSupervisor([]);
-      const stalledSupervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
-        ...supervisor,
-        session: yield* SubscriptionRef.make(
-          Option.some({
-            ...(yield* SubscriptionRef.get(supervisor.session).pipe(Effect.map(Option.getOrThrow))),
-            client: {
-              [ORCHESTRATION_WS_METHODS.dispatchCommand]: () => Effect.never,
-            } as unknown as WsRpcProtocolClient,
-          }),
-        ),
-      });
-      const fiber = yield* Effect.forkChild(
-        startThreadTurn({
-          threadId: ThreadId.make("thread-1"),
-          message: {
-            messageId: MessageId.make("message-1"),
-            role: "user",
-            text: "do not disappear",
-            attachments: [],
-          },
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5.6-sol",
-          },
-          runtimeMode: "full-access",
-          interactionMode: "default",
-        }).pipe(
-          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, stalledSupervisor),
-          Effect.flip,
-        ),
-      );
-
-      yield* TestClock.adjust("10 seconds");
-      const error = yield* Fiber.join(fiber);
-      expect(error).toBeInstanceOf(EnvironmentRpcUnavailableError);
-    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
-  );
-
   it.effect("does not add timestamps to commands without createdAt", () =>
     Effect.gen(function* () {
       const dispatched: ClientOrchestrationCommand[] = [];
@@ -189,41 +162,6 @@ describe("environment commands", () => {
           threadId: "thread-1",
         },
       ]);
-    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
-  );
-
-  it.effect("dispatches checkpoint undo, redo, and jump commands", () =>
-    Effect.gen(function* () {
-      const dispatched: ClientOrchestrationCommand[] = [];
-      const supervisor = yield* makeSupervisor(dispatched);
-      const run = Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor);
-
-      yield* undoThreadCheckpoint({
-        commandId: CommandId.make("undo-command"),
-        threadId: ThreadId.make("thread-1"),
-        filesOnlyConfirmed: true,
-        createdAt: "2026-06-06T00:01:00.000Z",
-      }).pipe(run);
-      yield* redoThreadCheckpoint({
-        commandId: CommandId.make("redo-command"),
-        threadId: ThreadId.make("thread-1"),
-        createdAt: "2026-06-06T00:02:00.000Z",
-      }).pipe(run);
-      yield* jumpThreadCheckpoint({
-        commandId: CommandId.make("jump-command"),
-        threadId: ThreadId.make("thread-1"),
-        turnCount: 2,
-        filesOnlyConfirmed: true,
-        createdAt: "2026-06-06T00:03:00.000Z",
-      }).pipe(run);
-
-      expect(dispatched.map((command) => command.type)).toEqual([
-        "thread.checkpoint.undo",
-        "thread.checkpoint.redo",
-        "thread.checkpoint.jump",
-      ]);
-      expect(dispatched[0]).toMatchObject({ filesOnlyConfirmed: true });
-      expect(dispatched[2]).toMatchObject({ filesOnlyConfirmed: true });
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
   );
 
@@ -253,6 +191,26 @@ describe("environment commands", () => {
           commandId: "unsettle-command",
           threadId: "thread-1",
           reason: "user",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("sends an active order key without changing activity timestamps", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+      yield* reorderActiveThread({
+        commandId: CommandId.make("reorder-command"),
+        threadId: ThreadId.make("thread-1"),
+        orderKey: "mf",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+      expect(dispatched).toEqual([
+        {
+          type: "thread.active.reorder",
+          commandId: "reorder-command",
+          threadId: "thread-1",
+          orderKey: "mf",
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),

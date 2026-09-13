@@ -47,7 +47,7 @@ function statusWithoutLiveData(data: Option.Option<OrchestrationThread>): Enviro
  * observed threads stays around 100K gzipped while median threads load fully.
  */
 export const INITIAL_THREAD_USER_TURN_LIMIT = 10;
-export const OLDER_THREAD_PAGE_USER_TURN_LIMIT = 20;
+const OLDER_THREAD_PAGE_USER_TURN_LIMIT = 20;
 
 function snapshotUserTurnLimit(snapshot: OrchestrationThreadDetailSnapshot): number | null {
   return snapshot.page === undefined
@@ -107,7 +107,7 @@ const defaultOlderTurnRequestRegistry = makeThreadOlderTurnRequestRegistry();
  * instance is shared with the sync `requestOlderThreadTurns` entry point so
  * the apps get working wiring without providing anything.
  */
-export class ThreadOlderTurnRequests extends Context.Reference<ThreadOlderTurnRequestRegistry>(
+class ThreadOlderTurnRequests extends Context.Reference<ThreadOlderTurnRequestRegistry>(
   "@t3tools/client-runtime/state/threads/ThreadOlderTurnRequests",
   { defaultValue: () => defaultOlderTurnRequestRegistry },
 ) {}
@@ -165,10 +165,18 @@ function matchesThreadSnapshot(
         currentPage.hasMore === page.hasMore;
 }
 
+// A retained "live" state stays live: the cursor resume that follows only
+// replays what the thread missed, and on servers that send the completion
+// marker the first replayed event moves the status to "synchronizing" on its
+// own. Downgrading here would flash a sync label on every return to a
+// recently viewed thread.
 function cachedThreadState(value: EnvironmentThreadState): EnvironmentThreadState {
   return {
     ...value,
-    status: value.status === "deleted" ? "deleted" : statusWithoutLiveData(value.data),
+    status:
+      value.status === "deleted" || (value.status === "live" && Option.isSome(value.data))
+        ? value.status
+        : statusWithoutLiveData(value.data),
     error: Option.none(),
     page: Option.map(value.page, (page) => ({ ...page, loadingOlder: false })),
   };
@@ -326,8 +334,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Effect.forkScoped,
   );
 
-  const setSynchronizing = SubscriptionRef.update(state, (current) =>
-    current.status === "deleted"
+  const setConnecting = SubscriptionRef.update(state, (current) =>
+    current.status === "deleted" || Option.isSome(current.error)
       ? current
       : {
           ...current,
@@ -336,7 +344,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         },
   );
   const setReady = SubscriptionRef.update(state, (current) =>
-    current.status === "live" || current.status === "deleted"
+    current.status === "live" || current.status === "deleted" || Option.isSome(current.error)
       ? current
       : {
           ...current,
@@ -357,14 +365,14 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       status: current.status === "deleted" ? current.status : statusWithoutLiveData(current.data),
     }));
   });
-  const setStreamError = (cause: Cause.Cause<unknown>) =>
+  const setStreamError = (message: string) =>
     Ref.set(awaitingCompletion, false).pipe(
       Effect.andThen(
         SubscriptionRef.update(state, (current) => ({
           ...current,
           status:
             current.status === "deleted" ? current.status : statusWithoutLiveData(current.data),
-          error: Option.some(formatThreadError(cause)),
+          error: Option.some(message),
         })),
       ),
     );
@@ -378,8 +386,13 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     const waiting = yield* Ref.get(awaitingCompletion);
     yield* SubscriptionRef.update(state, (current) => ({
       data: Option.some(thread),
-      status: waiting ? ("synchronizing" as const) : ("live" as const),
-      error: Option.none(),
+      // Buffered values from the failed attempt can still arrive after its error.
+      status: Option.isSome(current.error)
+        ? ("cached" as const)
+        : waiting
+          ? ("synchronizing" as const)
+          : ("live" as const),
+      error: current.error,
       page: page === "keep" ? current.page : page,
     }));
     // Active threads can update many times per second and retain large tool
@@ -482,7 +495,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     if (item.kind === "synchronized") {
       yield* Ref.set(awaitingCompletion, false);
       yield* SubscriptionRef.update(state, (current) =>
-        Option.isSome(current.data) && current.status !== "deleted"
+        Option.isSome(current.data) && current.status !== "deleted" && Option.isNone(current.error)
           ? { ...current, status: "live" as const, error: Option.none() }
           : current,
       );
@@ -585,6 +598,49 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       // timeline from the compact completion event.
       yield* refetchThreadDetail(item.event.sequence);
     }
+  });
+
+  const applyItems = Effect.fn("EnvironmentThreadState.applyItems")(function* (
+    items: ReadonlyArray<OrchestrationThreadStreamItem>,
+  ) {
+    yield* applyLock.withPermits(1)(
+      Effect.gen(function* () {
+        const current = yield* SubscriptionRef.get(state);
+        if (
+          Option.isNone(current.data) ||
+          (yield* Ref.get(pendingOlderPage)) !== null ||
+          items.some(
+            (item) =>
+              item.kind === "snapshot" ||
+              (item.kind === "event" &&
+                (item.event.type === "thread.reverted" || item.event.type === "thread.deleted")),
+          )
+        ) {
+          for (const item of items) {
+            yield* applyItemLocked(item);
+            yield* remember;
+          }
+          return;
+        }
+
+        let thread = current.data.value;
+        let sequence = yield* SubscriptionRef.get(lastSequence);
+        let synchronized = false;
+        for (const item of items) {
+          if (item.kind === "synchronized") {
+            synchronized = true;
+          } else if (item.kind === "event" && item.event.sequence > sequence) {
+            sequence = item.event.sequence;
+            const result = applyThreadDetailEvent(thread, item.event);
+            if (result.kind === "updated") thread = result.thread;
+          }
+        }
+        yield* SubscriptionRef.set(lastSequence, sequence);
+        if (thread !== current.data.value) yield* setThread(thread, "keep");
+        if (synchronized) yield* applyItemLocked({ kind: "synchronized" });
+        yield* remember;
+      }),
+    );
   });
 
   // Merges an older disjoint page below the currently loaded window. All four
@@ -736,7 +792,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     Stream.runForEach((connectionState) => {
       switch (connectionProjectionPhase(connectionState)) {
         case "synchronizing":
-          return setSynchronizing;
+          return setConnecting;
         case "disconnected":
           return setDisconnected;
         case "ready":
@@ -752,7 +808,22 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       service.changes.pipe(Stream.filter(ConnectionWakeups.shouldResubscribeAfterWakeup)),
   });
 
-  yield* setSynchronizing;
+  // Only the first subscription after a warm live resume keeps the retained
+  // status. A replacement session or foreground resubscribe on the same scope
+  // may have missed events, so those show sync progress until confirmed.
+  const resumingLive = yield* Ref.make(initialState.status === "live");
+  const markSynchronizing = Effect.gen(function* () {
+    if (yield* Ref.get(resumingLive)) return;
+    // Connection notifications do not establish that a terminated load restarted.
+    // Clear its diagnostic only when this subscription actually tries again.
+    yield* SubscriptionRef.update(state, (current) =>
+      current.status === "deleted"
+        ? current
+        : { ...current, status: "synchronizing" as const, error: Option.none() },
+    );
+  });
+
+  yield* markSynchronizing;
   yield* Effect.forkScoped(
     subscribeDynamic(
       ORCHESTRATION_WS_METHODS.subscribeThread,
@@ -773,7 +844,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         const supportsPagination = config.threadSnapshotPagination === true;
         yield* Ref.set(paginationSupported, supportsPagination);
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
-        yield* setSynchronizing;
+        yield* markSynchronizing;
+        yield* Ref.set(resumingLive, false);
 
         let current = yield* SubscriptionRef.get(state);
         // A windowed cache resuming against a server without pagination is a
@@ -845,11 +917,16 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         };
       }),
       {
-        onExpectedFailure: setStreamError,
+        onDefect: () => setStreamError("Could not synchronize the thread."),
+        onExpectedFailure: (cause) => setStreamError(formatThreadError(cause)),
         retryExpectedFailureAfter: "250 millis",
         resubscribe: foregroundResubscriptions,
       },
-    ).pipe(Stream.runForEach(applyItem)),
+    ).pipe(
+      Stream.runForEachArray((items) =>
+        items.length === 1 ? applyItem(items[0]!) : applyItems(items),
+      ),
+    ),
   );
 
   // Expose loadOlderTurns to UI actions through the request registry.
@@ -901,7 +978,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   return state;
 });
 
-export function threadStateChanges(
+function threadStateChanges(
   environmentId: EnvironmentIdType,
   threadId: ThreadIdType,
   resumeCache?: ThreadResumeCache,

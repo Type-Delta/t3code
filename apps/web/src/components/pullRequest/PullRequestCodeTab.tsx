@@ -187,7 +187,7 @@ function getReviewPositionAnchor(position: PullRequestReviewPosition): {
  * host sit under the line they were written on, and a new comment joins the review being
  * drafted rather than being posted as it is typed.
  */
-export function PullRequestCodeTab({
+function PullRequestCodeTab({
   environmentId,
   reference,
   detail,
@@ -485,7 +485,11 @@ export function PullRequestCodeTab({
           groupAt(anchor.side, anchor.line).draft = true;
         }
 
-        const collapsed = isFileDiffCollapsed(fileKey, foldOverride, toggledFiles);
+        const collapsed = isFileDiffCollapsed(
+          fileKey,
+          foldOverride ?? (settings.diffFilesCollapsed ? "folded" : "expanded"),
+          toggledFiles,
+        );
 
         const annotations: ReviewAnnotation[] = [...groups.values()].map((group) => ({
           side: toViewerSide(group.side),
@@ -538,6 +542,7 @@ export function PullRequestCodeTab({
       foldOverride,
       pendingComments,
       placedThreadIds,
+      settings.diffFilesCollapsed,
       toggledFiles,
     ],
   );

@@ -33,6 +33,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneration.ts";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
+import { expandHomePath } from "../../pathExpansion.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
@@ -70,7 +71,6 @@ import {
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
-import { expandHomePath } from "../../pathExpansion.ts";
 import { fetchCodexSubscriptionUsage } from "../subscriptionUsage.ts";
 import {
   makeGatewayModelCatalog,
@@ -217,6 +217,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const effectiveConfig = {
         ...config,
         enabled,
+        binaryPath: expandHomePath(config.binaryPath),
         homePath: homeLayout.effectiveHomePath ?? "",
         launchArgs: effectiveLaunchArgs,
       } satisfies CodexSettings;
@@ -268,7 +269,6 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         resolveModelContextWindow: (model) => modelContextWindows[model],
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, effectiveProcessEnv);
 
       // Build a managed snapshot whose settings never change — mutations come
       // in as instance rebuilds from the registry rather than in-place
@@ -357,6 +357,11 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               cause,
             }),
         ),
+      );
+      const textGeneration = yield* makeCodexTextGeneration(
+        effectiveConfig,
+        processEnv,
+        snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
       );
       const snapshotForCwd = (cwd: string) =>
         !effectiveConfig.enabled

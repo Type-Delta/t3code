@@ -21,7 +21,7 @@ export interface CheckpointStartupReport {
   readonly scavengedTemporaryDirectories: number;
 }
 
-class CheckpointStartupTaskError extends Schema.TaggedErrorClass<CheckpointStartupTaskError>()(
+class CheckpointStartupTaskError extends Schema.TaggedError<CheckpointStartupTaskError>()(
   "CheckpointStartupTaskError",
   { operation: Schema.String, cause: Schema.Defect() },
 ) {}

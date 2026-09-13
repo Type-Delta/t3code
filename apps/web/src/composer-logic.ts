@@ -7,9 +7,8 @@ import {
   splitPromptIntoComposerSegments,
   type ComposerPromptSegment,
 } from "./composer-editor-mentions";
-import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
 
-export type ComposerTriggerKind = "path" | "slash-command" | "skill";
+export type ComposerTriggerKind = "path" | "pull-request" | "slash-command" | "skill";
 export type ComposerSlashCommand = "model" | "plan" | "default" | "undo" | "redo";
 export type CheckpointNavigationCommand = "undo" | "redo" | "jump";
 
@@ -121,13 +120,7 @@ function clampCursor(text: string, cursor: number): number {
 }
 
 function isWhitespace(char: string): boolean {
-  return (
-    char === " " ||
-    char === "\n" ||
-    char === "\t" ||
-    char === "\r" ||
-    char === INLINE_TERMINAL_CONTEXT_PLACEHOLDER
-  );
+  return char === " " || char === "\n" || char === "\t" || char === "\r";
 }
 
 function tokenStartForCursor(text: string, cursor: number): number {
@@ -149,7 +142,11 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
   let expandedCursor = 0;
 
   for (const segment of segments) {
-    if (segment.type === "mention" || segment.type === "citation") {
+    if (
+      segment.type === "mention" ||
+      segment.type === "citation" ||
+      segment.type === "context-reference"
+    ) {
       const expandedLength = segment.source.length;
       if (remaining <= 1) {
         return expandedCursor + (remaining === 0 ? 0 : expandedLength);
@@ -165,14 +162,6 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
       }
       remaining -= 1;
       expandedCursor += expandedLength;
-      continue;
-    }
-    if (segment.type === "terminal-context") {
-      if (remaining <= 1) {
-        return expandedCursor + remaining;
-      }
-      remaining -= 1;
-      expandedCursor += 1;
       continue;
     }
 
@@ -226,7 +215,11 @@ export function collapseExpandedComposerCursor(text: string, cursorInput: number
   let collapsedCursor = 0;
 
   for (const segment of segments) {
-    if (segment.type === "mention" || segment.type === "citation") {
+    if (
+      segment.type === "mention" ||
+      segment.type === "citation" ||
+      segment.type === "context-reference"
+    ) {
       const expandedLength = segment.source.length;
       if (remaining === 0) {
         return collapsedCursor;
@@ -247,14 +240,6 @@ export function collapseExpandedComposerCursor(text: string, cursorInput: number
         return collapsedCursor + 1;
       }
       remaining -= expandedLength;
-      collapsedCursor += 1;
-      continue;
-    }
-    if (segment.type === "terminal-context") {
-      if (remaining <= 1) {
-        return collapsedCursor + remaining;
-      }
-      remaining -= 1;
       collapsedCursor += 1;
       continue;
     }
@@ -318,6 +303,15 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
 
   const tokenStart = tokenStartForCursor(text, cursor);
   const token = text.slice(tokenStart, cursor);
+  const pullRequestMatch = /^#([\p{L}\p{N}][\p{L}\p{N}_-]*)?$/u.exec(token);
+  if (pullRequestMatch) {
+    return {
+      kind: "pull-request",
+      query: pullRequestMatch[1] ?? "",
+      rangeStart: tokenStart,
+      rangeEnd: cursor,
+    };
+  }
   if (token.startsWith("$")) {
     return {
       kind: "skill",

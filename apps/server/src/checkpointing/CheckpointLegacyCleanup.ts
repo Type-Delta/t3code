@@ -10,7 +10,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as CheckpointMigration from "./CheckpointMigration.ts";
 import { sanitizedGitEnvironment } from "./CheckpointRepositoryIdentity.ts";
 
-export class CheckpointLegacyCleanupError extends Schema.TaggedErrorClass<CheckpointLegacyCleanupError>()(
+export class CheckpointLegacyCleanupError extends Schema.TaggedError<CheckpointLegacyCleanupError>()(
   "CheckpointLegacyCleanupError",
   { operation: Schema.String, cause: Schema.Defect() },
 ) {}

@@ -30,6 +30,7 @@ function makeThread(): Thread {
     messages: [],
     activities: [],
     proposedPlans: [],
+    pullRequests: [],
     checkpoints: [
       {
         turnId: TurnId.make("turn-stale"),

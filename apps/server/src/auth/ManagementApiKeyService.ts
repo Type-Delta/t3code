@@ -61,7 +61,7 @@ type RotateFinishResult = {
   readonly released: boolean;
 };
 
-export class ManagementApiKeyValidationError extends Schema.TaggedErrorClass<ManagementApiKeyValidationError>()(
+export class ManagementApiKeyValidationError extends Schema.TaggedError<ManagementApiKeyValidationError>()(
   "ManagementApiKeyValidationError",
   {
     reason: Schema.Literals(["empty_scopes", "duplicate_scopes", "expired_at_creation"]),
@@ -79,7 +79,7 @@ export class ManagementApiKeyValidationError extends Schema.TaggedErrorClass<Man
   }
 }
 
-export class ManagementApiKeyServiceInternalError extends Schema.TaggedErrorClass<ManagementApiKeyServiceInternalError>()(
+export class ManagementApiKeyServiceInternalError extends Schema.TaggedError<ManagementApiKeyServiceInternalError>()(
   "ManagementApiKeyServiceInternalError",
   {
     operation: Schema.String,

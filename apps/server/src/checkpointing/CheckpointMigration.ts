@@ -23,7 +23,7 @@ export interface ImportedLegacyCheckpoint {
   readonly treeOid: string;
 }
 
-export class CheckpointMigrationPersistenceError extends Schema.TaggedErrorClass<CheckpointMigrationPersistenceError>()(
+export class CheckpointMigrationPersistenceError extends Schema.TaggedError<CheckpointMigrationPersistenceError>()(
   "CheckpointMigrationPersistenceError",
   {
     operation: Schema.String,

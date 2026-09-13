@@ -10,6 +10,7 @@ import {
   registerConnectionInCatalog,
   removeCatalogValue,
   removeConnectionFromCatalog,
+  setConnectionEnabledInCatalog,
   replaceCatalogValue,
 } from "@t3tools/client-runtime/platform";
 import { TokenStore } from "@t3tools/client-runtime/authorization";
@@ -33,6 +34,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import { projectFaviconCache } from "../assets/projectFaviconCache";
 
 const DATABASE_NAME = "t3code:connection-runtime";
 const DATABASE_VERSION = 4;
@@ -98,8 +100,10 @@ function catalogError(operation: string, cause: unknown) {
 function persistenceError(
   operation:
     | "list-targets"
+    | "list-disabled-targets"
     | "register-connection"
     | "remove-connection"
+    | "set-connection-enabled"
     | "load-shell"
     | "save-shell"
     | "load-thread"
@@ -376,6 +380,10 @@ export const connectionStorageLayer = Layer.effectContext(
         Effect.map((document) => document.targets),
         Effect.mapError((cause) => persistenceError("list-targets", cause)),
       ),
+      listDisabled: catalog.read.pipe(
+        Effect.map((document) => document.disabledEnvironmentIds),
+        Effect.mapError((cause) => persistenceError("list-disabled-targets", cause)),
+      ),
     });
     const registrationStore = ConnectionRegistrationStore.of({
       register: (registration) =>
@@ -386,6 +394,10 @@ export const connectionStorageLayer = Layer.effectContext(
         catalog
           .update((document) => removeConnectionFromCatalog(document, target))
           .pipe(Effect.mapError((cause) => persistenceError("remove-connection", cause))),
+      setEnabled: (environmentId, enabled) =>
+        catalog
+          .update((document) => setConnectionEnabledInCatalog(document, environmentId, enabled))
+          .pipe(Effect.mapError((cause) => persistenceError("set-connection-enabled", cause))),
     });
     const profileStore = ProfileStore.make({
       get: (connectionId) =>
@@ -461,6 +473,7 @@ export const connectionStorageLayer = Layer.effectContext(
     const cacheStore = EnvironmentCacheStore.of({
       loadShell: (environmentId) =>
         readDatabaseValue(database, SHELL_STORE_NAME, environmentId).pipe(
+          Effect.tap(() => Effect.promise(() => projectFaviconCache.hydrate())),
           Effect.flatMap((raw) => {
             if (typeof raw !== "string") {
               return Effect.succeed(Option.none());
@@ -638,6 +651,7 @@ export const connectionStorageLayer = Layer.effectContext(
       clear: (environmentId) =>
         Effect.all(
           [
+            Effect.promise(() => projectFaviconCache.clearEnvironment(environmentId)),
             removeDatabaseValue(database, SHELL_STORE_NAME, environmentId),
             removeDatabaseValuesInRange(
               database,
