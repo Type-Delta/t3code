@@ -567,6 +567,16 @@ This is an append-only historical decision record. It provides context for integ
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
 
+### 2026-09-14 — Post-merge migration repair (follow-up to the 2026-09-13 merge)
+
+The 2026-09-13 merge assigned upstream migrations `058`–`061` after the fork's deployed history, but the deployed fork database had already recorded a different `058` (`ProjectionThreadMessageSuggestions`, from the `feat/prompt-suggestion` line) under the same ID. The migrator tracks applied migrations by ID, so upstream's `058_ProjectionThreadBranchPullRequest` was silently skipped against the live database and the server crashed on startup (`no such column: branch_pull_request_json`).
+
+Repairs:
+
+- **Deployed database:** backed up (`VACUUM INTO`), then the skipped migration's DDL was applied by hand (`ALTER TABLE projection_threads ADD COLUMN branch_pull_request_json TEXT`) and the `effect_sql_migrations` record for ID 58 was corrected to `ProjectionThreadBranchPullRequest`.
+- **Code:** the fork's suggestion column migration was re-added as `062_ProjectionThreadMessageSuggestions` (import + manifest entry in `Migrations.ts`). It is deliberately idempotent — it checks for the column before altering — because deployed databases already carry `suggestion` from the old 058, while fresh databases (including upstream lineage) do not.
+- Validation: focused `vp test run` on `062_ProjectionThreadMessageSuggestions.test.ts` (2 passing: column added from empty, idempotent re-run), full `vp check` / `vp run typecheck` / web + server builds, service restart with HTTP 200 on `127.0.0.1:21013`, build stamp newer than HEAD.
+
 ### 2026-09-13 — Merge upstream/main into main
 
 **Merge commit:** this merge commit
