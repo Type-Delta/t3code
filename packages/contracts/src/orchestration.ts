@@ -164,6 +164,16 @@ export type ProviderApprovalOption = typeof ProviderApprovalOption.Type;
 export const ProviderUserInputAnswers = Schema.Record(Schema.String, Schema.Unknown);
 export type ProviderUserInputAnswers = typeof ProviderUserInputAnswers.Type;
 
+/**
+ * Client-local prompt suggestion preference carried with each turn request.
+ * The server treats an omitted preference the same as `{ enabled: false }`.
+ */
+export const PromptSuggestionPreference = Schema.Struct({
+  enabled: Schema.Boolean,
+  instructions: Schema.optionalKey(TrimmedString),
+});
+export type PromptSuggestionPreference = typeof PromptSuggestionPreference.Type;
+
 export const PROVIDER_SEND_TURN_MAX_INPUT_CHARS = 120_000;
 export const PROVIDER_SEND_TURN_MAX_ATTACHMENTS = 8;
 export const PROVIDER_SEND_TURN_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -503,6 +513,8 @@ export const OrchestrationMessage = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   subagentId: Schema.optional(TrimmedNonEmptyString),
   streaming: Schema.Boolean,
+  /** Agent-proposed next user prompt, extracted from the reply on completion. */
+  suggestion: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1287,6 +1299,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
+  promptSuggestion: Schema.optional(PromptSuggestionPreference),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   retryMessage: Schema.optional(Schema.Boolean),
@@ -1308,6 +1321,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  promptSuggestion: Schema.optional(PromptSuggestionPreference),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   retryMessage: Schema.optional(Schema.Boolean),
@@ -1505,6 +1519,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   messageId: MessageId,
   turnId: Schema.optional(TurnId),
   subagentId: Schema.optional(TrimmedNonEmptyString),
+  suggestion: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
 });
 
@@ -1897,6 +1912,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   subagentId: Schema.optional(TrimmedNonEmptyString),
   streaming: Schema.Boolean,
+  suggestion: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1910,6 +1926,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
+  promptSuggestion: Schema.optional(PromptSuggestionPreference),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   createdAt: IsoDateTime,
 });

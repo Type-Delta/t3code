@@ -169,6 +169,7 @@ import {
   formatAttachmentUploadProgress,
 } from "../../lib/attachmentUploadState";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
+import { useClientSettings } from "../../hooks/useSettings";
 import { getTerminalFocusOwner } from "../../lib/terminalFocus";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../../keybindings";
@@ -258,6 +259,7 @@ import {
   matchesPullRequestQuery,
   rankPullRequestMatches,
 } from "../pullRequest/pullRequestList.logic";
+import { usePromptSuggestion } from "./usePromptSuggestion";
 import {
   searchSlashCommandItems,
   slashCommandItemsForPromptPosition,
@@ -2485,6 +2487,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const isComposerApprovalState = activePendingApproval !== null;
+  const lastThreadMessage = activeThread?.messages.at(-1) ?? null;
+  const promptSuggestionEnabled = useClientSettings(
+    (clientSettings) => clientSettings.enablePromptSuggestion,
+  );
+  // Ghost text for the agent's proposed next prompt; the suggestion rides along
+  // with the message, so this only decides whether to show it.
+  const promptSuggestion = usePromptSuggestion({
+    enabled: promptSuggestionEnabled && !isMobileViewport,
+    disabled:
+      isConnecting ||
+      isSendBusy ||
+      isComposerApprovalState ||
+      projectSelectionRequired ||
+      activePendingProgress !== null ||
+      pendingUserInputs.length > 0,
+    threadIdle: phase === "ready" && activeThread?.session?.activeTurnId == null,
+    threadId: activeThreadId,
+    lastMessage: lastThreadMessage,
+    prompt,
+    trigger: composerTrigger,
+  });
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const isChoiceOnlyPendingQuestion =
     activePendingProgress?.activeQuestion?.allowCustomAnswer === false;
@@ -3986,6 +4009,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     if (key === "ArrowUp" || key === "ArrowDown") {
       return navigatePromptHistory(key === "ArrowUp" ? "backward" : "forward", event);
+    }
+    if (key === "Tab" && !event.shiftKey) {
+      const suggestion = promptSuggestion.accept();
+      if (suggestion) {
+        return applyPromptReplacement(0, promptRef.current.length, suggestion);
+      }
     }
     const submissionIntent =
       key === "Enter"
@@ -6668,6 +6697,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     buildContextClipboardFragment={buildContextClipboardFragment}
                     importContextFragment={importContextFragment}
                     skills={selectedProviderSkills}
+                    ghostText={promptSuggestion.ghostText}
                     containerClassName={cn(isComposerResting && "min-w-0 flex-1")}
                     className={cn(
                       showMobilePendingAnswerActions && "max-sm:pb-11",

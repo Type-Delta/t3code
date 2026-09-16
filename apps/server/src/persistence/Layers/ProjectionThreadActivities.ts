@@ -174,6 +174,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
           activity_id AS "activityId",
           thread_id AS "threadId",
           turn_id AS "turnId",
+          subagent_id AS "subagentId",
           tone,
           kind,
           summary,

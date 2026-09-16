@@ -1458,6 +1458,9 @@ Do not repeat completed work, start new work, or expand the user's requested sco
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
+          ...(command.promptSuggestion !== undefined
+            ? { promptSuggestion: command.promptSuggestion }
+            : {}),
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
           createdAt: command.createdAt,
         },
@@ -1970,6 +1973,7 @@ Do not repeat completed work, start new work, or expand the user's requested sco
           role: "assistant",
           text: "",
           turnId: command.turnId ?? null,
+          ...(command.suggestion !== undefined ? { suggestion: command.suggestion } : {}),
           ...(command.subagentId ? { subagentId: command.subagentId } : {}),
           streaming: false,
           createdAt: command.createdAt,

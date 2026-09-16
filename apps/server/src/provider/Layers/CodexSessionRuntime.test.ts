@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
+import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
@@ -154,6 +155,35 @@ function makeThreadOpenResponse(
 }
 
 describe("buildTurnStartParams", () => {
+  it.effect(
+    "appends prompt suggestions for plain, default, and plan turns only when provided",
+    () =>
+      Effect.gen(function* () {
+        const block = buildPromptSuggestionInstructions("Prefer a focused test as the next step.");
+        for (const interactionMode of [undefined, "default", "plan"] as const) {
+          const input = {
+            threadId: "provider-thread-1",
+            runtimeMode: "full-access" as const,
+            ...(interactionMode ? { interactionMode } : {}),
+          };
+          const enabled = yield* buildTurnStartParams({
+            ...input,
+            promptSuggestionInstructions: block,
+          });
+          const instructions = enabled.collaborationMode?.settings.developer_instructions;
+          NodeAssert.equal(enabled.collaborationMode?.mode, interactionMode ?? "default");
+          NodeAssert.ok(instructions?.endsWith(`\n\n${block}`));
+
+          const disabled = yield* buildTurnStartParams(input);
+          NodeAssert.ok(
+            !disabled.collaborationMode?.settings.developer_instructions?.includes(
+              "<t3_prompt_suggestion>",
+            ),
+          );
+        }
+      }),
+  );
+
   it("keeps invalid turn values only in the schema cause", () => {
     const secret = "codex-turn-input-secret-sentinel";
     const error = Effect.runSync(

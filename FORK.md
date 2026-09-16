@@ -546,9 +546,10 @@ limits are intentionally unsupported.
 `apps/web/src/components/settings/{SettingsPanels,settingsSearch}.ts*`.
 
 **Recorded validation:** focused native Claude and Codex reset parsing, provider-runtime,
-settings-contract, and server-settings tests.
+settings-contract, and server-settings tests. The 2026-09-16 merge reran the provider-runtime
+ingestion suite (78 passing) with the repository-backed latest-user-message lookup.
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-16
 
 ### DL033 — Model search within the selected group
 
@@ -561,11 +562,55 @@ search, and switching groups preserves the query. Provider and continuation rest
 
 **Last updated:** 2026-09-07
 
+### DL034 — Prompt suggestion ghost text from the agent's own turn
+
+When the client setting `enablePromptSuggestion` is on (default off), Codex and Claude sessions
+receive a standing instruction to end each reply with a tagged one-line proposal for the user's
+next prompt. The agent writes it from its real context (repository instructions, memory, and the
+conversation so far); no separate model call, provider session, or transcript summary is made.
+`ProviderRuntimeIngestion` withholds any partial or open tag from streamed and buffered deltas,
+strips every tagged block at completion, and carries the sanitized text as `suggestion` on the
+assistant message through the decider, projector, client reducer, and SQLite projection
+(migration `062`). The web composer shows it as ghost text once the thread is idle and the
+composer is empty; Tab accepts it, typing dismisses it for that message, and a new message or
+thread resets it. Cursor, Grok, OpenCode, and Antigravity receive no instruction. Mobile has no
+toggle or ghost text. An optional `promptSuggestionInstructions` setting appends extra guidance to
+the built-in instruction. Both settings live under Settings → General → Prompt suggestion.
+They persist on the client and travel with turn requests to local or remote environments;
+server settings do not control them. Codex applies the submitting client's preference per
+turn. Claude pins the preference and instructions at its first session start in a thread,
+preserving them across session recovery and restarts. Each viewing client independently
+controls whether suggestions appear in its composer. See [prompt suggestions](docs/user/composer.md#prompt-suggestions).
+
+**Implementation evidence:** `packages/shared/src/promptSuggestion.ts`,
+`packages/contracts/src/{settings,orchestration,provider}.ts`,
+`apps/server/src/provider/Layers/{ProviderService,CodexSessionRuntime,ClaudeAdapter}.ts`,
+`apps/server/src/provider/CodexDeveloperInstructions.ts`,
+`apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`,
+`apps/server/src/orchestration/{decider,projector}.ts`,
+`apps/server/src/persistence/Migrations/062_ProjectionThreadMessageSuggestions.ts`,
+`packages/client-runtime/src/state/threadReducer.ts`,
+`apps/web/src/promptSuggestion.logic.ts`, `apps/web/src/components/chat/usePromptSuggestion.ts`,
+`apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/ComposerPromptEditor.tsx`,
+and `apps/web/src/components/settings/SettingsPanels.tsx`.
+
+**Last updated:** 2026-09-16
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-09-16 — Merge `feat/prompt-suggestion` into `main`
+
+**Merge commit:** this merge commit
+**Parents:** `0283c3542` (fork main) and `1717a5dc9` (feature branch)
+
+- Reapplied the prompt suggestion feature after the upstream sync while preserving the current scoped settings model, inline context records, prompt-history navigation, pull-request autocomplete, and expanded MCP tool availability.
+- Kept upstream migration `058_ProjectionThreadBranchPullRequest` and the fork's idempotent `062_ProjectionThreadMessageSuggestions`; discarded only the obsolete feature-branch migration files that reused ID `058`.
+- Preserved prompt suggestion preferences as client-local settings and reconciled Codex per-turn delivery and Claude per-thread pinning with the current provider-service recovery flow.
+- Recomposed fork auto-resume and task-title recovery with upstream's repository-backed ingestion: auto-resume reads the latest user-message id and thread shell instead of hydrating full thread detail, and the latest-task activity query now returns the `subagentId` column its decoder expects.
 
 ### 2026-09-14 — Post-merge migration repair (follow-up to the 2026-09-13 merge)
 

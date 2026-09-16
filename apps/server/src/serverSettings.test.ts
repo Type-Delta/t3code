@@ -164,6 +164,29 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }),
   );
 
+  it.effect("ignores retired prompt suggestion fields in server settings", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        '{"enablePromptSuggestion":true,"promptSuggestionInstructions":"This preference belongs to a client."}',
+      );
+
+      const loaded = yield* serverSettings.getSettings;
+      assert.notProperty(loaded, "enablePromptSuggestion");
+      assert.notProperty(loaded, "promptSuggestionInstructions");
+
+      yield* serverSettings.updateSettings({ enableLegacyTokenStreaming: true });
+      const persisted = yield* Schema.decodeUnknownEffect(
+        Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+      )(yield* fileSystem.readFileString(serverConfig.settingsPath));
+      assert.notProperty(persisted, "enablePromptSuggestion");
+      assert.notProperty(persisted, "promptSuggestionInstructions");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect(
     "decodes legacy object-shaped textGenerationModelSelection.options from settings.json",
     () =>

@@ -24,6 +24,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
 import { type ClaudeScopedLimitNames, claudeRateLimitEventToUpdate } from "./claudeUsageLimits.ts";
 import {
   ApprovalRequestId,
@@ -4875,6 +4876,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? { autoCompactWindow: Number(claudeSettings.autoCompactWindow) }
           : {}),
       };
+      const promptSuggestionInstructions = input.promptSuggestion?.enabled
+        ? buildPromptSuggestionInstructions(input.promptSuggestion.instructions)
+        : undefined;
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       // The attachments dir grant lets the agent Read/copy pasted images at
       // the paths ProviderService injects into the turn text, without an
@@ -4891,8 +4895,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
-          // Model and effort can change after this session-level prompt is set.
-          append: buildRuntimeInstructions({ harness: "Claude Code" }),
+          // Prompt suggestions are pinned to the thread when this Claude
+          // session starts, because Claude treats this system prompt as
+          // session state and cannot change it reliably between turns.
+          append: [
+            buildRuntimeInstructions({ harness: "Claude Code" }),
+            promptSuggestionInstructions,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
         },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is

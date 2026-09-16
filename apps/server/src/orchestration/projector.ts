@@ -763,6 +763,7 @@ export function projectEvent(
             id: payload.messageId,
             role: payload.role,
             text: payload.text,
+            ...(payload.suggestion !== undefined ? { suggestion: payload.suggestion } : {}),
             ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
             ...(payload.context !== undefined ? { context: payload.context } : {}),
             turnId: payload.turnId,
@@ -787,6 +788,11 @@ export function projectEvent(
                         ? message.text
                         : entry.text,
                     streaming: message.streaming,
+                    ...(message.streaming
+                      ? { suggestion: undefined }
+                      : message.suggestion !== undefined
+                        ? { suggestion: message.suggestion }
+                        : {}),
                     updatedAt: message.updatedAt,
                     turnId: message.turnId,
                     ...(message.subagentId !== undefined ? { subagentId: message.subagentId } : {}),

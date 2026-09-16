@@ -413,6 +413,53 @@ describe("ClientSettings proactive panels", () => {
   });
 });
 
+describe("ClientSettings prompt suggestions", () => {
+  it("defaults to disabled and keeps the preference in the client settings", () => {
+    expect(decodeClientSettings({}).enablePromptSuggestion).toBe(false);
+    expect(decodeClientSettings({}).promptSuggestionInstructions).toBe("");
+
+    const settings = decodeClientSettings({
+      enablePromptSuggestion: true,
+      promptSuggestionInstructions: " Suggest a focused next step. ",
+    });
+    expect(settings.enablePromptSuggestion).toBe(true);
+    expect(settings.promptSuggestionInstructions).toBe("Suggest a focused next step.");
+    expect(encodeClientSettings(settings)).toMatchObject({
+      enablePromptSuggestion: true,
+      promptSuggestionInstructions: "Suggest a focused next step.",
+    });
+  });
+
+  it("accepts prompt suggestion updates at the client patch boundary", () => {
+    expect(
+      decodeClientSettingsPatch({
+        enablePromptSuggestion: true,
+        promptSuggestionInstructions: " Suggest one idea. ",
+      }),
+    ).toEqual({
+      enablePromptSuggestion: true,
+      promptSuggestionInstructions: "Suggest one idea.",
+    });
+  });
+});
+
+describe("ServerSettings prompt suggestions", () => {
+  it("ignores the retired server-wide prompt suggestion fields", () => {
+    const decoded = decodeServerSettings({
+      enablePromptSuggestion: true,
+      promptSuggestionInstructions: "This belongs to a client.",
+    });
+    expect(decoded).not.toHaveProperty("enablePromptSuggestion");
+    expect(decoded).not.toHaveProperty("promptSuggestionInstructions");
+    expect(
+      decodeServerSettingsPatch({
+        enablePromptSuggestion: true,
+        promptSuggestionInstructions: "This belongs to a client.",
+      }),
+    ).toEqual({});
+  });
+});
+
 describe("ClientSettings quit confirmation", () => {
   it("defaults to hold", () => {
     expect(decodeClientSettings({}).confirmQuit).toBe("hold");

@@ -334,6 +334,10 @@ export const ClientSettingsSchema = Schema.Struct({
   browserAutoShowFloatingPreview: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW)),
   ),
+  /** Whether each client turn asks the provider for a next-prompt suggestion. */
+  enablePromptSuggestion: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Optional extra guidance sent with the client turn preference. */
+  promptSuggestionInstructions: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /**
    * User-created browser profiles. The built-in Default and Incognito profiles
    * are synthesized by `resolveBrowserProfiles`, not stored here, so they
@@ -1479,6 +1483,8 @@ export const ClientSettingsPatch = Schema.Struct({
   browserRecordingFrameRate: Schema.optionalKey(BrowserRecordingFrameRate),
   browserLinkTarget: Schema.optionalKey(BrowserLinkTarget),
   browserAutoShowFloatingPreview: Schema.optionalKey(Schema.Boolean),
+  enablePromptSuggestion: Schema.optionalKey(Schema.Boolean),
+  promptSuggestionInstructions: Schema.optionalKey(TrimmedString),
   browserProfiles: Schema.optionalKey(Schema.Array(BrowserProfile)),
   browserDefaultProfileId: Schema.optionalKey(BrowserProfileId),
   confirmQuit: Schema.optionalKey(QuitConfirmationMode),

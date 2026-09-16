@@ -260,6 +260,18 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["collapsed expanded collapse expand files pull request pr code tab"],
   },
   {
+    id: "prompt-suggestion",
+    title: "Prompt suggestion",
+    to: "/settings/general",
+    searchTerms: ["prompt suggestion ghost text next prompt tab"],
+  },
+  {
+    id: "prompt-suggestion-instructions",
+    title: "Suggestion instructions",
+    to: "/settings/general",
+    searchTerms: ["prompt suggestion ghost text next prompt tab instructions guidance"],
+  },
+  {
     id: "diff-layout",
     title: "Diff layout",
     to: "/settings/general",

@@ -33,6 +33,10 @@ import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { formatTokens } from "@t3tools/shared/usageFormat";
+import {
+  extractPromptSuggestion,
+  promptSuggestionHoldbackLength,
+} from "@t3tools/shared/promptSuggestion";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
@@ -1064,11 +1068,6 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
-  const getLoadedThreadDetail = (threadId: ThreadId) =>
-    projectionSnapshotQuery
-      .getThreadDetailById(threadId, { activityKinds: [] })
-      .pipe(Effect.map(Option.getOrUndefined));
-
   const getThreadMessageById = Effect.fn("getThreadMessageById")(function* (
     threadId: ThreadId,
     messageId: MessageId,
@@ -1242,7 +1241,7 @@ const make = Effect.gen(function* () {
       });
     });
 
-  const appendBufferedAssistantText = (messageId: MessageId, delta: string) =>
+  const appendBufferedAssistantText = (messageId: MessageId, delta: string, streaming = false) =>
     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
       Effect.flatMap((existingText) =>
         Effect.gen(function* () {
@@ -1250,14 +1249,15 @@ const make = Effect.gen(function* () {
             onNone: () => delta,
             onSome: (text) => `${text}${delta}`,
           });
-          if (nextText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
+          if (!streaming && nextText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
             yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText);
             return "";
           }
 
-          // Safety valve: flush full buffered text as an assistant delta to cap memory.
-          yield* Cache.invalidate(bufferedAssistantTextByMessageId, messageId);
-          return nextText;
+          const holdback = promptSuggestionHoldbackLength(nextText);
+          const split = nextText.length - holdback;
+          yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText.slice(split));
+          return nextText.slice(0, split);
         }),
       ),
     );
@@ -1301,7 +1301,7 @@ const make = Effect.gen(function* () {
     commandTag: string;
   }) =>
     Effect.gen(function* () {
-      const bufferedText = yield* takeBufferedAssistantText(input.messageId);
+      const bufferedText = yield* appendBufferedAssistantText(input.messageId, "", true);
       if (!hasRenderableAssistantText(bufferedText)) {
         return false;
       }
@@ -1367,12 +1367,13 @@ const make = Effect.gen(function* () {
   }) =>
     Effect.gen(function* () {
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
-      const text =
+      const rawText =
         bufferedText.length > 0
           ? bufferedText
           : (input.fallbackText?.trim().length ?? 0) > 0
             ? input.fallbackText!
             : "";
+      const { text, suggestion } = extractPromptSuggestion(rawText);
       const hasRenderableText = hasRenderableAssistantText(text);
 
       if (hasRenderableText) {
@@ -1388,12 +1389,13 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (input.hasProjectedMessage || hasRenderableText) {
+      if (input.hasProjectedMessage || hasRenderableText || suggestion !== undefined) {
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.complete",
           commandId: yield* providerCommandId(input.event, input.commandTag),
           threadId: input.threadId,
           messageId: input.messageId,
+          ...(suggestion !== undefined && !input.event.subagentId ? { suggestion } : {}),
           ...(input.turnId ? { turnId: input.turnId } : {}),
           ...(input.event.subagentId ? { subagentId: input.event.subagentId } : {}),
           createdAt: input.createdAt,
@@ -1854,27 +1856,23 @@ const make = Effect.gen(function* () {
               ? "streaming"
               : "buffered",
         );
-        if (assistantDeliveryMode === "buffered") {
-          const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
-          if (spillChunk.length > 0) {
-            yield* orchestrationEngine.dispatch({
-              type: "thread.message.assistant.delta",
-              commandId: yield* providerCommandId(event, "assistant-delta-buffer-spill"),
-              threadId: thread.id,
-              messageId: assistantMessageId,
-              delta: spillChunk,
-              ...(turnId ? { turnId } : {}),
-              ...(event.subagentId ? { subagentId: event.subagentId } : {}),
-              createdAt: now,
-            });
-          }
-        } else {
+        const spillChunk = yield* appendBufferedAssistantText(
+          assistantMessageId,
+          assistantDelta,
+          assistantDeliveryMode === "streaming",
+        );
+        if (spillChunk.length > 0) {
           yield* orchestrationEngine.dispatch({
             type: "thread.message.assistant.delta",
-            commandId: yield* providerCommandId(event, "assistant-delta"),
+            commandId: yield* providerCommandId(
+              event,
+              assistantDeliveryMode === "buffered"
+                ? "assistant-delta-buffer-spill"
+                : "assistant-delta",
+            ),
             threadId: thread.id,
             messageId: assistantMessageId,
-            delta: assistantDelta,
+            delta: spillChunk,
             ...(turnId ? { turnId } : {}),
             ...(event.subagentId ? { subagentId: event.subagentId } : {}),
             createdAt: now,
@@ -2118,23 +2116,25 @@ const make = Effect.gen(function* () {
         event.turnId !== undefined &&
         completedLifecycleSequence !== undefined
       ) {
-        const detailedThread = yield* getLoadedThreadDetail(thread.id);
-        const expectedUserMessage = detailedThread?.messages.findLast(
-          (message) => message.role === "user",
-        );
-        if (detailedThread && expectedUserMessage) {
-          const sourceTurnId = toTurnId(event.turnId);
-          if (sourceTurnId !== undefined) {
-            const providerInstanceId =
-              event.providerInstanceId ??
-              thread.session?.providerInstanceId ??
-              detailedThread.modelSelection.instanceId;
+        const sourceTurnId = toTurnId(event.turnId);
+        const expectedUserMessageId = yield* projectionThreadMessages.getLatestUserMessageId({
+          threadId: thread.id,
+        });
+        if (sourceTurnId !== undefined && expectedUserMessageId !== null) {
+          let providerInstanceId = event.providerInstanceId ?? thread.session?.providerInstanceId;
+          if (providerInstanceId === undefined) {
+            const threadShell = yield* projectionSnapshotQuery
+              .getThreadShellById(thread.id)
+              .pipe(Effect.map(Option.getOrUndefined));
+            providerInstanceId = threadShell?.modelSelection.instanceId;
+          }
+          if (providerInstanceId !== undefined) {
             yield* autoResumeReactor.schedule({
               scheduleId: autoResumeScheduleId(thread.id, sourceTurnId),
               threadId: thread.id,
               scheduledSequence: completedLifecycleSequence,
               sourceTurnId,
-              expectedUserMessageId: MessageId.make(expectedUserMessage.id),
+              expectedUserMessageId: MessageId.make(expectedUserMessageId),
               providerInstanceId,
               messageId: MessageId.make(autoResumeMessageId(thread.id, sourceTurnId)),
               reason: autoResumeRetry.reason,

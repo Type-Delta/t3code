@@ -325,6 +325,31 @@ describe("persistClientSettingsUpdate", () => {
       persistClientSettingsUpdate((current) => ({ ...current, wordWrap: false }), persist),
     ).resolves.toMatchObject({ wordWrap: false });
   });
+
+  it("persists prompt suggestion preferences in client storage", async () => {
+    const persist = vi.fn().mockResolvedValue(undefined);
+    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
+
+    persistClientSettingsPatch(
+      {
+        enablePromptSuggestion: true,
+        promptSuggestionInstructions: "Suggest a focused next step.",
+      },
+      persist,
+    );
+    await Promise.resolve();
+
+    expect(getClientSettings()).toMatchObject({
+      enablePromptSuggestion: true,
+      promptSuggestionInstructions: "Suggest a focused next step.",
+    });
+    expect(persist).toHaveBeenCalledWith(
+      expect.objectContaining({
+        enablePromptSuggestion: true,
+        promptSuggestionInstructions: "Suggest a focused next step.",
+      }),
+    );
+  });
 });
 
 describe("resolveEnvironmentIdentificationMode", () => {
@@ -412,6 +437,27 @@ describe("mergeEnvironmentSettings", () => {
 
     expect(settings.sidebarAutoSettleAfterDays).toBe(14);
     expect(settings.sidebarAutoSettleOnMerge).toBe(false);
+  });
+
+  it("keeps client prompt suggestion preferences when an older server still returns them", () => {
+    const serverSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      enablePromptSuggestion: false,
+      promptSuggestionInstructions: "server value",
+    } as typeof DEFAULT_SERVER_SETTINGS & {
+      enablePromptSuggestion: boolean;
+      promptSuggestionInstructions: string;
+    };
+    const clientSettings = {
+      ...DEFAULT_CLIENT_SETTINGS,
+      enablePromptSuggestion: true,
+      promptSuggestionInstructions: "client value",
+    };
+
+    const settings = mergeEnvironmentSettings(serverSettings, clientSettings);
+
+    expect(settings.enablePromptSuggestion).toBe(true);
+    expect(settings.promptSuggestionInstructions).toBe("client value");
   });
 });
 

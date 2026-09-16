@@ -29,6 +29,7 @@ export const ProjectionThreadMessage = Schema.Struct({
   threadId: ThreadId,
   turnId: Schema.NullOr(TurnId),
   subagentId: Schema.optional(TrimmedNonEmptyString),
+  suggestion: Schema.optional(TrimmedNonEmptyString),
   role: OrchestrationMessageRole,
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
@@ -113,6 +114,11 @@ export interface ProjectionThreadMessageRepositoryShape {
   readonly getLatestUserMessageAt: (
     input: ListProjectionThreadMessagesInput,
   ) => Effect.Effect<ProjectionThreadMessage["createdAt"] | null, ProjectionRepositoryError>;
+
+  /** Read the latest user-message id without loading message bodies. */
+  readonly getLatestUserMessageId: (
+    input: ListProjectionThreadMessagesInput,
+  ) => Effect.Effect<ProjectionThreadMessage["messageId"] | null, ProjectionRepositoryError>;
 
   /**
    * Delete projected thread messages by thread.

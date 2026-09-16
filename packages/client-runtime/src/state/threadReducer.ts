@@ -386,6 +386,7 @@ export function applyThreadDetailEvent(
         turnId: event.payload.turnId,
         ...(event.payload.subagentId !== undefined ? { subagentId: event.payload.subagentId } : {}),
         streaming: event.payload.streaming,
+        ...(event.payload.suggestion !== undefined ? { suggestion: event.payload.suggestion } : {}),
         createdAt: event.payload.createdAt,
         updatedAt: event.payload.updatedAt,
       };
@@ -403,6 +404,12 @@ export function applyThreadDetailEvent(
                       ? message.text
                       : entry.text,
                   streaming: message.streaming,
+                  // Re-streaming invalidates any earlier suggestion; completion sets it.
+                  ...(message.streaming
+                    ? { suggestion: undefined }
+                    : message.suggestion !== undefined
+                      ? { suggestion: message.suggestion }
+                      : {}),
                   ...(message.turnId !== undefined ? { turnId: message.turnId } : {}),
                   ...(message.subagentId !== undefined ? { subagentId: message.subagentId } : {}),
                   ...(message.streaming ? {} : { updatedAt: message.updatedAt }),

@@ -322,6 +322,10 @@
     "./dateTime": {
       "types": "./src/dateTime.ts",
       "import": "./src/dateTime.ts"
+    },
+    "./promptSuggestion": {
+      "types": "./src/promptSuggestion.ts",
+      "import": "./src/promptSuggestion.ts"
     }
   },
   "scripts": {

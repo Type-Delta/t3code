@@ -78,6 +78,7 @@ import {
 import { useScopedModelDisabledReason } from "./useScopedModelAvailability";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
+import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
@@ -107,6 +108,7 @@ import {
 } from "../ui/dialog";
 import { DraftInput } from "../ui/draft-input";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import {
   DEFAULT_CODE_FONT_STACK,
   DEFAULT_SANS_FONT_STACK,
@@ -489,6 +491,8 @@ export function useSettingsRestore(onRestored?: () => void) {
   } = useTheme();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
+  const clientSettings = useClientSettings();
+  const updateClientSettings = useUpdateClientSettings();
 
   const isTextGenerationModelDirty = !Equal.equals(
     settings.textGenerationModelSelection ?? null,
@@ -597,6 +601,13 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
         ? ["Agent browser access"]
         : []),
+      ...(clientSettings.enablePromptSuggestion !== DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion
+        ? ["Prompt suggestion"]
+        : []),
+      ...(clientSettings.promptSuggestionInstructions !==
+      DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions
+        ? ["Suggestion instructions"]
+        : []),
     ],
     [
       isTextGenerationModelDirty,
@@ -610,6 +621,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.appearanceContrast,
       settings.diffColorScheme,
       settings.enableAgentBrowserAccess,
+      clientSettings.enablePromptSuggestion,
+      clientSettings.promptSuggestionInstructions,
       settings.confirmQuit,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
@@ -769,6 +782,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       // rather than discovering it later.
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
     });
+    updateClientSettings({
+      enablePromptSuggestion: DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion,
+      promptSuggestionInstructions: DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions,
+    });
     onRestored?.();
   }, [
     changedSettingLabels,
@@ -779,6 +796,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     setThemeHalf,
     theme,
     themeHalves,
+    updateClientSettings,
     updateSettings,
   ]);
 
@@ -2054,6 +2072,8 @@ function LegacyFeaturesSection() {
 export function GeneralSettingsPanel() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
+  const clientSettings = useClientSettings();
+  const updateClientSettings = useUpdateClientSettings();
   const navigate = useNavigate();
   const { scope, environment, connectedEnvironments } = useSettingsScope();
   // The representative environment supplies the provider list for pickers;
@@ -2960,6 +2980,70 @@ export function GeneralSettingsPanel() {
             )
           }
         />
+      </SettingsSection>
+
+      <SettingsSection id="prompt-suggestion" title="Prompt suggestion">
+        <SettingsRow
+          {...searchableSetting("prompt-suggestion")}
+          description="Show a suggested next prompt; Tab accepts it. Saved on this client for local and remote threads. Codex follows each turn's setting. Claude keeps its initial choice for the thread; start a new thread to change it."
+          resetAction={
+            clientSettings.enablePromptSuggestion !==
+            DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion ? (
+              <SettingResetButton
+                label="prompt suggestion"
+                onClick={() =>
+                  updateClientSettings({
+                    enablePromptSuggestion: DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={clientSettings.enablePromptSuggestion}
+              onCheckedChange={(checked) =>
+                updateClientSettings({ enablePromptSuggestion: Boolean(checked) })
+              }
+              aria-label="Enable prompt suggestion"
+            />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("prompt-suggestion-instructions")}
+          description="Optional guidance. Codex uses changes next turn; Claude uses the guidance chosen at the thread's first session."
+          resetAction={
+            clientSettings.promptSuggestionInstructions !==
+            DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions ? (
+              <SettingResetButton
+                label="suggestion instructions"
+                onClick={() =>
+                  updateClientSettings({
+                    promptSuggestionInstructions:
+                      DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions,
+                  })
+                }
+              />
+            ) : null
+          }
+        >
+          <div className="mt-3 max-w-2xl pb-3.5">
+            <Textarea
+              key={clientSettings.promptSuggestionInstructions}
+              defaultValue={clientSettings.promptSuggestionInstructions}
+              onBlur={(event) => {
+                const next = event.target.value.trim();
+                if (next !== clientSettings.promptSuggestionInstructions) {
+                  updateClientSettings({ promptSuggestionInstructions: next });
+                }
+              }}
+              rows={4}
+              placeholder="Favor the next verification step over new work."
+              aria-label="Suggestion instructions"
+            />
+          </div>
+        </SettingsRow>
       </SettingsSection>
 
       <SettingsSection id="about" title="About">

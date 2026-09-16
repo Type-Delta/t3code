@@ -215,6 +215,9 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly promptSuggestionInstructions?: string;
+  /** Present on provider turns so an explicit disabled preference can reset a prior mode. */
+  readonly promptSuggestionEnabled?: boolean;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -650,31 +653,40 @@ function runtimeModeToTurnSandboxPolicy(
 }
 
 function buildCodexCollaborationMode(input: {
+  readonly promptSuggestionInstructions?: string;
+  readonly promptSuggestionEnabled?: boolean;
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly browserToolsAvailable?: boolean | T3CodeToolAvailability;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
-  if (input.interactionMode === undefined) {
+  if (
+    input.interactionMode === undefined &&
+    !input.promptSuggestionInstructions &&
+    input.promptSuggestionEnabled === undefined
+  ) {
     return undefined;
   }
   const model = normalizeCodexModelSlug(input.model) ?? DEFAULT_MODEL;
   const reasoningEffort = input.effort ?? "medium";
   return {
-    mode: input.interactionMode,
+    mode: input.interactionMode ?? "default",
     settings: {
       model,
       reasoning_effort: reasoningEffort,
       developer_instructions: buildCodexDeveloperInstructions(
-        input.interactionMode,
+        input.interactionMode ?? "default",
         { model, reasoningEffort },
         input.browserToolsAvailable ?? true,
+        input.promptSuggestionInstructions,
       ),
     },
   };
 }
 
 export function buildTurnStartParams(input: {
+  readonly promptSuggestionInstructions?: string;
+  readonly promptSuggestionEnabled?: boolean;
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
@@ -705,6 +717,12 @@ export function buildTurnStartParams(input: {
 
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   const collaborationMode = buildCodexCollaborationMode({
+    ...(input.promptSuggestionInstructions
+      ? { promptSuggestionInstructions: input.promptSuggestionInstructions }
+      : {}),
+    ...(input.promptSuggestionEnabled !== undefined
+      ? { promptSuggestionEnabled: input.promptSuggestionEnabled }
+      : {}),
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
@@ -2866,6 +2884,12 @@ export const makeCodexSessionRuntime = (
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );
           const params = yield* buildTurnStartParams({
+            ...(input.promptSuggestionInstructions
+              ? { promptSuggestionInstructions: input.promptSuggestionInstructions }
+              : {}),
+            ...(input.promptSuggestionEnabled !== undefined
+              ? { promptSuggestionEnabled: input.promptSuggestionEnabled }
+              : {}),
             threadId: providerThreadId,
             runtimeMode: options.runtimeMode,
             ...(input.input ? { prompt: input.input } : {}),
@@ -2873,8 +2897,15 @@ export const makeCodexSessionRuntime = (
             ...(normalizedModel ? { model: normalizedModel } : {}),
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
-            ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-            // Derived from the session's own credential rather than the
+            // Promptless continuation turns normally omit collaboration mode;
+            // explicit prompt suggestion state also forces one so disabling
+            // the feature clears any developer instructions from the prior turn.
+            ...(input.interactionMode
+              ? { interactionMode: input.interactionMode }
+              : input.promptSuggestionInstructions || input.promptSuggestionEnabled !== undefined
+                ? { interactionMode: "default" as const }
+                : {}),
+            // Derived from the session's own MCP configuration rather than the
             // setting, so the prompt describes the tools this turn actually
             // has even if the setting changed after the session started.
             browserToolsAvailable: configuredMcpToolAvailability(

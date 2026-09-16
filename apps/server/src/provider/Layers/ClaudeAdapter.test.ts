@@ -23,6 +23,7 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
 import { assert, describe, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -382,6 +383,35 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(layer),
+    );
+  });
+
+  it.effect("appends prompt suggestion instructions to the session system prompt", () => {
+    const harness = makeHarness();
+    const customInstructions = "End with <t3_prompt_suggestion>one line</t3_prompt_suggestion>.";
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        promptSuggestion: {
+          enabled: true,
+          instructions: customInstructions,
+        },
+      });
+
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.systemPrompt, {
+        type: "preset",
+        preset: "claude_code",
+        append: [
+          buildRuntimeInstructions({ harness: "Claude Code" }),
+          buildPromptSuggestionInstructions(customInstructions),
+        ].join("\n\n"),
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
     );
   });
 

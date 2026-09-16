@@ -720,6 +720,42 @@ describe("applyThreadDetailEvent", () => {
       }
     });
 
+    it("attaches the suggestion on completion and clears it on re-stream", () => {
+      const sent = (sequence: number, text: string, streaming: boolean, suggestion?: string) =>
+        ({
+          ...baseEventFields,
+          sequence,
+          occurredAt: "2026-04-01T06:00:00.000Z",
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          type: "thread.message-sent",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            messageId: MessageId.make("msg-3"),
+            role: "assistant",
+            text,
+            turnId: TurnId.make("turn-1"),
+            streaming,
+            ...(suggestion !== undefined ? { suggestion } : {}),
+            createdAt: "2026-04-01T06:00:00.000Z",
+            updatedAt: "2026-04-01T06:00:00.000Z",
+          },
+        }) as const;
+
+      const streamed = applyThreadDetailEvent(baseThread, sent(10, "Done.", true));
+      if (streamed.kind !== "updated") throw new Error("expected update");
+      const completed = applyThreadDetailEvent(streamed.thread, sent(11, "", false, "Run tests"));
+      if (completed.kind !== "updated") throw new Error("expected update");
+      expect(completed.thread.messages[0]).toMatchObject({
+        text: "Done.",
+        suggestion: "Run tests",
+      });
+
+      const restreamed = applyThreadDetailEvent(completed.thread, sent(12, " More", true));
+      if (restreamed.kind !== "updated") throw new Error("expected update");
+      expect(restreamed.thread.messages[0]?.suggestion).toBeUndefined();
+    });
+
     it("preserves subagent identity across streamed message updates", () => {
       const delta = applyThreadDetailEvent(baseThread, {
         ...baseEventFields,
