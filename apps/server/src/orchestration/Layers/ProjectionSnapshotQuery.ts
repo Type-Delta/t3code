@@ -1335,6 +1335,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         thread_id AS "threadId",
         turn_id AS "turnId",
         subagent_id AS "subagentId",
+        suggestion,
         role,
         text,
         attachments_json AS "attachments",
