@@ -27,6 +27,11 @@ use. Its models match the choices in T3 Code, including legacy and custom entrie
 filter selects a driver kind rather than a provider instance ID. Provider settings can change while
 the server is running, so call the tool again when current availability matters.
 
+To select a model for `create_thread` or `send_message_to_thread`, copy one exact
+`providers[].instanceId` and one `models[].slug` from that same `list_models` entry. The instance ID
+is a configured T3 routing key, not a model vendor name. Thread tools reject unknown, unavailable,
+or mismatched instance and model pairs before starting the turn.
+
 ## Threads and subagents
 
 These tools create durable threads that you can open, manage, and continue. Each thread has its

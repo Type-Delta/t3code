@@ -13,11 +13,11 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import {
-  ModelSelection,
   OrchestrationMessageRole,
   OrchestrationProposedPlan,
   OrchestrationThreadActivityTone,
 } from "./orchestration.ts";
+import { ProviderOptionSelections } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderModel } from "./server.ts";
 
@@ -71,13 +71,29 @@ const ThreadToolProgress = Schema.Struct({
   totalSteps: NonNegativeInt,
 });
 
+/** Canonical MCP selection. Provider instances must be discovered with list_models. */
+export const ThreadToolModelSelection = Schema.Struct({
+  instanceId: ProviderInstanceId.annotate({
+    description:
+      "Exact configured T3 provider instanceId from list_models. Do not use a model vendor name or invent an id.",
+  }),
+  model: TrimmedNonEmptyString.annotate({
+    description: "Exact model slug listed under the selected instance in list_models.",
+  }),
+  options: Schema.optionalKey(ProviderOptionSelections),
+}).annotate({
+  description:
+    "Select a model on a configured T3 provider instance. Call list_models first and copy one providers[].instanceId and its models[].slug.",
+});
+export type ThreadToolModelSelection = typeof ThreadToolModelSelection.Type;
+
 export const ThreadToolSummary = Schema.Struct({
   threadId: ThreadId,
   title: TrimmedNonEmptyString,
   status: ThreadToolStatus,
   attentionReason: Schema.optionalKey(ThreadToolAttentionReason),
   project: ThreadToolProject,
-  modelSelection: ModelSelection,
+  modelSelection: ThreadToolModelSelection,
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   pinned: Schema.Boolean,
@@ -106,7 +122,7 @@ export const ThreadCreateToolInput = Schema.Struct({
   prompt: ThreadToolText,
   target: Schema.optionalKey(ThreadCreateToolTarget),
   title: Schema.optionalKey(TrimmedNonEmptyString),
-  modelSelection: Schema.optionalKey(ModelSelection),
+  modelSelection: Schema.optionalKey(ThreadToolModelSelection),
 });
 export type ThreadCreateToolInput = typeof ThreadCreateToolInput.Type;
 
@@ -200,7 +216,7 @@ export type ThreadReadToolResult = typeof ThreadReadToolResult.Type;
 export const ThreadSendMessageToolInput = Schema.Struct({
   threadId: ThreadId,
   message: ThreadToolText,
-  modelSelection: Schema.optionalKey(ModelSelection),
+  modelSelection: Schema.optionalKey(ThreadToolModelSelection),
 });
 export type ThreadSendMessageToolInput = typeof ThreadSendMessageToolInput.Type;
 

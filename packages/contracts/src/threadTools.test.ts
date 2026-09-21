@@ -68,6 +68,16 @@ describe("thread tool inputs", () => {
     expect(input.modelSelection).toEqual(modelSelection);
   });
 
+  it("drops the legacy provider field from MCP model selections", () => {
+    const input = decodeCreateInput({
+      prompt: "Start the review.",
+      modelSelection: { ...modelSelection, provider: "codex" },
+    });
+
+    expect(input.modelSelection).toEqual(modelSelection);
+    expect(input.modelSelection).not.toHaveProperty("provider");
+  });
+
   it("keeps handler-owned list and read defaults undefined", () => {
     expect(decodeListInput({})).not.toHaveProperty("limit");
     expect(decodeReadInput({ threadId: "thread-1" })).not.toHaveProperty("turnLimit");

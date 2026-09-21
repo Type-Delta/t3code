@@ -21,7 +21,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as References from "effect/References";
 import * as Stream from "effect/Stream";
-import { McpSchema, McpServer } from "effect/unstable/ai";
+import { McpSchema, McpServer, Tool } from "effect/unstable/ai";
 
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
@@ -29,7 +29,13 @@ import * as ThreadCommandDispatcher from "../../../orchestration/ThreadCommandDi
 import { makeProviderRegistryLayer } from "../../../provider/testUtils/providerRegistryMock.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { ThreadToolkitHandlersLive } from "./handlers.ts";
-import { ListModelsTool, ReadThreadTool, ThreadToolkit } from "./tools.ts";
+import {
+  CreateThreadTool,
+  ListModelsTool,
+  ReadThreadTool,
+  SendMessageToThreadTool,
+  ThreadToolkit,
+} from "./tools.ts";
 
 const environmentId = EnvironmentId.make("thread-tools-environment");
 const projectId = ProjectId.make("thread-tools-project");
@@ -196,11 +202,53 @@ const makeThreadToolkitTestLayer = (providers: ReadonlyArray<ServerProvider> = [
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(makeProviderRegistryLayer(providers)),
   );
-const ThreadToolkitTestLayer = makeThreadToolkitTestLayer();
+const ThreadToolkitTestLayer = makeThreadToolkitTestLayer([
+  provider("codex", "codex", {
+    models: [
+      {
+        slug: "gpt-5.4",
+        name: "GPT-5.4",
+        isCustom: false,
+        isLegacy: false,
+        capabilities: null,
+      },
+      {
+        slug: "gpt-5.6-sol",
+        name: "GPT-5.6-Sol",
+        isCustom: false,
+        isLegacy: false,
+        capabilities: null,
+      },
+    ],
+  }),
+]);
 
 it("describes the read pagination argument as cursor", () => {
   expect(ReadThreadTool.description).toContain("Use cursor");
   expect(ReadThreadTool.description).not.toContain("olderCursor");
+});
+
+it("exposes only canonical, described model selection fields", () => {
+  for (const tool of [CreateThreadTool, SendMessageToThreadTool]) {
+    const schema = Tool.getJsonSchema(tool) as {
+      readonly properties?: Readonly<
+        Record<
+          string,
+          {
+            readonly description?: string;
+            readonly properties?: Readonly<Record<string, { readonly description?: string }>>;
+          }
+        >
+      >;
+    };
+    const selection = schema.properties?.modelSelection;
+    expect(selection?.description).toContain("Call list_models first");
+    expect(selection?.properties).toHaveProperty("instanceId");
+    expect(selection?.properties).toHaveProperty("model");
+    expect(selection?.properties).not.toHaveProperty("provider");
+  }
+  expect(CreateThreadTool.description).toContain("call list_models");
+  expect(SendMessageToThreadTool.description).toContain("Call list_models first");
 });
 
 it.effect("registers list_models as a readonly, idempotent, closed-world tool", () =>
@@ -883,6 +931,60 @@ it.effect("requires a project and a model default for management-key create", ()
       {
         type: "text",
         text: "The create input is invalid: A management create requires modelSelection or a default model selection on the target project.",
+      },
+    ]);
+    expect(dispatched).toHaveLength(0);
+  }).pipe(Effect.provide(ThreadToolkitTestLayer)),
+);
+
+it.effect("rejects unknown provider instances and models before dispatch", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const dispatched: Array<unknown> = [];
+    const dispatcher = ThreadCommandDispatcher.ThreadCommandDispatcher.of({
+      dispatch: (command) =>
+        Effect.sync(() => {
+          dispatched.push(command);
+          return { sequence: dispatched.length };
+        }),
+    });
+    const crypto = Crypto.make({
+      randomBytes: (size) => new Uint8Array(size),
+      digest: (_algorithm, data) => Effect.succeed(data),
+    });
+    const call = (name: "create_thread" | "send_message_to_thread", arguments_: object) =>
+      server
+        .callTool({ name, arguments: arguments_ })
+        .pipe(
+          Effect.provideService(McpSchema.McpServerClient, client),
+          Effect.provideService(McpInvocationContext.McpInvocationContext, allowedInvocation),
+          Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, query),
+          Effect.provideService(ThreadCommandDispatcher.ThreadCommandDispatcher, dispatcher),
+          Effect.provideService(Crypto.Crypto, crypto),
+        );
+
+    const unknownInstance = yield* call("create_thread", {
+      prompt: "Use the requested critic.",
+      modelSelection: { instanceId: "glm_critic", model: "glm-5.3-flash" },
+    });
+    expect(unknownInstance.isError).toBe(true);
+    expect(unknownInstance.content).toEqual([
+      {
+        type: "text",
+        text: "The create input is invalid: Provider instance 'glm_critic' is not available. Call list_models and use an exact providers[].instanceId.",
+      },
+    ]);
+
+    const wrongModel = yield* call("send_message_to_thread", {
+      threadId,
+      message: "Use a different model.",
+      modelSelection: { instanceId: "codex", model: "glm-5.3-flash" },
+    });
+    expect(wrongModel.isError).toBe(true);
+    expect(wrongModel.content).toEqual([
+      {
+        type: "text",
+        text: "The send input is invalid: Model 'glm-5.3-flash' is not available on provider instance 'codex'. Call list_models and use a models[].slug from that provider entry.",
       },
     ]);
     expect(dispatched).toHaveLength(0);

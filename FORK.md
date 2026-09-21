@@ -314,7 +314,10 @@ Agents can also list the model choices exposed by currently selectable provider 
 optionally filtered by driver kind. Results keep provider-instance identity separate from the
 driver that runs it and include the current, legacy, and custom models shown in the product model
 picker. User-created instances that share a driver remain distinct, and runtime provider changes
-are reflected in later calls.
+are reflected in later calls. The MCP selection schema exposes only the canonical `instanceId`,
+model, and options fields. Tool descriptions direct agents to copy an exact instance and model pair
+from `list_models`, and create or message calls reject unknown, unavailable, or mismatched pairs
+before dispatching a provider turn.
 
 The tools share the server-owned provider MCP credential. They cannot access another environment,
 and a thread cannot message itself. Lists default to 50 threads and cap at 200. Reads default to
@@ -336,7 +339,7 @@ developer instruction tests, plus `vp check` and `vp run typecheck`. Dispatcher 
 the deletion drain for direct and bootstrapped creation and preserves cleanup order on failed
 setup.
 
-**Last updated:** 2026-09-02
+**Last updated:** 2026-09-21
 
 ### DL026 — Per-instance API gateway model catalogs
 

@@ -250,6 +250,32 @@ const getProjectShell = Effect.fn("ThreadToolkit.getProjectShell")(function* (
   return project.value;
 });
 
+const validateModelSelection = Effect.fn("ThreadToolkit.validateModelSelection")(function* (
+  operation: "create" | "send",
+  selection: OrchestrationThreadShell["modelSelection"],
+) {
+  const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+  const provider = (yield* providerRegistry.getProviders).find(
+    (candidate) =>
+      candidate.instanceId === selection.instanceId &&
+      candidate.enabled &&
+      candidate.status === "ready" &&
+      candidate.availability !== "unavailable",
+  );
+  if (provider === undefined) {
+    return yield* new ThreadToolInvalidInputError({
+      operation,
+      reason: `Provider instance '${selection.instanceId}' is not available. Call list_models and use an exact providers[].instanceId.`,
+    });
+  }
+  if (!provider.models.some(({ slug }) => slug === selection.model)) {
+    return yield* new ThreadToolInvalidInputError({
+      operation,
+      reason: `Model '${selection.model}' is not available on provider instance '${selection.instanceId}'. Call list_models and use a models[].slug from that provider entry.`,
+    });
+  }
+});
+
 const getThreadWithProject = Effect.fn("ThreadToolkit.getThreadWithProject")(function* (
   operation: ThreadToolOperation,
   threadId: ThreadId,
@@ -353,6 +379,7 @@ const createThread = Effect.fn("ThreadToolkit.createThread")(function* (input: {
       });
     }
   }
+  yield* validateModelSelection("create", modelSelection);
   const threadId = ThreadId.make(yield* newId("create"));
   const commandId = CommandId.make(`mcp:create:${yield* newId("create")}`);
   const messageId = MessageId.make(yield* newId("create"));
@@ -524,6 +551,8 @@ const sendMessageToThread = Effect.fn("ThreadToolkit.sendMessageToThread")(funct
     });
   }
   const target = yield* getThreadShell("send", input.threadId);
+  const modelSelection = input.modelSelection ?? target.modelSelection;
+  yield* validateModelSelection("send", modelSelection);
   const dispatcher = yield* ThreadCommandDispatcher.ThreadCommandDispatcher;
 
   if (input.modelSelection !== undefined) {
@@ -553,7 +582,7 @@ const sendMessageToThread = Effect.fn("ThreadToolkit.sendMessageToThread")(funct
           text: input.message,
           attachments: [],
         },
-        modelSelection: input.modelSelection ?? target.modelSelection,
+        modelSelection,
         runtimeMode: target.runtimeMode,
         interactionMode: target.interactionMode,
         createdAt,

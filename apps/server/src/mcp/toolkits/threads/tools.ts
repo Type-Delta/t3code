@@ -34,11 +34,11 @@ const dependencies = [
 
 export const CreateThreadTool = Tool.make("create_thread", {
   description:
-    "Create a thread in this environment, send its first user message, and optionally start it in a new worktree.",
+    "Create a thread in this environment, send its first user message, and optionally start it in a new worktree. Before supplying modelSelection, call list_models and copy an exact providers[].instanceId and a models[].slug from that same provider entry; do not invent instance ids or use a model vendor name as one.",
   parameters: ThreadCreateToolInput,
   success: ThreadCreateToolResult,
   failure: ThreadToolError,
-  dependencies,
+  dependencies: [...dependencies, ProviderRegistry.ProviderRegistry],
 })
   .annotate(Tool.Title, "Create thread")
   .annotate(Tool.Readonly, false)
@@ -62,7 +62,7 @@ export const ListThreadsTool = Tool.make("list_threads", {
 
 export const ListModelsTool = Tool.make("list_models", {
   description:
-    "List models accepted by the currently enabled and ready provider instances, optionally filtered by driver.",
+    "List models accepted by currently enabled and ready T3 provider instances, optionally filtered by driver. providers[].instanceId is the exact routing key required by modelSelection. Select model from that same entry's models[].slug.",
   parameters: ThreadListModelsToolInput,
   success: ThreadListModelsToolResult,
   failure: ThreadToolError,
@@ -90,11 +90,11 @@ export const ReadThreadTool = Tool.make("read_thread", {
 
 export const SendMessageToThreadTool = Tool.make("send_message_to_thread", {
   description:
-    "Send a user message to another active thread in this environment. A supplied modelSelection updates that thread before the turn starts.",
+    "Send a user message to another active thread in this environment. A supplied modelSelection updates that thread before the turn starts. Call list_models first and copy an exact providers[].instanceId and a models[].slug from that same provider entry.",
   parameters: ThreadSendMessageToolInput,
   success: ThreadSendMessageToolResult,
   failure: ThreadToolError,
-  dependencies,
+  dependencies: [...dependencies, ProviderRegistry.ProviderRegistry],
 })
   .annotate(Tool.Title, "Send message to thread")
   .annotate(Tool.Readonly, false)
