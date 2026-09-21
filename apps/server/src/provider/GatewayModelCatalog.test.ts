@@ -10,6 +10,7 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as ServerConfig from "../config.ts";
 import {
   makeGatewayModelCatalog,
+  mergeCodexCatalog,
   mergeGatewayModelCatalog,
   parseGatewayModelCatalog,
   type GatewayCatalogSnapshot,
@@ -17,6 +18,8 @@ import {
 } from "./GatewayModelCatalog.ts";
 
 const decodeGatewaySettings = Schema.decodeSync(ApiGatewaySettings);
+const encodeUnknownJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeUnknownJson = Schema.decodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const httpClientLayer = (handler: (request: Request) => Response) =>
   Layer.succeed(
@@ -154,6 +157,77 @@ describe("gateway model catalog parsing", () => {
       defaultReasoningEffort: "high",
     });
   });
+});
+
+describe("Codex catalog generation", () => {
+  it("deep-merges custom models without dropping configured metadata", () => {
+    expect(
+      mergeCodexCatalog({
+        base: {
+          metadata: { revision: 3, nested: { keep: true } },
+          models: [
+            {
+              slug: "existing",
+              display_name: "Existing",
+              context_window: 200_000,
+              capabilities: { tools: { shell: true } },
+            },
+          ],
+        },
+        customModels: [
+          { slug: "existing", name: "Renamed" },
+          { slug: "custom-model", name: "Custom Model" },
+        ],
+      }),
+    ).toEqual({
+      metadata: { revision: 3, nested: { keep: true } },
+      models: [
+        {
+          slug: "existing",
+          display_name: "Existing",
+          context_window: 200_000,
+          capabilities: { tools: { shell: true } },
+        },
+        { slug: "custom-model", display_name: "Custom Model" },
+      ],
+    });
+  });
+
+  it.effect("falls back to the native cache when no gateway catalog is configured", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const nativeHome = `${serverConfig.providerStatusCacheDir}/native-codex-home`;
+      yield* fileSystem.makeDirectory(nativeHome, { recursive: true });
+      yield* fileSystem.writeFileString(
+        `${nativeHome}/models_cache.json`,
+        encodeUnknownJson({
+          metadata: { nested: { retained: true } },
+          models: [{ slug: "native-model", display_name: "Native Model", context_window: 123_000 }],
+        }),
+      );
+
+      const catalog = yield* makeGatewayModelCatalog({
+        instanceId: ProviderInstanceId.make("codex_native_cache_fallback_test"),
+        settings: undefined,
+        environment: {},
+        nativeCodexHomePath: nativeHome,
+        customModels: [{ slug: "custom-model", name: "Custom Model" }],
+      });
+      const snapshot = yield* catalog.current;
+      expect(snapshot.codexCatalogPath).toBeDefined();
+      const generated = decodeUnknownJson(
+        yield* fileSystem.readFileString(snapshot.codexCatalogPath as string),
+      );
+      expect(generated).toEqual({
+        metadata: { nested: { retained: true } },
+        models: [
+          { slug: "native-model", display_name: "Native Model", context_window: 123_000 },
+          { slug: "custom-model", display_name: "Custom Model" },
+        ],
+      });
+    }).pipe(Effect.scoped, Effect.provide(gatewayTestLayer(() => Response.json({ models: [] })))),
+  );
 });
 
 describe("gateway model catalog merging", () => {

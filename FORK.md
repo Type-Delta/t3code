@@ -375,6 +375,9 @@ joining rules. Claude receives its gateway environment, gateway discovery flag, 
 effort, and a context-aware plain or `[1m]` model ID. Metadata with no matching harness control
 remains informational. Authoritative gateway inventories also keep gateway-discovered custom rows
 available to the chat model picker, while stale manual rows remain scoped to the current settings.
+The generated Codex catalog is deep-merged from the configured Codex JSON, or the instance's
+native `models_cache.json` when no Codex JSON is configured, with explicit custom models appended
+by slug so nested native metadata is retained.
 
 **Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
 `apps/server/src/provider/GatewayModelCatalog.ts`,

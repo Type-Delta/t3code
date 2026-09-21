@@ -597,6 +597,75 @@ const writeJsonFile = (filePath: string, value: unknown) =>
 const writeCodexCatalog = (filePath: string, rawCodexCatalog: unknown) =>
   writeJsonFile(filePath, rawCodexCatalog);
 
+const modelIdentity = (value: unknown): string | undefined => {
+  const entry = record(value);
+  return (
+    nonEmptyString(entry?.["slug"]) ??
+    nonEmptyString(entry?.["model"]) ??
+    nonEmptyString(entry?.["id"])
+  );
+};
+
+const deepMergeJson = (base: unknown, overlay: unknown, key?: string): unknown => {
+  const baseRecord = record(base);
+  const overlayRecord = record(overlay);
+  if (baseRecord && overlayRecord) {
+    const result: Record<string, unknown> = { ...baseRecord };
+    for (const [entryKey, value] of Object.entries(overlayRecord)) {
+      result[entryKey] = deepMergeJson(result[entryKey], value, entryKey);
+    }
+    return result;
+  }
+  if (key === "models" && Array.isArray(base) && Array.isArray(overlay)) {
+    const result = [...base];
+    const indexes = new Map<string, number>();
+    result.forEach((entry, index) => {
+      const identity = modelIdentity(entry);
+      if (identity) indexes.set(identity, index);
+    });
+    for (const entry of overlay) {
+      const identity = modelIdentity(entry);
+      const index = identity === undefined ? undefined : indexes.get(identity);
+      if (index === undefined) {
+        if (identity) indexes.set(identity, result.length);
+        result.push(entry);
+      } else {
+        result[index] = deepMergeJson(result[index], entry);
+      }
+    }
+    return result;
+  }
+  return overlay === undefined ? base : overlay;
+};
+
+export function mergeCodexCatalog(input: {
+  readonly base: unknown;
+  readonly customModels: ReadonlyArray<CustomModelSetting>;
+}): unknown {
+  const customEntries = readCustomModelEntries(input.customModels).map((model) => ({
+    slug: model.slug,
+    display_name: model.name,
+  }));
+  const baseModels = record(input.base)?.["models"];
+  const existing = new Set(
+    Array.isArray(baseModels)
+      ? baseModels.flatMap((model) => (modelIdentity(model) ? [modelIdentity(model)] : []))
+      : [],
+  );
+  const additions = customEntries.filter((model) => !existing.has(model.slug));
+  return customEntries.length === 0
+    ? input.base
+    : deepMergeJson(input.base ?? {}, { models: additions });
+}
+
+const readJsonFile = (filePath: string) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    return yield* fileSystem
+      .readFileString(filePath)
+      .pipe(Effect.flatMap((contents) => decodeUnknownJson(contents)));
+  }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
+
 const requestCatalog = Effect.fn("GatewayModelCatalog.request")(function* (input: {
   readonly url: string;
   readonly format: Exclude<ApiGatewaySettings["catalogFormat"], "auto">;
@@ -660,6 +729,8 @@ export const makeGatewayModelCatalog = Effect.fn("makeGatewayModelCatalog")(func
   readonly instanceId: ProviderInstanceId;
   readonly settings: ApiGatewaySettings | undefined;
   readonly environment: NodeJS.ProcessEnv;
+  readonly nativeCodexHomePath?: string | undefined;
+  readonly customModels?: ReadonlyArray<CustomModelSetting> | undefined;
 }): Effect.fn.Return<
   GatewayModelCatalog,
   never,
@@ -677,6 +748,14 @@ export const makeGatewayModelCatalog = Effect.fn("makeGatewayModelCatalog")(func
     config.providerStatusCacheDir,
     `${input.instanceId}.codex-models.json`,
   );
+  const nativeCodexCatalog = input.nativeCodexHomePath
+    ? yield* readJsonFile(path.join(input.nativeCodexHomePath, "models_cache.json")).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+      )
+    : undefined;
+  const customModels = input.customModels ?? [];
+  const buildCodexCatalog = (raw: unknown): unknown =>
+    mergeCodexCatalog({ base: raw ?? nativeCodexCatalog, customModels });
   const requestIdentity = input.settings?.enabled
     ? resolveCatalogRequestIdentity(input.settings, input.environment)
     : undefined;
@@ -685,23 +764,36 @@ export const makeGatewayModelCatalog = Effect.fn("makeGatewayModelCatalog")(func
         Effect.provideService(FileSystem.FileSystem, fileSystem),
       )
     : undefined;
-  const cachedHasCodexCatalog = cached?.rawCodexCatalog !== undefined && cached.models.length > 0;
-  if (cachedHasCodexCatalog) {
-    yield* writeCodexCatalog(codexCatalogPath, cached.rawCodexCatalog).pipe(
+  const initialCodexCatalog = buildCodexCatalog(cached?.rawCodexCatalog);
+  const initialCodexModels = record(initialCodexCatalog)?.["models"];
+  const hasInitialCodexCatalog = Array.isArray(initialCodexModels) && initialCodexModels.length > 0;
+  const initialModels = cached?.models.length
+    ? cached.models
+    : (parseGatewayModelCatalog(initialCodexCatalog, "codex")?.models ?? []);
+  if (hasInitialCodexCatalog) {
+    yield* writeCodexCatalog(codexCatalogPath, initialCodexCatalog).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
     );
   }
   const initial: GatewayCatalogSnapshot = !input.settings?.enabled
-    ? { models: [], source: "disabled" }
+    ? {
+        models: initialModels,
+        source: "disabled",
+        ...(hasInitialCodexCatalog ? { codexCatalogPath } : {}),
+      }
     : cached
       ? {
-          models: cached.models,
+          models: initialModels,
           source: "cache",
           fetchedAt: cached.fetchedAt,
-          ...(cachedHasCodexCatalog ? { codexCatalogPath } : {}),
+          ...(hasInitialCodexCatalog ? { codexCatalogPath } : {}),
         }
-      : { models: [], source: "none" };
+      : {
+          models: initialModels,
+          source: "none",
+          ...(hasInitialCodexCatalog ? { codexCatalogPath } : {}),
+        };
   const snapshotRef = yield* Ref.make(initial);
   const semaphore = yield* Semaphore.make(1);
 
@@ -750,15 +842,21 @@ export const makeGatewayModelCatalog = Effect.fn("makeGatewayModelCatalog")(func
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
       );
-      const hasCodexCatalog = catalog.rawCodexCatalog !== undefined && catalog.models.length > 0;
+      const mergedCodexCatalog = buildCodexCatalog(catalog.rawCodexCatalog);
+      const mergedModels = record(mergedCodexCatalog)?.["models"];
+      const hasCodexCatalog = Array.isArray(mergedModels) && mergedModels.length > 0;
+      const snapshotModels =
+        catalog.models.length > 0
+          ? catalog.models
+          : (parseGatewayModelCatalog(mergedCodexCatalog, "codex")?.models ?? []);
       if (hasCodexCatalog) {
-        yield* writeCodexCatalog(codexCatalogPath, catalog.rawCodexCatalog).pipe(
+        yield* writeCodexCatalog(codexCatalogPath, mergedCodexCatalog).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
         );
       }
       const next = {
-        models: catalog.models,
+        models: snapshotModels,
         source: "network",
         fetchedAt,
         ...(hasCodexCatalog ? { codexCatalogPath } : {}),

@@ -176,10 +176,19 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const eventLoggers = yield* ProviderEventLoggers;
       const modelManifest = yield* ModelManifest.ModelManifest;
       const processEnv = mergeProviderInstanceEnvironment(environment);
+      const homeLayout = yield* resolveCodexHomeLayout(config);
+      const nativeCodexHomePath =
+        config.homePath.trim().length > 0
+          ? homeLayout.sharedHomePath
+          : processEnv["CODEX_HOME"]?.trim()
+            ? expandHomePath(processEnv["CODEX_HOME"])
+            : homeLayout.sharedHomePath;
       const gatewayModelCatalog = yield* makeGatewayModelCatalog({
         instanceId,
         settings: config.apiGateway,
         environment: processEnv,
+        nativeCodexHomePath,
+        customModels: config.customModels,
       });
       const gatewayCatalog = yield* gatewayModelCatalog.current;
       const baseLaunchArgs = resolveCodexLaunchArgs(config.launchArgs, processEnv);
@@ -194,7 +203,6 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         apiGateway: config.apiGateway,
         catalog: gatewayCatalog,
       });
-      const homeLayout = yield* resolveCodexHomeLayout(config);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
