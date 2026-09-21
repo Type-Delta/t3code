@@ -153,6 +153,11 @@ function applyInstanceModelPreferences(
   );
 }
 
+function isGatewayDiscoveredModel(model: ServerProvider["models"][number]): boolean {
+  const source = model.metadata?.source?.trim().toLowerCase();
+  return source === "gateway" || source === "api-gateway";
+}
+
 function normalizeCustomModelEntries(
   models: ReadonlyArray<CustomModelDefinition>,
   builtInModelSlugs: ReadonlySet<string>,
@@ -185,12 +190,24 @@ function getAppModelOptions(
   provider: ProviderDriverKind,
   selectedModel?: string | null,
 ): AppModelOption[] {
+  const defaultInstanceId = defaultInstanceIdForDriver(provider);
+  const customModels = readInstanceCustomModels(settings, defaultInstanceId, provider);
+  const customModelSlugs = new Set(customModels.map((entry) => entry.slug));
   const rawModels = getProviderModels(providers, provider);
-  // Server-reported custom rows mirror settings and can lag a removal, so
-  // only built-ins are taken from the snapshot; custom rows are rebuilt from
-  // settings below.
+  const providerSnapshot = providers.find(
+    (candidate) => candidate.instanceId === defaultInstanceId,
+  );
+  // Server-reported custom rows mirror settings and can lag a removal. Keep
+  // only gateway rows from an authoritative inventory, then rebuild authored
+  // custom rows from settings below.
   const options: AppModelOption[] = rawModels
-    .filter((model) => !model.isCustom)
+    .filter(
+      (model) =>
+        !model.isCustom ||
+        (providerSnapshot?.modelsAuthoritative === true &&
+          isGatewayDiscoveredModel(model) &&
+          !customModelSlugs.has(model.slug)),
+    )
     .map(toAppModelOption);
   const seen = new Set(options.map((option) => option.slug));
   const builtInModelSlugs = new Set(
@@ -203,8 +220,6 @@ function getAppModelOptions(
   // now land), falling back to the legacy per-kind bucket so unmigrated
   // settings and the initial render before the first write both still
   // see the user's authored custom models.
-  const defaultInstanceId = defaultInstanceIdForDriver(provider);
-  const customModels = readInstanceCustomModels(settings, defaultInstanceId, provider);
   for (const entry of normalizeCustomModelEntries(customModels, builtInModelSlugs)) {
     if (seen.has(entry.slug)) {
       continue;
@@ -233,17 +248,26 @@ function getAppModelOptions(
  * when present, falling back to the legacy per-kind
  * `settings.providers[driverKind].customModels` bucket for default
  * instances only. This keeps two instances of the same kind from leaking
- * custom slugs into each other. Custom rows reported by the server are
- * ignored so a slug removed in Settings disappears without waiting for the
- * next provider probe.
+ * custom slugs into each other. Gateway rows from an authoritative inventory
+ * are included when they are not also represented by a manually configured
+ * entry. Other server custom rows remain ignored so a slug removed in Settings
+ * disappears without waiting for the next provider probe.
  */
 export function getAppModelOptionsForInstance(
   settings: UnifiedSettings,
   entry: ProviderInstanceEntry,
   selectedModel?: string | null,
 ): AppModelOption[] {
+  const customModels = readInstanceCustomModels(settings, entry.instanceId, entry.driverKind);
+  const customModelSlugs = new Set(customModels.map((custom) => custom.slug));
   const options: AppModelOption[] = entry.models
-    .filter((model) => !model.isCustom)
+    .filter(
+      (model) =>
+        !model.isCustom ||
+        (entry.snapshot.modelsAuthoritative === true &&
+          isGatewayDiscoveredModel(model) &&
+          !customModelSlugs.has(model.slug)),
+    )
     .map(toAppModelOption);
   const seen = new Set(options.map((option) => option.slug));
   const builtInModelSlugs = new Set(
@@ -252,7 +276,6 @@ export function getAppModelOptionsForInstance(
     ),
   );
 
-  const customModels = readInstanceCustomModels(settings, entry.instanceId, entry.driverKind);
   for (const custom of normalizeCustomModelEntries(customModels, builtInModelSlugs)) {
     if (seen.has(custom.slug)) {
       continue;

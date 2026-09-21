@@ -42,7 +42,7 @@ Upstream owns the richer `usageLimits` data and the Usage page's Limits tab, inc
 
 **Recorded validation:** subscription-usage mapping tests, live Claude and Codex fetcher smoke tests, and contracts/server/web typecheck and lint coverage from the original feature.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-21
 
 ### DL004 — Preview navigation and automation hardening
 
@@ -373,7 +373,8 @@ reasoning effort, and a per-model `model_context_window`. Its adapter normalizes
 gateway path to end in `/v1`, so users can enter the gateway origin without knowing Codex's URL
 joining rules. Claude receives its gateway environment, gateway discovery flag, selected reasoning
 effort, and a context-aware plain or `[1m]` model ID. Metadata with no matching harness control
-remains informational.
+remains informational. Authoritative gateway inventories also keep gateway-discovered custom rows
+available to the chat model picker, while stale manual rows remain scoped to the current settings.
 
 **Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
 `apps/server/src/provider/GatewayModelCatalog.ts`,
@@ -383,12 +384,13 @@ remains informational.
 and `apps/web/src/components/settings/providerModelDetails.ts`.
 
 **Recorded validation:** focused gateway parsing and cache tests, Codex and Claude provider relay
-tests, settings and server contract tests, provider-settings component tests, `vp check`,
-`vp run typecheck`, and integrated web verification of gateway configuration, custom model metadata,
-and model-detail tooltips. The 2026-09-03 add-instance dialog scroll fix was verified in a browser at
-1000x720 and 390x700 with the gateway section expanded.
+tests, settings and server contract tests, provider-settings component tests, model-picker regression
+tests for authoritative gateway rows, `vp check`, `vp run typecheck`, and integrated web verification
+of gateway configuration, custom model metadata, and model-detail tooltips. The 2026-09-03
+add-instance dialog scroll fix was verified in a browser at 1000x720 and 390x700 with the gateway
+section expanded.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-21
 
 ### DL027 — Remote editor links select the server account
 

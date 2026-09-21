@@ -13,6 +13,7 @@ import { deriveProviderInstanceEntries, NO_PROVIDER_MODEL_SELECTION } from "./pr
 import {
   getCustomModelOptionsByInstance,
   getAppModelOptionsForInstance,
+  resolveAppModelSelection,
   resolveAppModelSelectionForInstance,
   resolveAppModelSelectionState,
   resolvePlanAgentHealPatch,
@@ -252,6 +253,112 @@ describe("instance-scoped model selection", () => {
         (option) => option.slug,
       ),
     ).toEqual(["claude-sonnet-4-6", "openai/gpt-5.5"]);
+  });
+
+  it("keeps gateway-discovered custom rows while dropping stale manual rows", () => {
+    const baseProvider = provider({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      instanceId: "claudeAgent",
+      models: ["claude-sonnet-4-6"],
+    });
+    const providers = [
+      {
+        ...baseProvider,
+        models: [
+          ...baseProvider.models,
+          {
+            slug: "claude-gateway-private",
+            name: "Gateway Private",
+            isCustom: true,
+            capabilities: null,
+            metadata: { source: "gateway" as const },
+          },
+          {
+            slug: "removed-manual",
+            name: "Removed Manual",
+            isCustom: true,
+            capabilities: null,
+          },
+        ],
+        modelsAuthoritative: true,
+      },
+    ];
+    const settings: UnifiedSettings = {
+      ...settingsWithProviderInstances(),
+      providerInstances: {
+        ...settingsWithProviderInstances().providerInstances,
+        [ProviderInstanceId.make("claudeAgent")]: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          config: { apiGateway: { enabled: true }, customModels: [] },
+        },
+      },
+    };
+    const stock = deriveProviderInstanceEntries(providers)[0]!;
+
+    expect(getAppModelOptionsForInstance(settings, stock).map((option) => option.slug)).toEqual([
+      "claude-sonnet-4-6",
+      "claude-gateway-private",
+    ]);
+  });
+
+  it("resolves an authoritative gateway model for the legacy default selector", () => {
+    const baseProvider = provider({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      instanceId: "claudeAgent",
+      models: ["claude-sonnet-4-6"],
+    });
+    const providers = [
+      {
+        ...baseProvider,
+        models: [
+          ...baseProvider.models,
+          {
+            slug: "claude-gateway-private",
+            name: "Gateway Private",
+            isCustom: true,
+            capabilities: null,
+            metadata: { source: "gateway" as const },
+          },
+        ],
+        modelsAuthoritative: true,
+      },
+    ];
+
+    expect(
+      resolveAppModelSelectionForInstance(
+        ProviderInstanceId.make("claudeAgent"),
+        {
+          ...settingsWithProviderInstances(),
+          providerInstances: {
+            ...settingsWithProviderInstances().providerInstances,
+            [ProviderInstanceId.make("claudeAgent")]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              config: { apiGateway: { enabled: true }, customModels: [] },
+            },
+          },
+        },
+        providers,
+        "claude-gateway-private",
+      ),
+    ).toBe("claude-gateway-private");
+
+    expect(
+      resolveAppModelSelection(
+        ProviderDriverKind.make("claudeAgent"),
+        {
+          ...settingsWithProviderInstances(),
+          providerInstances: {
+            ...settingsWithProviderInstances().providerInstances,
+            [ProviderInstanceId.make("claudeAgent")]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              config: { apiGateway: { enabled: true }, customModels: [] },
+            },
+          },
+        },
+        providers,
+        "claude-gateway-private",
+      ),
+    ).toBe("claude-gateway-private");
   });
 
   it("applies persisted per-instance model ordering", () => {
