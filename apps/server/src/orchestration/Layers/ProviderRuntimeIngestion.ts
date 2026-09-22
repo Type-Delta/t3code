@@ -1852,7 +1852,8 @@ const make = Effect.gen(function* () {
         const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
           serverSettingsService.getSettings,
           (settings) =>
-            resolveProjectSettings(settings, thread.projectId).settings.enableLegacyTokenStreaming
+            resolveProjectSettings(settings, thread.projectId).settings.responseStreamingMode ===
+            "token"
               ? "streaming"
               : "buffered",
         );
@@ -1894,7 +1895,8 @@ const make = Effect.gen(function* () {
         const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
           serverSettingsService.getSettings,
           (settings) =>
-            resolveProjectSettings(settings, thread.projectId).settings.enableLegacyTokenStreaming
+            resolveProjectSettings(settings, thread.projectId).settings.responseStreamingMode ===
+            "token"
               ? "streaming"
               : "buffered",
         );

@@ -1281,7 +1281,7 @@ const make = Effect.gen(function* () {
           (startedTurnId === undefined && !thread.session?.activeTurnId))
       ) {
         pendingTurnStarts.delete(event.threadId);
-        yield* pullRequests.refreshAfterTurn;
+        yield* pullRequests.refreshAfterTurn(thread.projectId);
       }
       if (event.type === "turn.aborted") {
         yield* mutationCoordinator.releaseProviderMutation(event.threadId);
@@ -1289,12 +1289,12 @@ const make = Effect.gen(function* () {
       }
 
       const captureEnqueued = yield* captureCheckpointFromTurnCompletion(event).pipe(
-        Effect.catch((error) =>
+        Effect.catchCause((cause) =>
           Effect.flatMap(nowIso, (createdAt) =>
             appendCaptureFailureActivity({
               threadId: event.threadId,
               turnId,
-              detail: error.message,
+              detail: Cause.pretty(cause),
               createdAt,
             }).pipe(
               Effect.catch(() => Effect.void),

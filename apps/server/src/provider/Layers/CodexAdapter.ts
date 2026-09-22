@@ -2766,7 +2766,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
             }
           : {}),
-        ...(serviceTier ? { serviceTier } : {}),
+        ...(serviceTier
+          ? {
+              serviceTier: serviceTier as NonNullable<
+                EffectCodexSchema.V2ThreadStartParams["serviceTier"]
+              >,
+            }
+          : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         promptSuggestionEnabled,
         ...(promptSuggestionInstructions ? { promptSuggestionInstructions } : {}),

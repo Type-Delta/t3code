@@ -215,18 +215,26 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
-  readonly promptSuggestionInstructions?: string;
+  readonly promptSuggestionInstructions?: string | undefined;
   /** Present on provider turns so an explicit disabled preference can reset a prior mode. */
   readonly promptSuggestionEnabled?: boolean;
-  readonly input?: string;
-  readonly attachments?: ReadonlyArray<{
-    readonly type: "localImage";
-    readonly path: string;
-  }>;
-  readonly model?: string;
+  readonly input?: string | undefined;
+  readonly attachments?:
+    | ReadonlyArray<
+        | {
+            readonly type: "localImage";
+            readonly path: string;
+          }
+        | {
+            readonly type: "image";
+            readonly url: string;
+          }
+      >
+    | undefined;
+  readonly model?: string | undefined;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
-  readonly interactionMode?: ProviderInteractionMode;
+  readonly interactionMode?: ProviderInteractionMode | undefined;
 }
 
 export interface CodexThreadTurnSnapshot {
@@ -694,10 +702,16 @@ export function buildTurnStartParams(input: {
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
-  readonly attachments?: ReadonlyArray<{
-    readonly type: "localImage";
-    readonly path: string;
-  }>;
+  readonly attachments?: ReadonlyArray<
+    | {
+        readonly type: "localImage";
+        readonly path: string;
+      }
+    | {
+        readonly type: "image";
+        readonly url: string;
+      }
+  >;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;

@@ -180,3 +180,4 @@ export type AuthSessionRepositoryError = PersistenceSqlError | PersistenceDecode
 export type ManagementApiKeyRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type PullRequestFilesViewedRepositoryError = PersistenceSqlError | PersistenceDecodeError;

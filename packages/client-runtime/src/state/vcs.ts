@@ -19,6 +19,7 @@ import { Atom, AtomRegistry } from "effect/unstable/reactivity";
 import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcSubscriptionAtomFamily,
   createEnvironmentSubscriptionAtomFamily,
 } from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -379,28 +380,40 @@ export function createVcsEnvironmentAtoms<R, E>(
       tag: WS_METHODS.vcsPull,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefs,
+      onSettled: invalidateRefsAndWorktrees,
     }),
     refreshStatus: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:refresh-status",
       tag: WS_METHODS.vcsRefreshStatus,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefs,
+      onSettled: invalidateRefsAndWorktrees,
     }),
     createWorktree: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:create-worktree",
       tag: WS_METHODS.vcsCreateWorktree,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefsAndWorktrees,
+      onSettled: invalidateRefs,
+    }),
+    // Live stages of a bootstrap worktree setup. Null until the server begins
+    // tracking, then a snapshot per change, then null again after the setup
+    // is dropped. Short TTL so a closed thread releases its subscription.
+    worktreeSetup: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:vcs:worktree-setup",
+      tag: WS_METHODS.subscribeWorktreeSetup,
+      idleTtlMs: VCS_STATUS_IDLE_TTL_MS,
+    }),
+    cancelWorktreeSetup: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:vcs:cancel-worktree-setup",
+      tag: WS_METHODS.worktreeSetupCancel,
     }),
     removeWorktree: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:remove-worktree",
       tag: WS_METHODS.vcsRemoveWorktree,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefsAndWorktrees,
+      onSettled: invalidateRefs,
     }),
     createRef: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:create-ref",

@@ -560,10 +560,7 @@ function resultErrorsText(result: SDKResultMessage): string {
 }
 
 /** Failure text for structured terminal reasons, including success-tagged failures. */
-function terminalResultError(
-  reason: SDKResultMessage["terminal_reason"],
-  failureHint?: string,
-): string | undefined {
+function terminalResultError(reason: string | undefined, failureHint?: string): string | undefined {
   switch (reason) {
     case "api_error":
       return failureHint ?? "Claude gave up after repeated API errors.";
@@ -617,6 +614,10 @@ function isInterruptedResult(result: SDKResultMessage): boolean {
   );
 }
 
+type ClaudeRateLimitInfo = Omit<SDKRateLimitInfo, "rateLimitType"> & {
+  readonly rateLimitType?: SDKRateLimitInfo["rateLimitType"] | "seven_day_overage_included";
+};
+
 const CLAUDE_USAGE_LIMIT_WINDOWS = {
   five_hour: "5-hour",
   seven_day: "7-day",
@@ -624,7 +625,7 @@ const CLAUDE_USAGE_LIMIT_WINDOWS = {
   seven_day_sonnet: "7-day Sonnet",
   seven_day_overage_included: "7-day model",
   overage: "overage",
-} satisfies Record<NonNullable<SDKRateLimitInfo["rateLimitType"]>, string>;
+} satisfies Record<NonNullable<ClaudeRateLimitInfo["rateLimitType"]>, string>;
 
 /** Beyond this the reset time is not credible, so the row ships without a wait. */
 const CLAUDE_USAGE_LIMIT_MAX_WAIT_MS = 30 * 24 * 60 * 60 * 1000;
@@ -636,7 +637,7 @@ const CLAUDE_USAGE_LIMIT_MAX_WAIT_MS = 30 * 24 * 60 * 60 * 1000;
  * timestamp preference. A wait reads the same everywhere.
  */
 function describeClaudeUsageLimit(
-  info: SDKRateLimitInfo,
+  info: ClaudeRateLimitInfo,
   nowMs: number,
   names: ClaudeScopedLimitNames,
 ): string {
@@ -3613,7 +3614,33 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     switch (message.subtype as string) {
       case "vcs_state_changed":
       case "code_change_published":
+      case "background_tasks_changed":
+      case "control_request_progress":
+      case "worker_shutting_down":
         return;
+      case "informational": {
+        const informational = message as unknown as {
+          readonly level?: unknown;
+          readonly content?: unknown;
+        };
+        if (informational.level === "warning" && typeof informational.content === "string") {
+          yield* emitRuntimeWarning(context, informational.content, message);
+        }
+        return;
+      }
+      case "model_refusal_no_fallback": {
+        const refusal = message as unknown as {
+          readonly api_refusal_explanation?: unknown;
+          readonly content?: unknown;
+        };
+        const explanation =
+          typeof refusal.api_refusal_explanation === "string"
+            ? refusal.api_refusal_explanation.trim()
+            : "";
+        const content = typeof refusal.content === "string" ? refusal.content : "";
+        yield* emitRuntimeWarning(context, explanation || content, message);
+        return;
+      }
     }
 
     switch (message.subtype) {
@@ -3953,27 +3980,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       case "commands_changed":
       case "memory_recall":
       case "elicitation_complete":
-      case "background_tasks_changed":
-      case "control_request_progress":
-      case "worker_shutting_down":
-        return;
-      case "informational":
-        // Transcript-level CLI notes. Only warnings (e.g. a Stop hook that
-        // refused continuation) warrant a work-log row; info/notice/
-        // suggestion levels are CLI chrome.
-        if (message.level === "warning") {
-          yield* emitRuntimeWarning(context, message.content, message);
-        }
-        return;
-      case "model_refusal_no_fallback":
-        // The API refused the request and no fallback model was available.
-        // The terminal result reports the failed turn; this row carries the
-        // refusal explanation the result's error list lacks.
-        yield* emitRuntimeWarning(
-          context,
-          message.api_refusal_explanation?.trim() || message.content,
-          message,
-        );
         return;
       case "permission_denied":
         yield* offerRuntimeEvent({
@@ -4150,7 +4156,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* ensureThreadId(context, message);
 
     // Wire-only command bookkeeping has no user-facing T3 lifecycle.
-    if (sdkMessageType(message) === "command_lifecycle") {
+    const messageType = sdkMessageType(message);
+    if (messageType === "command_lifecycle" || messageType === "conversation_reset") {
       return;
     }
 
@@ -4177,10 +4184,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* handleSdkTelemetryMessage(context, message);
         return;
       // Composer prompt suggestions have no T3 surface; consumed deliberately.
-      // `conversation_reset` announces a CLI-side conversation id swap
-      // (e.g. /clear); T3 keeps its own thread identity and resume cursor.
       case "prompt_suggestion":
-      case "conversation_reset":
         return;
       default: {
         // Exhaustiveness guard (see handleSystemMessage): new SDK top-level
