@@ -83,23 +83,6 @@ describe("ProviderSessionStartInput", () => {
     expect(parsed.runtimeMode).toBe("full-access");
   });
 
-  it("accepts a client prompt suggestion preference", () => {
-    const parsed = decodeProviderSessionStartInput({
-      threadId: "thread-1",
-      provider: "claudeAgent",
-      runtimeMode: "full-access",
-      promptSuggestion: {
-        enabled: true,
-        instructions: " Suggest a focused next step. ",
-      },
-    });
-
-    expect(parsed.promptSuggestion).toEqual({
-      enabled: true,
-      instructions: "Suggest a focused next step.",
-    });
-  });
-
   it("accepts cursor provider", () => {
     const parsed = decodeProviderSessionStartInput({
       threadId: "thread-1",
@@ -138,18 +121,56 @@ describe("ProviderSessionStartInput", () => {
 });
 
 describe("ProviderSendTurnInput", () => {
-  it("leaves an omitted prompt suggestion preference absent", () => {
-    expect(decodeProviderSendTurnInput({ threadId: "thread-1" }).promptSuggestion).toBeUndefined();
-  });
-
-  it("accepts an explicitly disabled prompt suggestion preference", () => {
+  it("accepts 100 attachments and rejects 101", () => {
+    const attachments = Array.from({ length: 100 }, (_, index) => ({
+      type: "image",
+      id: `image-${index}`,
+      name: "image.png",
+      mimeType: "image/png",
+      sizeBytes: 1,
+    }));
     expect(
+      decodeProviderSendTurnInput({ threadId: "thread-1", attachments }).attachments,
+    ).toHaveLength(100);
+    expect(() =>
       decodeProviderSendTurnInput({
         threadId: "thread-1",
-        promptSuggestion: { enabled: false },
-      }).promptSuggestion,
-    ).toEqual({ enabled: false });
+        attachments: [...attachments, attachments[0]],
+      }),
+    ).toThrow();
   });
+
+  it.each(["image", "file"])(
+    "caps total image bytes for %s attachments without charging videos",
+    (type) => {
+      const image = {
+        type,
+        id: "image",
+        name: "image.png",
+        mimeType: "image/png",
+        sizeBytes: 10 * 1024 * 1024,
+      };
+      const video = {
+        type: "file",
+        id: "video",
+        name: "video.mp4",
+        mimeType: "video/mp4",
+        sizeBytes: 50 * 1024 * 1024,
+      };
+      expect(
+        decodeProviderSendTurnInput({
+          threadId: "thread-1",
+          attachments: [...Array.from({ length: 8 }, () => image), video],
+        }).attachments,
+      ).toHaveLength(9);
+      expect(() =>
+        decodeProviderSendTurnInput({
+          threadId: "thread-1",
+          attachments: [...Array.from({ length: 8 }, () => image), { ...image, sizeBytes: 1 }],
+        }),
+      ).toThrow(/80 MiB/);
+    },
+  );
 
   it("accepts codex modelSelection", () => {
     const parsed = decodeProviderSendTurnInput({

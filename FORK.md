@@ -6,7 +6,7 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (currently `0e0ddaeed`, the upstream parent of the 2026-09-13 merge). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (updated by the latest sync merge). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
@@ -80,7 +80,7 @@ SQLite persists capture jobs, immutable checkpoint entries, timeline generations
 
 Fork migrations `036`–`038` establish durable checkpoint state. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
 
-Migration `053_ReconcileUpstream47History` repairs a database carrying upstream history through `047`, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at `050`–`052`. Incoming upstream behavior then runs as `054_ClearAutomaticProjectModelDefaults`, `055_ProjectionProjectsAutoPull`, `056_RepairAutomaticSettlementTimestamps`, and `057_ProjectionProjectIcon`, followed by branch pull requests, active ordering, linked pull-request collections, and composer message context in `058`–`061`. Schema checks keep these changes safe for both fork and upstream database histories.
+Migration `053_ReconcileUpstream47History` repairs a database carrying upstream history through `047`, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at `050`–`052`. Incoming upstream behavior then runs as `054`–`061`, with fork prompt suggestions at `062`, and the latest upstream title-state and pull-request-file tables at `063`–`064`. Migration `065_ReconcileBranchPullRequestHistory` repairs the known deployed-ID-58 collision idempotently before startup. Schema checks keep these changes safe for both fork and upstream database histories.
 
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
@@ -609,6 +609,15 @@ and `apps/web/src/components/settings/SettingsPanels.tsx`.
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-09-22 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `7ff559cb7c` (fork) and `76cc9b08f1` (upstream/main)
+
+- Preserved the fork's durable checkpoints, sidecar navigation, split workspaces, Windows portability, provider credentials, preview safeguards, and compact subscription meters while absorbing the upstream web, mobile, desktop, provider, pull-request, and release updates.
+- Kept the deployed fork migration ledger authoritative. Upstream's colliding migrations `052`–`053` are appended as `063`–`064`; `065_ReconcileBranchPullRequestHistory` idempotently repairs databases that recorded the old fork suggestion migration at ID 58 before startup.
+- Validation for this sync includes the read-only migration collision audit (SQLite integrity, duplicate-ID, ledger-name, and required-column checks), conflict-marker scan, and `vp check`. Contracts and server/client-runtime focused typechecks pass; the repo-wide typecheck remains blocked by upstream/mobile worktree-setup contract drift, and the selected migration tests exposed two pre-existing fixture failures (`projection_thread_pull_requests` setup). No live server restart was performed against the known stale worktree database.
 
 ### 2026-09-16 — Merge `feat/prompt-suggestion` into `main`
 

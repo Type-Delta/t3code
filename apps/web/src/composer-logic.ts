@@ -1,4 +1,5 @@
-import type { AssistantCitation, OrchestrationCheckpointNavigationState } from "@t3tools/contracts";
+import type { ClientSettings } from "@t3tools/contracts/settings";
+import type { AssistantCitation } from "@t3tools/contracts";
 import {
   serializeAssistantCitation,
   withAssistantCitationComment,
@@ -9,85 +10,8 @@ import {
 } from "./composer-editor-mentions";
 
 export type ComposerTriggerKind = "path" | "pull-request" | "slash-command" | "skill";
-export type ComposerSlashCommand = "model" | "plan" | "default" | "undo" | "redo";
-export type CheckpointNavigationCommand = "undo" | "redo" | "jump";
-
-export function checkpointNavigationConfirmationMessage(input: {
-  command: CheckpointNavigationCommand;
-  capability: OrchestrationCheckpointNavigationState["capability"];
-  turnCount?: number;
-}): string | null {
-  if (input.command === "redo") {
-    return null;
-  }
-  if (input.capability !== "branching") {
-    const target =
-      input.command === "jump"
-        ? `checkpoint ${input.turnCount ?? "selected"}`
-        : "the previous checkpoint";
-    return [
-      `Restore workspace files from ${target}?`,
-      "Only workspace files will be restored. Chat history will NOT be reverted.",
-      "The provider may still remember the later conversation and changes.",
-    ].join("\n");
-  }
-  if (input.command === "jump") {
-    return [
-      `Revert this thread to checkpoint ${input.turnCount}?`,
-      "Newer messages and turn diffs will be hidden until you redo them.",
-    ].join("\n");
-  }
-  return null;
-}
-
-export function resolveCheckpointNavigationDisabledReason(input: {
-  command: CheckpointNavigationCommand;
-  threadCreated: boolean;
-  reconnectLabel: string | null;
-  busy: boolean;
-  locallyNavigating: boolean;
-  navigation: OrchestrationCheckpointNavigationState | undefined;
-}): string | null {
-  if (!input.threadCreated) {
-    return "Checkpoint navigation is available after the thread is created.";
-  }
-  if (input.reconnectLabel !== null) {
-    return `Reconnect ${input.reconnectLabel} before using /${input.command}.`;
-  }
-  if (input.navigation?.isNavigating || input.locallyNavigating) {
-    return "Checkpoint navigation is already in progress.";
-  }
-  if (input.busy) {
-    return "Interrupt the current turn before navigating checkpoints.";
-  }
-  if (!input.navigation) {
-    return "Checkpoint navigation availability has not loaded yet.";
-  }
-  if (input.navigation.latestCheckpointBlockingStatus === "pending") {
-    return "The latest checkpoint is still pending.";
-  }
-  if (input.navigation.latestCheckpointBlockingStatus === "contended") {
-    return "The latest checkpoint could not be captured because the workspace changed.";
-  }
-  if (input.command === "redo" && input.navigation.capability !== "branching") {
-    return "This provider cannot preserve conversation branches for redo.";
-  }
-  if (
-    input.command !== "jump" &&
-    !(input.command === "undo" ? input.navigation.canUndo : input.navigation.canRedo)
-  ) {
-    return `No ready checkpoint is available to ${input.command}.`;
-  }
-  return null;
-}
-export type ComposerSubmissionIntent = "foreground" | "background";
-
-export function shouldSubmitComposerOnEnter(input: {
-  isMobileViewport: boolean;
-  shiftKey: boolean;
-}): boolean {
-  return !input.isMobileViewport && !input.shiftKey;
-}
+export type ComposerSlashCommand = "model" | "plan" | "default";
+export type ComposerSubmissionIntent = "foreground" | "background" | "alternate";
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
@@ -105,9 +29,17 @@ export function composerSubmissionIntentForEnter(input: {
   shiftKey: boolean;
   modifierKey: boolean;
   isDraftThread: boolean;
+  isRunning?: boolean;
+  sendShortcut?: ClientSettings["sendShortcut"];
+  prompt?: string;
 }): ComposerSubmissionIntent | null {
-  if (input.isMobileViewport || input.shiftKey) {
-    return null;
+  const requiresModifier =
+    input.sendShortcut === "mod-enter" ||
+    (input.sendShortcut === "mod-enter-multiline" && /[\r\n]/.test(input.prompt ?? ""));
+  if (input.isMobileViewport || (requiresModifier && !input.modifierKey)) return null;
+  if (input.shiftKey && !(requiresModifier && input.modifierKey && input.isRunning)) return null;
+  if (input.isRunning && input.modifierKey && (!requiresModifier || input.shiftKey)) {
+    return "alternate";
   }
   return input.modifierKey && input.isDraftThread ? "background" : "foreground";
 }
@@ -156,7 +88,7 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
       continue;
     }
     if (segment.type === "skill") {
-      const expandedLength = segment.name.length + 1;
+      const expandedLength = segment.source.length;
       if (remaining <= 1) {
         return expandedCursor + (remaining === 0 ? 0 : expandedLength);
       }
@@ -232,7 +164,7 @@ export function collapseExpandedComposerCursor(text: string, cursorInput: number
       continue;
     }
     if (segment.type === "skill") {
-      const expandedLength = segment.name.length + 1;
+      const expandedLength = segment.source.length;
       if (remaining === 0) {
         return collapsedCursor;
       }
@@ -312,10 +244,11 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
       rangeEnd: cursor,
     };
   }
-  if (token.startsWith("$")) {
+  const skillPrefix = /^\p{Sc}/u.exec(token);
+  if (skillPrefix) {
     return {
       kind: "skill",
-      query: token.slice(1),
+      query: token.slice(skillPrefix[0].length),
       rangeStart: tokenStart,
       rangeEnd: cursor,
     };
@@ -332,18 +265,28 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
   };
 }
 
+/** Caret and trigger after replacing composer text and continuing at the end. */
+export function composerStateAtPromptEnd(text: string): {
+  cursor: number;
+  trigger: ComposerTrigger | null;
+} {
+  const cursor = collapseExpandedComposerCursor(text, text.length);
+  return {
+    cursor,
+    trigger: detectComposerTrigger(text, expandCollapsedComposerCursor(text, cursor)),
+  };
+}
+
 export function parseStandaloneComposerSlashCommand(
   text: string,
 ): Exclude<ComposerSlashCommand, "model"> | null {
-  const match = /^\/(plan|default|undo|redo)\s*$/i.exec(text.trim());
+  const match = /^\/(plan|default)\s*$/i.exec(text.trim());
   if (!match) {
     return null;
   }
   const command = match[1]?.toLowerCase();
   if (command === "plan") return "plan";
-  if (command === "default") return "default";
-  if (command === "undo") return "undo";
-  return "redo";
+  return "default";
 }
 
 export function replaceTextRange(

@@ -8,97 +8,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
-  filterModelPickerModels,
+  adjacentModelPickerProvider,
   resolveModelPickerSelectedModel,
   shouldIncludeModelPickerOption,
   shouldOfferModelPickerSetup,
-  type ModelPickerItem,
 } from "./ModelPickerContent";
-
-function pickerModel(
-  instanceId: ProviderInstanceId,
-  driverKind: string,
-  slug: string,
-  name: string,
-  continuationGroupKey?: string,
-): ModelPickerItem {
-  return {
-    instanceId,
-    driverKind: ProviderDriverKind.make(driverKind),
-    slug,
-    name,
-    instanceDisplayName: driverKind,
-    ...(continuationGroupKey ? { continuationGroupKey } : {}),
-  };
-}
-
-describe("filterModelPickerModels", () => {
-  const codex = ProviderInstanceId.make("codex_work");
-  const claude = ProviderInstanceId.make("claude_work");
-  const models = [
-    pickerModel(codex, "codex", "gpt-5", "GPT-5"),
-    pickerModel(claude, "claude", "sonnet", "Sonnet"),
-  ];
-  const baseInput = {
-    models,
-    searchQuery: "t",
-    favorites: new Set<string>(),
-    lockedProvider: null,
-    instanceOrder: [codex, claude],
-  } as const;
-
-  it("keeps search scoped to the selected provider and preserves the query for another selection", () => {
-    expect(
-      filterModelPickerModels({ ...baseInput, selection: codex }).map((model) => model.slug),
-    ).toEqual(["gpt-5"]);
-    expect(
-      filterModelPickerModels({ ...baseInput, selection: claude }).map((model) => model.slug),
-    ).toEqual(["sonnet"]);
-  });
-
-  it("searches across providers only when All is selected", () => {
-    expect(
-      filterModelPickerModels({ ...baseInput, selection: ":all" }).map((model) => model.slug),
-    ).toEqual(["gpt-5", "sonnet"]);
-  });
-
-  it("limits Favorites search to favorited models", () => {
-    expect(
-      filterModelPickerModels({
-        ...baseInput,
-        favorites: new Set([`${claude}:sonnet`]),
-        selection: "favorites",
-      }).map((model) => model.slug),
-    ).toEqual(["sonnet"]);
-  });
-
-  it("keeps a provider instance named all distinct from the All group", () => {
-    const allInstance = ProviderInstanceId.make("all");
-    expect(
-      filterModelPickerModels({
-        ...baseInput,
-        models: [...models, pickerModel(allInstance, "codex", "gpt-work", "GPT Work")],
-        selection: allInstance,
-      }).map((model) => model.slug),
-    ).toEqual(["gpt-work"]);
-  });
-
-  it("keeps locked continuation groups scoped even when All is selected", () => {
-    const lockedModels = [
-      pickerModel(codex, "codex", "gpt-5", "GPT-5", "work"),
-      pickerModel(claude, "codex", "sonnet", "Sonnet", "personal"),
-    ];
-    expect(
-      filterModelPickerModels({
-        ...baseInput,
-        models: lockedModels,
-        selection: ":all",
-        lockedProvider: ProviderDriverKind.make("codex"),
-        lockedContinuationGroupKey: "work",
-      }).map((model) => model.slug),
-    ).toEqual(["gpt-5"]);
-  });
-});
 
 function entry(status: ServerProvider["status"], driver = "opencode") {
   return deriveProviderInstanceEntries([
@@ -298,5 +212,76 @@ describe("shouldOfferModelPickerSetup", () => {
         [],
       ),
     ).toBe(true);
+  });
+});
+
+describe("adjacentModelPickerProvider", () => {
+  const codex = entry("ready", "codex");
+  const claude = entry("ready", "claudeAgent");
+  const unavailable = entry("error");
+  const input = {
+    entries: [codex, unavailable, claude],
+    disabledInstanceIds: undefined,
+    selectableUnavailableInstanceIds: undefined,
+  };
+
+  it("wraps through favorites and ready instances, skipping unavailable providers", () => {
+    expect(
+      adjacentModelPickerProvider({ ...input, selectedInstanceId: codex.instanceId, direction: 1 }),
+    ).toBe(claude.instanceId);
+    expect(
+      adjacentModelPickerProvider({ ...input, selectedInstanceId: "favorites", direction: -1 }),
+    ).toBe(claude.instanceId);
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        selectedInstanceId: claude.instanceId,
+        direction: 1,
+      }),
+    ).toBe("favorites");
+  });
+
+  it("keeps thread locks and the selected unavailable catalog", () => {
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        disabledInstanceIds: new Set([claude.instanceId]),
+        selectedInstanceId: codex.instanceId,
+        direction: 1,
+      }),
+    ).toBe("favorites");
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        selectableUnavailableInstanceIds: new Set([unavailable.instanceId]),
+        selectedInstanceId: codex.instanceId,
+        direction: 1,
+      }),
+    ).toBe(unavailable.instanceId);
+  });
+
+  it("handles an empty catalog and a removed selection in either direction", () => {
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        entries: [],
+        selectedInstanceId: codex.instanceId,
+        direction: -1,
+      }),
+    ).toBe("favorites");
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        selectedInstanceId: unavailable.instanceId,
+        direction: 1,
+      }),
+    ).toBe("favorites");
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        selectedInstanceId: unavailable.instanceId,
+        direction: -1,
+      }),
+    ).toBe(claude.instanceId);
   });
 });
