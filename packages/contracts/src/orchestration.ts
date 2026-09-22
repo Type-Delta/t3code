@@ -476,7 +476,7 @@ const ProjectLucideIconName = TrimmedNonEmptyString.check(
 );
 
 const ProjectEmoji = TrimmedNonEmptyString.check(Schema.isMaxLength(32));
-const ProjectMonogramText = TrimmedNonEmptyString.check(Schema.isMaxLength(32));
+export const ProjectMonogramText = TrimmedNonEmptyString.check(Schema.isMaxLength(32));
 
 export const ProjectIconOverride = Schema.Union([
   Schema.Struct({
