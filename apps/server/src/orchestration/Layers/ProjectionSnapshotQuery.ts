@@ -1522,7 +1522,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         a.payload_json AS "payload",
         a.sequence,
         a.created_at AS "createdAt"
-      FROM projection_thread_activities
+      FROM projection_thread_activities a
       WHERE thread_id = ${threadId}
         AND kind IN ('user-input.requested', 'user-input.resolved')
         AND json_extract(payload_json, '$.requestId') = ${requestId}

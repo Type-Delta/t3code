@@ -1,5 +1,6 @@
 import {
   type AgentSessionImportSource,
+  ApprovalRequestId,
   ChatAttachment,
   ComposerContextId,
   CheckpointRef,
@@ -3100,6 +3101,28 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
         SET pending_approval_count = 1, pending_user_input_count = 1
         WHERE thread_id = 'thread-w'
       `;
+
+      const pendingInput = yield* snapshotQuery.getUserInputActivity({
+        threadId: threadW,
+        requestId: ApprovalRequestId.make("input-1"),
+      });
+      assert.equal(Option.getOrThrow(pendingInput).kind, "user-input.requested");
+      assert.equal(Option.getOrThrow(pendingInput).id, asEventId("user-input-old"));
+      const resolvedInput = yield* snapshotQuery.getUserInputActivity({
+        threadId: threadW,
+        requestId: ApprovalRequestId.make("input-closed"),
+      });
+      assert.equal(Option.getOrThrow(resolvedInput).kind, "user-input.resolved");
+      assert.equal(Option.getOrThrow(resolvedInput).id, asEventId("user-input-closed-resolution"));
+      assert.equal(
+        Option.isNone(
+          yield* snapshotQuery.getUserInputActivity({
+            threadId: threadW,
+            requestId: ApprovalRequestId.make("input-missing"),
+          }),
+        ),
+        true,
+      );
 
       const detailWithPinnedRequests = yield* snapshotQuery.getThreadDetailById(threadW);
       assert.equal(detailWithPinnedRequests._tag, "Some");

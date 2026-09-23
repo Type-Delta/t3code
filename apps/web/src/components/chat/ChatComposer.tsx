@@ -42,6 +42,7 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   isPasteAsTextShortcut,
   nextPastedTextFileName,
@@ -178,6 +179,11 @@ import {
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { useClientSettings } from "../../hooks/useSettings";
 import { getTerminalFocusOwner } from "../../lib/terminalFocus";
+import {
+  selectActiveSplitPane,
+  selectIsSplitViewActive,
+  useSplitViewStore,
+} from "../../splitViewStore";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../../keybindings";
 import {
@@ -5278,6 +5284,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         },
       });
       if (command !== "composer.stash") return;
+      // Capture listeners are pane-local, but the window event is shared in split view.
+      const splitState = useSplitViewStore.getState();
+      if (selectIsSplitViewActive(splitState)) {
+        const activePane = selectActiveSplitPane(splitState);
+        if (
+          activePane === null ||
+          scopedThreadKey(activePane) !== scopedThreadKey(routeThreadRef)
+        ) {
+          return;
+        }
+      }
       // Always claim the shortcut so the browser save dialog never opens,
       // even when the composer is in a state that can't stash.
       event.preventDefault();
@@ -5303,6 +5320,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     keybindings,
     pendingUserInputs.length,
     projectSelectionRequired,
+    routeThreadRef,
     stashCurrentPrompt,
     isRevertingCheckpoint,
     terminalOpen,

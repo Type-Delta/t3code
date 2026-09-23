@@ -98,11 +98,11 @@ The fork supports up to four visible thread panes in an equal full-height grid, 
 
 Split membership is persisted as multiple ordered local groups with active state and stable group colors. Selecting any member restores its group; the current and legacy sidebars preserve group tinting, support pane and thread drag placement, and show complete left/right drop intent. The group tint is textured with an inline desaturated SVG grain so the color-coded row reads as a surface rather than a flat slab. The grain is a masked pseudo-element rather than a second background layer, because background layers cannot carry their own mask and unmasked grain also covers the gradient's faded tail, flattening the row back into a uniform slab; the overlay shares the tint's fade axis and stops short of its extent so the texture is gone before the color is. Group hues carry a hue-dependent chroma: a flat chroma across the wheel does not read as a flat saturation, since yellow-green renders at full strength while red and blue are gamut-clipped, so chroma eases down around yellow-green. Rows supply only the hue and that chroma, leaving the stylesheet to compose per-theme lightness and strength — light mode takes a deeper, less translucent tint because the translucency that reads as a clear band on the near-black sidebar washes out against zinc-50. The current sidebar also names the other panes in each grouped thread's details tooltip, keeps displayed panes visible when settled or snoozed shelves are collapsed, and preserves split actions in its context menu. Right-panel ownership remains useful when focus moves to a pane with no surface of its own.
 
-**Implementation evidence:** `apps/web/src/splitViewStore.ts`, `apps/web/src/splitViewDrag.ts`, `apps/web/src/components/{SplitThreadWorkspace,SplitPaneDropHint,Sidebar,LegacySidebar,RightPanelTabs,ChatView}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
+**Implementation evidence:** `apps/web/src/splitViewStore.ts`, `apps/web/src/splitViewDrag.ts`, `apps/web/src/components/{SplitThreadWorkspace,SplitPaneDropHint,Sidebar,LegacySidebar,RightPanelTabs,ChatView,chat/ChatComposer}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
 
-**Recorded validation:** split-store, sidebar, workspace, right-panel, and drag/drop tests; web typecheck; `vp check`; `git diff --check`; and Electron runtime verification of context menus, routing, pane layout, persistent groups, and right-panel attribution. The 2026-09-01 merge-focused web suite reran split ownership and routing against the new composer, attachment, theme, and activity UI.
+**Recorded validation:** split-store, sidebar, workspace, right-panel, and drag/drop tests; web typecheck; `vp check`; `git diff --check`; and Electron runtime verification of context menus, routing, pane layout, persistent groups, and right-panel attribution. The 2026-09-01 merge-focused web suite reran split ownership and routing against the new composer, attachment, theme, and activity UI. On 2026-09-22, isolated paired-browser verification confirmed that `composer.stash` claims and stashes only for the active pane; inactive panes leave the key unclaimed and their drafts untouched.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-22
 
 ### DL012 — Prompt preservation during draft promotion
 
@@ -614,6 +614,8 @@ Don't forget to update the `base` tag after each merge to track the latest share
 
 **Merge commit:** this merge commit
 **Parents:** `7ff559cb7c` (fork) and `76cc9b08f1` (upstream/main)
+
+- The 2026-09-23 follow-up declares the missing activity-table alias in the user-input lookup introduced by post-sync reconciliation. This restores answer and dismissal commands without a migration; regression coverage checks pending, resolved, and missing requests through the SQLite-backed query service.
 
 - Preserved the fork's durable checkpoints, sidecar navigation, split workspaces, Windows portability, provider credentials, preview safeguards, and compact subscription meters while absorbing the upstream web, mobile, desktop, provider, pull-request, and release updates.
 - Kept the deployed fork migration ledger authoritative. Upstream's colliding migrations `052`–`053` are appended as `063`–`064`; `065_ReconcileBranchPullRequestHistory` idempotently repairs databases that recorded the old fork suggestion migration at ID 58 before startup.
