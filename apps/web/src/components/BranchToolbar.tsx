@@ -56,10 +56,12 @@ import { Separator } from "./ui/separator";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { MiddleTruncate } from "./ui/middle-truncate";
 import { ComposerSurface } from "./chat/ComposerSurface";
+import { ComposerSubagents } from "./chat/ComposerSubagents";
 import { useComposerMenuProps } from "./chat/composerEventScope";
 import { measureRestingComposerControls } from "./chat/restingComposerControlsMeasurement";
 import { resolveRestingComposerControlsNaturalWidth } from "./composerFooterLayout";
 import { cn } from "~/lib/utils";
+import type { SubagentRunSummary } from "../session-logic";
 
 export interface BranchToolbarHandle {
   openBranchPicker: () => void;
@@ -88,6 +90,8 @@ interface BranchToolbarProps {
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
   composerControlsHostRef?: (element: HTMLDivElement | null) => void;
   contextStripVisible?: boolean;
+  subagentRuns?: ReadonlyArray<SubagentRunSummary>;
+  onOpenSubagentRuns?: (runIds: ReadonlyArray<string>) => void;
 }
 
 interface MobileRunContextSelectorProps {
@@ -503,6 +507,8 @@ export const BranchToolbar = memo(function BranchToolbar({
   onEnvironmentChange,
   composerControlsHostRef,
   contextStripVisible = true,
+  subagentRuns = [],
+  onOpenSubagentRuns,
 }: BranchToolbarProps) {
   const branchSelectorRef = useRef<BranchToolbarBranchSelectorHandle>(null);
   const threadRef = useMemo(
@@ -684,6 +690,14 @@ export const BranchToolbar = memo(function BranchToolbar({
           data-composer-context-control
           data-chat-resting-composer-controls-host="true"
           className="flex min-w-0 flex-1 items-center justify-start overflow-x-clip overflow-y-visible"
+        />
+      ) : null}
+
+      {onOpenSubagentRuns ? (
+        <ComposerSubagents
+          runs={subagentRuns}
+          onOpen={onOpenSubagentRuns}
+          visible={contextStripVisible}
         />
       ) : null}
 

@@ -577,6 +577,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         model: "gpt-5.3-codex",
         effort: "high",
         serviceTier: "priority",
+        promptSuggestionEnabled: false,
       });
     }),
   );
@@ -802,6 +803,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       NodeAssert.deepStrictEqual(secondRuntime.sendTurnImpl.mock.calls[0]?.[0], {
         input: "second turn",
         model: "model-b",
+        promptSuggestionEnabled: false,
       });
     }).pipe(Effect.provide(layer));
   });
@@ -851,6 +853,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
         input: "second model, same context",
         model: "model-b",
+        promptSuggestionEnabled: false,
       });
     }).pipe(Effect.provide(layer));
   });
@@ -938,6 +941,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         model: "gpt-5.3-codex",
         effort: "high",
         serviceTier: "flex",
+        promptSuggestionEnabled: false,
       });
     }).pipe(Effect.provide(customLayer));
   });
@@ -2473,6 +2477,53 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("does not emit a second failure for a native usage-limit turn completion", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit({
+        id: asEventId("evt-native-limit-error"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: USAGE_LIMIT_NOW,
+        method: "error",
+        turnId: asTurnId("turn-limit"),
+        payload: {
+          threadId: "thread-1",
+          turnId: "turn-limit",
+          error: { message: CODEX_OUT_OF_CREDITS, codexErrorInfo: "usageLimitExceeded" },
+          willRetry: false,
+          t3UsageLimitRetryAt: "2026-01-02T00:00:00.000Z",
+        },
+      } satisfies ProviderEvent);
+      yield* runtime.emit(codexUsageLimitTurnFailed("evt-native-limit-completed"));
+      yield* runtime.emit(
+        codexRateLimitsNotification({
+          id: "evt-after-native-limit",
+          primary: { usedPercent: 100, resetsInSeconds: 3_600 },
+        }),
+      );
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["runtime.error", "turn.completed", "account.rate-limits.updated"],
+      );
+      NodeAssert.equal(events[1]?.type, "turn.completed");
+      if (events[1]?.type === "turn.completed") {
+        NodeAssert.deepStrictEqual(events[1].payload.retry, {
+          reason: "usage_limit",
+          retryAt: "2026-01-02T00:00:00.000Z",
+        });
+      }
+    }),
+  );
+
   it.effect("does not treat a CPA 429 as native usage-limit retry metadata", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -3756,7 +3807,7 @@ usageLimitLayer("CodexAdapterLive usage limits", (it) => {
       NodeAssert.equal(first._tag, "Some");
       if (first._tag !== "Some" || first.value.type !== "runtime.error") return;
       NodeAssert.equal(first.value.payload.message, "Codex is temporarily unavailable.");
-      NodeAssert.equal(first.value.payload.class, "provider_error");
+      NodeAssert.equal(first.value.payload.class, "turn_error");
     }),
   );
 });

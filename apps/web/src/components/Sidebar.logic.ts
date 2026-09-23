@@ -1177,6 +1177,27 @@ export function getOtherSplitViewThreads(input: {
   });
 }
 
+export function selectSidebarShelfThreads<T>(input: {
+  threads: readonly T[];
+  keyOf: (thread: T) => string;
+  retainedThreadKeys: ReadonlySet<string>;
+  expanded: boolean;
+  visibleCount?: number;
+}): T[] {
+  const { threads, keyOf, retainedThreadKeys, expanded, visibleCount } = input;
+  const page = threads.slice(0, visibleCount ?? threads.length);
+  if (!expanded) return threads.filter((thread) => retainedThreadKeys.has(keyOf(thread)));
+  if (visibleCount === undefined || page.length === threads.length) return page;
+
+  const pageKeys = new Set(page.map(keyOf));
+  return [
+    ...page,
+    ...threads
+      .slice(page.length)
+      .filter((thread) => retainedThreadKeys.has(keyOf(thread)) && !pageKeys.has(keyOf(thread))),
+  ];
+}
+
 export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
 }): ThreadStatusPill | null {

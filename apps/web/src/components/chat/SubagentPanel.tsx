@@ -24,6 +24,7 @@ interface SubagentPanelProps {
   messages: ReadonlyArray<OrchestrationMessage>;
   activities: ReadonlyArray<OrchestrationThreadActivity>;
   environmentId: EnvironmentId;
+  machineName: string;
   routeThreadKey: string;
   markdownCwd: string | undefined;
   workspaceRoot: string | undefined;
@@ -131,6 +132,7 @@ export function SubagentPanel(props: SubagentPanelProps) {
         isRevertingCheckpoint={false}
         onImageExpand={doNothing}
         activeThreadEnvironmentId={props.environmentId}
+        machineName={props.machineName}
         markdownCwd={props.markdownCwd}
         resolvedTheme={props.resolvedTheme}
         timestampFormat={props.timestampFormat}

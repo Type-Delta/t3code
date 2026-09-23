@@ -2,6 +2,14 @@ import { useLayoutEffect, type PointerEvent as ReactPointerEvent } from "react";
 import { type SensorProps } from "@dnd-kit/core";
 import { getOwnerDocument, getWindow } from "@dnd-kit/utilities";
 
+export function isSplitThreadDragHandle(target: EventTarget | null): boolean {
+  const element = target as (Element & { closest?: Element["closest"] }) | null;
+  return (
+    typeof element?.closest === "function" &&
+    element.closest("[data-split-thread-drag-handle]") !== null
+  );
+}
+
 // Search unmounts the drag context while its owning Sidebar remains mounted.
 export function SidebarDragLifecycle({ onUnmount }: { onUnmount: () => void }) {
   useLayoutEffect(() => onUnmount, [onUnmount]);
@@ -20,8 +28,13 @@ export class SidebarPointerSensor {
   static activators = [
     {
       eventName: "onPointerDown" as const,
-      handler: ({ nativeEvent }: ReactPointerEvent) =>
-        nativeEvent.isPrimary && nativeEvent.button === 0,
+      handler: ({ nativeEvent }: ReactPointerEvent) => {
+        return (
+          nativeEvent.isPrimary &&
+          nativeEvent.button === 0 &&
+          !isSplitThreadDragHandle(nativeEvent.target)
+        );
+      },
     },
   ];
   autoScrollEnabled = true;

@@ -53,6 +53,7 @@ import {
   EyeIcon,
   FolderIcon,
   GitBranchIcon,
+  GripVerticalIcon,
   MessageCircleQuestionIcon,
   PinIcon,
   PinOffIcon,
@@ -73,6 +74,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -84,8 +86,17 @@ import {
   findSplitViewGroupForThread,
   MAX_SPLIT_VIEW_PANES,
   selectActiveSplitPane,
+  selectIsSplitViewActive,
+  selectSplitPaneRefs,
+  selectSplitViewGroups,
   useSplitViewStore,
 } from "../splitViewStore";
+import {
+  beginSplitThreadDrag,
+  endSplitThreadDrag,
+  hasSplitThreadDrag,
+  readSplitThreadDrag,
+} from "../splitViewDrag";
 import {
   isAtomCommandInterrupted,
   settlePromise,
@@ -167,6 +178,7 @@ import {
   filterSidebarProjectScopeItems,
   formatWorkingDurationLabel,
   firstValidTimestampMs,
+  getOtherSplitViewThreads,
   hasUnseenCompletion,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
@@ -177,6 +189,7 @@ import {
   resolveSidebarDropTarget,
   resolveSidebarDropVerb,
   resolveSplitViewDetachNavigationTarget,
+  selectSidebarShelfThreads,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
   searchSidebarThreads,
@@ -190,6 +203,8 @@ import {
   sortPinnedThreadsForSidebar,
   sortSettledThreadsForSidebar,
   sortThreadsForSidebar,
+  resolveSplitViewGroupRowStyle,
+  SPLIT_VIEW_GROUP_ROW_CLASS_NAME,
   useRetainedValue,
   useSidebarRowSubscriptionLease,
   useThreadJumpHintVisibility,
@@ -330,6 +345,7 @@ function SidebarThreadTooltip({
   modelInstanceId,
   modelLabel,
   branchMismatch,
+  otherSplitThreads,
   terminalStatus,
   terminalProcessCount,
 }: {
@@ -346,6 +362,7 @@ function SidebarThreadTooltip({
     threadBranch: string;
     currentBranch: string;
   } | null;
+  otherSplitThreads: ReadonlyArray<{ threadKey: string; title: string }>;
   terminalStatus: TerminalStatusIndicator | null;
   terminalProcessCount: number;
 }) {
@@ -391,6 +408,18 @@ function SidebarThreadTooltip({
               <div className="min-w-0 flex-1 wrap-break-word leading-5">
                 You're currently checked out on another branch.
               </div>
+            </div>
+          ) : null}
+          {otherSplitThreads.length > 0 ? (
+            <div className="min-w-0 border-t border-border/60 pt-1.5">
+              <div className="text-foreground/90">Other threads in split view</div>
+              <ul className="mt-0.5 list-disc pl-3.5 text-foreground/90">
+                {otherSplitThreads.map((splitThread) => (
+                  <li key={splitThread.threadKey} className="wrap-break-word">
+                    {splitThread.title}
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
           {driverKind ? (
@@ -973,6 +1002,12 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
   ),
 };
 
+type SplitGroupIndicator = {
+  colorHue: number;
+  label: string;
+  otherThreads: ReadonlyArray<{ threadKey: string; title: string }>;
+};
+
 const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
   variant: "card" | "slim";
@@ -1003,6 +1038,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // the user visits the thread.
   wokeAt: string | null;
   isActive: boolean;
+  isDisplayedInSplitView: boolean;
+  canDragIntoSplit: boolean;
+  splitGroupIndicator: SplitGroupIndicator | null;
   openPullRequestsInRightPanel: boolean;
   jumpLabel: string | null;
   currentEnvironmentId: string | null;
@@ -1052,6 +1090,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     onUnpin,
     openPullRequestsInRightPanel,
     renamingTitle,
+    splitGroupIndicator,
     thread,
     variant,
     variantAction,
@@ -1231,10 +1270,40 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       modelInstanceId={modelInstanceId}
       modelLabel={modelLabel}
       branchMismatch={branchMismatch}
+      otherSplitThreads={props.splitGroupIndicator?.otherThreads ?? []}
       terminalStatus={terminalStatus}
       terminalProcessCount={terminalProcessCount}
     />
   );
+  const splitGroupAriaDescription = props.splitGroupIndicator
+    ? `Included in ${props.splitGroupIndicator.label}${
+        props.splitGroupIndicator.otherThreads.length > 0
+          ? ` with ${props.splitGroupIndicator.otherThreads.map(({ title }) => title).join(", ")}`
+          : ""
+      }`
+    : undefined;
+  const handleThreadDragStart = useCallback(
+    (event: ReactDragEvent<HTMLButtonElement>) => {
+      beginSplitThreadDrag(event.dataTransfer, threadRef);
+    },
+    [threadRef],
+  );
+  const handleThreadDragEnd = useCallback(() => endSplitThreadDrag(), []);
+  const splitDragHandle = props.canDragIntoSplit ? (
+    <button
+      type="button"
+      draggable
+      data-split-thread-drag-handle
+      aria-label={`Drag ${thread.title} into split view`}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      onDragStart={handleThreadDragStart}
+      onDragEnd={handleThreadDragEnd}
+      className="flex h-7 w-5 shrink-0 cursor-grab items-center justify-center rounded-sm text-muted-foreground/45 outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
+    >
+      <GripVerticalIcon aria-hidden className="size-3.5" />
+    </button>
+  ) : null;
 
   const handleClick = useCallback(
     (event: ReactMouseEvent) => {
@@ -1415,11 +1484,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       ? "bg-sidebar-row-active text-sidebar-foreground"
       : isSelected
         ? "bg-sidebar-row-selected text-sidebar-foreground"
-        : hasUnsentDraft
-          ? cn(draftSurfaceClassName, "text-sidebar-foreground")
-          : shouldRecede
-            ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
-            : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
+        : props.isDisplayedInSplitView
+          ? "bg-accent/50 text-foreground hover:bg-accent/65 hover:text-foreground dark:bg-accent/35 dark:hover:bg-accent/50"
+          : hasUnsentDraft
+            ? cn(draftSurfaceClassName, "text-sidebar-foreground")
+            : shouldRecede
+              ? "text-sidebar-muted-foreground/75 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+              : "bg-transparent text-sidebar-foreground hover:bg-sidebar-row-hover",
     isFileDragOver && "ring-1 ring-inset ring-primary/70",
     // The hover tint must not clobber an active/selected row's own surface.
     isFileDragOver && !props.isActive && !isSelected && "bg-sidebar-row-hover",
@@ -1592,9 +1663,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         className={cn(
           // Matches the h-9 row so unrendered rows never shift the list when they paint.
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
+          props.canDragIntoSplit && "flex items-center gap-1",
           sortable?.isDragging && "relative z-20",
         )}
       >
+        {splitDragHandle}
         <Tooltip disabled={sortable?.isDragging}>
           <TooltipTrigger
             render={
@@ -1604,7 +1677,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 tabIndex={0}
                 data-testid="sidebar-row-slim"
                 aria-busy={isRegeneratingTitle || undefined}
-                className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
+                aria-description={splitGroupAriaDescription}
+                className={cn(
+                  rowSurfaceClassName,
+                  "flex h-9 items-center gap-2.5 px-2.5",
+                  props.canDragIntoSplit && "w-auto min-w-0 flex-1",
+                  splitGroupIndicator && SPLIT_VIEW_GROUP_ROW_CLASS_NAME,
+                )}
+                style={
+                  splitGroupIndicator
+                    ? resolveSplitViewGroupRowStyle(splitGroupIndicator.colorHue)
+                    : undefined
+                }
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
                 onKeyDown={handleKeyDown}
@@ -1745,9 +1829,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       className={cn(
         // Matches the h-[4.875rem] content box; the py-0.5 padding is added on top.
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
+        props.canDragIntoSplit && "flex items-center gap-1",
         sortable?.isDragging && "relative z-20",
       )}
     >
+      {splitDragHandle}
       <Tooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
         <TooltipTrigger
           render={
@@ -1757,7 +1843,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               tabIndex={0}
               data-testid="sidebar-row-card"
               aria-busy={isRegeneratingTitle || undefined}
-              className={rowSurfaceClassName}
+              aria-description={splitGroupAriaDescription}
+              className={cn(
+                rowSurfaceClassName,
+                props.canDragIntoSplit && "w-auto min-w-0 flex-1",
+                splitGroupIndicator && SPLIT_VIEW_GROUP_ROW_CLASS_NAME,
+              )}
+              style={
+                splitGroupIndicator
+                  ? resolveSplitViewGroupRowStyle(splitGroupIndicator.colorHue)
+                  : undefined
+              }
               onClick={handleClick}
               onDoubleClick={handleDoubleClick}
               onKeyDown={handleKeyDown}
@@ -2146,6 +2242,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
           modelInstanceId={modelInstanceId}
           modelLabel={modelLabel}
           branchMismatch={branchMismatch}
+          otherSplitThreads={[]}
           terminalStatus={terminalStatus}
           terminalProcessCount={runningTerminalIds.length}
         />
@@ -2158,6 +2255,46 @@ export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
+  const splitPaneRefs = useSplitViewStore(selectSplitPaneRefs);
+  const isSplitViewActive = useSplitViewStore(selectIsSplitViewActive);
+  const activeSplitPane = useSplitViewStore(selectActiveSplitPane);
+  const activeSplitThreadKey = activeSplitPane ? scopedThreadKey(activeSplitPane) : null;
+  const splitGroups = useSplitViewStore(selectSplitViewGroups);
+  const displayedSplitThreadKeys = useMemo(
+    () => new Set(isSplitViewActive ? splitPaneRefs.map(scopedThreadKey) : []),
+    [isSplitViewActive, splitPaneRefs],
+  );
+  const threadTitleByKey = useMemo(
+    () =>
+      new Map(
+        threads.map((thread) => [
+          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+          thread.title,
+        ]),
+      ),
+    [threads],
+  );
+  const splitGroupByThreadKey = useMemo(() => {
+    const membership = new Map<string, SplitGroupIndicator>();
+    splitGroups.forEach((group, index) => {
+      const paneThreadKeys = group.paneRefs.map(scopedThreadKey);
+      const indicator = {
+        colorHue: group.colorHue,
+        label: `split view group ${index + 1}`,
+      };
+      paneThreadKeys.forEach((threadKey) =>
+        membership.set(threadKey, {
+          ...indicator,
+          otherThreads: getOtherSplitViewThreads({
+            paneThreadKeys,
+            threadKey,
+            threadTitleByKey,
+          }),
+        }),
+      );
+    });
+    return membership;
+  }, [splitGroups, threadTitleByKey]);
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -2268,6 +2405,11 @@ export default function Sidebar() {
     [routeDraftThread, routeTarget],
   );
   const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
+  const retainedThreadKeys = useMemo(
+    () =>
+      new Set([...(routeThreadKey === null ? [] : [routeThreadKey]), ...displayedSplitThreadKeys]),
+    [displayedSplitThreadKeys, routeThreadKey],
+  );
   const routeTargetRef = useRef(routeTarget);
   routeTargetRef.current = routeTarget;
   // Post-settle navigation validates against the CURRENT route, not the one
@@ -2718,23 +2860,22 @@ export default function Sidebar() {
     lastSettledResetKeyRef.current = settledResetKey;
     setSettledVisibleCount(SETTLED_TAIL_INITIAL_COUNT);
   }
-  const visibleSettledThreads = useMemo(() => {
-    if (settledThreads.length <= settledVisibleCount) return settledThreads;
-    const visible = settledThreads.slice(0, settledVisibleCount);
-    // The open thread must never hide under "Show more": navigating into a
-    // deep settled thread (search, deep link) pulls its row into the visible
-    // tail so the highlight and the un-settle affordance stay reachable.
-    if (routeThreadKey !== null) {
-      const routeThread = settledThreads
-        .slice(settledVisibleCount)
-        .find(
-          (thread) =>
-            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
-        );
-      if (routeThread !== undefined) visible.push(routeThread);
-    }
-    return visible;
-  }, [routeThreadKey, settledThreads, settledVisibleCount]);
+  const getSidebarThreadKey = useCallback(
+    (thread: EnvironmentThreadShell) =>
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+    [],
+  );
+  const visibleSettledThreads = useMemo(
+    () =>
+      selectSidebarShelfThreads({
+        threads: settledThreads,
+        keyOf: getSidebarThreadKey,
+        retainedThreadKeys,
+        expanded: true,
+        visibleCount: settledVisibleCount,
+      }),
+    [getSidebarThreadKey, retainedThreadKeys, settledThreads, settledVisibleCount],
+  );
   const hiddenSettledCount = settledThreads.length - visibleSettledThreads.length;
   const showMoreSettled = useCallback(
     () => setSettledVisibleCount((count) => count + SETTLED_TAIL_PAGE_COUNT),
@@ -2750,14 +2891,13 @@ export default function Sidebar() {
     [setSettledShelfExpanded],
   );
   const renderedSettledThreads = useMemo(() => {
-    if (settledShelfExpanded) return visibleSettledThreads;
-    if (routeThreadKey === null) return EMPTY_THREADS;
-    const routeThread = visibleSettledThreads.find(
-      (thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
-    );
-    return routeThread === undefined ? EMPTY_THREADS : [routeThread];
-  }, [routeThreadKey, settledShelfExpanded, visibleSettledThreads]);
+    return selectSidebarShelfThreads({
+      threads: visibleSettledThreads,
+      keyOf: getSidebarThreadKey,
+      retainedThreadKeys,
+      expanded: settledShelfExpanded,
+    });
+  }, [getSidebarThreadKey, retainedThreadKeys, settledShelfExpanded, visibleSettledThreads]);
 
   // The snoozed shelf is collapsed by default: out of the way, never gone.
   // Collapsed threads don't render (and so don't participate in jump
@@ -2772,18 +2912,13 @@ export default function Sidebar() {
     [setSnoozedShelfExpanded],
   );
   const visibleSnoozedThreads = useMemo(() => {
-    if (snoozedShelfExpanded) return snoozedThreads;
-    // The open thread must never vanish behind the collapsed shelf: a
-    // snoozed thread reached by route (deep link, open before snoozing
-    // elsewhere) keeps its row — with highlight and wake affordance — same
-    // exception the settled tail's "Show more" makes.
-    if (routeThreadKey === null) return EMPTY_THREADS;
-    const routeThread = snoozedThreads.find(
-      (thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
-    );
-    return routeThread === undefined ? EMPTY_THREADS : [routeThread];
-  }, [routeThreadKey, snoozedShelfExpanded, snoozedThreads]);
+    return selectSidebarShelfThreads({
+      threads: snoozedThreads,
+      keyOf: getSidebarThreadKey,
+      retainedThreadKeys,
+      expanded: snoozedShelfExpanded,
+    });
+  }, [getSidebarThreadKey, retainedThreadKeys, snoozedShelfExpanded, snoozedThreads]);
 
   const orderedThreads = useMemo(
     () => [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
@@ -4470,11 +4605,61 @@ export default function Sidebar() {
     shortcutLabelForCommand(keybindings, "chat.new") ??
     (projectGroups.length <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
+  const [isSplitThreadDragOver, setIsSplitThreadDragOver] = useState(false);
+  const clearSplitThreadDragTarget = useCallback(() => {
+    endSplitThreadDrag();
+    setIsSplitThreadDragOver(false);
+  }, []);
+  const handleSplitThreadDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const threadRef = readSplitThreadDrag(event.dataTransfer);
+    const canDetach =
+      threadRef !== null && findSplitViewGroupForThread(useSplitViewStore.getState(), threadRef);
+    if (!canDetach) {
+      setIsSplitThreadDragOver(false);
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setIsSplitThreadDragOver(true);
+  }, []);
+  const handleSplitThreadDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setIsSplitThreadDragOver(false);
+  }, []);
+  const handleSplitThreadDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!hasSplitThreadDrag(event.dataTransfer)) return;
+      const threadRef = readSplitThreadDrag(event.dataTransfer);
+      event.preventDefault();
+      clearSplitThreadDragTarget();
+      if (!threadRef) return;
+      const splitState = useSplitViewStore.getState();
+      const splitGroup = findSplitViewGroupForThread(splitState, threadRef);
+      if (!splitGroup) return;
+      const wasActive =
+        splitGroup.id === splitState.activeGroupId &&
+        splitState.activeThreadKey === scopedThreadKey(threadRef);
+      const detachFallback = splitState.detachPane(threadRef);
+      const navigationTarget = resolveSplitViewDetachNavigationTarget({
+        wasActive,
+        detachFallback,
+        activePane: selectActiveSplitPane(useSplitViewStore.getState()),
+      });
+      if (navigationTarget) void navigateToThread(navigationTarget);
+    },
+    [clearSplitThreadDragTarget, navigateToThread],
+  );
   return (
     <>
       <SidebarChromeHeader isElectron={isElectron} />
       <SidebarContent
-        className="gap-0 min-h-full"
+        className={cn("relative gap-0 min-h-full", isSplitThreadDragOver && "bg-primary/[0.035]")}
+        onDragEnd={clearSplitThreadDragTarget}
+        onDragLeave={handleSplitThreadDragLeave}
+        onDragOver={handleSplitThreadDragOver}
+        onDrop={handleSplitThreadDrop}
         fixedHeader={
           // Lifted above the stage backdrop, whose fade bleeds below the
           // header and would otherwise paint across the search row's outline.
@@ -4637,6 +4822,13 @@ export default function Sidebar() {
           </SidebarGroup>
         }
       >
+        {isSplitThreadDragOver ? (
+          <div className="pointer-events-none absolute inset-x-2 top-2 z-30 flex justify-center">
+            <span className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground shadow-sm">
+              Drop to detach from split view
+            </span>
+          </div>
+        ) : null}
         <SidebarGroup className="ps-[calc(var(--sidebar-content-inset)+1px)] pe-[var(--sidebar-content-inset)] pb-1 pt-0 flex-1">
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
@@ -4755,6 +4947,7 @@ export default function Sidebar() {
                             // sortable wrapper keeps its identity during a drag.
                             key={`${threadKey}:${rowVariant}`}
                             thread={thread}
+                            splitGroupIndicator={splitGroupByThreadKey.get(threadKey) ?? null}
                             variant={rowVariant}
                             // Snoozed rows wake, settled rows un-settle, and cards settle.
                             variantAction={
@@ -4798,7 +4991,13 @@ export default function Sidebar() {
                             // the wake signal must survive the trip. Still-snoozed
                             // rows resolve to null on their own.
                             wokeAt={threadWokeAt(thread, { now: snoozeNow })}
-                            isActive={routeThreadKey === threadKey}
+                            isActive={
+                              isSplitViewActive
+                                ? activeSplitThreadKey === threadKey
+                                : routeThreadKey === threadKey
+                            }
+                            isDisplayedInSplitView={displayedSplitThreadKeys.has(threadKey)}
+                            canDragIntoSplit={isSplitViewActive}
                             openPullRequestsInRightPanel={routeThreadRef !== null}
                             jumpLabel={
                               showThreadJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null

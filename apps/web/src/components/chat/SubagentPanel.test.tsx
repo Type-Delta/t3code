@@ -41,6 +41,7 @@ function render(
       messages={[]}
       activities={activities}
       environmentId={EnvironmentId.make("environment-1")}
+      machineName="This device"
       routeThreadKey="thread-1"
       markdownCwd={undefined}
       workspaceRoot={undefined}

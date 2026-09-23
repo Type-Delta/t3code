@@ -3830,12 +3830,14 @@ export default function ChatView(props: ChatViewProps) {
     isGitRepo,
     showEnvironmentIndicator: showComposerEnvironmentIndicator,
     hostsRestingComposerControls: routeKind === "server",
+    hasSubagentRuns: subagentRuns.length > 0,
   });
   const showComposerContextStrip = shouldShowComposerContextStrip({
     hasActiveProject: activeProject !== null,
     isGitRepo,
     showEnvironmentIndicator: showComposerEnvironmentIndicator,
     hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
+    hasSubagentRuns: subagentRuns.length > 0,
   });
   const terminalShortcutLabelOptions = useMemo(
     () => ({
@@ -9871,6 +9873,7 @@ export default function ChatView(props: ChatViewProps) {
         messages={activeThread.messages}
         activities={threadActivities}
         environmentId={activeThread.environmentId}
+        machineName={environmentById.get(activeThread.environmentId)?.label ?? "This device"}
         routeThreadKey={routeThreadKey}
         markdownCwd={gitCwd ?? undefined}
         workspaceRoot={activeWorkspaceRoot}
@@ -10071,6 +10074,7 @@ export default function ChatView(props: ChatViewProps) {
           availableEditors={availableEditors}
           rightPanelOpen={rightPanelOpen}
           gitCwd={gitCwd}
+          usage={activeProviderStatus?.usage ?? null}
           onNewThreadInProject={handleNewThreadInActiveProject}
           {...(activeDraftLogicalProjectKey
             ? { onOpenProjectSettings: handleOpenDraftProjectSettings }
@@ -10312,6 +10316,11 @@ export default function ChatView(props: ChatViewProps) {
                 activeThreadEnvironmentId={
                   displayedThreadRef?.environmentId ?? activeThread.environmentId
                 }
+                machineName={
+                  environmentById.get(
+                    displayedThreadRef?.environmentId ?? activeThread.environmentId,
+                  )?.label ?? "This device"
+                }
                 routeThreadKey={displayedTimelineKey}
                 displayThreadKey={displayedTimelineKey}
                 onOpenTurnDiff={paintOnlyDisplayedTimeline ? noopHeldTurnDiff : onOpenTurnDiff}
@@ -10426,6 +10435,7 @@ export default function ChatView(props: ChatViewProps) {
                           draftId={draftId}
                           activeProjectRef={activeProjectRef}
                           activeProjectTitle={activeProject?.title ?? null}
+                          machineName={environmentById.get(environmentId)?.label ?? "This device"}
                         />
                       </div>
                     </div>
@@ -10623,6 +10633,8 @@ export default function ChatView(props: ChatViewProps) {
                                 availableEnvironments={logicalProjectEnvironments}
                                 composerControlsHostRef={setRestingComposerControlsHost}
                                 contextStripVisible={showComposerContextStrip}
+                                subagentRuns={subagentRuns}
+                                onOpenSubagentRuns={openSubagentRuns}
                               />
                             </div>
                           )}

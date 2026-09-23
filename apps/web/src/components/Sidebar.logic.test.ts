@@ -13,6 +13,7 @@ import {
   deleteSelectedThreadEntries,
   filterSidebarProjectScopeItems,
   getSidebarThreadIdsToPrewarm,
+  getOtherSplitViewThreads,
   resolveAdjacentThreadId,
   reduceSidebarProjectScopeMenuState,
   getFallbackThreadIdAfterDelete,
@@ -50,6 +51,7 @@ import {
   type SidebarListMarker,
   type SidebarSection,
   resolveSidebarDropVerb,
+  selectSidebarShelfThreads,
 } from "./Sidebar.logic";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import {
@@ -93,6 +95,44 @@ describe("animateSidebarLayoutChanges", () => {
 
   it("keeps layout movement while the user is sorting", () => {
     expect(animateSidebarLayoutChanges({ ...baseArgs, isSorting: true })).toBe(true);
+  });
+});
+
+describe("split sidebar rows", () => {
+  it("lists the other named panes in a group's details metadata", () => {
+    expect(
+      getOtherSplitViewThreads({
+        paneThreadKeys: ["thread-a", "thread-b"],
+        threadKey: "thread-a",
+        threadTitleByKey: new Map([
+          ["thread-a", "Active pane"],
+          ["thread-b", "Review API"],
+        ]),
+      }),
+    ).toEqual([{ threadKey: "thread-b", title: "Review API" }]);
+  });
+
+  it("keeps split panes visible in collapsed shelves and outside the settled page", () => {
+    const threads = ["one", "two", "three", "four"];
+    const retainedThreadKeys = new Set(["four"]);
+
+    expect(
+      selectSidebarShelfThreads({
+        threads,
+        keyOf: (thread) => thread,
+        retainedThreadKeys,
+        expanded: true,
+        visibleCount: 2,
+      }),
+    ).toEqual(["one", "two", "four"]);
+    expect(
+      selectSidebarShelfThreads({
+        threads,
+        keyOf: (thread) => thread,
+        retainedThreadKeys,
+        expanded: false,
+      }),
+    ).toEqual(["four"]);
   });
 });
 

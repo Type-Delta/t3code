@@ -489,9 +489,10 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
       ...(defaultSchema.protocols?.href ?? []),
       "file",
       "t3-citation",
+      "t3-context",
       ...WINDOWS_DRIVE_PROTOCOLS,
     ],
-    src: [...(defaultSchema.protocols?.src ?? []), "file"],
+    src: [...(defaultSchema.protocols?.src ?? []), "file", "t3-context"],
   },
 } satisfies Parameters<typeof rehypeSanitize>[0];
 
@@ -2420,6 +2421,7 @@ function useChatMarkdownState({
   const markdownUrlTransform = useCallback(
     (href: string) => {
       if (parseAssistantCitationHref(href)) return href;
+      if (parseComposerContextHref(href)) return href;
       if (isWindowsDrivePathHref(href)) return href;
       return (
         rewriteMarkdownFileUriHref(href) ??

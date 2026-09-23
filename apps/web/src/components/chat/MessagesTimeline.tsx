@@ -441,6 +441,7 @@ interface MessagesTimelineProps {
   onFileOpen?: (attachment: ChatFileAttachment) => void;
   onFileDownload?: (attachment: ChatFileAttachment) => void;
   activeThreadEnvironmentId: EnvironmentId;
+  machineName: string;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   timestampFormat: TimestampFormat;
@@ -512,6 +513,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onFileOpen = NOOP_OPEN_ATTACHMENT,
   onFileDownload = NOOP_OPEN_ATTACHMENT,
   activeThreadEnvironmentId,
+  machineName,
   markdownCwd,
   resolvedTheme,
   timestampFormat,
@@ -1267,7 +1269,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     }
     return (
       <div className="flex h-full items-center justify-center">
-        <p className="text-placeholder text-sm">Send a message to start the conversation.</p>
+        <div className="text-center">
+          <p className="text-[2rem] leading-tight font-medium text-foreground/80">
+            On {machineName}
+          </p>
+          <p className="text-sm text-muted-foreground/45">
+            Send a message to start the conversation.
+          </p>
+        </div>
       </div>
     );
   }

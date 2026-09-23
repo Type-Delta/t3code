@@ -280,13 +280,13 @@ Checkpoint workers also reclaim expired leases while the server remains running,
 
 ### DL021 — Clickable Windows file links in thread Markdown
 
-Thread Markdown preserves local Windows drive-letter destinations through URL sanitization and resolves the encoded backslash form emitted by the Markdown parser. These links open through the existing file chip behavior instead of rendering as inert anchors. This coexists with upstream workspace images, spaced-folder command-click handling, contrast-aware annotation styling, and full-path link tooltips.
+Thread Markdown preserves local Windows drive-letter destinations through URL sanitization and resolves the encoded backslash form emitted by the Markdown parser. These links open through the existing file chip behavior instead of rendering as inert anchors. Sanitization also preserves validated `t3-context` references in both link and image destinations so structured context records render as chips instead of inert Markdown. This coexists with upstream workspace images, spaced-folder command-click handling, contrast-aware annotation styling, and full-path link tooltips.
 
-**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx` and `apps/web/src/markdown-links.test.ts`.
+**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx`, `apps/web/src/components/ChatMarkdown.test.tsx`, `apps/web/src/components/chat/MessagesTimeline.test.tsx`, and `apps/web/src/markdown-links.test.ts`.
 
-**Recorded validation:** focused Markdown link tests, an isolated paired web-client pass with a drive-letter link in both user and assistant messages, `vp check`, and `vp run typecheck`.
+**Recorded validation:** focused Markdown link tests, ChatMarkdown and MessagesTimeline context-reference tests, an isolated paired web-client pass with a drive-letter link in both user and assistant messages, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-09-23
 
 ### DL022 — Ephemeral zrok public sharing from Connection Settings
 
@@ -612,12 +612,18 @@ Don't forget to update the `base` tag after each merge to track the latest share
 
 ### 2026-09-23 — Audit of September sync regressions
 
+- Restored saved split-group colors and accessible group descriptions in both compact and card rows of the default sidebar, using the existing light/dark theme tint.
 - Restored dropped desktop IPC contracts for recording input, file paths, notification badges, and local-environment controls. Bearer-token requests preserve the selected environment, and iframe keyboard cleanup preserves its CDP session while retaining bounded cleanup.
 - Reconnected split-pane header and panel ownership, active-pane focus, the split workspace route, the default sidebar's split actions and saved manual order, subagent transcripts, checkpoint composer controls, prompt suggestion text, and model-picker selection. Providers without conversation rollback can reach the confirmed files-only checkpoint path. Saved split layouts survive partial environment bootstrap. Shared client state again negotiates reasoning subscriptions, clears obsolete page-loading state, retains completed turns across batched starts, and invalidates worktree lists after revision changes.
+- Restored the status-aware subagent dropdown in the composer context strip, linking each run to its transcript and keeping the subagent and branch controls grouped at narrow widths.
+- Restored machine context below the empty-state heading and compact subscription meters in the active thread header.
+- Restored default-sidebar split membership details, including peer-pane names in row tooltips, active panes in collapsed shelves, and split-thread drag payloads without intercepting ordinary file or sortable-row drags.
 - Preserved legacy message-event decoding, upstream project-monogram validation, and the fork's attachment limits. These repairs reconcile the retained consumers and tests rather than introducing a new migration history.
 - Restored Git branch/path disambiguation, scoped remote fetches, worktree progress and cancellation callbacks, and complete file metadata for review diffs. Checkpoint file restoration now checks workspace ownership on the active navigation path rather than relying on an obsolete reactor command.
 - Reconnected WebSocket worktree turn creation to the bootstrap workflow, restoring scoped fetches, setup progress, cancellation, and failure cleanup. Worktree preparation waits for its completion response without the ordinary command's ten-second deadline. Ordinary thread commands continue through the shared dispatcher with their existing deadline.
 - Restored Claude usage-limit retry metadata, subagent tool-input isolation, and prompt-suggestion instructions while retaining upstream's subagent narration filtering. Provider ingestion again handles diff checks separately from turn settlement, ignores diffs for non-running turns, and persists reasoning with separate parent and subagent identities. Failed turns retain their error state when the provider session remains reusable and checkpoint capture succeeds.
+- Restored Codex permission-approval request mapping and preserved native usage-limit reset metadata needed for automatic resume while still suppressing duplicate generic limit errors.
+- Restored Codex image attachments as path-based `localImage` inputs so large files do not expand `turn/start` requests; the adapter and runtime tests cover the restored contract.
 - Reconciled test fixtures with current service layers and APIs. Packaging removals were audited separately: the dedicated WSL runtime archive and explicit Claude executable resolution supersede the older staging and SDK-patch mechanisms.
 
 ### 2026-09-22 — Merge upstream/main into main

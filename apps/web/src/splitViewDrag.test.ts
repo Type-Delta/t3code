@@ -41,4 +41,13 @@ describe("split view thread drag", () => {
     expect(hasSplitThreadDrag(dataTransfer)).toBe(true);
     expect(readSplitThreadDrag(dataTransfer)).toEqual(threadRef);
   });
+
+  it("does not classify ordinary file or text drags as split-thread drags", () => {
+    const dataTransfer = createDataTransfer();
+    dataTransfer.setData("Files", "file.txt");
+    dataTransfer.setData("text/plain", "file.txt");
+
+    expect(hasSplitThreadDrag(dataTransfer)).toBe(false);
+    expect(readSplitThreadDrag(dataTransfer)).toBeNull();
+  });
 });

@@ -720,6 +720,18 @@ describe("shouldShowComposerContextStrip", () => {
       }),
     ).toBe(true);
   });
+
+  it("keeps subagent controls visible in a non-Git thread", () => {
+    expect(
+      shouldShowComposerContextStrip({
+        hasActiveProject: true,
+        isGitRepo: false,
+        showEnvironmentIndicator: false,
+        hostsRestingComposerControls: false,
+        hasSubagentRuns: true,
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("resolveEffectiveEnvMode", () => {

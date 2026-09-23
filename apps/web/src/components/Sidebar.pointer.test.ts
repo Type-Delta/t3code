@@ -2,7 +2,11 @@ import type { SensorProps } from "@dnd-kit/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { act, createElement, StrictMode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
-import { SidebarDragLifecycle, SidebarPointerSensor } from "./Sidebar.pointer";
+import {
+  isSplitThreadDragHandle,
+  SidebarDragLifecycle,
+  SidebarPointerSensor,
+} from "./Sidebar.pointer";
 
 class TestDocument extends EventTarget {
   hidden = false;
@@ -61,6 +65,18 @@ afterEach(() => {
 });
 
 describe("sidebar pointer lifecycle", () => {
+  it("leaves split drag-handle gestures to native thread placement", () => {
+    const splitHandle = {
+      closest: (selector: string) =>
+        selector === "[data-split-thread-drag-handle]" ? splitHandle : null,
+    };
+    const ordinaryRow = { closest: () => null };
+
+    expect(isSplitThreadDragHandle(splitHandle as unknown as EventTarget)).toBe(true);
+    expect(isSplitThreadDragHandle(ordinaryRow as unknown as EventTarget)).toBe(false);
+    expect(isSplitThreadDragHandle(null)).toBe(false);
+  });
+
   it("keeps a click idle and starts only after the drag threshold", () => {
     const click = gesture();
     document.dispatchEvent(pointer("pointermove", { clientY: 16 }));

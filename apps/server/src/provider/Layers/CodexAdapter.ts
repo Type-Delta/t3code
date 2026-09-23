@@ -36,7 +36,6 @@ import * as NodeCrypto from "node:crypto";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
-import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -915,6 +914,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_read_approval";
     case "item/fileChange/requestApproval":
       return "file_change_approval";
+    case "item/permissions/requestApproval":
+      return "permission_approval";
     case "mcpServer/elicitation/request":
       return "mcp_elicitation_approval";
     case "applyPatchApproval":
@@ -940,6 +941,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_read_approval";
     case "file-change":
       return "file_change_approval";
+    case "permission":
+      return "permission_approval";
     case "mcp-elicitation":
       return "mcp_elicitation_approval";
     default:
@@ -1544,6 +1547,13 @@ function mapToRuntimeEvents(
           // These params carry no path of their own, only the root the agent
           // wants to write under.
           return nonEmptyDetail(payload?.reason) ?? nonEmptyDetail(payload?.grantRoot);
+        }
+        case "item/permissions/requestApproval": {
+          const payload = readPayload(
+            EffectCodexSchema.PermissionsRequestApprovalParams,
+            event.payload,
+          );
+          return nonEmptyDetail(payload?.reason);
         }
         case "mcpServer/elicitation/request":
           return elicitation?.message;
@@ -2403,7 +2413,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   options?: CodexAdapterLiveOptions,
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
-  const fileSystem = yield* FileSystem.FileSystem;
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
   const serverConfig = yield* Effect.service(ServerConfig);
@@ -2501,6 +2510,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // after the stop and often sparse, so keep the session's merged view of
         // it and read it when a turn fails on the limit.
         let rateLimits: CodexRateLimitSnapshot | undefined;
+        // Some app-server versions report the same limit through both an
+        // `error` notification and the later `turn/completed` notification.
+        // The error carries the native retry timestamp, so keep its turn id
+        // long enough to suppress the duplicate completion.
+        const nativeUsageLimitTurns = new Set<string>();
         const sessionScope = yield* Scope.make("sequential");
         let sessionScopeTransferred = false;
         yield* Effect.addFinalizer(() =>
@@ -2572,12 +2586,25 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 event.payload,
               );
               // The failed `turn/completed` repeats this sentence and is answered
-              // below; relaying both would show the limit twice.
-              if (errorPayload?.error.codexErrorInfo === "usageLimitExceeded") return;
+              // below; relaying both would show the limit twice. Some app-server
+              // builds attach the native retry timestamp only to this error,
+              // though, so keep that event for auto-resume metadata.
+              const retryMetadata = decodeCodexUsageLimitRetryMetadata(event.payload);
+              const hasRetryAt =
+                Option.isSome(retryMetadata) &&
+                typeof retryMetadata.value[CODEX_USAGE_LIMIT_RETRY_AT_FIELD] === "string";
+              if (errorPayload?.error.codexErrorInfo === "usageLimitExceeded") {
+                if (hasRetryAt && event.turnId) {
+                  nativeUsageLimitTurns.add(String(event.turnId));
+                } else if (!hasRetryAt) {
+                  return;
+                }
+              }
             }
 
             let usageLimitError: ProviderRuntimeEvent | undefined;
             let usageLimitMessage: string | undefined;
+            let duplicateNativeUsageLimitCompletion = false;
             if (event.method === "turn/completed") {
               const completedPayload = readPayload(
                 EffectCodexSchema.V2TurnCompletedNotification,
@@ -2588,16 +2615,20 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   ? completedPayload.turn.error
                   : undefined;
               if (turnError?.codexErrorInfo === "usageLimitExceeded") {
-                usageLimitMessage = codexUsageLimitMessage(rateLimits, event.createdAt);
-                usageLimitError = {
-                  ...runtimeEventBase(event, event.threadId),
-                  type: "runtime.error",
-                  payload: {
-                    message: usageLimitMessage,
-                    class: "provider_error",
-                    ...(turnError.message ? { detail: turnError.message } : {}),
-                  },
-                };
+                duplicateNativeUsageLimitCompletion =
+                  event.turnId !== undefined && nativeUsageLimitTurns.delete(String(event.turnId));
+                if (!duplicateNativeUsageLimitCompletion) {
+                  usageLimitMessage = codexUsageLimitMessage(rateLimits, event.createdAt);
+                  usageLimitError = {
+                    ...runtimeEventBase(event, event.threadId),
+                    type: "runtime.error",
+                    payload: {
+                      message: usageLimitMessage,
+                      class: "provider_error",
+                      ...(turnError.message ? { detail: turnError.message } : {}),
+                    },
+                  };
+                }
               }
             }
 
@@ -2631,9 +2662,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }
               return runtimeEvent;
             });
-            const runtimeEvents = usageLimitError
-              ? [usageLimitError, ...mappedEvents]
-              : mappedEvents;
+            const runtimeEvents = duplicateNativeUsageLimitCompletion
+              ? mappedEvents.filter(
+                  (runtimeEvent) =>
+                    !(
+                      runtimeEvent.type === "turn.completed" && runtimeEvent.turnId === event.turnId
+                    ),
+                )
+              : usageLimitError
+                ? [usageLimitError, ...mappedEvents]
+                : mappedEvents;
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
@@ -2696,27 +2734,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         detail: `Invalid attachment id '${attachment.id}'.`,
       });
     }
-    const bytes = yield* fileSystem.readFile(attachmentPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "turn/start",
-            detail: `Failed to read attachment file: ${cause.message}.`,
-            cause,
-          }),
-      ),
-    );
     return {
-      type: "image" as const,
-      url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+      type: "localImage" as const,
+      path: attachmentPath,
     };
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    // Codex ingests images only. Anything else would be base64-encoded as an
-    // image and rejected or misread; generic files reach the agent through the
-    // path line ProviderService puts in the prompt.
+    // Codex ingests images only. Generic files reach the agent through the
+    // path line ProviderService puts in the prompt. Passing images by path
+    // keeps the turn/start request independent of image size.
     const codexAttachments = yield* Effect.forEach(
       (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment(input, attachment),
