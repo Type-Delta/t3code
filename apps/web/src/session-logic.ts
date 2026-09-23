@@ -1,6 +1,7 @@
 import {
   requestKindFromRequestType,
   type PendingApproval,
+  derivePendingRequests,
 } from "@t3tools/client-runtime/pending-requests";
 import { UserInputAttachmentAnswerPayload } from "@t3tools/contracts";
 import { foldUserInputActivities } from "@t3tools/client-runtime/work-log/user-input";
@@ -8,7 +9,12 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Arr from "effect/Array";
 import { shallow } from "zustand/vanilla/shallow";
-import { isBackgroundTaskActivity } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  isBackgroundTaskActivity,
+  type AgentPanelModel,
+  type RuntimeSubagent,
+  type RuntimeSubagentStatus,
+} from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   commandDetailRepeatsCommand,
   extractCommandOutputText,
@@ -44,6 +50,21 @@ import {
 
 export type { PendingApproval, PendingUserInput } from "@t3tools/client-runtime/pending-requests";
 
+// Keep the historical web selectors while sharing the request reducer with
+// mobile and desktop. Both selectors intentionally return fresh arrays so
+// callers can derive UI state without mutating the shared result.
+export function derivePendingApprovals(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): PendingApproval[] {
+  return derivePendingRequests(activities).approvals;
+}
+
+export function derivePendingUserInputs(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): import("@t3tools/client-runtime/pending-requests").PendingUserInput[] {
+  return derivePendingRequests(activities).userInputs;
+}
+
 export { formatDuration } from "@t3tools/shared/orchestrationTiming";
 
 export {
@@ -72,6 +93,10 @@ export interface WorkLogEntry {
   toolIcon?: import("@t3tools/contracts").ToolActivityIcon;
   toolSource?: import("@t3tools/contracts").ToolActivitySource;
   toolData?: unknown;
+  subagentRunIds?: ReadonlyArray<string>;
+  subagentPrompt?: string;
+  subagentModel?: string;
+  subagentReasoningEffort?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   /** From runtime item / task payload `status` when present (e.g. tool.updated). */
@@ -450,11 +475,27 @@ function isAgentInternalActivity(activity: OrchestrationThreadActivity): boolean
 
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
+  options?: { readonly includeAgentInternal?: boolean },
 ): WorkLogEntry[] {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
   // A launch tool and its task lifecycle describe the same run. Only hide
   // launch rows once their tool-use id has an agent row to replace them.
   const agentLaunchToolIds = new Set<string>();
+  const authoritativeAgentTaskIds = new Set(
+    ordered.flatMap((activity) => {
+      if (
+        activity.kind !== "task.started" &&
+        activity.kind !== "task.progress" &&
+        activity.kind !== "task.completed"
+      ) {
+        return [];
+      }
+      const payload = asRecord(activity.payload);
+      return payload && typeof payload.taskId === "string" && !isBackgroundTaskActivity(payload)
+        ? [payload.taskId]
+        : [];
+    }),
+  );
   for (const activity of ordered) {
     if (
       (activity.kind === "task.started" ||
@@ -474,7 +515,16 @@ export function deriveWorkLogEntries(
     ) {
       continue;
     }
-    if (activity.kind === "tool.started") continue;
+    if (activity.kind === "tool.started" && !isSubagentToolActivity(activity)) continue;
+    if (isSubagentToolActivity(activity)) {
+      const payload = asRecord(activity.payload);
+      const data = asRecord(payload?.data);
+      const runIds = data ? extractSubagentToolData(payload, data).runIds : [];
+      // Native task lifecycle is the single chat-row authority. Keep the
+      // provider item persisted for transcript correlation, but do not render
+      // a second spawn row when both shapes describe the same child.
+      if (runIds.some((runId) => authoritativeAgentTaskIds.has(runId))) continue;
+    }
     // Agent task.started rows are CTA seeds: they carry the true spawn turn,
     // which is the batch key (completions of background subagents arrive
     // under later synthetic turns and must not start new batches). They
@@ -487,7 +537,7 @@ export function deriveWorkLogEntries(
     if (activity.summary === "Checkpoint captured") continue;
     if (isNoContentRuntimeWarning(activity)) continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
-    if (isAgentInternalActivity(activity)) continue;
+    if (!options?.includeAgentInternal && isAgentInternalActivity(activity)) continue;
     const entry = toDerivedWorkLogEntry(activity);
     // Native agent launches get their visible row from task.started. Defer
     // their active tool row so another launch cannot duplicate the batch.
@@ -512,6 +562,11 @@ export function deriveWorkLogEntries(
     entries.push(entry);
   }
   return collapseDerivedWorkLogEntries(entries);
+}
+
+export function isSubagentToolActivity(activity: OrchestrationThreadActivity): boolean {
+  const payload = asRecord(activity.payload);
+  return payload?.itemType === "collab_agent_tool_call";
 }
 
 /** Adapters forward unknown wire-only SDK messages (background_tasks_changed,
@@ -637,6 +692,25 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     const toolData = typeof data?.toolName === "string" ? (data.item ?? data) : data?.item;
     if (toolData !== undefined) {
       entry.toolData = toolData;
+    }
+  }
+  if (itemType === "collab_agent_tool_call") {
+    const data = asRecord(payload?.data);
+    if (data) {
+      entry.toolData = data;
+      const subagent = extractSubagentToolData(payload, data);
+      if (subagent.runIds.length > 0) {
+        entry.subagentRunIds = subagent.runIds;
+      }
+      if (subagent.prompt !== undefined) {
+        entry.subagentPrompt = subagent.prompt;
+      }
+      if (subagent.model !== undefined) {
+        entry.subagentModel = subagent.model;
+      }
+      if (subagent.reasoningEffort !== undefined) {
+        entry.subagentReasoningEffort = subagent.reasoningEffort;
+      }
     }
   }
   if (itemType) {
@@ -863,6 +937,10 @@ function mergeDerivedWorkLogEntries(
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
+  const subagentRunIds = next.subagentRunIds ?? previous.subagentRunIds;
+  const subagentPrompt = next.subagentPrompt ?? previous.subagentPrompt;
+  const subagentModel = next.subagentModel ?? previous.subagentModel;
+  const subagentReasoningEffort = next.subagentReasoningEffort ?? previous.subagentReasoningEffort;
   return {
     ...previous,
     ...next,
@@ -881,6 +959,10 @@ function mergeDerivedWorkLogEntries(
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolLifecycleStatus !== undefined ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
+    ...(subagentRunIds !== undefined ? { subagentRunIds } : {}),
+    ...(subagentPrompt !== undefined ? { subagentPrompt } : {}),
+    ...(subagentModel !== undefined ? { subagentModel } : {}),
+    ...(subagentReasoningEffort !== undefined ? { subagentReasoningEffort } : {}),
   };
 }
 
@@ -1533,6 +1615,214 @@ type AttachmentResource = Extract<AssetResource, { readonly _tag: "attachment" }
 const EMPTY_IMAGE_RESOURCES = Object.freeze<ReadonlyArray<AttachmentResource>>([]);
 
 /** A mounted row requests its stored images. Local previews keep their existing URLs. */
+function extractSubagentToolData(
+  payload: Record<string, unknown> | null,
+  data: Record<string, unknown>,
+): {
+  runIds: string[];
+  prompt?: string;
+  title?: string;
+  model?: string;
+  reasoningEffort?: string;
+  status?: SubagentRunSummary["status"];
+} {
+  const item = asRecord(data.item);
+  if (
+    item &&
+    ((item.type === "collabAgentToolCall" && item.tool === "spawnAgent") ||
+      (item.type === "subAgentActivity" && item.kind !== "interacted"))
+  ) {
+    const receiverThreadIds = Array.isArray(item.receiverThreadIds)
+      ? item.receiverThreadIds.filter(
+          (value): value is string => typeof value === "string" && value.length > 0,
+        )
+      : [];
+    const agentThreadId = asTrimmedString(item.agentThreadId);
+    const runIds =
+      receiverThreadIds.length > 0 ? receiverThreadIds : agentThreadId ? [agentThreadId] : [];
+    const model = asTrimmedString(item.model);
+    const reasoningEffort = asTrimmedString(item.reasoningEffort);
+    const agentPath = asTrimmedString(item.agentPath);
+    const agentName = agentPath?.split("/").findLast((segment) => segment.length > 0) ?? null;
+    return {
+      runIds,
+      ...(typeof item.prompt === "string" ? { prompt: item.prompt } : {}),
+      ...(model ? { model } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      title: agentName ?? model ?? "Subagent",
+      ...(isSubagentRunStatus(item.status) ? { status: item.status } : {}),
+    };
+  }
+
+  const input = asRecord(data.input);
+  const toolCallId = typeof payload?.toolCallId === "string" ? payload.toolCallId : undefined;
+  if (!toolCallId || typeof data.toolName !== "string" || !input) {
+    return { runIds: [] };
+  }
+  const description = asTrimmedString(input.description);
+  const subagentType = asTrimmedString(input.subagent_type);
+  const model = asTrimmedString(input.model);
+  const reasoningEffort =
+    asTrimmedString(input.reasoningEffort) ??
+    asTrimmedString(input.reasoning_effort) ??
+    asTrimmedString(input.effort);
+  return {
+    runIds: [toolCallId],
+    ...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}),
+    title: description ?? subagentType ?? "Subagent",
+    ...(model ? { model } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(isSubagentRunStatus(payload?.status) ? { status: payload.status } : {}),
+  };
+}
+
+function isSubagentRunStatus(value: unknown): value is SubagentRunSummary["status"] {
+  return (
+    value === "inProgress" || value === "completed" || value === "failed" || value === "stopped"
+  );
+}
+
+export interface SubagentRunSummary {
+  id: string;
+  title: string;
+  prompt: string;
+  model?: string;
+  reasoningEffort?: string;
+  status: "inProgress" | "completed" | "failed" | "stopped";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SubagentPanelRunSummary = Omit<SubagentRunSummary, "status"> & {
+  status: SubagentRunSummary["status"] | RuntimeSubagentStatus;
+};
+
+export function findSubagentInPanelModel(
+  model: AgentPanelModel,
+  agentId: string,
+): RuntimeSubagent | undefined {
+  const direct = model.directAgents.find((agent) => agent.id === agentId);
+  if (direct) return direct;
+  for (const group of model.workflows) {
+    if (group.workflow.id === agentId) return group.workflow;
+    for (const phase of group.phases) {
+      const member = phase.members.find((agent) => agent.id === agentId);
+      if (member) return member;
+    }
+    const member = group.unphasedMembers.find((agent) => agent.id === agentId);
+    if (member) return member;
+  }
+  return undefined;
+}
+
+export function resolveSubagentPanelRun(input: {
+  runId: string;
+  surfaceTitle: string;
+  legacyRun?: SubagentRunSummary | undefined;
+  nativeAgent?: RuntimeSubagent | undefined;
+  threadCreatedAt: string;
+  threadUpdatedAt: string;
+}): SubagentPanelRunSummary {
+  const { legacyRun, nativeAgent } = input;
+  return {
+    id: input.runId,
+    title: nativeAgent?.title ?? legacyRun?.title ?? input.surfaceTitle,
+    prompt: legacyRun?.prompt ?? "",
+    ...(legacyRun?.model ? { model: legacyRun.model } : {}),
+    ...(legacyRun?.reasoningEffort ? { reasoningEffort: legacyRun.reasoningEffort } : {}),
+    status: nativeAgent?.status ?? legacyRun?.status ?? "stopped",
+    createdAt:
+      nativeAgent?.startedAt ??
+      nativeAgent?.firstSeenAt ??
+      legacyRun?.createdAt ??
+      input.threadCreatedAt,
+    updatedAt: nativeAgent?.updatedAt ?? legacyRun?.updatedAt ?? input.threadUpdatedAt,
+  };
+}
+
+export function deriveSubagentTranscriptIds(
+  messages: ReadonlyArray<{ readonly subagentId?: string | undefined }>,
+  activities: ReadonlyArray<{ readonly subagentId?: string | undefined }>,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const message of messages) if (message.subagentId !== undefined) ids.add(message.subagentId);
+  for (const activity of activities)
+    if (activity.subagentId !== undefined) ids.add(activity.subagentId);
+  return ids;
+}
+
+export function deriveSubagentRuns(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): SubagentRunSummary[] {
+  const runs = new Map<string, SubagentRunSummary>();
+  for (const activity of [...activities].toSorted(compareActivitiesByOrder)) {
+    const payload = asRecord(activity.payload);
+    if (payload?.itemType !== "collab_agent_tool_call") continue;
+    const data = asRecord(payload.data);
+    if (!data) continue;
+    const subagent = extractSubagentToolData(payload, data);
+    for (const runId of subagent.runIds) {
+      const previous = runs.get(runId);
+      const model = subagent.model ?? previous?.model;
+      const reasoningEffort = subagent.reasoningEffort ?? previous?.reasoningEffort;
+      runs.set(runId, {
+        id: runId,
+        title: subagent.title ?? previous?.title ?? "Subagent",
+        prompt: subagent.prompt ?? previous?.prompt ?? "",
+        ...(model ? { model } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+        status:
+          subagent.status ??
+          (activity.kind === "tool.completed" ? "completed" : (previous?.status ?? "inProgress")),
+        createdAt: previous?.createdAt ?? activity.createdAt,
+        updatedAt: activity.createdAt,
+      });
+    }
+  }
+  return [...runs.values()];
+}
+
+function toLegacySubagentStatus(status: RuntimeSubagentStatus): SubagentRunSummary["status"] {
+  if (status === "pending" || status === "running" || status === "waiting") return "inProgress";
+  if (status === "completed" || status === "failed") return status;
+  return "stopped";
+}
+
+export function mergeSubagentRuns(
+  legacyRuns: ReadonlyArray<SubagentRunSummary>,
+  model: AgentPanelModel,
+): SubagentRunSummary[] {
+  const runs = new Map(legacyRuns.map((run) => [run.id, run]));
+  const nativeAgents: RuntimeSubagent[] = [
+    ...model.directAgents,
+    ...model.workflows.flatMap((group) => [
+      group.workflow,
+      ...group.phases.flatMap((phase) => phase.members),
+      ...group.unphasedMembers,
+    ]),
+  ];
+
+  for (const agent of nativeAgents) {
+    const previous = runs.get(agent.id);
+    runs.set(agent.id, {
+      id: agent.id,
+      title: agent.title,
+      prompt: previous?.prompt ?? "",
+      ...(agent.model ? { model: agent.model } : previous?.model ? { model: previous.model } : {}),
+      ...(agent.effort
+        ? { reasoningEffort: agent.effort }
+        : previous?.reasoningEffort
+          ? { reasoningEffort: previous.reasoningEffort }
+          : {}),
+      status: toLegacySubagentStatus(agent.status),
+      createdAt: agent.startedAt ?? agent.firstSeenAt,
+      updatedAt: agent.updatedAt,
+    });
+  }
+
+  return [...runs.values()];
+}
+
 export function selectMessageImageResources(
   attachments: ChatMessage["attachments"],
 ): ReadonlyArray<AttachmentResource> {

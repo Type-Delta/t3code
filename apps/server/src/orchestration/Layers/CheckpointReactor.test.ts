@@ -371,7 +371,9 @@ describe("CheckpointReactor", () => {
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(RuntimeReceiptBusTest),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
-      Layer.provideMerge(Layer.mock(PullRequestService)({ refreshAfterTurn })),
+      Layer.provideMerge(
+        Layer.mock(PullRequestService)({ refreshAfterTurn: () => refreshAfterTurn }),
+      ),
       Layer.provideMerge(vcsStatusBroadcasterLayer),
       Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
       Layer.provideMerge(

@@ -322,6 +322,7 @@ export function sortActiveThreadsByOrderKey<
     readonly id: string;
     readonly createdAt: string;
     readonly unsettledAt?: string | null | undefined;
+    readonly latestUserMessageAt?: string | null | undefined;
     readonly activeOrderKey?: string | null | undefined;
     readonly environmentId?: string | undefined;
   },
@@ -330,7 +331,13 @@ export function sortActiveThreadsByOrderKey<
   const timestamps = new Map<T, number>();
   for (const thread of threads) {
     if (thread.activeOrderKey == null) {
-      timestamps.set(thread, activeThreadAnchorTimestampMs(thread));
+      timestamps.set(
+        thread,
+        Math.max(
+          activeThreadAnchorTimestampMs(thread),
+          toSortableTimestamp(thread.latestUserMessageAt ?? undefined) ?? 0,
+        ),
+      );
     }
   }
   return [...threads].sort((left, right) => {

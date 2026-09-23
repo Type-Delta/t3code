@@ -24,13 +24,11 @@ import * as Schema from "effect/Schema";
 
 import type { TestTurnResponse } from "./TestProviderAdapter.integration.ts";
 import {
-  gitRefExists,
-  gitShowFileAtRef,
   makeOrchestrationIntegrationHarness,
   type OrchestrationIntegrationHarness,
 } from "./OrchestrationEngineHarness.integration.ts";
-import { checkpointRefForThreadTurn } from "../src/checkpointing/Utils.ts";
 import type {
+  CheckpointBaselineCapturedReceipt,
   CheckpointDiffFinalizedReceipt,
   TurnProcessingQuiescedReceipt,
 } from "../src/orchestration/Services/RuntimeReceiptBus.ts";
@@ -181,7 +179,7 @@ const startTurn = (input: {
     createdAt: input.createdAt ?? nowIso(),
   });
 
-it.live("runs a single turn end-to-end and persists checkpoint state in sqlite + git", () =>
+it.live("runs a single turn end-to-end and persists checkpoint state in sqlite + sidecar", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
       yield* seedProjectAndThread(harness);
@@ -248,12 +246,40 @@ it.live("runs a single turn end-to-end and persists checkpoint state in sqlite +
       assert.equal(thread.checkpoints[0]?.checkpointTurnCount, 1);
       assert.deepEqual(thread.checkpoints[0]?.files, []);
 
-      const ref0 = checkpointRefForThreadTurn(THREAD_ID, 0);
-      const ref1 = checkpointRefForThreadTurn(THREAD_ID, 1);
-      assert.equal(gitRefExists(harness.workspaceDir, ref0), true);
-      assert.equal(gitRefExists(harness.workspaceDir, ref1), true);
-      assert.equal(gitShowFileAtRef(harness.workspaceDir, ref0, "README.md"), "v1\n");
-      assert.equal(gitShowFileAtRef(harness.workspaceDir, ref1, "README.md"), "v1\n");
+      const baseline = yield* harness.waitForReceipt(
+        (receipt): receipt is CheckpointBaselineCapturedReceipt =>
+          receipt.type === "checkpoint.baseline.captured" && receipt.threadId === THREAD_ID,
+      );
+      if (baseline.type !== "checkpoint.baseline.captured") {
+        throw new Error("Expected checkpoint.baseline.captured receipt.");
+      }
+      assert.equal(
+        yield* harness.checkpointStore.hasCheckpointRef({
+          cwd: harness.workspaceDir,
+          checkpointRef: baseline.checkpointRef,
+        }),
+        true,
+      );
+      const checkpointRef = thread.checkpoints[0]!.checkpointRef;
+      assert.equal(
+        yield* harness.checkpointStore.hasCheckpointRef({
+          cwd: harness.workspaceDir,
+          checkpointRef,
+        }),
+        true,
+      );
+      NodeFS.writeFileSync(NodePath.join(harness.workspaceDir, "README.md"), "changed\n");
+      assert.equal(
+        yield* harness.checkpointStore.restoreCheckpoint({
+          cwd: harness.workspaceDir,
+          checkpointRef,
+        }),
+        true,
+      );
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(harness.workspaceDir, "README.md"), "utf8"),
+        "v1\n",
+      );
     }),
   ),
 );
@@ -418,10 +444,18 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
           receipt.checkpointTurnCount === 1,
       );
 
-      yield* harness.waitForThread(
+      const firstTurnThread = yield* harness.waitForThread(
         THREAD_ID,
         (entry) => entry.checkpoints.length === 1 && entry.session?.threadId === "thread-1",
       );
+      const firstCheckpointRef = firstTurnThread.checkpoints[0]!.checkpointRef;
+      const baseline = yield* harness.waitForReceipt(
+        (receipt): receipt is CheckpointBaselineCapturedReceipt =>
+          receipt.type === "checkpoint.baseline.captured" && receipt.threadId === THREAD_ID,
+      );
+      if (baseline.type !== "checkpoint.baseline.captured") {
+        throw new Error("Expected checkpoint.baseline.captured receipt.");
+      }
 
       yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
         events: [
@@ -485,6 +519,7 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
       const secondCheckpoint = secondTurnThread.checkpoints.find(
         (checkpoint) => checkpoint.checkpointTurnCount === 2,
       );
+      const secondCheckpointRef = secondCheckpoint!.checkpointRef;
       assert.equal(
         secondCheckpoint?.files.some((file) => file.path === "README.md"),
         true,
@@ -497,8 +532,8 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
 
       const incrementalDiff = yield* harness.checkpointStore.diffCheckpoints({
         cwd: harness.workspaceDir,
-        fromCheckpointRef: checkpointRefForThreadTurn(THREAD_ID, 1),
-        toCheckpointRef: checkpointRefForThreadTurn(THREAD_ID, 2),
+        fromCheckpointRef: firstCheckpointRef,
+        toCheckpointRef: secondCheckpointRef,
         fallbackFromToHead: false,
         ignoreWhitespace: false,
       });
@@ -506,27 +541,33 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
 
       const fullDiff = yield* harness.checkpointStore.diffCheckpoints({
         cwd: harness.workspaceDir,
-        fromCheckpointRef: checkpointRefForThreadTurn(THREAD_ID, 0),
-        toCheckpointRef: checkpointRefForThreadTurn(THREAD_ID, 2),
+        fromCheckpointRef: baseline.checkpointRef,
+        toCheckpointRef: secondCheckpointRef,
         fallbackFromToHead: false,
         ignoreWhitespace: false,
       });
       assert.equal(fullDiff.includes("README.md"), true);
 
       assert.equal(
-        gitShowFileAtRef(
-          harness.workspaceDir,
-          checkpointRefForThreadTurn(THREAD_ID, 1),
-          "README.md",
-        ),
+        yield* harness.checkpointStore.restoreCheckpoint({
+          cwd: harness.workspaceDir,
+          checkpointRef: firstCheckpointRef,
+        }),
+        true,
+      );
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(harness.workspaceDir, "README.md"), "utf8"),
         "v2\n",
       );
       assert.equal(
-        gitShowFileAtRef(
-          harness.workspaceDir,
-          checkpointRefForThreadTurn(THREAD_ID, 2),
-          "README.md",
-        ),
+        yield* harness.checkpointStore.restoreCheckpoint({
+          cwd: harness.workspaceDir,
+          checkpointRef: secondCheckpointRef,
+        }),
+        true,
+      );
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(harness.workspaceDir, "README.md"), "utf8"),
         "v3\n",
       );
     }),
@@ -614,7 +655,7 @@ it.live("tracks approval requests and resolves pending approvals on user respons
   ),
 );
 
-it.live("records failed turn runtime state and checkpoint status as error", () =>
+it.live("keeps a failed Codex session usable and captures its checkpoint", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
       yield* seedProjectAndThread(harness);
@@ -669,24 +710,28 @@ it.live("records failed turn runtime state and checkpoint status as error", () =
       const thread = yield* harness.waitForThread(
         THREAD_ID,
         (entry) =>
-          entry.session?.status === "error" &&
+          entry.session?.status === "ready" &&
           entry.session?.lastError === "Sandbox command failed." &&
           entry.activities.some((activity) => activity.kind === "runtime.error") &&
           entry.checkpoints.length === 1,
       );
-      assert.equal(thread.session?.status, "error");
-      assert.equal(thread.checkpoints[0]?.status, "error");
+      assert.equal(thread.session?.status, "ready");
+      assert.equal(thread.latestTurn?.state, "error");
+      assert.equal(thread.checkpoints[0]?.status, "ready");
 
       assert.equal(thread.checkpoints[0]?.checkpointTurnCount, 1);
       assert.equal(
-        gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 1)),
+        yield* harness.checkpointStore.hasCheckpointRef({
+          cwd: harness.workspaceDir,
+          checkpointRef: thread.checkpoints[0]!.checkpointRef,
+        }),
         true,
       );
     }),
   ),
 );
 
-it.live("reverts to an earlier checkpoint and trims checkpoint projections + git refs", () =>
+it.live("navigates to an earlier checkpoint and retains forward sidecar history", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
       yield* seedProjectAndThread(harness);
@@ -804,7 +849,7 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         createdAt: "2026-02-24T10:05:00.900Z",
       });
 
-      yield* harness.waitForThread(
+      const beforeRevert = yield* harness.waitForThread(
         THREAD_ID,
         (entry) =>
           entry.latestTurn?.turnId === "turn-2" &&
@@ -812,6 +857,7 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
           entry.activities.some((activity) => activity.turnId === "turn-2"),
         8000,
       );
+      const abandonedCheckpointRef = beforeRevert.checkpoints[1]!.checkpointRef;
 
       yield* harness.engine.dispatch({
         type: "thread.checkpoint.revert",
@@ -821,7 +867,17 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         createdAt: nowIso(),
       });
 
-      yield* harness.waitForDomainEvent((event) => event.type === "thread.reverted");
+      const navigationEvents = yield* harness.waitForDomainEvent(
+        (event) =>
+          event.type === "thread.checkpoint-navigation-completed" ||
+          event.type === "thread.checkpoint-navigation-failed",
+      );
+      const navigationResult = navigationEvents.findLast(
+        (event) =>
+          event.type === "thread.checkpoint-navigation-completed" ||
+          event.type === "thread.checkpoint-navigation-failed",
+      );
+      assert.equal(navigationResult?.type, "thread.checkpoint-navigation-completed");
       const revertedThread = yield* harness.waitForThread(
         THREAD_ID,
         (entry) =>
@@ -856,10 +912,13 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         "v2\n",
       );
       assert.equal(
-        gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
-        false,
+        yield* harness.checkpointStore.hasCheckpointRef({
+          cwd: harness.workspaceDir,
+          checkpointRef: abandonedCheckpointRef,
+        }),
+        true,
       );
-      assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
+      assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), []);
     }),
   ),
 );
@@ -1269,7 +1328,7 @@ it.live("forwards thread.turn.interrupt to claudeAgent provider sessions", () =>
   ),
 );
 
-it.live("reverts claudeAgent turns and rolls back provider conversation state", () =>
+it.live("requires confirmation for Claude files-only checkpoint restore", () =>
   withHarness(
     (harness) =>
       Effect.gen(function* () {
@@ -1327,10 +1386,24 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           },
         });
 
+        yield* harness.waitForReceipt(
+          (receipt): receipt is CheckpointDiffFinalizedReceipt =>
+            receipt.type === "checkpoint.diff.finalized" &&
+            receipt.threadId === THREAD_ID &&
+            receipt.checkpointTurnCount === 1,
+        );
+        yield* harness.waitForReceipt(
+          (receipt): receipt is TurnProcessingQuiescedReceipt =>
+            receipt.type === "turn.processing.quiesced" &&
+            receipt.threadId === THREAD_ID &&
+            receipt.checkpointTurnCount === 1,
+        );
         yield* harness.waitForThread(
           THREAD_ID,
           (entry) =>
-            entry.latestTurn?.turnId === "turn-1" && entry.session?.threadId === "thread-1",
+            entry.latestTurn?.turnId === "turn-1" &&
+            entry.session?.threadId === "thread-1" &&
+            entry.checkpoints.length === 1,
         );
 
         yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
@@ -1381,13 +1454,14 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           text: "Second Claude edit",
         });
 
-        yield* harness.waitForThread(
+        const beforeRevert = yield* harness.waitForThread(
           THREAD_ID,
-          (entry) =>
-            entry.latestTurn?.turnId === "turn-2" &&
-            entry.checkpoints.length === 2 &&
-            entry.session?.providerName === "claudeAgent",
+          (entry) => entry.checkpoints.length === 2,
+          5000,
         );
+        assert.equal(beforeRevert.session?.providerName, "claudeAgent");
+        const abandonedCheckpointRef = beforeRevert.checkpoints[1]!.checkpointRef;
+        const messagesBeforeRestore = beforeRevert.messages;
 
         yield* harness.engine.dispatch({
           type: "thread.checkpoint.revert",
@@ -1397,21 +1471,57 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           createdAt: nowIso(),
         });
 
-        const revertedThread = yield* harness.waitForThread(
+        const failureEvents = yield* harness.waitForDomainEvent(
+          (event) => event.type === "thread.checkpoint-navigation-failed",
+          5000,
+        );
+        const failure = failureEvents.findLast(
+          (event) => event.type === "thread.checkpoint-navigation-failed",
+        );
+        assert.equal(failure?.type, "thread.checkpoint-navigation-failed");
+        if (failure?.type === "thread.checkpoint-navigation-failed") {
+          assert.equal(failure.payload.code, "files-only-confirmation-required");
+        }
+
+        yield* harness.engine.dispatch({
+          type: "thread.checkpoint.jump",
+          commandId: CommandId.make("cmd-checkpoint-files-only-claude"),
+          threadId: THREAD_ID,
+          turnCount: 1,
+          filesOnlyConfirmed: true,
+          createdAt: nowIso(),
+        });
+        yield* harness.waitForDomainEvent(
+          (event) => event.type === "thread.checkpoint-navigation-completed",
+          5000,
+        );
+        const restoredThread = yield* harness.waitForThread(
           THREAD_ID,
           (entry) =>
-            entry.checkpoints.length === 1 && entry.checkpoints[0]?.checkpointTurnCount === 1,
+            entry.activities.some((activity) => activity.kind === "checkpoint.files-restored"),
+          5000,
         );
-        assert.equal(revertedThread.checkpoints[0]?.checkpointTurnCount, 1);
+        assert.deepEqual(restoredThread.messages, messagesBeforeRestore);
+        assert.equal(restoredThread.checkpoints.length, 2);
         assert.equal(
-          gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 1)),
+          NodeFS.readFileSync(NodePath.join(harness.workspaceDir, "README.md"), "utf8"),
+          "v2\n",
+        );
+        assert.equal(
+          yield* harness.checkpointStore.hasCheckpointRef({
+            cwd: harness.workspaceDir,
+            checkpointRef: restoredThread.checkpoints[0]!.checkpointRef,
+          }),
           true,
         );
         assert.equal(
-          gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
-          false,
+          yield* harness.checkpointStore.hasCheckpointRef({
+            cwd: harness.workspaceDir,
+            checkpointRef: abandonedCheckpointRef,
+          }),
+          true,
         );
-        assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
+        assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), []);
       }),
     CLAUDE_AGENT_PROVIDER,
   ),

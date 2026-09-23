@@ -18,7 +18,7 @@ import projectionProjectsAutoPull from "./055_ProjectionProjectsAutoPull.ts";
 import repairAutomaticSettlementTimestamps from "./056_RepairAutomaticSettlementTimestamps.ts";
 import projectionProjectIcon from "./057_ProjectionProjectIcon.ts";
 
-const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
+const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
 layer("053_ReconcileUpstream47History", (it) => {
   it.effect("repairs fork schema after the upstream 36-47 ledger", () =>

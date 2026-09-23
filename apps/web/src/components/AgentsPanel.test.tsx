@@ -1,5 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+// The panel tests render agent rows; the imported diff worker is not exercised here.
+vi.mock("@pierre/diffs/worker/worker.js?worker", () => ({ default: class {} }));
 
 import type { AgentPanelModel } from "@t3tools/client-runtime/state/subagentRuntime";
 

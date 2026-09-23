@@ -88,7 +88,7 @@ if (
   Command.run(cli, { version: packageJson.version }).pipe(
     Effect.scoped,
     Effect.provide(CliRuntimeLayer),
-    (effect) => effect as unknown as Effect.Effect<void, unknown, never>,
+    Effect.orDie,
     NodeRuntime.runMain,
   );
 }

@@ -15,6 +15,108 @@ const runWith = <A, E>(
   effect: Effect.Effect<A, E, CheckpointNavigationService>,
 ) => effect.pipe(Effect.provide(fixture.makeLayer()));
 
+it.effect("requires an isolated worktree even when no sibling thread exists", () =>
+  Effect.gen(function* () {
+    const fixture = makeNavigationFixture({ contextWorktreePath: null });
+    const result = yield* runWith(
+      fixture,
+      Effect.gen(function* () {
+        const service = yield* CheckpointNavigationService;
+        return yield* service
+          .navigate({ commandId: "main-workspace-restore", threadId, kind: "undo" })
+          .pipe(Effect.result);
+      }),
+    );
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") assert.equal(result.failure.code, "shared-workspace");
+    assert.deepStrictEqual(fixture.events, []);
+  }),
+);
+
+it.effect("refuses a restore when an archived thread owns the workspace", () =>
+  Effect.gen(function* () {
+    const fixture = makeNavigationFixture({ archivedSiblingWorktreePath: "C:/workspace" });
+    const result = yield* runWith(
+      fixture,
+      Effect.gen(function* () {
+        const service = yield* CheckpointNavigationService;
+        return yield* service
+          .navigate({ commandId: "archived-shared-restore", threadId, kind: "undo" })
+          .pipe(Effect.result);
+      }),
+    );
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") assert.equal(result.failure.code, "shared-workspace");
+    assert.deepStrictEqual(fixture.events, []);
+  }),
+);
+
+it.effect("refuses a restore when another provider session uses the workspace", () =>
+  Effect.gen(function* () {
+    const fixture = makeNavigationFixture({ providerSessionCwd: "C:/workspace" });
+    const result = yield* runWith(
+      fixture,
+      Effect.gen(function* () {
+        const service = yield* CheckpointNavigationService;
+        return yield* service
+          .navigate({ commandId: "session-shared-restore", threadId, kind: "undo" })
+          .pipe(Effect.result);
+      }),
+    );
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") assert.equal(result.failure.code, "shared-workspace");
+    assert.deepStrictEqual(fixture.events, []);
+  }),
+);
+
+it.effect("refuses a restore when another thread owns the same workspace", () =>
+  Effect.gen(function* () {
+    const fixture = makeNavigationFixture({ siblingWorktreePath: "C:/workspace" });
+    const result = yield* runWith(
+      fixture,
+      Effect.gen(function* () {
+        const service = yield* CheckpointNavigationService;
+        return yield* service
+          .navigate({ commandId: "shared-restore", threadId, kind: "undo" })
+          .pipe(Effect.result);
+      }),
+    );
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") {
+      assert.equal(result.failure.code, "shared-workspace");
+    }
+    assert.deepStrictEqual(fixture.events, []);
+  }),
+);
+
+it.effect("keeps explicit files-only restore from overwriting a sibling workspace", () =>
+  Effect.gen(function* () {
+    const fixture = makeNavigationFixture({
+      capability: "unsupported",
+      siblingWorktreePath: "C:/workspace",
+    });
+    const result = yield* runWith(
+      fixture,
+      Effect.gen(function* () {
+        const service = yield* CheckpointNavigationService;
+        return yield* service
+          .navigate({
+            commandId: "shared-files-only",
+            threadId,
+            kind: "undo",
+            filesOnlyConfirmed: true,
+          })
+          .pipe(Effect.result);
+      }),
+    );
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") {
+      assert.equal(result.failure.code, "shared-workspace");
+    }
+    assert.deepStrictEqual(fixture.events, []);
+  }),
+);
+
 it.effect("returns deterministic baseline, tip, and already-current no-ops", () =>
   Effect.gen(function* () {
     const baseline = makeNavigationFixture({ currentOrdinal: 1 });

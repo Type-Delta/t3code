@@ -1,6 +1,7 @@
 import { ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -20,6 +21,7 @@ import type {
 } from "../persistence/Services/CheckpointTimeline.ts";
 import { ProviderUnsupportedError } from "../provider/Errors.ts";
 import { ProviderConversationNavigation } from "../provider/Services/ProviderConversationNavigation.ts";
+import { ProviderService } from "../provider/Services/ProviderService.ts";
 import type {
   ProviderConversationBinding,
   ProviderConversationCursor,
@@ -74,6 +76,10 @@ export interface NavigationFixtureOptions {
   readonly rescueWorktreeKey?: string;
   readonly targetWorktreeKey?: string;
   readonly failures?: ReadonlyArray<NavigationFailurePoint>;
+  readonly contextWorktreePath?: string | null;
+  readonly siblingWorktreePath?: string;
+  readonly archivedSiblingWorktreePath?: string;
+  readonly providerSessionCwd?: string;
 }
 
 const persistenceFailure = (operation: string) =>
@@ -374,12 +380,44 @@ export function makeNavigationFixture(options: NavigationFixtureOptions = {}) {
         Option.some({
           threadId: navigationTestThreadId,
           workspaceCwd: "C:/workspace",
+          worktreePath:
+            options.contextWorktreePath === undefined
+              ? "C:/workspace"
+              : options.contextWorktreePath,
           sessionStatus: "idle" as const,
           hasPendingApprovals: false,
           hasPendingUserInput: false,
         }),
       ),
+    getShellSnapshot: () =>
+      Effect.succeed({
+        projects: [{ id: "project-1", workspaceRoot: "C:/workspace" }],
+        threads: options.siblingWorktreePath
+          ? [{ id: "sibling", projectId: "project-1", worktreePath: options.siblingWorktreePath }]
+          : [],
+      }),
+    getArchivedShellSnapshot: () =>
+      Effect.succeed({
+        projects: [{ id: "project-1", workspaceRoot: "C:/workspace" }],
+        threads: options.archivedSiblingWorktreePath
+          ? [
+              {
+                id: "archived-sibling",
+                projectId: "project-1",
+                worktreePath: options.archivedSiblingWorktreePath,
+              },
+            ]
+          : [],
+      }),
   } as unknown as ProjectionSnapshotQuery["Service"]);
+  const providerSessionsLayer = Layer.succeed(ProviderService, {
+    listSessions: () =>
+      Effect.succeed(
+        options.providerSessionCwd
+          ? [{ threadId: "session-sibling", status: "running", cwd: options.providerSessionCwd }]
+          : [],
+      ),
+  } as unknown as ProviderService["Service"]);
   const identityLayer = Layer.succeed(CheckpointRepositoryIdentityResolver, {
     resolve: () =>
       Effect.succeed({
@@ -397,12 +435,17 @@ export function makeNavigationFixture(options: NavigationFixtureOptions = {}) {
     workspaceLayer,
     providerLayer,
     projectionLayer,
+    providerSessionsLayer,
     identityLayer,
     WorkspaceMutationCoordinatorLive,
     NodeServices.layer,
   );
 
-  const makeLayer = () => CheckpointNavigationServiceLive.pipe(Layer.provide(dependencies));
+  const makeLayer = () =>
+    CheckpointNavigationServiceLive.pipe(
+      Layer.provide(FileSystem.layerNoop({ realPath: (path) => Effect.succeed(path) })),
+      Layer.provide(dependencies),
+    );
 
   const seedOperation = (
     phase: CheckpointNavigationPhase,

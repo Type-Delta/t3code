@@ -1,6 +1,7 @@
 import {
   CommandId,
   EnvironmentId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
@@ -8,10 +9,14 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -27,6 +32,7 @@ import {
   revertThreadCheckpoint,
   reorderActiveThread,
   settleThread,
+  startThreadTurn,
   stopThreadSession,
   unsettleThread,
 } from "./commands.ts";
@@ -214,5 +220,53 @@ describe("environment commands", () => {
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("does not expire a worktree bootstrap while checkout is still running", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<void>();
+      const supervisor = yield* makeSupervisor([]);
+      const session = yield* SubscriptionRef.get(supervisor.session);
+      if (Option.isNone(session)) throw new Error("test session missing");
+      const dispatched = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(completed)),
+        Effect.as({ sequence: 1 }),
+      );
+      const client = {
+        [ORCHESTRATION_WS_METHODS.dispatchCommand]: (_command: ClientOrchestrationCommand) =>
+          dispatched,
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(supervisor.session, Option.some({ ...session.value, client }));
+      const pending = startThreadTurn({
+        threadId: ThreadId.make("thread-bootstrap"),
+        message: {
+          messageId: MessageId.make("message-1"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        bootstrap: {
+          prepareWorktree: {
+            projectCwd: "/workspace/project",
+            baseBranch: "main",
+            branch: "t3code/worktree",
+          },
+        },
+        createdAt: "2026-06-06T00:00:00.000Z",
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      const fiber = yield* pending;
+      yield* Deferred.await(started);
+      yield* TestClock.adjust(Duration.seconds(11));
+      expect(fiber.pollUnsafe()).toBeUndefined();
+      yield* Deferred.succeed(completed, undefined);
+      const result = yield* Fiber.join(fiber);
+      expect(result).toEqual({ sequence: 1 });
+    }).pipe(Effect.provide(Layer.merge(TEST_CRYPTO_LAYER, TestClock.layer()))),
   );
 });

@@ -53,7 +53,7 @@ const assertReconciledColumns = Effect.fn("assertReconciledColumns")(function* (
   }
 });
 
-it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
+it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
   "039_ReconcileCheckpointAndTitleHistory upstream ledger",
   (it) => {
     it.effect("upgrades the upstream 33-35 ledger", () =>
@@ -66,7 +66,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
   },
 );
 
-it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
+it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
   "039_ReconcileCheckpointAndTitleHistory fork ledger",
   (it) => {
     it.effect("upgrades the fork 33-38 ledger", () =>
@@ -106,7 +106,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
   },
 );
 
-it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
+it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
   "039_ReconcileCheckpointAndTitleHistory upstream 38 ledger",
   (it) => {
     it.effect("repairs checkpoint schema skipped by upstream-numbered migrations", () =>
@@ -137,7 +137,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
   },
 );
 
-it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
+it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
   "039_ReconcileCheckpointAndTitleHistory old fork ledger",
   (it) => {
     it.effect("upgrades the old fork 33-36 ledger", () =>
@@ -163,7 +163,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
   },
 );
 
-it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()))(
+it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
   "039_ReconcileCheckpointAndTitleHistory pre-navigation fork ledger",
   (it) => {
     it.effect("adds navigation mode after the old fork 33-35 ledger", () =>

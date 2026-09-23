@@ -13,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
+  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -29,6 +30,7 @@ import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
@@ -267,6 +269,7 @@ describe("ProviderRuntimeIngestion", () => {
     serverSettings?: Partial<ServerSettings>;
     threadTitle?: string;
     workspaceSubdirectory?: string;
+    isGitRepository?: CheckpointStore.CheckpointStore["Service"]["isGitRepository"];
   }) {
     const repositoryRoot = makeTempDir("t3-provider-project-");
     NodeChildProcess.execFileSync("git", ["init", "--initial-branch=main"], {
@@ -322,7 +325,15 @@ describe("ProviderRuntimeIngestion", () => {
         }),
       ),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
-      Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))),
+      Layer.provideMerge(
+        Layer.effect(
+          CheckpointStore.CheckpointStore,
+          Effect.map(CheckpointStore.CheckpointStore, (store) => ({
+            ...store,
+            isGitRepository: options?.isGitRepository ?? store.isGitRepository,
+          })),
+        ).pipe(Layer.provide(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer)))),
+      ),
       Layer.provideMerge(VcsProcess.layer),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
       Layer.provideMerge(NodeServices.layer),
@@ -456,6 +467,25 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("ready");
     expect(thread.session?.lastError).toBe("turn failed");
+    expect(thread.latestTurn).toMatchObject({ turnId: "turn-1", state: "error" });
+
+    await harness.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-failed-turn-checkpoint"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-1"),
+      completedAt: now,
+      checkpointRef: CheckpointRef.make("refs/t3/checkpoints/thread-1/turn/1"),
+      status: "ready",
+      files: [],
+      checkpointTurnCount: 1,
+      createdAt: now,
+    });
+    const afterCapture = await harness.readModel();
+    expect(afterCapture.threads[0]?.latestTurn).toMatchObject({
+      turnId: "turn-1",
+      state: "error",
+    });
   });
 
   it("schedules one auto-resume job for a failed turn with retry metadata", async () => {
@@ -585,13 +615,8 @@ describe("ProviderRuntimeIngestion", () => {
     expect(harness.autoResumeSchedules).toEqual([]);
   });
 
-  it.each([
-    { delivery: "buffered", enableLegacyTokenStreaming: false },
-    { delivery: "streamed", enableLegacyTokenStreaming: true },
-  ])("settles OpenCode aborted turns and saves $delivery assistant text", async (settings) => {
-    const harness = await createHarness({
-      serverSettings: { enableLegacyTokenStreaming: settings.enableLegacyTokenStreaming },
-    });
+  it("settles OpenCode aborted turns and saves assistant text", async () => {
+    const harness = await createHarness();
     const threadId = asThreadId("thread-1");
     const turnId = asTurnId("opencode-aborted-turn");
     const base = {
@@ -641,9 +666,7 @@ describe("ProviderRuntimeIngestion", () => {
   it.each(["turn.completed", "turn.aborted"] as const)(
     "finalizes old buffered text on late %s without stopping the newer turn",
     async (terminalType) => {
-      const harness = await createHarness({
-        serverSettings: { enableLegacyTokenStreaming: false },
-      });
+      const harness = await createHarness();
       const threadId = asThreadId("thread-1");
       const oldTurnId = asTurnId("old-buffered-turn");
       const newTurnId = asTurnId("new-active-turn");
@@ -725,9 +748,7 @@ describe("ProviderRuntimeIngestion", () => {
     { source: "the previous turn", turnId: asTurnId("opencode-stopped-turn") },
     { source: "an unspecified turn", turnId: undefined },
   ])("ignores late OpenCode aborts for $source across newer turns", async (lateAbort) => {
-    const harness = await createHarness({
-      serverSettings: { enableLegacyTokenStreaming: true },
-    });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const threadId = asThreadId("thread-1");
     const stoppedTurnId = asTurnId("opencode-stopped-turn");
     const nextTurnId = asTurnId("opencode-next-turn");
@@ -1466,7 +1487,7 @@ describe("ProviderRuntimeIngestion", () => {
     const harness = await createHarness();
     const initial = await harness.readModel();
 
-    for (const streamKind of ["reasoning_text", "command_output", "file_change_output"] as const) {
+    for (const streamKind of ["command_output", "file_change_output"] as const) {
       harness.emit({
         type: "content.delta",
         eventId: asEventId(`evt-ignored-${streamKind}`),
@@ -1616,6 +1637,231 @@ describe("ProviderRuntimeIngestion", () => {
     expect(child?.text).toBe("Child response");
     expect(child?.subagentId).toBe("child-thread-1");
     expect(thread.latestTurn?.assistantMessageId).toBe("assistant:parent-item");
+  });
+
+  it("keeps interleaved parent and child reasoning separate from assistant replies", async () => {
+    const harness = await createHarness();
+    const base = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-shared-reasoning"),
+    };
+    await harness.emitAndDrain([
+      { ...base, type: "turn.started", eventId: asEventId("evt-reasoning-turn-start") },
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-root-reasoning-first"),
+        itemId: asItemId("root-reasoning"),
+        payload: { streamKind: "reasoning_summary_text", summaryIndex: 0, delta: "First" },
+      },
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-child-reasoning"),
+        subagentId: "child-1",
+        itemId: asItemId("child-reasoning"),
+        payload: { streamKind: "reasoning_text", delta: "Child thought" },
+      },
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-root-reasoning-second"),
+        itemId: asItemId("root-reasoning"),
+        payload: { streamKind: "reasoning_summary_text", summaryIndex: 1, delta: "Second" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-child-reasoning-complete"),
+        subagentId: "child-1",
+        itemId: asItemId("child-reasoning"),
+        payload: { itemType: "reasoning", status: "completed" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-root-reasoning-complete"),
+        itemId: asItemId("root-reasoning"),
+        payload: { itemType: "reasoning", status: "completed" },
+      },
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-root-answer"),
+        itemId: asItemId("root-answer"),
+        payload: { streamKind: "assistant_text", delta: "Root answer" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-root-answer-complete"),
+        itemId: asItemId("root-answer"),
+        payload: { itemType: "assistant_message", status: "completed" },
+      },
+    ]);
+    const thread = (await harness.readModel()).threads[0];
+    const reasoning = thread?.messages.filter((message) => message.role === "reasoning") ?? [];
+    expect(reasoning).toHaveLength(2);
+    expect(reasoning).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: "First\n\nSecond", streaming: false }),
+        expect.objectContaining({ text: "Child thought", subagentId: "child-1", streaming: false }),
+      ]),
+    );
+    expect(reasoning.find((message) => message.text === "First\n\nSecond")).not.toHaveProperty(
+      "subagentId",
+    );
+    expect(
+      thread?.messages.find((message) => message.id === "assistant:root-answer"),
+    ).toMatchObject({
+      role: "assistant",
+      text: "Root answer",
+      streaming: false,
+    });
+    expect(thread?.latestTurn?.assistantMessageId).toBe("assistant:root-answer");
+  });
+
+  it("starts a new reasoning block after tool work and handles a whole-item snapshot", async () => {
+    const harness = await createHarness();
+    const base = {
+      provider: ProviderDriverKind.make("claude"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-tooled-reasoning"),
+    };
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-reasoning-before-tool"),
+        payload: { streamKind: "reasoning_text", delta: "before tool" },
+      },
+      {
+        ...base,
+        type: "item.started",
+        eventId: asEventId("evt-reasoning-tool"),
+        itemId: asItemId("reasoning-tool"),
+        payload: { itemType: "command_execution", status: "inProgress", title: "ls" },
+      },
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-reasoning-after-tool"),
+        payload: { streamKind: "reasoning_text", delta: "after tool" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-reasoning-after-tool-complete"),
+        payload: { itemType: "reasoning", status: "completed" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-reasoning-snapshot"),
+        itemId: asItemId("reasoning-snapshot"),
+        payload: { itemType: "reasoning", status: "completed", detail: "snapshot only" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-reasoning-snapshot-repeat"),
+        itemId: asItemId("reasoning-snapshot"),
+        payload: { itemType: "reasoning", status: "completed", detail: "snapshot only" },
+      },
+    ]);
+    const reasoning =
+      (await harness.readModel()).threads[0]?.messages.filter(
+        (message) => message.role === "reasoning",
+      ) ?? [];
+    expect(reasoning.map((message) => message.text)).toEqual([
+      "before tool",
+      "after tool",
+      "snapshot only",
+    ]);
+  });
+
+  it("does not let a late reasoning completion close the next item", async () => {
+    const harness = await createHarness();
+    const base = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-late-reasoning"),
+    };
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-reasoning-item-a"),
+        itemId: asItemId("reasoning-item-a"),
+        payload: { streamKind: "reasoning_text", delta: "Item A" },
+      },
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-reasoning-item-b"),
+        itemId: asItemId("reasoning-item-b"),
+        payload: { streamKind: "reasoning_text", delta: "Item B" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-reasoning-item-a-late-complete"),
+        itemId: asItemId("reasoning-item-a"),
+        payload: { itemType: "reasoning", status: "completed", detail: "Item A" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-reasoning-item-b-complete"),
+        itemId: asItemId("reasoning-item-b"),
+        payload: { itemType: "reasoning", status: "completed" },
+      },
+    ]);
+    const reasoning =
+      (await harness.readModel()).threads[0]?.messages.filter(
+        (message) => message.role === "reasoning",
+      ) ?? [];
+    expect(reasoning.map((message) => message.text)).toEqual(["Item A", "Item B"]);
+    expect(reasoning.every((message) => !message.streaming)).toBe(true);
+  });
+
+  it("closes reasoning before an assistant answer reported without deltas", async () => {
+    const harness = await createHarness();
+    const base = {
+      provider: ProviderDriverKind.make("claude"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning-answer"),
+    };
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("evt-thinking-before-answer"),
+        payload: { streamKind: "reasoning_text", delta: "Thinking" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-answer-without-delta"),
+        itemId: asItemId("answer-without-delta"),
+        payload: { itemType: "assistant_message", status: "completed", detail: "Answer" },
+      },
+    ]);
+    const messages = (await harness.readModel()).threads[0]?.messages ?? [];
+    expect(messages.filter((message) => message.role === "reasoning")).toEqual([
+      expect.objectContaining({ text: "Thinking", streaming: false }),
+    ]);
+    expect(
+      messages.find((message) => message.id === "assistant:answer-without-delta"),
+    ).toMatchObject({
+      text: "Answer",
+      streaming: false,
+    });
   });
 
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
@@ -2553,9 +2799,7 @@ describe("ProviderRuntimeIngestion", () => {
   ])(
     "strips suggestions with streaming=$streaming, tagged=$tagged, subagent=$subagentId",
     async ({ streaming, text, tagged, subagentId }) => {
-      const harness = await createHarness({
-        serverSettings: { enableLegacyTokenStreaming: streaming },
-      });
+      const harness = await createHarness();
       const common = {
         provider: ProviderDriverKind.make("codex"),
         createdAt: "2026-01-01T00:00:00.000Z",
@@ -3018,7 +3262,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("keeps streaming while an async question is pending", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const base = {
       provider: ProviderDriverKind.make("codex"),
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -3260,7 +3504,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("starts a new streaming assistant message segment after approval", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+    const harness = await createHarness();
     const startedAt = "2026-03-28T07:00:00.000Z";
     const pausedAt = "2026-03-28T07:00:01.000Z";
     const resumedAt = "2026-03-28T07:00:02.000Z";
@@ -3366,8 +3610,8 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe(" after approval");
   });
 
-  it("streams assistant deltas when thread.turn.start requests streaming mode", async () => {
-    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
+  it("streams assistant deltas when token streaming is enabled", async () => {
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "token" } });
     const now = "2026-01-01T00:00:00.000Z";
 
     await Effect.runPromise(
@@ -3918,6 +4162,115 @@ describe("ProviderRuntimeIngestion", () => {
     });
   });
 
+  effectIt.effect("ignores a diff for a missing turn without moving the latest turn", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const base = {
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+      yield* Effect.promise(() =>
+        harness.emitAndDrain([
+          {
+            ...base,
+            type: "turn.started",
+            eventId: asEventId("evt-existing-turn"),
+            turnId: asTurnId("current-turn"),
+          },
+          {
+            ...base,
+            type: "turn.diff.updated",
+            eventId: asEventId("evt-missing-turn-diff"),
+            turnId: asTurnId("missing-turn"),
+            payload: { unifiedDiff: "diff --git a/file.ts b/file.ts\n+late\n" },
+          },
+        ]),
+      );
+      const snapshot = yield* Effect.promise(harness.readModel);
+      expect(snapshot.threads[0]?.checkpoints).toEqual([]);
+      expect(snapshot.threads[0]?.latestTurn).toMatchObject({
+        turnId: "current-turn",
+        state: "running",
+      });
+    }),
+  );
+
+  effectIt.effect("settles the turn while repository detection for a diff is blocked", () =>
+    Effect.gen(function* () {
+      const detectionStarted = yield* Deferred.make<void>();
+      const releaseDetection = yield* Deferred.make<boolean>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          isGitRepository: () =>
+            Deferred.succeed(detectionStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseDetection)),
+            ),
+        }),
+      );
+      yield* Effect.addFinalizer(() => Deferred.succeed(releaseDetection, true));
+      const base = {
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("blocked-diff-turn"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+      };
+      yield* Effect.promise(() =>
+        harness.emitAndDrain([
+          { ...base, type: "turn.started", eventId: asEventId("evt-blocked-turn-start") },
+        ]),
+      );
+      harness.emit({
+        ...base,
+        type: "turn.diff.updated",
+        eventId: asEventId("evt-blocked-diff"),
+        payload: { unifiedDiff: "diff --git a/file.ts b/file.ts\n+new\n" },
+      });
+      yield* Deferred.await(detectionStarted);
+
+      const settled = yield* harness.engine.streamDomainEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.session-set" &&
+            event.payload.threadId === base.threadId &&
+            event.payload.session.status === "ready" &&
+            event.payload.session.activeTurnId === null,
+        ),
+        Stream.runHead,
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      harness.emit({
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("evt-blocked-final-reply"),
+        itemId: asItemId("blocked-final-reply"),
+        payload: { itemType: "assistant_message", status: "completed", detail: "Work finished." },
+      });
+      harness.emit({
+        ...base,
+        type: "turn.completed",
+        eventId: asEventId("evt-blocked-turn-completed"),
+        payload: { state: "failed" },
+      });
+      yield* Fiber.join(settled);
+      const blocked = yield* Effect.promise(harness.readModel);
+      expect(blocked.threads[0]?.session).toMatchObject({ status: "ready", activeTurnId: null });
+      expect(blocked.threads[0]?.messages).toEqual(
+        expect.arrayContaining([expect.objectContaining({ text: "Work finished." })]),
+      );
+      expect(blocked.threads[0]?.checkpoints).toEqual([]);
+
+      yield* Deferred.succeed(releaseDetection, true);
+      yield* Effect.promise(harness.drain);
+      const released = yield* Effect.promise(harness.readModel);
+      expect(released.threads[0]?.checkpoints).toEqual([]);
+      expect(released.threads[0]?.latestTurn).toMatchObject({
+        turnId: "blocked-diff-turn",
+        state: "error",
+      });
+    }),
+  );
+
   effectIt.effect("tracks provider diff updates from a nested Git workspace", () =>
     Effect.gen(function* () {
       const harness = yield* Effect.promise(() =>
@@ -3925,6 +4278,14 @@ describe("ProviderRuntimeIngestion", () => {
       );
       yield* Effect.promise(() =>
         harness.emitAndDrain([
+          {
+            type: "turn.started",
+            eventId: asEventId("evt-nested-turn-started"),
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: "2026-01-01T00:00:00.000Z",
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("nested-turn"),
+          },
           {
             type: "turn.diff.updated",
             eventId: asEventId("evt-nested-diff"),
@@ -3948,6 +4309,15 @@ describe("ProviderRuntimeIngestion", () => {
   it("consumes P1 runtime events into thread metadata, diff checkpoints, and activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("evt-turn-p1-started"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-p1"),
+    });
 
     harness.emit({
       type: "thread.metadata.updated",

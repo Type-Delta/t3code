@@ -22,6 +22,7 @@ import { GitCommandError, type ReviewDiffFileContentsInput } from "@t3tools/cont
 import { ServerConfig } from "../config.ts";
 import {
   makeGitVcsDriverCore,
+  parseGitCheckoutProgressLine,
   parseGitWorktreeList,
   splitNullSeparatedGitStdoutPaths,
 } from "./GitVcsDriverCore.ts";
@@ -903,6 +904,102 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("keeps complete file statistics when the review patch is truncated", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "README.md", "# changed\n");
+        yield* writeTextFile(cwd, "large.txt", "x".repeat(150_000));
+
+        const preview = yield* (yield* GitVcsDriver.GitVcsDriver).getReviewDiffPreview({
+          cwd,
+          ignoreWhitespace: false,
+        });
+        const source = preview.sources.find((candidate) => candidate.kind === "working-tree");
+
+        assert.equal(source?.truncated, true);
+        assert.deepStrictEqual(source?.files?.map((file) => file.path).sort(), [
+          "README.md",
+          "large.txt",
+        ]);
+      }),
+    );
+
+    it.effect("omits incomplete file statistics when untracked paths are truncated", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* Effect.forEach(
+          Array.from(
+            { length: 600 },
+            (_, index) =>
+              `${"long-untracked-name-".repeat(10)}${index.toString().padStart(4, "0")}.txt`,
+          ),
+          (name) => writeTextFile(cwd, name, "x\n"),
+          { concurrency: 32 },
+        );
+
+        const preview = yield* (yield* GitVcsDriver.GitVcsDriver).getReviewDiffPreview({ cwd });
+        const source = preview.sources.find((candidate) => candidate.kind === "working-tree");
+
+        assert.equal(source?.truncated, true);
+        assert.isNotEmpty(source?.diff);
+        assert.equal(source?.files, undefined);
+      }),
+    );
+
+    it.effect("includes file statistics for a branch range", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["checkout", "-b", "feature/review-statistics"]);
+        yield* writeTextFile(cwd, "README.md", "# changed\n");
+        yield* git(cwd, ["add", "README.md"]);
+        yield* git(cwd, ["commit", "-m", "change README"]);
+
+        const preview = yield* (yield* GitVcsDriver.GitVcsDriver).getReviewDiffPreview({
+          cwd,
+          baseRef: initialBranch,
+        });
+
+        assert.deepStrictEqual(
+          preview.sources.find((source) => source.kind === "branch-range")?.files,
+          [{ path: "README.md", previousPath: null, additions: 1, deletions: 1 }],
+        );
+      }),
+    );
+
+    it.effect("reports both paths for a renamed review file", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["mv", "README.md", "renamed.md"]);
+
+        const preview = yield* (yield* GitVcsDriver.GitVcsDriver).getReviewDiffPreview({ cwd });
+
+        assert.deepStrictEqual(
+          preview.sources.find((source) => source.kind === "working-tree")?.files,
+          [{ path: "renamed.md", previousPath: "README.md", additions: 0, deletions: 0 }],
+        );
+      }),
+    );
+
+    it.effect("includes untracked files before the first commit", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.initRepo({ cwd });
+        yield* writeTextFile(cwd, "first.txt", "first\n");
+
+        const preview = yield* driver.getReviewDiffPreview({ cwd });
+
+        assert.deepStrictEqual(
+          preview.sources.find((source) => source.kind === "working-tree")?.files,
+          [{ path: "first.txt", previousPath: null, additions: 1, deletions: 0 }],
+        );
+      }),
+    );
+
     it.effect("keeps untracked filenames with pathspec magic in the review", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -1539,6 +1636,24 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("does not discard local edits when a missing ref matches a file path", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* writeTextFile(cwd, "README.md", "local edits\n");
+
+        const result = yield* (yield* GitVcsDriver.GitVcsDriver)
+          .switchRef({ cwd, refName: "README.md" })
+          .pipe(Effect.result);
+
+        assert.equal(result._tag, "Failure");
+        assert.equal(
+          yield* (yield* FileSystem.FileSystem).readFileString(`${cwd}/README.md`),
+          "local edits\n",
+        );
+      }),
+    );
+
     it.effect("returns the existing refName when rename source and target match", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -1558,6 +1673,33 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
   });
 
   describe("worktree operations", () => {
+    it("reads Git's checkout progress output", () => {
+      assert.deepStrictEqual(parseGitCheckoutProgressLine("Updating files:  78% (2104/2700)"), {
+        percent: 78,
+        completed: 2104,
+        total: 2700,
+      });
+      assert.equal(parseGitCheckoutProgressLine("Preparing worktree (new branch 'x')"), null);
+    });
+
+    it.effect("reports ownership of a newly created worktree", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const pathService = yield* Path.Path;
+        const worktreePath = pathService.join(yield* makeTmpDir(), "new-worktree");
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const claimed: string[] = [];
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        yield* driver.createWorktree(
+          { cwd, path: worktreePath, refName: initialBranch, newRefName: "feature/new-worktree" },
+          { progress: { onWorktreeClaimed: (path) => Effect.sync(() => void claimed.push(path)) } },
+        );
+
+        assert.deepStrictEqual(claimed, [worktreePath]);
+      }),
+    );
+
     it.effect("force-refreshes the shared snapshot when listing worktrees", () =>
       Effect.gen(function* () {
         const driver = yield* GitVcsDriver.GitVcsDriver;
@@ -2004,6 +2146,33 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
   });
 
   describe("remote operations", () => {
+    it.effect("fetches the requested base branch when another configured ref is missing", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir("git-remote-");
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "origin", initialBranch]);
+        yield* git(cwd, [
+          "config",
+          "--replace-all",
+          "remote.origin.fetch",
+          "+refs/heads/missing:refs/remotes/origin/missing",
+        ]);
+
+        const result = yield* (yield* GitVcsDriver.GitVcsDriver)
+          .fetchRemote({ cwd, remoteName: "origin", refName: initialBranch })
+          .pipe(Effect.result);
+
+        assert.equal(result._tag, "Success");
+        assert.equal(
+          yield* git(cwd, ["rev-parse", `refs/remotes/origin/${initialBranch}`]),
+          yield* git(cwd, ["rev-parse", "HEAD"]),
+        );
+      }),
+    );
+
     it.effect("creates a worktree from the latest fetched remote commit", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

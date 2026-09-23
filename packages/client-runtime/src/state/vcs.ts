@@ -380,21 +380,21 @@ export function createVcsEnvironmentAtoms<R, E>(
       tag: WS_METHODS.vcsPull,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefsAndWorktrees,
+      onSettled: invalidateRefs,
     }),
     refreshStatus: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:refresh-status",
       tag: WS_METHODS.vcsRefreshStatus,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefsAndWorktrees,
+      onSettled: invalidateRefs,
     }),
     createWorktree: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:create-worktree",
       tag: WS_METHODS.vcsCreateWorktree,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefs,
+      onSettled: invalidateRefsAndWorktrees,
     }),
     // Live stages of a bootstrap worktree setup. Null until the server begins
     // tracking, then a snapshot per change, then null again after the setup
@@ -413,7 +413,7 @@ export function createVcsEnvironmentAtoms<R, E>(
       tag: WS_METHODS.vcsRemoveWorktree,
       scheduler: vcsCommandScheduler,
       concurrency: vcsCommandConcurrency,
-      onSettled: invalidateRefs,
+      onSettled: invalidateRefsAndWorktrees,
     }),
     createRef: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:vcs:create-ref",

@@ -81,6 +81,12 @@ import { useParams, useRouter } from "@tanstack/react-router";
 
 import { useRightPanelStore } from "../rightPanelStore";
 import {
+  findSplitViewGroupForThread,
+  MAX_SPLIT_VIEW_PANES,
+  selectActiveSplitPane,
+  useSplitViewStore,
+} from "../splitViewStore";
+import {
   isAtomCommandInterrupted,
   settlePromise,
   squashAtomCommandFailure,
@@ -170,6 +176,7 @@ import {
   resolveAdjacentThreadId,
   resolveSidebarDropTarget,
   resolveSidebarDropVerb,
+  resolveSplitViewDetachNavigationTarget,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
   searchSidebarThreads,
@@ -2853,9 +2860,17 @@ export default function Sidebar() {
   // history stays readable without un-settling, and sending a message or
   // starting a session un-settles server-side.
   const navigateToThread = useCallback(
-    (threadRef: ScopedThreadRef) => {
+    (threadRef: ScopedThreadRef, options?: { replace?: boolean }) => {
       if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
         clearSelection();
+      }
+      const splitViewState = useSplitViewStore.getState();
+      const splitGroup = findSplitViewGroupForThread(splitViewState, threadRef);
+      const switchingWithinActiveGroup = splitGroup?.id === splitViewState.activeGroupId;
+      if (splitGroup) {
+        splitViewState.resumeSplit(threadRef);
+      } else {
+        splitViewState.exitSplit();
       }
       setSelectionAnchor(scopedThreadKey(threadRef));
       if (isMobile) {
@@ -2864,6 +2879,7 @@ export default function Sidebar() {
       return router.navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(threadRef),
+        replace: switchingWithinActiveGroup || (options?.replace ?? false),
       });
     },
     [clearSelection, isMobile, router, setOpenMobile, setSelectionAnchor],
@@ -4047,6 +4063,12 @@ export default function Sidebar() {
         }
         const thread = threadByKeyRef.current.get(threadKey);
         if (!thread) return;
+        const splitViewState = useSplitViewStore.getState();
+        const threadSplitGroup = findSplitViewGroupForThread(splitViewState, threadRef);
+        const currentSplitThreadRef = selectActiveSplitPane(splitViewState) ?? routeThreadRef;
+        const canOpenInSplit =
+          currentSplitThreadRef !== null && scopedThreadKey(currentSplitThreadRef) !== threadKey;
+        const splitViewActionId = threadSplitGroup ? "detach-from-split" : "open-in-split";
         const threadWorkspacePath =
           thread.worktreePath ??
           projectByKey.get(`${thread.environmentId}:${thread.projectId}`)?.workspaceRoot ??
@@ -4080,29 +4102,36 @@ export default function Sidebar() {
           ) ?? null;
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
-            buildThreadActionMenuItems({
-              branch: thread.branch ?? null,
-              projectFilter: threadProjectGroup
-                ? {
-                    label: threadProjectGroup.displayName,
-                    isActive: projectScopeKey === threadProjectGroup.projectKey,
-                  }
-                : null,
-              isPinned,
-              isSettled,
-              isSnoozed,
-              canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-              isRegeneratingTitle,
-              isRunning:
-                thread.session?.status === "running" && thread.session.activeTurnId != null,
-              supports: {
-                settlement: supportsSettlement,
-                snooze: supportsSnooze,
-                pinning: supportsPinning,
-                titleRegeneration: supportsTitleRegeneration,
+            [
+              {
+                id: splitViewActionId,
+                label: threadSplitGroup ? "Detach from split view" : "Open in split view",
+                ...(!threadSplitGroup && !canOpenInSplit ? { disabled: true } : {}),
               },
-              snoozePresets,
-            }),
+              ...buildThreadActionMenuItems({
+                branch: thread.branch ?? null,
+                projectFilter: threadProjectGroup
+                  ? {
+                      label: threadProjectGroup.displayName,
+                      isActive: projectScopeKey === threadProjectGroup.projectKey,
+                    }
+                  : null,
+                isPinned,
+                isSettled,
+                isSnoozed,
+                canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                isRegeneratingTitle,
+                isRunning:
+                  thread.session?.status === "running" && thread.session.activeTurnId != null,
+                supports: {
+                  settlement: supportsSettlement,
+                  snooze: supportsSnooze,
+                  pinning: supportsPinning,
+                  titleRegeneration: supportsTitleRegeneration,
+                },
+                snoozePresets,
+              }),
+            ],
             position,
           ),
         );
@@ -4116,6 +4145,32 @@ export default function Sidebar() {
           return;
         }
         switch (clicked.value) {
+          case "open-in-split": {
+            if (!currentSplitThreadRef) return;
+            const openResult = splitViewState.openInSplit(currentSplitThreadRef, threadRef);
+            if (openResult === "at-capacity") {
+              toastManager.add({
+                type: "warning",
+                title: `Split view is limited to ${MAX_SPLIT_VIEW_PANES} panes`,
+              });
+              return;
+            }
+            void navigateToThread(threadRef, { replace: true });
+            return;
+          }
+          case "detach-from-split": {
+            const wasActive =
+              threadSplitGroup?.id === splitViewState.activeGroupId &&
+              splitViewState.activeThreadKey === threadKey;
+            const detachFallback = splitViewState.detachPane(threadRef);
+            const fallbackThreadRef = resolveSplitViewDetachNavigationTarget({
+              wasActive,
+              detachFallback,
+              activePane: selectActiveSplitPane(useSplitViewStore.getState()),
+            });
+            if (fallbackThreadRef) void navigateToThread(fallbackThreadRef, { replace: true });
+            return;
+          }
           case "filter-by-project":
             // This item is the only scope control here, so picking the
             // already-scoped project again is the way back to all projects.
@@ -4289,9 +4344,11 @@ export default function Sidebar() {
       deleteThread,
       handleMultiSelectContextMenu,
       markThreadUnread,
+      navigateToThread,
       openProjectSettings,
       projectScopeKey,
       projectByKey,
+      routeThreadRef,
       serverConfigs,
       setProjectScopeKey,
       startThreadRename,

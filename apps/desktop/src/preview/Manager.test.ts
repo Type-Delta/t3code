@@ -4970,18 +4970,35 @@ describe("PreviewManager", () => {
         const cleanupStarted = new Promise<void>((resolve) => {
           markCleanupStarted = resolve;
         });
-        const sendCommand = vi.fn((method: string, params?: Record<string, unknown>) => {
-          if (method === "Input.dispatchKeyEvent" && params?.["type"] === "keyUp") {
-            keyUpCalls += 1;
-            if (keyUpCalls === 1) {
-              markCleanupStarted();
-              return new Promise<never>(() => undefined);
+        const sendCommand = vi.fn(
+          (method: string, params?: Record<string, unknown>, sessionId?: string) => {
+            if (method === "Input.dispatchKeyEvent" && params?.["type"] === "keyUp") {
+              keyUpCalls += 1;
+              if (keyUpCalls === 1) {
+                markCleanupStarted();
+                return new Promise<never>(() => undefined);
+              }
             }
-          }
-          return Promise.resolve(
-            method === "Runtime.evaluate" ? { result: { value: "recovered" } } : undefined,
-          );
-        });
+            if (method === "Runtime.evaluate") {
+              return Promise.resolve(
+                params?.["returnByValue"] === true
+                  ? { result: { value: "recovered" } }
+                  : sessionId
+                    ? { result: { subtype: "null" } }
+                    : { result: { objectId: "focused-iframe" } },
+              );
+            }
+            if (method === "DOM.describeNode")
+              return Promise.resolve({ node: { frameId: "focused-frame" } });
+            if (method === "Target.getTargets")
+              return Promise.resolve({
+                targetInfos: [{ targetId: "focused-frame", type: "iframe" }],
+              });
+            if (method === "Target.attachToTarget")
+              return Promise.resolve({ sessionId: "child-session" });
+            return Promise.resolve(undefined);
+          },
+        );
         const { webContents, attach, detach } = makeTestControlWebContents(sendCommand);
         fromId.mockReturnValue(webContents);
 

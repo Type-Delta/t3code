@@ -12,7 +12,7 @@ import projectionProjectsDefaultThreadEnvMode from "./044_ProjectionProjectsDefa
 import projectionProjectFaviconPath from "./045_ProjectionProjectFaviconPath.ts";
 import authSessionClientConnection from "./047_AuthSessionClientConnection.ts";
 
-const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
+const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
 layer("046_ReconcileUpstream41History", (it) => {
   it.effect("repairs fork schema after the upstream 36-41 ledger", () =>

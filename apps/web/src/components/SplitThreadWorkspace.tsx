@@ -34,6 +34,7 @@ import {
 } from "../splitViewStore";
 import { useRightPanelStore } from "../rightPanelStore";
 import {
+  useAllEnvironmentProjectSnapshotsReady,
   useProject,
   useThread,
   useThreadRefs,
@@ -179,14 +180,15 @@ function SplitThreadPane(props: {
       return;
     }
 
-    finalizePromotedDraftThreadByRef(threadRef);
     if (active) {
       void navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(threadRef),
         replace: true,
-      });
+      }).then(() => finalizePromotedDraftThreadByRef(threadRef));
+      return;
     }
+    finalizePromotedDraftThreadByRef(threadRef);
   }, [active, draftPane, navigate, serverThreadStarted, threadRef]);
 
   const handleDragStart = useCallback(
@@ -339,6 +341,7 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   const paneRefs = useSplitViewStore(selectSplitPaneRefs);
   const activePane = useSplitViewStore(selectActiveSplitPane);
   const splitActive = useSplitViewStore(selectIsSplitViewActive);
+  const allProjectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();
   const serverThreadRefs = useThreadRefs();
   const draftThreadsById = useComposerDraftStore((state) => state.draftThreadsByThreadKey);
   const [headerSlot, setHeaderSlot] = useState<HTMLDivElement | null>(null);
@@ -392,15 +395,13 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   );
 
   useEffect(() => {
-    // Persisted layouts are restored before thread bootstrap completes. Waiting
-    // for at least one known thread prevents that short loading interval from
-    // erasing a valid saved layout.
-    if (availablePaneRefs.length === 0) return;
+    // A partially loaded environment list cannot prove that a saved pane is gone.
+    if (!allProjectSnapshotsReady) return;
     const fallback = useSplitViewStore.getState().reconcilePanes(availablePaneRefs);
     if (fallback) {
       navigateToPane(fallback);
     }
-  }, [availablePaneRefs, navigateToPane]);
+  }, [allProjectSnapshotsReady, availablePaneRefs, navigateToPane]);
 
   const activePaneKey = activePane ? scopedThreadKey(activePane) : null;
   useEffect(() => {

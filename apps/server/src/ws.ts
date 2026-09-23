@@ -1881,13 +1881,13 @@ const makeWsRpcLayer = (
                     ),
                   )
                 : false;
-              const result = yield* threadCommandDispatcher
-                .dispatch(normalizedCommand, dispatchOptions)
-                .pipe(
-                  Effect.tapError(() =>
-                    cleanupFailedUploadedAttachments(command, normalizedCommand),
-                  ),
-                );
+              const dispatch =
+                normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
+                  ? dispatchNormalizedCommand(normalizedCommand)
+                  : threadCommandDispatcher.dispatch(normalizedCommand, dispatchOptions);
+              const result = yield* dispatch.pipe(
+                Effect.tapError(() => cleanupFailedUploadedAttachments(command, normalizedCommand)),
+              );
               yield* recordClientCommandAnalytics(normalizedCommand);
               yield* ProjectCloneTracker.discardCloneForDeletedProject(
                 projectCloneTracker,

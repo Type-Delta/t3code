@@ -1456,7 +1456,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             // Leaving the "running" session status is the turn-end signal:
             // settle still-running turns so their duration reflects the whole
             // turn rather than the last assistant message.
-            const settledTurnState = settledTurnStateForSessionStatus(event.payload.session.status);
+            const settledTurnState =
+              event.payload.session.status === "ready" && event.payload.session.lastError !== null
+                ? "error"
+                : settledTurnStateForSessionStatus(event.payload.session.status);
             if (settledTurnState === null) {
               return;
             }
@@ -1716,7 +1719,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               ...existingTurn.value,
               assistantMessageId: event.payload.assistantMessageId,
               state:
-                turnStillRunning || existingTurn.value.state === "interrupted"
+                turnStillRunning ||
+                existingTurn.value.state === "interrupted" ||
+                existingTurn.value.state === "error"
                   ? existingTurn.value.state
                   : nextState,
               checkpointTurnCount: event.payload.checkpointTurnCount,

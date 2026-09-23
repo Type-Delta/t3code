@@ -273,6 +273,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   // from the session config. Gates loadOlderTurns so a reconnect to a
   // pre-pagination server never sends unsupported window parameters.
   const paginationSupported = yield* Ref.make(false);
+  const reasoningMessagesSupported = yield* Ref.make(false);
   // The page cursor describes where the loaded window starts, not how wide it
   // is. Keep the requested width separately so authoritative checkpoint
   // refreshes can replace the same window instead of downloading full history.
@@ -360,6 +361,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     // window parameters to a server that may not accept them (review
     // finding). makeSubscribeInput re-sets it from the next session's config.
     yield* Ref.set(paginationSupported, false);
+    yield* Ref.set(reasoningMessagesSupported, false);
     yield* SubscriptionRef.update(state, (current) => ({
       ...current,
       status: current.status === "deleted" ? current.status : statusWithoutLiveData(current.data),
@@ -376,6 +378,31 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         })),
       ),
     );
+
+  const offerThreadPersistence = Effect.fn("EnvironmentThreadState.offerThreadPersistence")(
+    function* (thread: OrchestrationThread, snapshotSequence: number) {
+      const [currentPage, currentTurnLimit] = yield* Effect.all([
+        SubscriptionRef.get(state).pipe(Effect.map((value) => value.page)),
+        Ref.get(loadedUserTurnLimit),
+      ]);
+      yield* Queue.offer(persistence, {
+        snapshotSequence,
+        thread,
+        ...Option.match(currentPage, {
+          onNone: () => ({}),
+          onSome: (value) =>
+            ({
+              page: {
+                beforeCursor: value.beforeCursor,
+                hasMore: value.hasMore,
+                snapshotSequence,
+                ...(currentTurnLimit === null ? {} : { turnLimit: currentTurnLimit }),
+              },
+            }) as const,
+        }),
+      });
+    },
+  );
 
   const setThread = Effect.fn("EnvironmentThreadState.setThread")(function* (
     thread: OrchestrationThread,
@@ -400,28 +427,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     // persist once it settles so cache encoding stays off the streaming path.
     if (shouldPersistThread(thread)) {
       const snapshotSequence = yield* SubscriptionRef.get(lastSequence);
-      const [currentPage, currentTurnLimit] = yield* Effect.all([
-        SubscriptionRef.get(state).pipe(Effect.map((value) => value.page)),
-        Ref.get(loadedUserTurnLimit),
-      ]);
-      yield* Queue.offer(persistence, {
-        snapshotSequence,
-        thread,
-        // Persist the window boundary with the window's content so a cache
-        // restore can keep paging from where the loaded history ends.
-        ...Option.match(currentPage, {
-          onNone: () => ({}),
-          onSome: (value) =>
-            ({
-              page: {
-                beforeCursor: value.beforeCursor,
-                hasMore: value.hasMore,
-                snapshotSequence,
-                ...(currentTurnLimit === null ? {} : { turnLimit: currentTurnLimit }),
-              },
-            }) as const,
-        }),
-      });
+      yield* offerThreadPersistence(thread, snapshotSequence);
     }
   });
 
@@ -461,6 +467,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       prepared.value,
       threadId,
       supportsPagination && windowLimit !== null ? { turnLimit: windowLimit } : undefined,
+      yield* Ref.get(reasoningMessagesSupported),
     );
 
     // HTTP stays outside applyLock. Only the staleness check and replacement
@@ -509,6 +516,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       // epoch bump discards any older-page fetch racing this snapshot.
       yield* Ref.update(historyEpoch, (epoch) => epoch + 1);
       yield* Ref.set(loadedUserTurnLimit, snapshotUserTurnLimit(item.snapshot));
+      // The parked page belongs to the replaced history window.
+      yield* Ref.set(pendingOlderPage, null);
       yield* SubscriptionRef.set(lastSequence, item.snapshot.snapshotSequence);
       yield* setThread(item.snapshot.thread, pageStateFromSnapshot(item.snapshot.page));
       return;
@@ -626,17 +635,25 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         let thread = current.data.value;
         let sequence = yield* SubscriptionRef.get(lastSequence);
         let synchronized = false;
+        // A settled state can be followed by the next turn in the same batch.
+        let persistable: { thread: OrchestrationThread; sequence: number } | undefined;
         for (const item of items) {
           if (item.kind === "synchronized") {
             synchronized = true;
           } else if (item.kind === "event" && item.event.sequence > sequence) {
             sequence = item.event.sequence;
             const result = applyThreadDetailEvent(thread, item.event);
-            if (result.kind === "updated") thread = result.thread;
+            if (result.kind === "updated") {
+              thread = result.thread;
+              if (shouldPersistThread(thread)) persistable = { thread, sequence };
+            }
           }
         }
         yield* SubscriptionRef.set(lastSequence, sequence);
         if (thread !== current.data.value) yield* setThread(thread, "keep");
+        if (persistable !== undefined && !shouldPersistThread(thread)) {
+          yield* offerThreadPersistence(persistable.thread, persistable.sequence);
+        }
         if (synchronized) yield* applyItemLocked({ kind: "synchronized" });
         yield* remember;
       }),
@@ -742,7 +759,12 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       turnLimit: OLDER_THREAD_PAGE_USER_TURN_LIMIT,
       beforeCursor: page.beforeCursor,
     };
-    const response = yield* snapshotLoader.load(prepared, threadId, window);
+    const response = yield* snapshotLoader.load(
+      prepared,
+      threadId,
+      window,
+      yield* Ref.get(reasoningMessagesSupported),
+    );
     // Staleness check and merge run under the same lock as stream-item
     // application, so a revert/snapshot cannot land between them (TOCTOU
     // review finding) — anything that rewrites history bumps the epoch
@@ -834,6 +856,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
               ({}) as {
                 threadResumeCompletionMarker?: boolean;
                 threadSnapshotPagination?: boolean;
+                reasoningMessages?: boolean;
               },
           ),
         );
@@ -842,6 +865,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         // servers reject unknown query params, and a windowed WS fallback to
         // such a server would silently hide history.
         const supportsPagination = config.threadSnapshotPagination === true;
+        const supportsReasoningMessages = config.reasoningMessages === true;
+        yield* Ref.set(reasoningMessagesSupported, supportsReasoningMessages);
         yield* Ref.set(paginationSupported, supportsPagination);
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);
         yield* markSynchronizing;
@@ -889,6 +914,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
             prepared,
             threadId,
             supportsPagination ? { turnLimit: INITIAL_THREAD_USER_TURN_LIMIT } : undefined,
+            supportsReasoningMessages,
           );
           if (Option.isSome(httpSnapshot)) {
             yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
@@ -910,6 +936,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           threadId,
           ...(canResume ? { afterSequence: sequence } : {}),
           ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+          ...(supportsReasoningMessages ? { reasoningMessages: true as const } : {}),
           // The WS fallback snapshot (sent when afterSequence is missing or
           // the gap is too large) should be windowed the same as the HTTP
           // path; without this a resume failure re-downloads the full thread.

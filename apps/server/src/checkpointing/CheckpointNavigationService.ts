@@ -1,14 +1,20 @@
 import { ThreadId } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionCheckpointNavigationContext,
+} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { CheckpointNavigationRepository } from "../persistence/Services/CheckpointNavigation.ts";
 import type {
   CheckpointNavigationOperation,
@@ -21,6 +27,7 @@ import type {
   ThreadCheckpointEntry,
 } from "../persistence/Services/CheckpointTimeline.ts";
 import { ProviderConversationNavigation } from "../provider/Services/ProviderConversationNavigation.ts";
+import { ProviderService } from "../provider/Services/ProviderService.ts";
 import type {
   ProviderConversationBinding,
   ProviderConversationCursor,
@@ -202,9 +209,67 @@ const make = Effect.gen(function* () {
   const mutations = yield* WorkspaceMutationCoordinator;
   const provider = yield* ProviderConversationNavigation;
   const projections = yield* ProjectionSnapshotQuery;
+  const providerSessions = yield* ProviderService;
   const identities = yield* CheckpointRepositoryIdentityResolver;
   const crypto = yield* Crypto.Crypto;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const hostPlatform = yield* HostProcessPlatform;
   const threadLocks = new Map<string, Semaphore.Semaphore>();
+
+  const isRestoreWorkspaceIsolated = Effect.fn(
+    "CheckpointNavigationService.isRestoreWorkspaceIsolated",
+  )(function* (context: ProjectionCheckpointNavigationContext) {
+    if (context.worktreePath === null) return false;
+    const canonical = (candidate: string) =>
+      fileSystem
+        .realPath(candidate)
+        .pipe(
+          Effect.map((resolved) => (hostPlatform === "win32" ? resolved.toLowerCase() : resolved)),
+        );
+    const cwd = yield* canonical(context.workspaceCwd);
+    if ((yield* canonical(context.worktreePath)) !== cwd) return false;
+    const [active, archived, sessions] = yield* Effect.all([
+      projections.getShellSnapshot(),
+      projections.getArchivedShellSnapshot(),
+      providerSessions.listSessions(),
+    ]);
+    const projects = [...active.projects, ...archived.projects];
+    const paths = new Set<string>();
+    for (const other of [...active.threads, ...archived.threads]) {
+      if (other.id === context.threadId) continue;
+      const candidate =
+        other.worktreePath ??
+        projects.find((project) => project.id === other.projectId)?.workspaceRoot;
+      if (candidate !== undefined) paths.add(candidate);
+    }
+    for (const session of sessions) {
+      if (
+        session.threadId !== context.threadId &&
+        session.status !== "closed" &&
+        session.cwd !== undefined
+      )
+        paths.add(session.cwd);
+    }
+    const overlaps = (parent: string, child: string) => {
+      const relative = path.relative(parent, child);
+      return (
+        relative === "" ||
+        (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+      );
+    };
+    for (const candidate of paths) {
+      const otherCwd = yield* canonical(candidate).pipe(
+        Effect.catch((error) =>
+          error.reason._tag === "NotFound" ? Effect.succeed(null) : Effect.fail(error),
+        ),
+      );
+      if (otherCwd !== null && (overlaps(cwd, otherCwd) || overlaps(otherCwd, cwd))) {
+        return false;
+      }
+    }
+    return true;
+  });
 
   const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) => {
     let lock = threadLocks.get(threadId);
@@ -818,6 +883,16 @@ const make = Effect.gen(function* () {
         return noOp("already-current");
       }
       return yield* navigationError("target-unavailable", "Requested checkpoint is not ready.");
+    }
+    if (
+      !(yield* isRestoreWorkspaceIsolated(context).pipe(
+        Effect.mapError(mapUnknownError("workspace-isolation-check-failed", null)),
+      ))
+    ) {
+      return yield* navigationError(
+        "shared-workspace",
+        "File restore requires an isolated worktree. Another thread may have files in this workspace.",
+      );
     }
     if (filesOnlyRequested) {
       // Explicit files-only intent wins over a live branching capability. This

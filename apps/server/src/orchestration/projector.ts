@@ -845,7 +845,10 @@ export function projectEvent(
 
         // Leaving the "running" session status is the turn-end signal: settle
         // a still-running latest turn so its duration reflects the whole turn.
-        const settledTurnState = settledTurnStateForSessionStatus(session.status);
+        const settledTurnState =
+          session.status === "ready" && session.lastError !== null
+            ? "error"
+            : settledTurnStateForSessionStatus(session.status);
         return {
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
@@ -978,8 +981,9 @@ export function projectEvent(
                   turnId: payload.turnId,
                   state:
                     thread.latestTurn?.turnId === payload.turnId &&
-                    thread.latestTurn.state === "interrupted"
-                      ? "interrupted"
+                    (thread.latestTurn.state === "interrupted" ||
+                      thread.latestTurn.state === "error")
+                      ? thread.latestTurn.state
                       : checkpointStatusToLatestTurnState(payload.status),
                   requestedAt:
                     thread.latestTurn?.turnId === payload.turnId

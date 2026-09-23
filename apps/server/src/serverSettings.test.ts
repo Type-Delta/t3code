@@ -178,7 +178,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.notProperty(loaded, "enablePromptSuggestion");
       assert.notProperty(loaded, "promptSuggestionInstructions");
 
-      yield* serverSettings.updateSettings({ enableLegacyTokenStreaming: true });
+      yield* serverSettings.updateSettings({ autoResumeOnUsageLimit: false });
       const persisted = yield* Schema.decodeUnknownEffect(
         Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
       )(yield* fileSystem.readFileString(serverConfig.settingsPath));

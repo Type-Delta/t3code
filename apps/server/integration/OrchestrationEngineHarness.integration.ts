@@ -65,6 +65,7 @@ import {
   CheckpointNavigationWorkspaceLive,
 } from "../src/checkpointing/CheckpointNavigationService.ts";
 import * as SidecarCheckpointRepository from "../src/checkpointing/SidecarCheckpointRepository.ts";
+import { StorageCleanup } from "../src/storageCleanup.ts";
 import { ProviderConversationNavigationLive } from "../src/provider/Layers/ProviderConversationNavigation.ts";
 import * as RepositoryIdentityResolver from "../src/project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "../src/orchestration/Layers/OrchestrationEngine.ts";
@@ -128,19 +129,6 @@ const initializeGitWorkspace = Effect.fn(function* (cwd: string) {
   runGit(cwd, ["add", "."]);
   runGit(cwd, ["commit", "-m", "Initial"]);
 });
-
-export function gitRefExists(cwd: string, ref: string): boolean {
-  try {
-    runGit(cwd, ["show-ref", "--verify", "--quiet", ref]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function gitShowFileAtRef(cwd: string, ref: string, filePath: string): string {
-  return runGit(cwd, ["show", `${ref}:${filePath}`]);
-}
 
 class WaitForTimeoutError extends Schema.TaggedError<WaitForTimeoutError>()("WaitForTimeoutError", {
   description: Schema.String,
@@ -413,7 +401,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(
         Layer.mock(PullRequestService.PullRequestService)({
-          refreshAfterTurn: Effect.void,
+          refreshAfterTurn: () => Effect.void,
         }),
       ),
       Layer.provideMerge(
@@ -448,6 +436,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(mutationCoordinatorLayer),
     );
     const orchestrationReactorLayer = OrchestrationReactorLive.pipe(
+      Layer.provide(Layer.mock(StorageCleanup)({ drain: Effect.void, start: () => Effect.void })),
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(providerCommandReactorLayer),
       Layer.provideMerge(checkpointReactorLayer),

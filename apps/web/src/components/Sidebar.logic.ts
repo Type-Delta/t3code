@@ -10,8 +10,8 @@ import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contract
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import {
-  activeThreadAnchorTimestampMs,
   planPinnedReorder,
+  sortActiveThreadsByOrderKey,
 } from "@t3tools/client-runtime/state/thread-sort";
 import {
   effectiveSnoozed,
@@ -1022,23 +1022,12 @@ export function sortThreadsForSidebar<
     readonly environmentId?: string;
     readonly id: string;
     readonly createdAt: string;
+    readonly activeOrderKey?: string | null | undefined;
     readonly latestUserMessageAt?: string | null | undefined;
     readonly unsettledAt?: string | null | undefined;
   },
 >(threads: readonly T[]): T[] {
-  return [...threads].toSorted(
-    (left, right) =>
-      Math.max(
-        activeThreadAnchorTimestampMs(right),
-        toSortableTimestamp(right.latestUserMessageAt ?? undefined) ?? 0,
-      ) -
-        Math.max(
-          activeThreadAnchorTimestampMs(left),
-          toSortableTimestamp(left.latestUserMessageAt ?? undefined) ?? 0,
-        ) ||
-      (left.environmentId ?? "").localeCompare(right.environmentId ?? "") ||
-      left.id.localeCompare(right.id),
-  );
+  return sortActiveThreadsByOrderKey(threads);
 }
 
 // Pinned-reorder key math and the keyed sort live in client-runtime

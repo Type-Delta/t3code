@@ -4,6 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
 import * as NodeProcess from "node:process";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 
 import {
   type DeviceServiceState,
@@ -117,9 +118,12 @@ import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ThreadCommandDispatcher from "./orchestration/ThreadCommandDispatcher.ts";
 import {
-  OrchestrationListenerCallbackError,
+  OrchestrationCommandInvariantError,
   OrchestrationThreadSettleBlockedError,
 } from "./orchestration/Errors.ts";
+import * as GitHubCli from "./sourceControl/GitHubCli.ts";
+import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
+import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import * as PullRequestSyncReactor from "./orchestration/PullRequestSyncReactor.ts";
@@ -503,6 +507,15 @@ const makeBrowserOtlpPayload = (spanName: string) =>
     return JSON.parse(request.body) as OtlpTracer.TraceData;
   });
 
+const successfulGitCommand = () =>
+  Effect.succeed({
+    exitCode: ChildProcessSpawner.ExitCode(0),
+    stdout: "",
+    stderr: "",
+    stdoutTruncated: false,
+    stderrTruncated: false,
+  });
+
 const buildAppUnderTest = (options?: {
   onPairingChangesSubscribed?: Effect.Effect<void>;
   config?: Partial<ServerConfig.ServerConfig["Service"]>;
@@ -572,7 +585,10 @@ const buildAppUnderTest = (options?: {
       traceMaxFiles: 10,
       otlpTracesUrl: undefined,
       otlpMetricsUrl: undefined,
-      otlpExportIntervalMs: 10_000,
+      otlpLogsUrl: undefined,
+      otlpTracesExport: DEFAULT_SIGNAL_EXPORT,
+      otlpMetricsExport: DEFAULT_SIGNAL_EXPORT,
+      otlpLogsExport: DEFAULT_SIGNAL_EXPORT,
       otlpServiceName: "t3-server",
       mode: "desktop",
       port: 0,
@@ -1229,6 +1245,16 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = appRuntimeLayer.pipe(
+      Layer.provideMerge(GitHubCli.layer),
+      Layer.provideMerge(
+        ProjectCloneTracker.layer.pipe(
+          Layer.provide(
+            Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
+          ),
+        ),
+      ),
+      Layer.provideMerge(WorktreeSetupTracker.layer),
+      Layer.provideMerge(OtlpSerialization.layerJson),
       Layer.provideMerge(ServerSecretStore.layer),
       Layer.provide(workspaceAndProjectServicesLayer),
       Layer.provideMerge(FetchHttpClient.layer),
@@ -1258,7 +1284,8 @@ const wsRpcProtocolLayer = (wsUrl: string, onMessage?: (message: string) => void
   const { cookie, url } = parseSessionCookieFromWsUrl(wsUrl);
   const webSocketConstructorLayer = Layer.succeed(
     Socket.WebSocketConstructor,
-    (socketUrl, protocols) => {
+    (socketUrl, options) => {
+      const protocols = typeof options === "string" || Array.isArray(options) ? options : undefined;
       const socket = new NodeSocket.NodeWS.WebSocket(
         socketUrl,
         protocols,
@@ -1321,7 +1348,8 @@ const appendSessionCookieToWsUrl = (url: string, sessionCookieHeader: string) =>
 const getHttpServerUrl = (pathname = "") =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer;
-    const address = server.address as HttpServer.TcpAddress;
+    const address = server.address;
+    if (address._tag === "UnixPathAddress") throw new Error("Expected TCP server address");
     return `http://127.0.0.1:${address.port}${pathname}`;
   });
 
@@ -1681,7 +1709,8 @@ const getWsServerUrl = (
 ) =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer;
-    const address = server.address as HttpServer.TcpAddress;
+    const address = server.address;
+    if (address._tag === "UnixPathAddress") throw new Error("Expected TCP server address");
     const baseUrl = `ws://127.0.0.1:${address.port}${pathname}`;
     if (options?.authenticated === false) {
       return baseUrl;
@@ -2082,7 +2111,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             return new Proxy(file, {
               get(target, key) {
                 if (key === "readAlloc") {
-                  return (size: FileSystem.SizeInput) => {
+                  return (size: number) => {
                     bodyReads += 1;
                     return target.readAlloc(size);
                   };
@@ -6390,25 +6419,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  it.effect("refreshes providers for each subscribeServerConfig connection", () =>
+  it.effect("does not refresh providers for each subscribeServerConfig connection", () =>
     Effect.gen(function* () {
       const refreshCalls = yield* Ref.make(0);
-      const firstRefreshDone = yield* Deferred.make<void>();
-      const secondRefreshDone = yield* Deferred.make<void>();
 
       yield* buildAppUnderTest({
         layers: {
           providerRegistry: {
-            refresh: () =>
-              Ref.updateAndGet(refreshCalls, (count) => count + 1).pipe(
-                Effect.tap((count) =>
-                  Deferred.succeed(
-                    count === 1 ? firstRefreshDone : secondRefreshDone,
-                    undefined,
-                  ).pipe(Effect.ignore),
-                ),
-                Effect.as([]),
-              ),
+            refresh: () => Ref.updateAndGet(refreshCalls, (count) => count + 1).pipe(Effect.as([])),
           },
         },
       });
@@ -6418,7 +6436,6 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         withWsRpcClient(wsUrl, (client) =>
           Effect.gen(function* () {
             yield* client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.runHead);
-            yield* Deferred.await(firstRefreshDone);
           }),
         ),
       );
@@ -6426,12 +6443,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         withWsRpcClient(wsUrl, (client) =>
           Effect.gen(function* () {
             yield* client[WS_METHODS.subscribeServerConfig]({}).pipe(Stream.runHead);
-            yield* Deferred.await(secondRefreshDone);
           }),
         ),
       );
 
-      assert.equal(yield* Ref.get(refreshCalls), 2);
+      assert.equal(yield* Ref.get(refreshCalls), 0);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -7340,8 +7356,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 Effect.flatMap(() =>
                   command.commandId === failedCommandId
                     ? Effect.fail(
-                        new OrchestrationListenerCallbackError({
-                          listener: "domain-event",
+                        new OrchestrationCommandInvariantError({
+                          commandType: "test.dispatch",
                           detail: "thread creation failed",
                         }),
                       )
@@ -10487,10 +10503,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.equal(dispatchResult.sequence, 1);
-      assert.deepEqual(effects, ["dispatch:thread.settle"]);
+      assert.deepEqual(effects, ["dispatch:thread.settle", "dispatch:thread.session.stop"]);
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
-        ["thread.settle"],
+        ["thread.settle", "thread.session.stop"],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -10546,8 +10562,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               effects.push(`dispatch:${command.type}`);
               if (command.type === "thread.session.stop") {
                 return Effect.fail(
-                  new OrchestrationListenerCallbackError({
-                    listener: "domain-event",
+                  new OrchestrationCommandInvariantError({
+                    commandType: "test.dispatch",
                     detail: "simulated archive stop failure",
                   }),
                 );
@@ -10730,7 +10746,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             }),
         );
         const createWorktree = vi.fn(
-          (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["createWorktree"]>[0]) =>
+          (
+            _: Parameters<GitVcsDriver.GitVcsDriver["Service"]["createWorktree"]>[0],
+            _options?: Parameters<GitVcsDriver.GitVcsDriver["Service"]["createWorktree"]>[1],
+          ) =>
             Effect.sync(() => {
               bootstrapGitOperations.push("create-worktree");
               return {
@@ -10751,6 +10770,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               status: "started" as const,
               scriptId: "setup",
               scriptName: "Setup",
+              scriptCommand: "echo setup",
+              async: false,
               terminalId: "setup-setup",
               cwd: "/tmp/bootstrap-worktree",
             }),
@@ -10758,7 +10779,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         yield* buildAppUnderTest({
           layers: {
+            vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
             gitVcsDriver: {
+              execute: successfulGitCommand,
               remoteExists,
               fetchRemote,
               remoteBranchExists,
@@ -10823,17 +10846,22 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
 
-        assert.equal(response.sequence, 5);
+        assert.equal(response.sequence, 8);
         assert.deepEqual(
           dispatchedCommands.map((command) => command.type),
           [
             "thread.create",
+            "thread.message.user.append",
+            "thread.activity.append",
+            "thread.session.set",
             "thread.meta.update",
             "thread.activity.append",
             "thread.activity.append",
             "thread.turn.start",
+            "thread.activity.append",
           ],
         );
+        assert.isDefined(createWorktree.mock.calls[0]?.[1]?.progress?.onCheckoutProgress);
         assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
           cwd: "/tmp/project",
           refName: fetchedOriginCommit,
@@ -10844,6 +10872,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(fetchRemote.mock.calls[0]?.[0], {
           cwd: "/tmp/project",
           remoteName: "origin",
+          refName: "main",
         });
         assert.deepEqual(remoteBranchExists.mock.calls[0]?.[0], {
           cwd: "/tmp/project",
@@ -10862,12 +10891,16 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           "resolve-remote-commit",
           "create-worktree",
         ]);
-        assert.deepEqual(runForThread.mock.calls[0]?.[0], {
-          threadId: ThreadId.make("thread-bootstrap"),
-          projectId: defaultProjectId,
-          projectCwd: "/tmp/project",
-          worktreePath: "/tmp/bootstrap-worktree",
-        });
+        assert.deepEqual(
+          { ...runForThread.mock.calls[0]?.[0], observeCompletion: undefined },
+          {
+            threadId: ThreadId.make("thread-bootstrap"),
+            projectId: defaultProjectId,
+            projectCwd: "/tmp/project",
+            worktreePath: "/tmp/bootstrap-worktree",
+            observeCompletion: undefined,
+          },
+        );
         assert.deepEqual(refreshStatus.mock.calls[0]?.[0], "/tmp/bootstrap-worktree");
 
         const setupActivities = dispatchedCommands.filter(
@@ -10876,9 +10909,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
         assert.deepEqual(
           setupActivities.map((command) => command.activity.kind),
-          ["setup-script.requested", "setup-script.started"],
+          ["worktree-setup", "setup-script.requested", "setup-script.started", "worktree-setup"],
         );
-        const finalCommand = dispatchedCommands[4];
+        const finalCommand = dispatchedCommands[7];
         assertTrue(finalCommand?.type === "thread.turn.start");
         if (finalCommand?.type === "thread.turn.start") {
           assert.equal(finalCommand.bootstrap, undefined);
@@ -10922,7 +10955,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       yield* buildAppUnderTest({
         layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
           gitVcsDriver: {
+            execute: successfulGitCommand,
             remoteExists,
             fetchRemote,
             remoteBranchExists,
@@ -11034,7 +11069,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       yield* buildAppUnderTest({
         layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
           gitVcsDriver: {
+            execute: successfulGitCommand,
             createWorktree,
           },
           orchestrationEngine: {
@@ -11091,14 +11128,24 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      assert.equal(response.sequence, 4);
+      assert.equal(response.sequence, 7);
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
-        ["thread.create", "thread.meta.update", "thread.activity.append", "thread.turn.start"],
+        [
+          "thread.create",
+          "thread.message.user.append",
+          "thread.activity.append",
+          "thread.session.set",
+          "thread.meta.update",
+          "thread.activity.append",
+          "thread.turn.start",
+          "thread.activity.append",
+        ],
       );
       const setupFailureActivity = dispatchedCommands.find(
         (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
-          command.type === "thread.activity.append",
+          command.type === "thread.activity.append" &&
+          command.activity.kind === "setup-script.failed",
       );
       assert.equal(setupFailureActivity?.activity.kind, "setup-script.failed");
       assert.deepEqual(setupFailureActivity?.activity.payload, {
@@ -11131,6 +11178,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             status: "started" as const,
             scriptId: "setup",
             scriptName: "Setup",
+            scriptCommand: "echo setup",
+            async: false,
             terminalId: "setup-setup",
             cwd: "/tmp/bootstrap-worktree",
           }),
@@ -11139,7 +11188,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       yield* buildAppUnderTest({
         layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
           gitVcsDriver: {
+            execute: successfulGitCommand,
             createWorktree,
           },
           orchestrationEngine: {
@@ -11151,8 +11202,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 setupActivityAppendAttempt += 1;
                 if (setupActivityAppendAttempt === 2) {
                   return Effect.fail(
-                    new OrchestrationListenerCallbackError({
-                      listener: "domain-event",
+                    new OrchestrationCommandInvariantError({
+                      commandType: "test.dispatch",
                       detail: "failed to append setup-script.started activity",
                     }),
                   );
@@ -11212,10 +11263,19 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      assert.equal(response.sequence, 4);
+      assert.equal(response.sequence, 7);
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
-        ["thread.create", "thread.meta.update", "thread.activity.append", "thread.turn.start"],
+        [
+          "thread.create",
+          "thread.message.user.append",
+          "thread.activity.append",
+          "thread.session.set",
+          "thread.meta.update",
+          "thread.activity.append",
+          "thread.turn.start",
+          "thread.activity.append",
+        ],
       );
       const setupActivities = dispatchedCommands.filter(
         (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
@@ -11223,7 +11283,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
       assert.deepEqual(
         setupActivities.map((command) => command.activity.kind),
-        ["setup-script.requested"],
+        ["worktree-setup", "setup-script.requested", "worktree-setup"],
       );
       assertTrue(
         setupActivities.every((command) => command.activity.kind !== "setup-script.failed"),
@@ -11244,7 +11304,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       const config = yield* buildAppUnderTest({
         layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
           gitVcsDriver: {
+            execute: successfulGitCommand,
             createWorktree,
           },
           orchestrationEngine: {
@@ -11326,7 +11388,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.strictEqual(result.failure.bootstrapThreadDisposition, "deleted");
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
-        ["thread.create", "thread.delete"],
+        [
+          "thread.create",
+          "thread.message.user.append",
+          "thread.activity.append",
+          "thread.session.set",
+          "thread.activity.append",
+          "thread.delete",
+        ],
       );
       assert.isDefined(pendingAttachmentId);
       assert.isTrue(
@@ -11439,7 +11508,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
-      assert.deepEqual(trace, ["thread.create", "drain:1", "thread.turn.start"]);
+      assert.deepEqual(trace, [
+        "thread.create",
+        "drain:1",
+        "thread.message.user.append",
+        "thread.turn.start",
+      ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
@@ -11453,7 +11527,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       yield* buildAppUnderTest({
         layers: {
+          vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) },
           gitVcsDriver: {
+            execute: successfulGitCommand,
             createWorktree,
           },
           orchestrationEngine: {
@@ -11461,8 +11537,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               dispatchedCommands.push(command);
               if (command.type === "thread.delete") {
                 return Effect.fail(
-                  new OrchestrationListenerCallbackError({
-                    listener: "domain-event",
+                  new OrchestrationCommandInvariantError({
+                    commandType: "test.dispatch",
                     detail: "thread cleanup exploded",
                   }),
                 );
@@ -11520,7 +11596,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.strictEqual(result.failure.bootstrapThreadDisposition, undefined);
       assert.deepEqual(
         dispatchedCommands.map((command) => command.type),
-        ["thread.create", "thread.delete"],
+        [
+          "thread.create",
+          "thread.message.user.append",
+          "thread.activity.append",
+          "thread.session.set",
+          "thread.activity.append",
+          "thread.delete",
+          "thread.session.set",
+        ],
       );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -11925,14 +12009,14 @@ it.live(
 
       const report = formatTransferBudgetReport(runs);
       yield* Effect.logInfo(`\n${report}`);
-      const reportPath = yield* Config.string("T3CODE_TRANSFER_BUDGET_REPORT_PATH").pipe(
+      const reportPath = yield* Config.String("T3CODE_TRANSFER_BUDGET_REPORT_PATH").pipe(
         Config.option,
       );
       if (Option.isSome(reportPath)) {
         const fileSystem = yield* FileSystem.FileSystem;
         yield* fileSystem.writeFileString(reportPath.value, report);
       }
-      const resultPath = yield* Config.string("T3CODE_TRANSFER_BUDGET_RESULT_PATH").pipe(
+      const resultPath = yield* Config.String("T3CODE_TRANSFER_BUDGET_RESULT_PATH").pipe(
         Config.option,
       );
       if (Option.isSome(resultPath)) {

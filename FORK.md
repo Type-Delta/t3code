@@ -12,15 +12,15 @@ Keep stable IDs when updating this section; gaps are intentional. When upstream 
 
 ### DL001 — Claude Windows resolver and artifact safeguards
 
-The fork retains the Windows-specific protection around `@anthropic-ai/claude-agent-sdk@0.3.170`: when the configured Claude command is a Windows shell shim, the patch selects the bundled native `claude.exe`, while explicit native `.exe` paths continue to work. In a packaged Electron build, the virtual `app.asar` path is remapped to its real `app.asar.unpacked` executable.
+Windows Claude commands are resolved before the Agent SDK starts a session. The resolver follows npm launcher shims to the installed native executable or JavaScript entry point and preserves explicit executable paths. Provider snapshots and DevTools expose sanitized resolver diagnostics; startup provenance identifies installed web artifacts without exposing command output or environment values.
 
-The server and desktop artifact builder pin the patched SDK version, including lockfile-free staging, so a build cannot silently resolve an unpatched SDK or fail with an unused-patch error. Provider snapshots and DevTools expose only sanitized resolver diagnostics; startup provenance identifies installed web artifacts without exposing command output or environment values.
+The current server bundle includes the SDK and uses the configured Claude installation. Upstream packaging removes unused SDK native optional dependencies; the older SDK patch and lockfile-free patch-pinning workaround are no longer active. Windows and WSL ship separate runtime archives, each with its own platform dependencies.
 
-**Implementation evidence:** `patches/@anthropic-ai__claude-agent-sdk@0.3.170.patch`, `apps/server/src/provider/Layers/ClaudeProvider.ts`, `apps/server/src/provider/providerSnapshot.ts`, `scripts/build-desktop-artifact.ts`, `scripts/build-desktop-artifact.test.ts`, `pnpm-workspace.yaml`, and `pnpm-lock.yaml`.
+**Implementation evidence:** `apps/server/src/provider/Drivers/ClaudeExecutable.ts`, `apps/server/src/provider/Layers/ClaudeProvider.ts`, `apps/server/src/provider/providerSnapshot.ts`, `scripts/build-desktop-artifact.ts`, and `pnpm-workspace.yaml`.
 
-**Recorded validation:** Windows Claude initialization and adapter coverage, server build, `vp check`, `vp run typecheck`, and Windows x64 NSIS packaging with native Claude binaries. The 2026-09-01 integration retained the `0.3.170` patch and exact package and staging pins under focused provider and artifact-builder coverage.
+**Recorded validation:** Windows initialization and packaging were verified during earlier integrations. The 2026-09-23 merge audit checks the current executable-resolution and packaging paths; it does not claim a new Windows runtime verification.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-09-23
 
 ### DL002 — Machine context beside the empty-state hero
 
@@ -610,10 +610,22 @@ This is an append-only historical decision record. It provides context for integ
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
 
+### 2026-09-23 — Audit of September sync regressions
+
+- Restored dropped desktop IPC contracts for recording input, file paths, notification badges, and local-environment controls. Bearer-token requests preserve the selected environment, and iframe keyboard cleanup preserves its CDP session while retaining bounded cleanup.
+- Reconnected split-pane header and panel ownership, active-pane focus, the split workspace route, the default sidebar's split actions and saved manual order, subagent transcripts, checkpoint composer controls, prompt suggestion text, and model-picker selection. Providers without conversation rollback can reach the confirmed files-only checkpoint path. Saved split layouts survive partial environment bootstrap. Shared client state again negotiates reasoning subscriptions, clears obsolete page-loading state, retains completed turns across batched starts, and invalidates worktree lists after revision changes.
+- Preserved legacy message-event decoding, upstream project-monogram validation, and the fork's attachment limits. These repairs reconcile the retained consumers and tests rather than introducing a new migration history.
+- Restored Git branch/path disambiguation, scoped remote fetches, worktree progress and cancellation callbacks, and complete file metadata for review diffs. Checkpoint file restoration now checks workspace ownership on the active navigation path rather than relying on an obsolete reactor command.
+- Reconnected WebSocket worktree turn creation to the bootstrap workflow, restoring scoped fetches, setup progress, cancellation, and failure cleanup. Worktree preparation waits for its completion response without the ordinary command's ten-second deadline. Ordinary thread commands continue through the shared dispatcher with their existing deadline.
+- Restored Claude usage-limit retry metadata, subagent tool-input isolation, and prompt-suggestion instructions while retaining upstream's subagent narration filtering. Provider ingestion again handles diff checks separately from turn settlement, ignores diffs for non-running turns, and persists reasoning with separate parent and subagent identities. Failed turns retain their error state when the provider session remains reusable and checkpoint capture succeeds.
+- Reconciled test fixtures with current service layers and APIs. Packaging removals were audited separately: the dedicated WSL runtime archive and explicit Claude executable resolution supersede the older staging and SDK-patch mechanisms.
+
 ### 2026-09-22 — Merge upstream/main into main
 
 **Merge commit:** this merge commit
 **Parents:** `7ff559cb7c` (fork) and `76cc9b08f1` (upstream/main)
+
+- Restored upstream preview recording input contracts and the recording bridge's `onInput` subscription lost during the merge. The existing desktop recording manager and web compositor depend on these definitions; their omission prevented desktop bundling.
 
 - The 2026-09-23 follow-up declares the missing activity-table alias in the user-input lookup introduced by post-sync reconciliation. This restores answer and dismissal commands without a migration; regression coverage checks pending, resolved, and missing requests through the SQLite-backed query service.
 

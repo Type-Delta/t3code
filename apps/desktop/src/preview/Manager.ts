@@ -1655,7 +1655,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       // control epoch. Otherwise a partially dispatched input can leave Chromium
       // with a held key or focus emulation enabled for subsequent actions.
       const sendCleanup: SendCommand = Effect.fn("PreviewManager.sendCleanupCommand")(
-        function* (method, commandParams) {
+        function* (method, commandParams, sessionId) {
           return yield* timeoutControlWork(
             attemptPromise(
               {
@@ -1663,7 +1663,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
                 tabId,
                 webContentsId: wc.id,
               },
-              () => control.debugger.sendCommand(method, commandParams),
+              () =>
+                sessionId === undefined
+                  ? control.debugger.sendCommand(method, commandParams)
+                  : control.debugger.sendCommand(method, commandParams, sessionId),
             ),
             tabId,
             wc,

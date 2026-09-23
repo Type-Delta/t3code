@@ -1,7 +1,7 @@
 import { Toolbar } from "@base-ui/react/toolbar";
 import { type ProviderInstanceId } from "@t3tools/contracts";
 import { memo, useLayoutEffect, useRef, useState } from "react";
-import { SparklesIcon, StarIcon } from "lucide-react";
+import { ListIcon, SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
@@ -42,8 +42,8 @@ const PICKER_TOOLTIP_SIDE_OFFSET = 8;
 const PICKER_TOOLTIP_CLASS = "max-w-64 text-balance font-normal leading-snug";
 
 export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
-  selectedInstanceId: ProviderInstanceId | "favorites";
-  onSelectInstance: (instanceId: ProviderInstanceId | "favorites") => void;
+  selectedInstanceId: ProviderInstanceId | "favorites" | ":all";
+  onSelectInstance: (instanceId: ProviderInstanceId | "favorites" | ":all") => void;
   onFocusSearch: () => void;
   /**
    * Instance entries to render as rail buttons. Each entry becomes one icon
@@ -54,6 +54,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
   instanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   /** Render the favorites rail entry. Hidden for locked-provider instance switching. */
   showFavorites?: boolean;
+  showAll?: boolean;
   /** Instance ids shown in the rail but unavailable for the current picker context. */
   disabledInstanceIds?: ReadonlySet<ProviderInstanceId>;
   /** Non-ready instances whose selected unavailable model remains reachable. */
@@ -66,7 +67,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
    */
   newBadgeInstanceIds?: ReadonlySet<ProviderInstanceId>;
 }) {
-  const handleSelect = (instanceId: ProviderInstanceId | "favorites") => {
+  const handleSelect = (instanceId: ProviderInstanceId | "favorites" | ":all") => {
     props.onSelectInstance(instanceId);
   };
   const showFavorites = props.showFavorites ?? true;
@@ -86,7 +87,7 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
       return;
     }
     setSelectedIndicatorTop(selectedItem.offsetTop + selectedItem.offsetHeight / 2 - 10);
-  }, [props.instanceEntries, props.selectedInstanceId, showFavorites]);
+  }, [props.instanceEntries, props.selectedInstanceId, props.showAll, showFavorites]);
 
   return (
     <Toolbar.Root
@@ -114,6 +115,33 @@ export const ModelPickerSidebar = memo(function ModelPickerSidebar(props: {
               )}
               style={{ top: selectedIndicatorTop }}
             />
+          ) : null}
+          {props.showAll ? (
+            <div className="relative w-full" data-model-picker-provider=":all">
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Toolbar.Button
+                      className="relative isolate flex w-full cursor-pointer aspect-square items-center justify-center rounded-md transition-colors hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
+                      onClick={() => handleSelect(":all")}
+                      type="button"
+                      aria-label="All models"
+                      aria-pressed={props.selectedInstanceId === ":all"}
+                    >
+                      <ListIcon className="size-5 shrink-0" aria-hidden />
+                    </Toolbar.Button>
+                  }
+                />
+                <TooltipPopup
+                  side={PICKER_TOOLTIP_SIDE}
+                  sideOffset={PICKER_TOOLTIP_SIDE_OFFSET}
+                  align="center"
+                  className={PICKER_TOOLTIP_CLASS}
+                >
+                  All models
+                </TooltipPopup>
+              </Tooltip>
+            </div>
           ) : null}
           {/* Favorites section */}
           {showFavorites ? (

@@ -3491,6 +3491,7 @@ pending_approval_requests AS (
       return Option.some({
         threadId,
         workspaceCwd: thread.value.worktreePath ?? project.value.workspaceRoot,
+        worktreePath: thread.value.worktreePath,
         sessionStatus: thread.value.session?.status ?? null,
         hasPendingApprovals: thread.value.hasPendingApprovals,
         hasPendingUserInput: thread.value.hasPendingUserInput,

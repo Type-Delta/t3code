@@ -191,12 +191,14 @@ export function shouldOfferModelPickerSetup(
 
 export function adjacentModelPickerProvider(input: {
   entries: ReadonlyArray<ProviderInstanceEntry>;
-  selectedInstanceId: ProviderInstanceId | "favorites";
+  selectedInstanceId: ModelPickerSelection;
   direction: 1 | -1;
+  showAll?: boolean;
   disabledInstanceIds: ReadonlySet<ProviderInstanceId> | undefined;
   selectableUnavailableInstanceIds: ReadonlySet<ProviderInstanceId> | undefined;
 }) {
-  const providers: Array<ProviderInstanceId | "favorites"> = [
+  const providers: ModelPickerSelection[] = [
+    ...(input.showAll ? [":all" as const] : []),
     "favorites",
     ...input.entries
       .filter(
@@ -746,6 +748,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           entries: sidebarInstanceEntries,
           selectedInstanceId,
           direction: command === "modelPicker.nextProvider" ? 1 : -1,
+          showAll: !isLocked,
           disabledInstanceIds: lockedDisabledInstanceIds,
           selectableUnavailableInstanceIds,
         });

@@ -776,6 +776,30 @@ export interface DesktopPreviewPointerEvent {
   createdAt: string;
 }
 
+/** Recording decorations are forwarded separately from the captured page pixels. */
+export const DesktopPreviewRecordingInputSchema = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("pointer"),
+    phase: Schema.Literals(["move", "down", "up", "click"]),
+    x: Schema.Finite,
+    y: Schema.Finite,
+    width: Schema.Finite.check(Schema.isGreaterThan(0)),
+    height: Schema.Finite.check(Schema.isGreaterThan(0)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("key"),
+    label: Schema.NullOr(Schema.String.check(Schema.isMaxLength(100))),
+    held: Schema.Boolean,
+    width: Schema.Finite.check(Schema.isGreaterThan(0)),
+  }),
+  Schema.Struct({ type: Schema.Literal("clear") }),
+]);
+export type DesktopPreviewRecordingInput = typeof DesktopPreviewRecordingInputSchema.Type;
+export interface DesktopPreviewRecordingInputEvent {
+  readonly tabId: string;
+  readonly input: DesktopPreviewRecordingInput;
+}
+
 /**
  * Static config a renderer needs to mount a preview `<webview>`. Returned
  * atomically by `DesktopPreviewBridge.getPreviewConfig()` so the renderer
@@ -1213,8 +1237,12 @@ export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
+  /** Absolute path of a dropped or picked file; absent on desktop builds predating it. */
+  getPathForFile?: (file: File) => string;
   /** The desktop client's OS platform, read from Electron's preload process. */
   getClientPlatform?: () => string;
+  setNotificationBadge?: (badge: { count: number; image: string | null }) => Promise<void>;
+  onNotificationBadgeClear?: (listener: () => void) => () => void;
   /**
    * The OS locale as a BCP-47 tag, which the renderer cannot read for itself:
    * the packaged app ships only the `en-US` Chromium locale pak, so
@@ -1226,6 +1254,8 @@ export interface DesktopBridge {
   // info (omits instances whose backend hasn't produced a config yet).
   // The primary backend is identified by id === PRIMARY_LOCAL_ENVIRONMENT_ID.
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
+  getLocalEnvironmentEnabled?: () => boolean;
+  setLocalEnvironmentEnabled?: (enabled: boolean) => Promise<void>;
   getLocalEnvironmentBearerToken: (environmentId?: string) => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
@@ -1407,6 +1437,7 @@ export interface DesktopPreviewBridge {
     close: (tabId: string) => Promise<void>;
   };
   recording: {
+    onInput: (listener: (event: DesktopPreviewRecordingInputEvent) => void) => () => void;
     startScreencast: (tabId: string) => Promise<void>;
     stopScreencast: (tabId: string) => Promise<void>;
     save: (

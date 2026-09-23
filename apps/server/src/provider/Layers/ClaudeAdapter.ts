@@ -27,6 +27,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
 import { type ClaudeScopedLimitNames, claudeRateLimitEventToUpdate } from "./claudeUsageLimits.ts";
 import {
   ApprovalRequestId,
@@ -277,6 +278,7 @@ interface ClaudeTurnState {
   nextSyntheticAssistantBlockIndex: number;
   authenticationFailureMessage: string | undefined;
   rejectedRateLimitTypes: Set<string>;
+  rejectedRateLimitResets: Map<string, number>;
   latestAssistantRateLimited: boolean;
   emittedThinkingText: boolean;
   readonly thinkingSnapshotIds: Set<string>;
@@ -426,7 +428,7 @@ interface ClaudeSessionContext {
     id: TurnId;
     items: Array<unknown>;
   }>;
-  readonly inFlightTools: Map<number, ToolInFlight>;
+  readonly inFlightTools: Map<string, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
   readonly taskAgents: Map<string, ClaudeTaskAgentState>;
   /**
@@ -2820,6 +2822,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     const stamp = yield* makeEventStamp();
+    const retryAtMs =
+      status === "failed" &&
+      turnState.rejectedRateLimitTypes.size > 0 &&
+      turnState.rejectedRateLimitTypes.size === turnState.rejectedRateLimitResets.size
+        ? Math.max(...turnState.rejectedRateLimitResets.values())
+        : undefined;
+    const retryAt =
+      retryAtMs !== undefined && retryAtMs > Date.parse(stamp.createdAt)
+        ? DateTime.formatIso(DateTime.makeUnsafe(retryAtMs))
+        : undefined;
     yield* offerRuntimeEvent({
       type: "turn.completed",
       eventId: stamp.eventId,
@@ -2836,6 +2848,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? { totalCostUsd: result.total_cost_usd }
           : {}),
         ...(errorMessage ? { errorMessage } : {}),
+        ...(retryAt ? { retry: { reason: "usage_limit" as const, retryAt } } : {}),
         tokenUsage: normalizeClaudeTurnTokenUsage(result, turnState.hasSubagents, status),
       },
       providerRefs: nativeProviderRefs(context),
@@ -2872,6 +2885,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // re-homed by the quiet-timeline filter.
     const streamParentToolUseId = (message as { parent_tool_use_id?: string | null })
       .parent_tool_use_id;
+    const streamItemKey = (index: number) => `${streamParentToolUseId || "main"}:${index}`;
     if (streamParentToolUseId !== null && streamParentToolUseId !== undefined) {
       // Drop only the subagent's narration (text/thinking); tool_use blocks
       // and their input_json_delta frames must flow so attributed tool items
@@ -2966,7 +2980,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
 
       if (event.delta.type === "input_json_delta") {
-        const tool = context.inFlightTools.get(event.index);
+        const toolKey = streamItemKey(event.index);
+        const tool = context.inFlightTools.get(toolKey);
         if (!tool || typeof event.delta.partial_json !== "string") {
           return;
         }
@@ -2990,7 +3005,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           parsedInput && Object.keys(parsedInput).length > 0
             ? toolInputFingerprint(parsedInput)
             : undefined;
-        context.inFlightTools.set(event.index, nextTool);
+        context.inFlightTools.set(toolKey, nextTool);
 
         if (
           !parsedInput ||
@@ -3004,7 +3019,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...nextTool,
           lastEmittedInputFingerprint: nextFingerprint,
         };
-        context.inFlightTools.set(event.index, nextTool);
+        context.inFlightTools.set(toolKey, nextTool);
 
         const stamp = yield* makeEventStamp();
         yield* offerRuntimeEvent({
@@ -3115,7 +3130,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(owningAgentId ? { agentId: owningAgentId } : {}),
         ...(parentToolUseId ? { parentToolUseId } : {}),
       };
-      context.inFlightTools.set(index, tool);
+      context.inFlightTools.set(streamItemKey(index), tool);
 
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
@@ -3152,7 +3167,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     if (event.type === "content_block_stop") {
       const { index } = event;
-      const assistantBlock = context.turnState?.assistantTextBlocks.get(index);
+      const assistantBlock = streamParentToolUseId
+        ? undefined
+        : context.turnState?.assistantTextBlocks.get(index);
       if (assistantBlock) {
         assistantBlock.streamClosed = true;
         yield* completeAssistantTextBlock(context, assistantBlock, {
@@ -3161,7 +3178,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       }
-      const tool = context.inFlightTools.get(index);
+      const tool = context.inFlightTools.get(streamItemKey(index));
       if (!tool) {
         return;
       }
@@ -3389,6 +3406,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         nextSyntheticAssistantBlockIndex: -1,
         authenticationFailureMessage: undefined,
         rejectedRateLimitTypes: new Set(),
+        rejectedRateLimitResets: new Map(),
         latestAssistantRateLimited: false,
         emittedThinkingText: false,
         thinkingSnapshotIds: new Set(),
@@ -4115,13 +4133,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Current blocking evidence is independent of whether its warning has
         // already been shown. A recovery can omit or advance the reset time;
         // its window type remains stable without clearing another window.
-        if (blocked) context.turnState.rejectedRateLimitTypes.add(limitType);
-        else if (
+        if (blocked) {
+          context.turnState.rejectedRateLimitTypes.add(limitType);
+          const resetAtMs =
+            rateLimitInfo.resetsAt === undefined ? NaN : rateLimitInfo.resetsAt * 1000;
+          const waitMs = resetAtMs - Date.parse(stamp.createdAt);
+          if (Number.isFinite(waitMs) && waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS)
+            context.turnState.rejectedRateLimitResets.set(limitType, resetAtMs);
+          else context.turnState.rejectedRateLimitResets.delete(limitType);
+        } else if (
           rateLimitInfo.status === "allowed" ||
           rateLimitInfo.status === "allowed_warning" ||
           overageAllowed
         ) {
           context.turnState.rejectedRateLimitTypes.delete(limitType);
+          context.turnState.rejectedRateLimitResets.delete(limitType);
         }
       }
       if (blocked && context.turnState !== undefined) {
@@ -4441,7 +4467,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
       const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
-      const inFlightTools = new Map<number, ToolInFlight>();
+      const inFlightTools = new Map<string, ToolInFlight>();
       const claudeTasks = new Map<string, ClaudeTaskState>();
       const taskAgents = new Map<string, ClaudeTaskAgentState>();
       const pendingTaskModels = new Map<string, string>();
@@ -4905,6 +4931,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (requestThinkingSummaries && extraArgs["thinking-display"] === undefined) {
         extraArgs["thinking-display"] = "summarized";
       }
+      const promptSuggestionInstructions = input.promptSuggestion?.enabled
+        ? buildPromptSuggestionInstructions(input.promptSuggestion.instructions)
+        : undefined;
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       // The attachments dir grant lets the agent Read/copy pasted images at
       // the paths ProviderService injects into the turn text, without an
@@ -4921,8 +4950,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
-          // Model and effort can change after this session-level prompt is set.
-          append: buildRuntimeInstructions({ harness: "Claude Code" }),
+          // The Claude system prompt is session state; turn settings cannot update it later.
+          append: [
+            buildRuntimeInstructions({ harness: "Claude Code" }),
+            promptSuggestionInstructions,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
         },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is
@@ -5219,6 +5253,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         nextSyntheticAssistantBlockIndex: -1,
         authenticationFailureMessage: undefined,
         rejectedRateLimitTypes: new Set(),
+        rejectedRateLimitResets: new Map(),
         latestAssistantRateLimited: false,
         emittedThinkingText: false,
         thinkingSnapshotIds: new Set(),

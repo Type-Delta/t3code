@@ -1944,7 +1944,8 @@ Do not repeat completed work, start new work, or expand the user's requested sco
       return [unsettledEvent, sessionSetEvent];
     }
 
-    case "thread.message.assistant.delta": {
+    case "thread.message.assistant.delta":
+    case "thread.message.reasoning.delta": {
       if (isImportedAgentSessionMessageId(command.messageId)) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -1967,7 +1968,7 @@ Do not repeat completed work, start new work, or expand the user's requested sco
         payload: {
           threadId: command.threadId,
           messageId: command.messageId,
-          role: "assistant",
+          role: command.type === "thread.message.reasoning.delta" ? "reasoning" : "assistant",
           text: command.delta,
           turnId: command.turnId ?? null,
           ...(command.subagentId ? { subagentId: command.subagentId } : {}),
@@ -1978,7 +1979,8 @@ Do not repeat completed work, start new work, or expand the user's requested sco
       };
     }
 
-    case "thread.message.assistant.complete": {
+    case "thread.message.assistant.complete":
+    case "thread.message.reasoning.complete": {
       if (isImportedAgentSessionMessageId(command.messageId)) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -2001,10 +2003,13 @@ Do not repeat completed work, start new work, or expand the user's requested sco
         payload: {
           threadId: command.threadId,
           messageId: command.messageId,
-          role: "assistant",
+          role: command.type === "thread.message.reasoning.complete" ? "reasoning" : "assistant",
           text: "",
           turnId: command.turnId ?? null,
-          ...(command.suggestion !== undefined ? { suggestion: command.suggestion } : {}),
+          ...(command.type === "thread.message.assistant.complete" &&
+          command.suggestion !== undefined
+            ? { suggestion: command.suggestion }
+            : {}),
           ...(command.subagentId ? { subagentId: command.subagentId } : {}),
           streaming: false,
           createdAt: command.createdAt,
@@ -2108,11 +2113,24 @@ Do not repeat completed work, start new work, or expand the user's requested sco
     }
 
     case "thread.turn.diff.complete": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const existingCheckpoint = thread.checkpoints.find(
+        (checkpoint) => checkpoint.turnId === command.turnId,
+      );
+      if (
+        command.status === "missing" &&
+        existingCheckpoint !== undefined &&
+        existingCheckpoint.status !== "missing"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `turn ${command.turnId} already has a captured checkpoint`,
+        });
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",

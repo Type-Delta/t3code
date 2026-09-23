@@ -48,6 +48,7 @@ import {
 
 const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
+const NOOP_OPEN_SUBAGENT = (_runIds: ReadonlyArray<string>) => {};
 const EMPTY_QUEUED_MESSAGES: ReadonlyArray<QueuedComposerMessage> = [];
 const NOOP_QUEUED_MESSAGE_ACTION = (_id: string) => {};
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
@@ -291,6 +292,7 @@ interface TimelineRowSharedState {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
+  onOpenSubagent: (runIds: ReadonlyArray<string>) => void;
   onToggleWorkEntry: (anchorKey: string, collapsed: boolean) => void;
   onToggleSpawnRow: (entryId: string, expanded: boolean) => void;
   onToggleReasoning: (messageId: string, expanded: boolean, anchorKey: string) => void;
@@ -309,6 +311,7 @@ interface TimelineRowSharedState {
 
 interface TimelineRowActivityState {
   isWorking: boolean;
+  activeTurnInProgress: boolean;
   isPreparingWorktree: boolean;
   isCompacting: boolean;
   isRevertingCheckpoint: boolean;
@@ -408,6 +411,7 @@ interface MessagesTimelineProps {
   agentPanelModel?: AgentPanelModel;
   onOpenAgents?: () => void;
   isWorking: boolean;
+  activeTurnInProgress?: boolean;
   isPreparingWorktree?: boolean;
   isCompacting?: boolean;
   activeTurnStartedAt: string | null;
@@ -460,6 +464,7 @@ interface MessagesTimelineProps {
   onContentOverflowChange?: (overflows: boolean) => void;
   onToolOutputCollapsedAtEnd?: () => void;
   onManualNavigation: () => void;
+  onOpenSubagent?: (runIds: ReadonlyArray<string>) => void;
   cancelPositionRestoreRef?: React.RefObject<(() => void) | null>;
   hideEmptyPlaceholder?: boolean;
   topFadeEnabled?: boolean;
@@ -481,6 +486,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   citationHistoryLoading = false,
   onCiteAssistantText,
   isWorking,
+  activeTurnInProgress = false,
   worktreeSetup = null,
   onCancelWorktreeSetup,
   onWorktreeSetupWorkLocally,
@@ -519,6 +525,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onContentOverflowChange,
   onToolOutputCollapsedAtEnd,
   onManualNavigation,
+  onOpenSubagent = NOOP_OPEN_SUBAGENT,
   cancelPositionRestoreRef,
   hideEmptyPlaceholder = false,
   topFadeEnabled = false,
@@ -1152,6 +1159,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onOpenSubagent,
       onToggleWorkEntry: suspendEndScrollMaintenanceForDisclosure,
       onToggleSpawnRow,
       onToggleReasoning,
@@ -1187,6 +1195,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onOpenTurnDiff,
       onToggleTurnFold,
       onToggleWorkGroup,
+      onOpenSubagent,
       suspendEndScrollMaintenanceForDisclosure,
       onToggleSpawnRow,
       onToggleReasoning,
@@ -1213,6 +1222,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const activityState = useMemo<TimelineRowActivityState>(
     () => ({
       isWorking,
+      activeTurnInProgress,
       isPreparingWorktree,
       isCompacting,
       isRevertingCheckpoint,
@@ -1227,6 +1237,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       isCompacting,
       isRevertingCheckpoint,
       isWorking,
+      activeTurnInProgress,
       isPreparingWorktree,
       // Deliberately the fields `deriveUnsettledTurnId` reads, not the object:
       // its identity changes on every thread-shell patch.
@@ -4823,7 +4834,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   onToggleEntry?: ((collapsed: boolean) => void) | undefined;
 }) {
   const { workEntry, workspaceRoot, isExpandedToolGroupEntry, displayLabel } = props;
-  const { threadRef, onImageExpand, timestampFormat } = use(TimelineRowCtx);
+  const { threadRef, onImageExpand, onOpenSubagent, timestampFormat } = use(TimelineRowCtx);
   const groupView = use(WorkGroupViewCtx);
   const [expanded, setExpanded] = useState(
     () => groupView?.state.expandedEntries.has(workEntry.id) ?? false,
@@ -4906,21 +4917,27 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   const accessibleDisplayText = showFailedIndicator
     ? `${accessiblePreview}, tool call failed`
     : accessiblePreview;
-  const rowToggleProps = canExpand
-    ? {
-        role: "button" as const,
-        tabIndex: 0 as const,
-        "aria-label": accessibleDisplayText,
-        "aria-expanded": expanded,
-        onClick: toggleExpanded,
-        onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            toggleExpanded();
-          }
-        },
-      }
-    : {};
+  const opensSubagent = (workEntry.subagentRunIds?.length ?? 0) > 0;
+  const activateRow = () => {
+    if (opensSubagent) onOpenSubagent(workEntry.subagentRunIds!);
+    else toggleExpanded();
+  };
+  const rowToggleProps =
+    canExpand || opensSubagent
+      ? {
+          role: "button" as const,
+          tabIndex: 0 as const,
+          "aria-label": accessibleDisplayText,
+          "aria-expanded": canExpand ? expanded : undefined,
+          onClick: activateRow,
+          onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              activateRow();
+            }
+          },
+        }
+      : {};
 
   return (
     <div
@@ -4928,7 +4945,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
         "group/timeline-row relative flex flex-col rounded-md px-0.5 transition-colors",
         isExpandedToolGroupEntry ? "py-0" : "py-0.5",
         expanded && "mb-1",
-        canExpand &&
+        (canExpand || opensSubagent) &&
           "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
       )}
       {...rowToggleProps}
@@ -4985,7 +5002,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           <span
             className={cn(
               "flex size-4 shrink-0 items-center justify-center",
-              !canExpand && "invisible",
+              !canExpand && !opensSubagent && "invisible",
             )}
             aria-hidden
           >

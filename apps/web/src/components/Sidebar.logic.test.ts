@@ -2151,7 +2151,9 @@ function makeProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
-function makeThread(overrides: Partial<Thread> = {}): Thread {
+function makeThread(
+  overrides: Partial<Thread> & { latestUserMessageAt?: string | null } = {},
+): Thread & { latestUserMessageAt?: string | null } {
   return {
     id: ThreadId.make("thread-1"),
     environmentId: localEnvironmentId,
@@ -2380,6 +2382,7 @@ describe("sortProjectsForSidebar", () => {
           id: ThreadId.make("thread-visible"),
           projectId: ProjectId.make("project-1"),
           updatedAt: "2026-03-09T10:02:00.000Z",
+          latestUserMessageAt: "2026-03-09T10:02:00.000Z",
           archivedAt: null,
         }),
         makeThread({
@@ -2430,11 +2433,13 @@ describe("sortScopedProjectsForSidebar", () => {
         environmentId: localEnvironmentId,
         projectId: sharedProjectId,
         updatedAt: "2026-03-09T10:02:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:02:00.000Z",
       }),
       makeThread({
         environmentId: remoteEnvironmentId,
         projectId: sharedProjectId,
         updatedAt: "2026-03-09T10:10:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:10:00.000Z",
       }),
     ];
 
@@ -2461,6 +2466,7 @@ describe("sortScopedProjectsForSidebar", () => {
         id: ThreadId.make("thread-visible"),
         projectId: ProjectId.make("project-visible"),
         updatedAt: "2026-03-09T10:02:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:02:00.000Z",
       }),
       makeThread({
         id: ThreadId.make("thread-archived"),

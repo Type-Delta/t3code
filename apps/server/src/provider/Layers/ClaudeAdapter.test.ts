@@ -27,6 +27,7 @@ import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggest
 import { assert, describe, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -1912,6 +1913,77 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("keeps interleaved subagent tool inputs with their own tool", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "inspect files",
+        attachments: [],
+      });
+
+      for (const agent of ["agent-a", "agent-b"]) {
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-interleaved-tools",
+          uuid: `${agent}-start`,
+          parent_tool_use_id: agent,
+          event: {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "tool_use", id: `tool-${agent}`, name: "Read", input: {} },
+          },
+        } as unknown as SDKMessage);
+      }
+      for (const agent of ["agent-a", "agent-b"]) {
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-interleaved-tools",
+          uuid: `${agent}-input`,
+          parent_tool_use_id: agent,
+          event: {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: `{"file_path":"${agent}.ts"}` },
+          },
+        } as unknown as SDKMessage);
+      }
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-interleaved-tools",
+        uuid: "interleaved-tools-result",
+      } as unknown as SDKMessage);
+
+      const updates = Array.from(yield* Fiber.join(runtimeEventsFiber))
+        .filter((event) => event.type === "item.updated")
+        .map((event) => ({
+          itemId: String(event.itemId),
+          input: (event.payload.data as { input?: { file_path?: string } } | undefined)?.input,
+        }));
+      assert.deepEqual(updates, [
+        { itemId: "tool-agent-a", input: { file_path: "agent-a.ts" } },
+        { itemId: "tool-agent-b", input: { file_path: "agent-b.ts" } },
+      ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("classifies only streamed Read image inputs as image views", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -2601,15 +2673,22 @@ describe("ClaudeAdapterLive", () => {
       yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
 
       const nowMs = yield* Clock.currentTimeMillis;
+      const resetsAt = Math.floor(nowMs / 1000) + 3 * 60 * 60;
       harness.query.emit({
         type: "rate_limit_event",
         rate_limit_info: {
           status: "rejected",
           rateLimitType: "five_hour",
-          resetsAt: Math.floor(nowMs / 1000) + 2 * 60 * 60,
+          resetsAt: resetsAt - 60 * 60,
         },
         session_id: "sdk-session-limit",
         uuid: "rate-limit-rejected",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", rateLimitType: "seven_day", resetsAt },
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-rejected-later",
       } as unknown as SDKMessage);
       harness.query.emit({
         type: "result",
@@ -2627,6 +2706,56 @@ describe("ClaudeAdapterLive", () => {
         payload.errorMessage,
         "Claude usage limit reached. Send the message again once the limit resets.",
       );
+      assert.deepEqual(payload.retry, {
+        reason: "usage_limit",
+        retryAt: DateTime.formatIso(DateTime.makeUnsafe(resetsAt * 1_000)),
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not auto-resume a Claude turn after its usage limit recovers", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+
+      const limit = {
+        rateLimitType: "five_hour",
+        resetsAt: Math.floor((yield* Clock.currentTimeMillis) / 1000) + 3600,
+      };
+      for (const status of ["rejected", "allowed"] as const) {
+        harness.query.emit({
+          type: "rate_limit_event",
+          rate_limit_info: { ...limit, status },
+          session_id: "sdk-session-recovered-limit",
+          uuid: `rate-limit-${status}`,
+        } as unknown as SDKMessage);
+      }
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Tool failed"],
+        session_id: "sdk-session-recovered-limit",
+        uuid: "recovered-limit-result",
+      } as unknown as SDKMessage);
+
+      const payload = completedTurn(Array.from(yield* Fiber.join(runtimeEventsFiber)));
+      assert.equal(payload.state, "failed");
+      assert.isUndefined(payload.retry);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

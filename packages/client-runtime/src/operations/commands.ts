@@ -98,7 +98,13 @@ const dispatch = Effect.fn("EnvironmentCommands.dispatch")(function* (
   command: ClientOrchestrationCommand,
 ) {
   const supervisor = yield* EnvironmentSupervisor;
-  return yield* request(ORCHESTRATION_WS_METHODS.dispatchCommand, command).pipe(
+  const requestEffect = request(ORCHESTRATION_WS_METHODS.dispatchCommand, command);
+  // Bootstrap replies wait for checkout and setup to finish; the ordinary RPC
+  // deadline would turn a healthy slow setup into a duplicate-send warning.
+  if (command.type === "thread.turn.start" && command.bootstrap?.prepareWorktree !== undefined) {
+    return yield* requestEffect;
+  }
+  return yield* requestEffect.pipe(
     Effect.timeoutOrElse({
       duration: ORCHESTRATION_DISPATCH_TIMEOUT,
       orElse: () =>

@@ -69,6 +69,7 @@ export interface ProjectionFullThreadDiffContext {
 export interface ProjectionCheckpointNavigationContext {
   readonly threadId: ThreadId;
   readonly workspaceCwd: string;
+  readonly worktreePath: string | null;
   readonly sessionStatus: OrchestrationThread["session"] extends infer _
     ? "idle" | "starting" | "running" | "ready" | "interrupted" | "stopped" | "error" | null
     : never;

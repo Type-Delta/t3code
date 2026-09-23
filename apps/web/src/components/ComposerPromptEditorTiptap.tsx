@@ -125,6 +125,7 @@ export interface ComposerPromptEditorProps {
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
   placeholder: string;
+  ghostText?: string | null;
   containerClassName?: string;
   className?: string;
   placeholderClassName?: string;
@@ -574,6 +575,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     skills,
     disabled,
     placeholder,
+    ghostText,
     containerClassName,
     className,
     placeholderClassName,
@@ -1307,7 +1309,17 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
                   placeholderClassName,
                 )}
               >
-                {placeholder}
+                {ghostText ? (
+                  <span
+                    className="text-muted-foreground/60"
+                    data-testid="composer-ghost-text"
+                    aria-hidden="true"
+                  >
+                    {ghostText}
+                  </span>
+                ) : (
+                  placeholder
+                )}
               </div>
             ) : null}
           </div>
