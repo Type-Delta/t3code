@@ -34,6 +34,7 @@ import {
   useSplitViewStore,
 } from "../splitViewStore";
 import { useRightPanelStore } from "../rightPanelStore";
+import { browserMiniPlayerSource, usePreviewMiniPlayerStore } from "../previewMiniPlayerStore";
 import {
   useAllEnvironmentProjectSnapshotsReady,
   useProject,
@@ -133,6 +134,8 @@ function SplitThreadPane(props: {
   draftPane: DraftPane | undefined;
   active: boolean;
   isRightPanelOwner: boolean;
+  rightPanelOpen: boolean;
+  onToggleRightPanel: () => void;
   paneIndex: number;
   dropTarget: SplitPaneDropTarget | null;
   canPlaceThread: (threadRef: ScopedThreadRef | null) => boolean;
@@ -150,6 +153,8 @@ function SplitThreadPane(props: {
     dropTarget,
     headerSlot,
     isRightPanelOwner,
+    onToggleRightPanel,
+    rightPanelOpen,
     onActivate,
     onDetach,
     onDropTargetChange,
@@ -306,6 +311,8 @@ function SplitThreadPane(props: {
             paneMode={{
               isActive: active,
               isRightPanelOwner,
+              rightPanelOpen,
+              onToggleRightPanel,
               onActivate,
               headerSlot,
               rightPanelSlot,
@@ -320,6 +327,8 @@ function SplitThreadPane(props: {
             paneMode={{
               isActive: active,
               isRightPanelOwner,
+              rightPanelOpen,
+              onToggleRightPanel,
               onActivate,
               headerSlot,
               rightPanelSlot,
@@ -417,6 +426,51 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   }, [allProjectSnapshotsReady, availablePaneRefs, navigateToPane]);
 
   const activePaneKey = activePane ? scopedThreadKey(activePane) : null;
+  const rightPanelOpen = paneRefs.some(
+    (paneRef) => rightPanelStateByThreadKey[scopedThreadKey(paneRef)]?.isOpen === true,
+  );
+  const toggleRightPanel = useCallback(() => {
+    const state = useRightPanelStore.getState();
+    const openPaneRefs = paneRefs.filter(
+      (paneRef) => state.byThreadKey[scopedThreadKey(paneRef)]?.isOpen === true,
+    );
+    if (openPaneRefs.length > 0) {
+      const visibleOwnerKey = resolveSplitRightPanelOwner({
+        paneKeys: paneRefs.map(scopedThreadKey),
+        activePaneKey,
+        currentOwnerKey: rightPanelOwnerThreadKey,
+        openPanelKeys: new Set(openPaneRefs.map(scopedThreadKey)),
+      });
+      for (const paneRef of openPaneRefs) {
+        const panelState = state.byThreadKey[scopedThreadKey(paneRef)];
+        const activeSurface = panelState?.surfaces.find(
+          (surface) => surface.id === panelState.activeSurfaceId,
+        );
+        if (
+          scopedThreadKey(paneRef) === visibleOwnerKey &&
+          activeSurface?.kind === "preview" &&
+          activeSurface.resourceId
+        ) {
+          usePreviewMiniPlayerStore
+            .getState()
+            .open(paneRef, browserMiniPlayerSource(activeSurface.resourceId));
+        } else if (
+          scopedThreadKey(paneRef) === visibleOwnerKey &&
+          activeSurface?.kind === "device" &&
+          activeSurface.target
+        ) {
+          usePreviewMiniPlayerStore.getState().open(paneRef, {
+            kind: "device",
+            ...activeSurface.target,
+          });
+        }
+        state.close(paneRef);
+      }
+      return;
+    }
+    const targetRef = activePane ?? paneRefs[0];
+    if (targetRef) state.toggleVisibility(targetRef);
+  }, [activePane, activePaneKey, paneRefs, rightPanelOwnerThreadKey]);
   useEffect(() => {
     const paneKeys = paneRefs.map(scopedThreadKey);
     const openPanelKeys = new Set(
@@ -596,6 +650,8 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
                     draftPane={draftPaneByThreadKey.get(threadKey)}
                     active={threadKey === activePaneKey}
                     isRightPanelOwner={threadKey === rightPanelOwnerThreadKey}
+                    rightPanelOpen={rightPanelOpen}
+                    onToggleRightPanel={toggleRightPanel}
                     paneIndex={paneIndex}
                     dropTarget={dropTarget}
                     canPlaceThread={canPlaceThread}

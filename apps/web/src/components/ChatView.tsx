@@ -752,6 +752,8 @@ function isCompactCommandMessage(message: ChatMessage): boolean {
 interface ChatViewPaneMode {
   isActive: boolean;
   isRightPanelOwner: boolean;
+  rightPanelOpen: boolean;
+  onToggleRightPanel: () => void;
   onActivate: () => void;
   headerSlot: HTMLElement | null;
   rightPanelSlot: HTMLElement | null;
@@ -5122,6 +5124,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     useRightPanelStore.getState().toggleVisibility(activeThreadRef);
   }, [activeThreadRef, closePreviewPanel, rightPanelOpen]);
+  const toggleVisibleRightPanel = paneMode?.onToggleRightPanel ?? toggleRightPanel;
   const toggleRightPanelMaximized = useCallback(() => {
     if (!canMaximizeRightPanel) return;
     setMaximizedRightPanelThreadKey((threadKey) =>
@@ -6880,7 +6883,7 @@ export default function ChatView(props: ChatViewProps) {
       if (command === "rightPanel.toggle") {
         event.preventDefault();
         event.stopPropagation();
-        toggleRightPanel();
+        toggleVisibleRightPanel();
         return;
       }
 
@@ -7059,7 +7062,7 @@ export default function ChatView(props: ChatViewProps) {
     confirmAndUnpinThread,
     copyActiveThreadReference,
     getShortcutContext,
-    toggleRightPanel,
+    toggleVisibleRightPanel,
     toggleRightPanelMaximized,
     toggleTerminalVisibility,
     composerRef,
@@ -9801,8 +9804,8 @@ export default function ChatView(props: ChatViewProps) {
       terminalAvailable={activeProject !== null}
       terminalOpen={terminalUiState.terminalOpen}
       terminalShortcutLabel={shortcutLabelForCommand(keybindings, "terminal.toggle")}
-      rightPanelAvailable={activeProject !== null}
-      rightPanelOpen={rightPanelOpen}
+      rightPanelAvailable={activeProject !== null || (isPaneMode && paneMode.rightPanelOpen)}
+      rightPanelOpen={paneMode?.rightPanelOpen ?? rightPanelOpen}
       rightPanelShortcutLabel={shortcutLabelForCommand(keybindings, "rightPanel.toggle")}
       // Suppressed while the Agents surface is visible: the roster itself is
       // on screen, so the toggle badge would be pointing at nothing.
@@ -9810,7 +9813,7 @@ export default function ChatView(props: ChatViewProps) {
         rightPanelOpen && activeRightPanelSurface?.kind === "agents" ? 0 : agentPanelModel.liveCount
       }
       onToggleTerminal={toggleTerminalVisibility}
-      onToggleRightPanel={toggleRightPanel}
+      onToggleRightPanel={toggleVisibleRightPanel}
     />
   );
   const panelLayoutControls = (
