@@ -613,6 +613,16 @@ and `apps/web/src/components/settings/SettingsPanels.tsx`.
 
 **Last updated:** 2026-09-16
 
+### DL035 — Manual-only release actions
+
+The fork's release workflow runs only through an explicit `workflow_dispatch` request. Automatic tag and scheduled triggers are disabled, so releases are started manually with the selected preview, stable, or nightly channel.
+
+**Implementation evidence:** `.github/workflows/release.yml`.
+
+**Recorded validation:** workflow trigger inspection and focused YAML review.
+
+**Last updated:** 2026-09-24
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
