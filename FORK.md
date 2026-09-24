@@ -6,6 +6,16 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
+### DL016 — Repository identity for partial clones
+
+Git may append a filter annotation to `git remote -v` fetch lines for partial clones. The repository identity resolver accepts those lines so projects using the same remote can group across environments.
+
+**Implementation evidence:** `apps/server/src/project/RepositoryIdentityResolver.ts` and its focused test.
+
+**Recorded validation:** resolver regression test, `vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-09-24
+
 ### DL015 — Case-safe composer subagent utility filename
 
 The composer subagent utility module uses a distinct basename from the `ComposerSubagents.tsx` component so Windows case-insensitive resolution cannot merge the two modules during typecheck.

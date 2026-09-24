@@ -53,7 +53,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
           return {
             stdout: input.args.includes("rev-parse")
               ? `${rootPath}\n`
-              : `origin\t${remoteUrl} (fetch)\n`,
+              : `origin\t${remoteUrl} (fetch) [blob:none]\n`,
             stderr: "",
             code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
