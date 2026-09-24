@@ -5,7 +5,7 @@ import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { useComposerMenuProps } from "./composerEventScope";
-import { composerSubagentLabel, composerSubagentStatus } from "./composerSubagents";
+import { composerSubagentLabel, composerSubagentStatus } from "./composerSubagentUtils";
 import { useComposerMenuState } from "./useComposerMenuState";
 import { subagentPanelStatusLabel } from "./SubagentPanel";
 

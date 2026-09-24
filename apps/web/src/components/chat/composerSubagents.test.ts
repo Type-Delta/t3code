@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { SubagentRunSummary } from "../../session-logic";
-import { composerSubagentLabel, composerSubagentStatus } from "./composerSubagents";
+import { composerSubagentLabel, composerSubagentStatus } from "./composerSubagentUtils";
 
 const run = (id: string, status: SubagentRunSummary["status"]): SubagentRunSummary => ({
   id,

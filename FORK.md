@@ -6,6 +6,16 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
+### DL015 — Case-safe composer subagent utility filename
+
+The composer subagent utility module uses a distinct basename from the `ComposerSubagents.tsx` component so Windows case-insensitive resolution cannot merge the two modules during typecheck.
+
+**Implementation evidence:** `apps/web/src/components/chat/composerSubagentUtils.ts`, `apps/web/src/components/chat/ComposerSubagents.tsx`, and `apps/web/src/components/chat/composerSubagents.test.ts`.
+
+**Recorded validation:** mobile typecheck and repository typecheck on Windows.
+
+**Last updated:** 2026-09-24
+
 This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (updated by the latest sync merge). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
