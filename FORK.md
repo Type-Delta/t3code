@@ -203,11 +203,10 @@ metadata. Child plan activity cannot replace the parent plan, and child assistan
 become the parent turn's checkpoint message. Spawn rows show the reported subagent model and
 reasoning effort, while a count-labeled Subagents dropdown between the composer Worktree and branch
 controls lists every run and opens its transcript directly. Its label contracts from `N Subagents`
-to `N Sub` with the available composer
-width. The aggregate label and each menu item's bot icon reflect completed, working, and failed
-states; active work breathes, while terminal errors remain static. The composer context strip keeps
-the same left-aligned workspace group and right-aligned subagent/branch group at every viewport
-width. Native lifecycle-only agents are merged into the same dropdown, and native tool rows
+to `N Sub` with the available composer width. Each row shows the subagent's model, reasoning
+effort, and status. The composer context strip keeps the same left-aligned workspace group and
+right-aligned subagent/branch group at every viewport width. Native lifecycle-only agents are
+merged into the same dropdown, and native tool rows
 attributed through `agentId` render inside their subagent transcript while remaining hidden from
 the parent timeline. Claude output without a parent Task identifier remains in the main transcript.
 
@@ -256,7 +255,7 @@ full native lifecycle and terminal output through projection. The 2026-09-01 int
 coverage for the single bounded metadata lookup, newer child settings and reroutes, and model and
 effort propagation through every task event.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-24
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
