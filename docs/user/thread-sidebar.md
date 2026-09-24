@@ -29,6 +29,14 @@ and worktree while you stay in the new thread composer. This requires a Git proj
 
 Pin a thread from its menu to keep it above your active work.
 
+On web and desktop, choose **Settings → General → Organization → Thread ordering**.
+**Manual**, the default, lets you arrange threads by dragging within the sidebar.
+**Last input** orders active threads by your latest message and disables sidebar
+reordering. Switching modes preserves your saved manual order.
+
+In either mode, drag a thread row into the conversation to open it beside the current
+thread. Drag into an existing split to add another pane. No separate drag handle is needed.
+
 On web and desktop, unpinning, settling, snoozing, and archiving a thread each show
 a notification with **Undo** for five seconds. Undo restores the thread's previous
 state, including its pinned position, and reopens an archived thread you were
@@ -45,7 +53,7 @@ scroll position instead of following the thread to its new place in the list.
 
 Pinning does not prevent automatic settlement. Settling a thread removes its pin.
 
-On web and desktop, drag a thread between sections to change its state. Drag a thread up into
+On web and desktop in **Manual** mode, drag a thread between sections to change its state. Drag a thread up into
 the pinned section to pin it at the spot you drop it; drag a pinned thread down into the active
 list to unpin it. Dragging a thread onto the **Settled** header settles it, and dragging a settled
 thread into the active list un-settles it. A snoozed thread can be dragged out of the snoozed
@@ -75,7 +83,7 @@ On web and desktop, the list also animates section changes made with thread acti
 preference. While dragging, rows follow the insertion gap without replaying a second transition
 after the drop.
 
-New threads appear above the active threads you have arranged. Settling clears a thread's active
+In **Manual** mode, new threads appear above the active threads you have arranged. Settling clears a thread's active
 position, so using **Un-settle** returns it to the top. Pinning and snoozing preserve its active
 position until you move it again. Thread activity does not change the order. The settled shelf
 continues to use settlement time.

@@ -2,14 +2,6 @@ import { useLayoutEffect, type PointerEvent as ReactPointerEvent } from "react";
 import { type SensorProps } from "@dnd-kit/core";
 import { getOwnerDocument, getWindow } from "@dnd-kit/utilities";
 
-export function isSplitThreadDragHandle(target: EventTarget | null): boolean {
-  const element = target as (Element & { closest?: Element["closest"] }) | null;
-  return (
-    typeof element?.closest === "function" &&
-    element.closest("[data-split-thread-drag-handle]") !== null
-  );
-}
-
 // Search unmounts the drag context while its owning Sidebar remains mounted.
 export function SidebarDragLifecycle({ onUnmount }: { onUnmount: () => void }) {
   useLayoutEffect(() => onUnmount, [onUnmount]);
@@ -20,6 +12,9 @@ type Options = {
   distance: number;
   onAttach: (sensor: SidebarPointerSensor) => void;
   onFinish: (started: boolean) => void;
+  onMove?: (active: string, point: { x: number; y: number }) => void;
+  onRelease?: (active: string, point: { x: number; y: number }) => void;
+  onCancelDrag?: () => void;
 };
 
 /** A sidebar gesture ends on release, cancellation, or loss of its window.
@@ -28,13 +23,8 @@ export class SidebarPointerSensor {
   static activators = [
     {
       eventName: "onPointerDown" as const,
-      handler: ({ nativeEvent }: ReactPointerEvent) => {
-        return (
-          nativeEvent.isPrimary &&
-          nativeEvent.button === 0 &&
-          !isSplitThreadDragHandle(nativeEvent.target)
-        );
-      },
+      handler: ({ nativeEvent }: ReactPointerEvent) =>
+        nativeEvent.isPrimary && nativeEvent.button === 0,
     },
   ];
   autoScrollEnabled = true;
@@ -98,16 +88,30 @@ export class SidebarPointerSensor {
       this.document.addEventListener("selectionchange", this.clearSelection);
       this.clearSelection();
       this.props.onStart(this.coordinates());
+      if (this.phase === "dragging") {
+        this.props.options.onMove?.(String(this.props.active), coordinates);
+      }
       return;
     }
     if (this.phase === "dragging") {
       if (event.cancelable) event.preventDefault();
       this.props.onMove(coordinates);
+      if (this.phase === "dragging") {
+        this.props.options.onMove?.(String(this.props.active), coordinates);
+      }
     }
   };
 
   private end = (event: PointerEvent) => {
-    if (event.pointerId === this.pointer.pointerId) this.finish(false);
+    if (event.pointerId === this.pointer.pointerId) {
+      if (this.phase === "dragging") {
+        this.props.options.onRelease?.(String(this.props.active), {
+          x: event.clientX,
+          y: event.clientY,
+        });
+      }
+      this.finish(false);
+    }
   };
   private pointerCancel = (event: PointerEvent) => {
     if (event.pointerId === this.pointer.pointerId) this.cancel();
@@ -124,6 +128,7 @@ export class SidebarPointerSensor {
     if (this.phase === "finished") return;
     const aborted = this.phase === "pending";
     this.phase = "finished";
+    if (cancelled) this.props.options.onCancelDrag?.();
     this.document.removeEventListener("pointermove", this.move, { capture: true });
     this.document.removeEventListener("pointerup", this.end, { capture: true });
     this.document.removeEventListener("pointercancel", this.pointerCancel, { capture: true });

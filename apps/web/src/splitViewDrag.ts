@@ -46,3 +46,55 @@ export function readSplitThreadDrag(dataTransfer: DataTransfer): ScopedThreadRef
 export function endSplitThreadDrag(): void {
   activeSplitThreadRef = null;
 }
+
+export type PointerSplitDropTarget =
+  | { kind: "single" }
+  | {
+      kind: "split";
+      paneKey: string | null;
+      insertionIndex: number;
+      position: "before" | "after" | null;
+    };
+
+/** Read the destination under the pointer, independent of dnd-kit's sidebar collision list. */
+export function resolvePointerSplitDropTarget(
+  document: Pick<Document, "elementFromPoint">,
+  point: { x: number; y: number },
+): PointerSplitDropTarget | null {
+  const element = document.elementFromPoint(point.x, point.y);
+  if (!(element instanceof Element)) return null;
+  const grid = element.closest("[data-split-thread-grid]");
+  if (grid) {
+    const panes = [...grid.querySelectorAll<HTMLElement>("[data-split-thread-pane]")];
+    const pane = element.closest<HTMLElement>("[data-split-thread-pane]");
+    const paneIndex = pane ? panes.indexOf(pane) : -1;
+    if (paneIndex < 0) {
+      return { kind: "split", paneKey: null, insertionIndex: panes.length, position: null };
+    }
+    const bounds = pane!.getBoundingClientRect();
+    const position = point.x < bounds.left + bounds.width / 2 ? "before" : "after";
+    return {
+      kind: "split",
+      paneKey: pane!.getAttribute("data-split-thread-pane-key"),
+      insertionIndex: paneIndex + (position === "after" ? 1 : 0),
+      position,
+    };
+  }
+  return element.closest("[data-thread-route-workspace]") ? { kind: "single" } : null;
+}
+
+let pointerTarget: PointerSplitDropTarget | null = null;
+const pointerTargetListeners = new Set<(target: PointerSplitDropTarget | null) => void>();
+
+export function subscribePointerSplitDropTarget(
+  listener: (target: PointerSplitDropTarget | null) => void,
+): () => void {
+  pointerTargetListeners.add(listener);
+  return () => pointerTargetListeners.delete(listener);
+}
+
+export function setPointerSplitDropTarget(target: PointerSplitDropTarget | null): void {
+  if (JSON.stringify(pointerTarget) === JSON.stringify(target)) return;
+  pointerTarget = target;
+  for (const listener of pointerTargetListeners) listener(target);
+}

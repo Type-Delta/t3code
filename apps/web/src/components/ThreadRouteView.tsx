@@ -6,7 +6,9 @@ import { useEffect, useState } from "react";
 import ChatView from "./ChatView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
 import { waitForDraftHeroTransition } from "./chat/draftHeroTransition";
+import { SplitPaneDropHint } from "./SplitPaneDropHint";
 import { SidebarInset } from "./ui/sidebar";
+import { subscribePointerSplitDropTarget } from "../splitViewDrag";
 import {
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThreadByRef,
@@ -45,6 +47,14 @@ import { resolveThreadSyncPhase } from "../threadSync";
  * an element only survives a route swap when the same parent renders it.
  */
 export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
+  const [isSplitDropTarget, setIsSplitDropTarget] = useState(false);
+  useEffect(
+    () =>
+      subscribePointerSplitDropTarget((dropTarget) =>
+        setIsSplitDropTarget(dropTarget?.kind === "single"),
+      ),
+    [],
+  );
   const navigate = useNavigate();
   const draftId = target.kind === "draft" ? target.draftId : null;
   const draftSession = useComposerDraftStore((store) =>
@@ -207,8 +217,12 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   }
 
   return (
-    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
+    <SidebarInset
+      data-thread-route-workspace
+      className="relative h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh"
+    >
       {view}
+      {isSplitDropTarget ? <SplitPaneDropHint className="inset-0" position="after" /> : null}
     </SidebarInset>
   );
 }

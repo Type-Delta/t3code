@@ -23,6 +23,7 @@ import {
   endSplitThreadDrag,
   hasSplitThreadDrag,
   readSplitThreadDrag,
+  subscribePointerSplitDropTarget,
 } from "../splitViewDrag";
 import {
   findSplitViewGroupForThread,
@@ -253,6 +254,7 @@ function SplitThreadPane(props: {
         active && "z-10",
       )}
       data-split-thread-pane
+      data-split-thread-pane-key={threadKey}
       data-split-thread-pane-active={active}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -349,6 +351,17 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   const rightPanelStateByThreadKey = useRightPanelStore((state) => state.byThreadKey);
   const [rightPanelOwnerThreadKey, setRightPanelOwnerThreadKey] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<SplitPaneDropTarget | null>(null);
+  useEffect(
+    () =>
+      subscribePointerSplitDropTarget((target) => {
+        setDropTarget(
+          target?.kind === "split" && target.paneKey !== null && target.position !== null
+            ? { paneKey: target.paneKey, position: target.position }
+            : null,
+        );
+      }),
+    [],
+  );
   const paneGridAnimationRef = useRef<{
     node: HTMLElement;
     controller: ReturnType<typeof autoAnimate>;

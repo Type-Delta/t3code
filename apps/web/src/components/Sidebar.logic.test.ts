@@ -1020,6 +1020,66 @@ describe("sortThreadsForSidebar", () => {
 
     expect(sorted.map((thread) => thread.id)).toEqual(["newest", "stale-stamp"]);
   });
+
+  it("last input mode ignores saved order keys while keeping creation and un-settle anchors", () => {
+    const createdAt = "2026-03-09T08:00:00.000Z";
+    const sorted = sortThreadsForSidebar(
+      [
+        {
+          environmentId: "b",
+          id: "older-input",
+          createdAt,
+          activeOrderKey: "a",
+          latestUserMessageAt: "2026-03-09T09:00:00.000Z",
+        },
+        {
+          environmentId: "a",
+          id: "new-input",
+          createdAt,
+          activeOrderKey: "z",
+          latestUserMessageAt: "2026-03-09T12:00:00.000Z",
+        },
+        {
+          environmentId: "a",
+          id: "reopened",
+          createdAt,
+          activeOrderKey: "m",
+          unsettledAt: "2026-03-09T13:00:00.000Z",
+        },
+        {
+          environmentId: "a",
+          id: "created",
+          createdAt: "2026-03-09T11:00:00.000Z",
+          activeOrderKey: "b",
+        },
+      ],
+      "last_input",
+    );
+
+    expect(sorted.map((thread) => thread.id)).toEqual([
+      "reopened",
+      "new-input",
+      "created",
+      "older-input",
+    ]);
+  });
+
+  it("last input mode breaks equal activity timestamps by environment and thread", () => {
+    const createdAt = "2026-03-09T08:00:00.000Z";
+    const sorted = sortThreadsForSidebar(
+      [
+        { environmentId: "b", id: "a", createdAt },
+        { environmentId: "a", id: "b", createdAt },
+        { environmentId: "a", id: "a", createdAt },
+      ],
+      "last_input",
+    );
+    expect(sorted.map((thread) => `${thread.environmentId}:${thread.id}`)).toEqual([
+      "a:a",
+      "a:b",
+      "b:a",
+    ]);
+  });
 });
 
 describe("pinOrderKeyBetween", () => {

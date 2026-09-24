@@ -12,6 +12,7 @@ import {
   type ProviderInstanceId,
   type ScopedThreadRef,
   type SidebarProjectGroupingMode,
+  type SidebarThreadOrderingMode,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
@@ -21,6 +22,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
+  DEFAULT_SIDEBAR_THREAD_ORDERING_MODE,
   DEFAULT_UNIFIED_SETTINGS,
   type DiffLayout,
   type EnvironmentIdentificationMode,
@@ -559,6 +561,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
         ? ["Project Grouping"]
         : []),
+      ...(clientSettings.sidebarThreadOrderingMode !== DEFAULT_SIDEBAR_THREAD_ORDERING_MODE
+        ? ["Thread ordering"]
+        : []),
       ...(settings.sidebarAutoSettleAfterDays !==
       DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
         ? ["Auto-settle inactive threads"]
@@ -658,6 +663,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.enableAgentBrowserAccess,
       clientSettings.enablePromptSuggestion,
       clientSettings.promptSuggestionInstructions,
+      clientSettings.sidebarThreadOrderingMode,
       settings.confirmQuit,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
@@ -830,6 +836,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     updateClientSettings({
       enablePromptSuggestion: DEFAULT_UNIFIED_SETTINGS.enablePromptSuggestion,
       promptSuggestionInstructions: DEFAULT_UNIFIED_SETTINGS.promptSuggestionInstructions,
+      sidebarThreadOrderingMode: DEFAULT_SIDEBAR_THREAD_ORDERING_MODE,
     });
     onRestored?.();
   }, [
@@ -2216,6 +2223,48 @@ export function GeneralSettingsPanel() {
     <SettingsPageContainer>
       <ProjectDefaultsSettings category="general" />
       <SettingsSection id="organization" title="Organization">
+        <SettingsRow
+          {...searchableSetting("sidebar-thread-ordering")}
+          description="Choose whether thread order follows your manual arrangement or the latest user message."
+          resetAction={
+            clientSettings.sidebarThreadOrderingMode !== DEFAULT_SIDEBAR_THREAD_ORDERING_MODE ? (
+              <SettingResetButton
+                label="thread ordering"
+                onClick={() =>
+                  updateClientSettings({
+                    sidebarThreadOrderingMode: DEFAULT_SIDEBAR_THREAD_ORDERING_MODE,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={clientSettings.sidebarThreadOrderingMode}
+              onValueChange={(value) =>
+                updateClientSettings({
+                  sidebarThreadOrderingMode: value as SidebarThreadOrderingMode,
+                })
+              }
+            >
+              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="Thread ordering">
+                <SelectValue>
+                  {clientSettings.sidebarThreadOrderingMode === "last_input"
+                    ? "Last input"
+                    : "Manual"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="manual">
+                  Manual
+                </SelectItem>
+                <SelectItem hideIndicator value="last_input">
+                  Last input
+                </SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
         <SettingsRow
           {...searchableSetting("project-grouping")}
           description="Combine matching repositories across environments."

@@ -673,6 +673,21 @@ describe("ClientSettings sidebar", () => {
     expect(decodeClientSettings({}).legacySidebarEnabled).toBe(false);
   });
 
+  it("defaults thread ordering to manual and round-trips both modes", () => {
+    expect(decodeClientSettings({}).sidebarThreadOrderingMode).toBe("manual");
+    for (const mode of ["manual", "last_input"] as const) {
+      expect(
+        decodeClientSettings({ sidebarThreadOrderingMode: mode }).sidebarThreadOrderingMode,
+      ).toBe(mode);
+      expect(decodeClientSettingsPatch({ sidebarThreadOrderingMode: mode })).toEqual({
+        sidebarThreadOrderingMode: mode,
+      });
+      expect(
+        encodeClientSettings(decodeClientSettings({ sidebarThreadOrderingMode: mode })),
+      ).toMatchObject({ sidebarThreadOrderingMode: mode });
+    }
+  });
+
   it("drops the retired sidebar v2 beta keys, resetting everyone to the default", () => {
     const decoded = decodeClientSettings({
       sidebarV2Enabled: false,

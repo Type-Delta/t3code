@@ -447,15 +447,15 @@ The Windows job also uses upstream's corrected Visual Studio Spectre runtime com
 
 **Last updated:** 2026-09-05
 
-### DL029 — User messages promote active sidebar threads
+### DL029 — Selectable sidebar thread ordering
 
-The current sidebar moves an active thread to the top when the user sends it a new message. Other thread updates do not change its position. Creation and un-settle timestamps remain lifecycle anchors, and equal anchors use environment and thread IDs for deterministic ordering.
+The default web and desktop sidebar offers **Manual** ordering by default and **Last input** ordering in General settings. Manual preserves saved positions and sidebar drag actions. Last input ignores saved active-order keys and promotes threads on user messages while retaining creation and un-settle lifecycle anchors. Switching modes preserves saved keys. Dragging a row into the conversation creates or extends a split in either mode, without a separate grip control. Initial split creation reuses the existing pane-drop overlay to show its right-side placement. The dragged row uses the same row appearance in a document-level drag overlay, preserving sidebar scroll position and avoiding clipping behind the conversation.
 
-**Implementation evidence:** `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/components/Sidebar.logic.test.ts`, `packages/client-runtime/src/state/threadSort.ts`, and its thread-sort tests.
+**Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/web/src/components/settings/SettingsPanels.tsx`, `apps/web/src/components/Sidebar.tsx`, `apps/web/src/components/Sidebar.logic.ts`, and their focused tests.
 
-**Recorded validation:** focused shared, web, and mobile thread-sort tests covering user-message promotion, non-message updates, creation fallback, un-settle re-entry, and deterministic ties; `vp check`; and `vp run typecheck`.
+**Recorded validation:** focused settings, sidebar sorting, pointer lifecycle, and split target tests; isolated browser checks for initial split creation, pane placement, manual reordering, Last input mode, and settings persistence; `vp check`; and `vp run typecheck`.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-24
 
 ### DL030 — Isolated macOS GitHub releases
 

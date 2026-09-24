@@ -2,11 +2,7 @@ import type { SensorProps } from "@dnd-kit/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { act, createElement, StrictMode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
-import {
-  isSplitThreadDragHandle,
-  SidebarDragLifecycle,
-  SidebarPointerSensor,
-} from "./Sidebar.pointer";
+import { SidebarDragLifecycle, SidebarPointerSensor } from "./Sidebar.pointer";
 
 class TestDocument extends EventTarget {
   hidden = false;
@@ -37,16 +33,26 @@ function gesture() {
     onPending: vi.fn(),
   };
   const onFinish = vi.fn();
+  const onPointerMove = vi.fn();
+  const onRelease = vi.fn();
+  const onCancelDrag = vi.fn();
   // The sensor never reads dnd-kit's layout context or active node.
   const props = {
     active: "thread",
     event: pointer("pointerdown"),
-    options: { distance: 6, onAttach: vi.fn(), onFinish },
+    options: {
+      distance: 6,
+      onAttach: vi.fn(),
+      onFinish,
+      onMove: onPointerMove,
+      onRelease,
+      onCancelDrag,
+    },
     ...callbacks,
   } as unknown as SensorProps<ConstructorParameters<typeof SidebarPointerSensor>[0]["options"]>;
   const sensor = new SidebarPointerSensor(props);
   sensors.push(sensor);
-  return { sensor, onFinish, ...callbacks };
+  return { sensor, onFinish, onPointerMove, onRelease, onCancelDrag, ...callbacks };
 }
 
 beforeEach(() => {
@@ -65,16 +71,11 @@ afterEach(() => {
 });
 
 describe("sidebar pointer lifecycle", () => {
-  it("leaves split drag-handle gestures to native thread placement", () => {
-    const splitHandle = {
-      closest: (selector: string) =>
-        selector === "[data-split-thread-drag-handle]" ? splitHandle : null,
-    };
-    const ordinaryRow = { closest: () => null };
-
-    expect(isSplitThreadDragHandle(splitHandle as unknown as EventTarget)).toBe(true);
-    expect(isSplitThreadDragHandle(ordinaryRow as unknown as EventTarget)).toBe(false);
-    expect(isSplitThreadDragHandle(null)).toBe(false);
+  it("starts the same drag from any primary-button row target", () => {
+    const activate = SidebarPointerSensor.activators[0]!.handler;
+    expect(activate({ nativeEvent: { isPrimary: true, button: 0 } } as never)).toBe(true);
+    expect(activate({ nativeEvent: { isPrimary: true, button: 1 } } as never)).toBe(false);
+    expect(activate({ nativeEvent: { isPrimary: false, button: 0 } } as never)).toBe(false);
   });
 
   it("keeps a click idle and starts only after the drag threshold", () => {
@@ -92,6 +93,29 @@ describe("sidebar pointer lifecycle", () => {
     expect(drag.onEnd).toHaveBeenCalledOnce();
     expect(drag.onAbort).not.toHaveBeenCalled();
     expect(drag.onFinish).toHaveBeenCalledOnce();
+  });
+
+  it("reports the release position once after a real row drag", () => {
+    const drag = gesture();
+    document.dispatchEvent(pointer("pointermove", { clientX: 20 }));
+    document.dispatchEvent(pointer("pointermove", { clientX: 120, clientY: 40 }));
+    document.dispatchEvent(pointer("pointerup", { buttons: 0, clientX: 125, clientY: 43 }));
+    document.dispatchEvent(pointer("pointerup", { buttons: 0, clientX: 130, clientY: 44 }));
+
+    expect(drag.onPointerMove).toHaveBeenLastCalledWith("thread", { x: 120, y: 40 });
+    expect(drag.onRelease).toHaveBeenCalledExactlyOnceWith("thread", { x: 125, y: 43 });
+    expect(drag.onEnd).toHaveBeenCalledOnce();
+  });
+
+  it("does not place a thread after Escape cancels its drag", () => {
+    const drag = gesture();
+    document.dispatchEvent(pointer("pointermove", { clientX: 20 }));
+    document.dispatchEvent(Object.assign(new Event("keydown"), { code: "Escape" }));
+    document.dispatchEvent(pointer("pointerup", { buttons: 0, clientX: 120 }));
+
+    expect(drag.onCancelDrag).toHaveBeenCalledOnce();
+    expect(drag.onRelease).not.toHaveBeenCalled();
+    expect(drag.onEnd).not.toHaveBeenCalled();
   });
 
   const interruptions = {
@@ -163,6 +187,7 @@ describe("sidebar pointer lifecycle", () => {
     document.dispatchEvent(pointer("pointermove", { clientY: 20 }));
     expect(drag.onCancel).toHaveBeenCalledOnce();
     expect(drag.onMove).not.toHaveBeenCalled();
+    expect(drag.onPointerMove).not.toHaveBeenCalled();
     expect(drag.onFinish).toHaveBeenCalledOnce();
   });
 

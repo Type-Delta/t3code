@@ -7,7 +7,11 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
-import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
+import type {
+  SidebarProjectSortOrder,
+  SidebarThreadOrderingMode,
+  SidebarThreadSortOrder,
+} from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import {
   planPinnedReorder,
@@ -1015,8 +1019,8 @@ function firstValidTimestamp(
   return null;
 }
 
-// User messages move active threads to the top. Other thread updates leave
-// their position alone; creation and un-settle remain lifecycle anchors.
+// Manual mode follows saved order keys. Last-input mode ignores them and
+// places recent creation, re-entry, or user input first.
 export function sortThreadsForSidebar<
   T extends {
     readonly environmentId?: string;
@@ -1026,7 +1030,26 @@ export function sortThreadsForSidebar<
     readonly latestUserMessageAt?: string | null | undefined;
     readonly unsettledAt?: string | null | undefined;
   },
->(threads: readonly T[]): T[] {
+>(threads: readonly T[], mode: SidebarThreadOrderingMode = "manual"): T[] {
+  if (mode === "last_input") {
+    const timestamps = new Map(
+      threads.map((thread) => [
+        thread,
+        Math.max(
+          firstValidTimestampMs(thread.latestUserMessageAt),
+          firstValidTimestampMs(thread.unsettledAt),
+          firstValidTimestampMs(thread.createdAt),
+        ),
+      ]),
+    );
+    return [...threads].sort(
+      (left, right) =>
+        (timestamps.get(right) ?? 0) - (timestamps.get(left) ?? 0) ||
+        `${left.environmentId ?? ""}:${left.id}`.localeCompare(
+          `${right.environmentId ?? ""}:${right.id}`,
+        ),
+    );
+  }
   return sortActiveThreadsByOrderKey(threads);
 }
 
