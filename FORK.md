@@ -440,8 +440,8 @@ and Electron shell tests.
 ### DL028 — Isolated Windows x64 GitHub releases
 
 The fork has a manual Windows x64 release workflow that uses GitHub-hosted runners. It builds the
-Linux `node-pty` payload required by the packaged WSL backend, produces an unsigned NSIS installer,
-and publishes only the Windows installer and updater files to this repository's GitHub Releases.
+Linux CLI archive required by the packaged WSL backend, produces an unsigned NSIS installer, and
+publishes only the Windows installer and updater files to this repository's GitHub Releases.
 It does not publish packages, build other desktop platforms, deploy hosted services, announce the
 release, or invoke another release workflow.
 
@@ -450,12 +450,12 @@ available because this workflow deliberately does not publish a matching `t3` pa
 
 **Implementation evidence:** `.github/workflows/fork-windows-release.yml`.
 
-The Windows job also uses upstream's corrected Visual Studio Spectre runtime component identifier when installing packaging prerequisites.
+The Windows job also uses upstream's corrected Visual Studio Spectre runtime component identifier when installing packaging prerequisites. The WSL archive handoff follows the current desktop artifact builder's `--wsl-runtime` interface.
 
-**Recorded validation:** workflow syntax and action-policy checks, `vp check`, and
-`vp run typecheck`.
+**Recorded validation:** workflow YAML and handoff contract checks, focused desktop artifact
+tests, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-26
 
 ### DL029 — Selectable sidebar thread ordering
 
