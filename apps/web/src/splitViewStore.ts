@@ -521,7 +521,7 @@ export const useSplitViewStore = create<SplitViewStore>()(
             }
           }
         }
-        return fallback;
+        return fallback && availableKeys.has(scopedThreadKey(fallback)) ? fallback : null;
       },
     }),
     {

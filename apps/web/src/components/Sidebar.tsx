@@ -82,6 +82,7 @@ import {
 import { useParams, useRouter } from "@tanstack/react-router";
 
 import { useRightPanelStore } from "../rightPanelStore";
+import { prepareSplitViewThreadNavigation } from "../splitViewNavigation";
 import {
   findSplitViewGroupForThread,
   MAX_SPLIT_VIEW_PANES,
@@ -2978,14 +2979,7 @@ export default function Sidebar() {
       if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
         clearSelection();
       }
-      const splitViewState = useSplitViewStore.getState();
-      const splitGroup = findSplitViewGroupForThread(splitViewState, threadRef);
-      const switchingWithinActiveGroup = splitGroup?.id === splitViewState.activeGroupId;
-      if (splitGroup) {
-        splitViewState.resumeSplit(threadRef);
-      } else {
-        splitViewState.exitSplit();
-      }
+      const switchingWithinActiveGroup = prepareSplitViewThreadNavigation(threadRef);
       setSelectionAnchor(scopedThreadKey(threadRef));
       if (isMobile) {
         setOpenMobile(false);
@@ -3346,7 +3340,7 @@ export default function Sidebar() {
       if (target.kind === "single") {
         if (!routeRef || scopedThreadKey(routeRef) === activeKey) return;
         if (paneRefs.length === 0) {
-          state.placePane(routeRef, threadRef, 1);
+          state.placePane(routeRef, threadRef, target.position === "before" ? 0 : 1);
         }
         return;
       }

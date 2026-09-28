@@ -197,6 +197,18 @@ describe("splitViewStore", () => {
     });
   });
 
+  it("does not return a fallback when reconciliation removes every pane", () => {
+    const store = useSplitViewStore.getState();
+    store.openInSplit(THREAD_A, THREAD_B);
+
+    expect(store.reconcilePanes([])).toBeNull();
+    expect(useSplitViewStore.getState()).toMatchObject({
+      groups: [],
+      activeGroupId: null,
+      activeThreadKey: null,
+    });
+  });
+
   it("keeps saved groups when leaving split mode and clears them only on request", () => {
     const store = useSplitViewStore.getState();
     store.openInSplit(THREAD_A, THREAD_B);

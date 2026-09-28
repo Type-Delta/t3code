@@ -7,6 +7,7 @@ import {
   endSplitThreadDrag,
   hasSplitThreadDrag,
   readSplitThreadDrag,
+  resolveNativeSingleSplitDrop,
   resolvePointerSplitDropTarget,
   setPointerSplitDropTarget,
   subscribePointerSplitDropTarget,
@@ -79,7 +80,7 @@ describe("split view thread drag", () => {
       }
     }
     vi.stubGlobal("Element", HitElement);
-    const single = new HitElement({});
+    const single = new HitElement({}, [], 100);
     single["matches"]["[data-thread-route-workspace]"] = single;
     const paneA = new HitElement({}, [], 100);
     const paneB = new HitElement({}, [], 300);
@@ -93,6 +94,11 @@ describe("split view thread drag", () => {
 
     expect(resolvePointerSplitDropTarget(doc(single), { x: 100, y: 0 })).toEqual({
       kind: "single",
+      position: "before",
+    });
+    expect(resolvePointerSplitDropTarget(doc(single), { x: 250, y: 0 })).toEqual({
+      kind: "single",
+      position: "after",
     });
     expect(resolvePointerSplitDropTarget(doc(paneA), { x: 150, y: 0 })).toEqual({
       kind: "split",
@@ -109,13 +115,64 @@ describe("split view thread drag", () => {
     expect(resolvePointerSplitDropTarget(doc(null), { x: 0, y: 0 })).toBeNull();
   });
 
+  it("accepts a legacy native thread drop on either half of a single workspace", () => {
+    const currentRef = scopeThreadRef(
+      EnvironmentId.make("environment-a"),
+      ThreadId.make("thread-a"),
+    );
+    const draggedRef = scopeThreadRef(
+      EnvironmentId.make("environment-a"),
+      ThreadId.make("thread-b"),
+    );
+    const dataTransfer = createDataTransfer();
+    beginSplitThreadDrag(dataTransfer, draggedRef);
+    const workspace = {
+      getBoundingClientRect: () => ({ left: 100, width: 200 }),
+    } as HTMLElement;
+
+    expect(
+      resolveNativeSingleSplitDrop(
+        { dataTransfer, clientX: 150, currentTarget: workspace },
+        currentRef,
+      ),
+    ).toEqual({ threadRef: draggedRef, position: "before", insertionIndex: 0 });
+    expect(
+      resolveNativeSingleSplitDrop(
+        { dataTransfer, clientX: 250, currentTarget: workspace },
+        currentRef,
+      ),
+    ).toEqual({ threadRef: draggedRef, position: "after", insertionIndex: 1 });
+    expect(
+      resolveNativeSingleSplitDrop(
+        { dataTransfer, clientX: 150, currentTarget: workspace },
+        draggedRef,
+      ),
+    ).toBeNull();
+    expect(
+      resolveNativeSingleSplitDrop({ dataTransfer, clientX: 150, currentTarget: workspace }, null),
+    ).toBeNull();
+    const fileTransfer = createDataTransfer();
+    fileTransfer.setData("Files", "file.txt");
+    expect(
+      resolveNativeSingleSplitDrop(
+        { dataTransfer: fileTransfer, clientX: 150, currentTarget: workspace },
+        currentRef,
+      ),
+    ).toBeNull();
+  });
+
   it("sends one target change and clears it after release", () => {
     const listener = vi.fn();
     const unsubscribe = subscribePointerSplitDropTarget(listener);
-    setPointerSplitDropTarget({ kind: "single" });
-    setPointerSplitDropTarget({ kind: "single" });
+    setPointerSplitDropTarget({ kind: "single", position: "before" });
+    setPointerSplitDropTarget({ kind: "single", position: "before" });
+    setPointerSplitDropTarget({ kind: "single", position: "after" });
     setPointerSplitDropTarget(null);
     unsubscribe();
-    expect(listener.mock.calls).toEqual([[{ kind: "single" }], [null]]);
+    expect(listener.mock.calls).toEqual([
+      [{ kind: "single", position: "before" }],
+      [{ kind: "single", position: "after" }],
+      [null],
+    ]);
   });
 });

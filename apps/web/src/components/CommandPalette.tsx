@@ -35,6 +35,7 @@ import {
   type SourceControlDiscoveryResult,
   type SourceControlProviderKind,
   type SourceControlRepositoryInfo,
+  type ScopedThreadRef,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
@@ -128,6 +129,7 @@ import {
 } from "../lib/utils";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteTarget } from "../threadRoutes";
+import { prepareSplitViewThreadNavigation } from "../splitViewNavigation";
 import { useAvailableSettingsSearchItems } from "./settings/useAvailableSettingsSearchItems";
 import {
   applyWslEnvironmentConfiguration,
@@ -686,6 +688,16 @@ function OpenCommandPaletteDialog(props: {
   readonly clearOpenIntent: () => void;
 }) {
   const navigate = useNavigate();
+  const navigateToThread = useCallback(
+    (threadRef: ScopedThreadRef) => {
+      return navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(threadRef),
+        replace: prepareSplitViewThreadNavigation(threadRef),
+      });
+    },
+    [navigate],
+  );
   const pathname = useLocation({ select: (location) => location.pathname });
   const { clearOpenIntent, openIntent, openOverlayMode, setOpen } = props;
   const [query, setQuery] = useState(openIntent?.kind === "search" ? openIntent.query : "");
@@ -1192,12 +1204,7 @@ function OpenCommandPaletteDialog(props: {
             clientSettings.sidebarThreadSortOrder,
           );
       if (latestThread) {
-        await navigate({
-          to: "/$environmentId/$threadId",
-          params: buildThreadRouteParams(
-            scopeThreadRef(latestThread.environmentId, latestThread.id),
-          ),
-        });
+        await navigateToThread(scopeThreadRef(latestThread.environmentId, latestThread.id));
         return;
       }
 
@@ -1206,7 +1213,7 @@ function OpenCommandPaletteDialog(props: {
     [
       clientSettings.sidebarThreadSortOrder,
       handleNewThread,
-      navigate,
+      navigateToThread,
       projectGroupByTargetKey,
       threads,
     ],
@@ -1372,16 +1379,13 @@ function OpenCommandPaletteDialog(props: {
             : undefined;
         },
         runThread: async (thread) => {
-          await navigate({
-            to: "/$environmentId/$threadId",
-            params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
-          });
+          await navigateToThread(scopeThreadRef(thread.environmentId, thread.id));
         },
       }),
     [
       activeThreadId,
       clientSettings.sidebarThreadSortOrder,
-      navigate,
+      navigateToThread,
       projectByKey,
       projectEnvironmentLocationById,
       projectTitleById,
@@ -2129,10 +2133,7 @@ function OpenCommandPaletteDialog(props: {
             query: linkedThreadSearch.query,
             icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
             runThread: async (thread) => {
-              await navigate({
-                to: "/$environmentId/$threadId",
-                params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
-              });
+              await navigateToThread(scopeThreadRef(thread.environmentId, thread.id));
             },
           })
         : allThreadItems,
@@ -2196,12 +2197,7 @@ function OpenCommandPaletteDialog(props: {
           clientSettings.sidebarThreadSortOrder,
         );
         if (latestThread && latestThread.settledOverride !== "settled") {
-          await navigate({
-            to: "/$environmentId/$threadId",
-            params: buildThreadRouteParams(
-              scopeThreadRef(latestThread.environmentId, latestThread.id),
-            ),
-          });
+          await navigateToThread(scopeThreadRef(latestThread.environmentId, latestThread.id));
         } else {
           const navigationResult = await settlePromise(() =>
             handleNewThread(scopeProjectRef(existing.environmentId, existing.id)),
@@ -2267,7 +2263,7 @@ function OpenCommandPaletteDialog(props: {
       handleNewThread,
       createProject,
       environments,
-      navigate,
+      navigateToThread,
       primaryEnvironmentId,
       projects,
       providers,

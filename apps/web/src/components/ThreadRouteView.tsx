@@ -1,14 +1,21 @@
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type DragEvent } from "react";
 
 import ChatView from "./ChatView";
 import { resolveDraftPromotionNavigationTarget, threadHasStarted } from "./ChatView.logic";
 import { waitForDraftHeroTransition } from "./chat/draftHeroTransition";
 import { SplitPaneDropHint } from "./SplitPaneDropHint";
 import { SidebarInset } from "./ui/sidebar";
-import { subscribePointerSplitDropTarget } from "../splitViewDrag";
+import {
+  endSplitThreadDrag,
+  hasSplitThreadDrag,
+  resolveNativeSingleSplitDrop,
+  subscribePointerSplitDropTarget,
+  type PointerSplitDropTarget,
+} from "../splitViewDrag";
+import { useSplitViewStore } from "../splitViewStore";
 import {
   finalizePromotedDraftThreadByRef,
   markPromotedDraftThreadByRef,
@@ -47,14 +54,20 @@ import { resolveThreadSyncPhase } from "../threadSync";
  * an element only survives a route swap when the same parent renders it.
  */
 export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
-  const [isSplitDropTarget, setIsSplitDropTarget] = useState(false);
-  useEffect(
-    () =>
-      subscribePointerSplitDropTarget((dropTarget) =>
-        setIsSplitDropTarget(dropTarget?.kind === "single"),
-      ),
-    [],
-  );
+  const [splitDropPosition, setSplitDropPosition] = useState<
+    Extract<PointerSplitDropTarget, { kind: "single" }>["position"] | null
+  >(null);
+  useEffect(() => {
+    const unsubscribe = subscribePointerSplitDropTarget((dropTarget) =>
+      setSplitDropPosition(dropTarget?.kind === "single" ? dropTarget.position : null),
+    );
+    const clearNativeDrop = () => setSplitDropPosition(null);
+    document.addEventListener("dragend", clearNativeDrop);
+    return () => {
+      unsubscribe();
+      document.removeEventListener("dragend", clearNativeDrop);
+    };
+  }, []);
   const navigate = useNavigate();
   const draftId = target.kind === "draft" ? target.draftId : null;
   const draftSession = useComposerDraftStore((store) =>
@@ -72,6 +85,12 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
     : null;
   const serverThreadRef: ScopedThreadRef | null =
     target.kind === "server" ? target.threadRef : (draftSession?.promotedTo ?? inferredThreadRef);
+  const currentSplitRef =
+    target.kind === "server"
+      ? target.threadRef
+      : draftSession
+        ? scopeThreadRef(draftSession.environmentId, draftSession.threadId)
+        : null;
   const serverThread = useThread(serverThreadRef);
   const backgroundSubmissionPending = useBackgroundDraftSubmissionPending(
     target.kind === "draft" ? serverThreadRef : null,
@@ -132,6 +151,33 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   });
   const serverThreadStarted = threadHasStarted(serverThreadDetail);
   const environmentHasAnyThreads = environmentThreadRefs.length > 0 || environmentHasDraftThreads;
+
+  const handleNativeDragOver = (event: DragEvent<HTMLElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const drop = resolveNativeSingleSplitDrop(event, currentSplitRef);
+    if (!drop) {
+      setSplitDropPosition(null);
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setSplitDropPosition(drop.position);
+  };
+  const handleNativeDragLeave = (event: DragEvent<HTMLElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setSplitDropPosition(null);
+  };
+  const handleNativeDrop = (event: DragEvent<HTMLElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const drop = resolveNativeSingleSplitDrop(event, currentSplitRef);
+    event.preventDefault();
+    setSplitDropPosition(null);
+    endSplitThreadDrag();
+    if (drop && currentSplitRef) {
+      useSplitViewStore.getState().placePane(currentSplitRef, drop.threadRef, drop.insertionIndex);
+    }
+  };
 
   useEffect(() => {
     if (!inferredThreadRef || draftSession?.promotedTo) {
@@ -220,9 +266,14 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
     <SidebarInset
       data-thread-route-workspace
       className="relative h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh"
+      onDragLeave={handleNativeDragLeave}
+      onDragOver={handleNativeDragOver}
+      onDrop={handleNativeDrop}
     >
       {view}
-      {isSplitDropTarget ? <SplitPaneDropHint className="inset-0" position="after" /> : null}
+      {splitDropPosition ? (
+        <SplitPaneDropHint className="inset-0" position={splitDropPosition} />
+      ) : null}
     </SidebarInset>
   );
 }

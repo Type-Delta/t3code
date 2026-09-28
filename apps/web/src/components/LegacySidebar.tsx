@@ -182,6 +182,7 @@ import {
   getThreadKeysToDeselectAfterDelete,
   useThreadSelectionStore,
 } from "../threadSelectionStore";
+import { prepareSplitViewThreadNavigation } from "../splitViewNavigation";
 import {
   findSplitViewGroupForThread,
   MAX_SPLIT_VIEW_PANES,
@@ -1935,14 +1936,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
         clearSelection();
       }
-      const splitViewState = useSplitViewStore.getState();
-      const splitGroup = findSplitViewGroupForThread(splitViewState, threadRef);
-      const switchingWithinActiveGroup = splitGroup?.id === splitViewState.activeGroupId;
-      if (splitGroup) {
-        splitViewState.resumeSplit(threadRef);
-      } else {
-        splitViewState.exitSplit();
-      }
+      const switchingWithinActiveGroup = prepareSplitViewThreadNavigation(threadRef);
       setSelectionAnchor(scopedThreadKey(threadRef));
       if (isMobile) {
         setOpenMobile(false);
@@ -3567,14 +3561,7 @@ export default function LegacySidebar() {
       if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
         clearSelection();
       }
-      const splitViewState = useSplitViewStore.getState();
-      const splitGroup = findSplitViewGroupForThread(splitViewState, threadRef);
-      const switchingWithinActiveGroup = splitGroup?.id === splitViewState.activeGroupId;
-      if (splitGroup) {
-        splitViewState.resumeSplit(threadRef);
-      } else {
-        splitViewState.exitSplit();
-      }
+      const switchingWithinActiveGroup = prepareSplitViewThreadNavigation(threadRef);
       setSelectionAnchor(scopedThreadKey(threadRef));
       if (isMobile) {
         setOpenMobile(false);
@@ -4049,17 +4036,30 @@ export default function LegacySidebar() {
     if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
     setIsSplitThreadDragOver(false);
   }, []);
-  const handleSplitThreadDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    if (!hasSplitThreadDrag(event.dataTransfer)) return;
-    const threadRef = readSplitThreadDrag(event.dataTransfer);
-    event.preventDefault();
-    endSplitThreadDrag();
-    setIsSplitThreadDragOver(false);
-    if (!threadRef) return;
-    const splitState = useSplitViewStore.getState();
-    if (!findSplitViewGroupForThread(splitState, threadRef)) return;
-    splitState.detachPane(threadRef);
-  }, []);
+  const handleSplitThreadDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!hasSplitThreadDrag(event.dataTransfer)) return;
+      const threadRef = readSplitThreadDrag(event.dataTransfer);
+      event.preventDefault();
+      endSplitThreadDrag();
+      setIsSplitThreadDragOver(false);
+      if (!threadRef) return;
+      const splitState = useSplitViewStore.getState();
+      const splitGroup = findSplitViewGroupForThread(splitState, threadRef);
+      if (!splitGroup) return;
+      const wasActive =
+        splitGroup.id === splitState.activeGroupId &&
+        splitState.activeThreadKey === scopedThreadKey(threadRef);
+      const detachFallback = splitState.detachPane(threadRef);
+      const navigationTarget = resolveSplitViewDetachNavigationTarget({
+        wasActive,
+        detachFallback,
+        activePane: selectActiveSplitPane(useSplitViewStore.getState()),
+      });
+      if (navigationTarget) navigateToThread(navigationTarget);
+    },
+    [navigateToThread],
+  );
 
   return (
     <>

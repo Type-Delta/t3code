@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 
 export const SPLIT_THREAD_DRAG_MIME_TYPE = "application/x-t3code-thread-ref";
@@ -47,8 +47,29 @@ export function endSplitThreadDrag(): void {
   activeSplitThreadRef = null;
 }
 
+/** Resolve a native sidebar drag over a standalone thread workspace. */
+export function resolveNativeSingleSplitDrop(
+  event: {
+    dataTransfer: DataTransfer;
+    clientX: number;
+    currentTarget: Pick<HTMLElement, "getBoundingClientRect">;
+  },
+  currentRef: ScopedThreadRef | null,
+): {
+  threadRef: ScopedThreadRef;
+  position: "before" | "after";
+  insertionIndex: number;
+} | null {
+  if (!currentRef || !hasSplitThreadDrag(event.dataTransfer)) return null;
+  const threadRef = readSplitThreadDrag(event.dataTransfer);
+  if (!threadRef || scopedThreadKey(threadRef) === scopedThreadKey(currentRef)) return null;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const position = event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
+  return { threadRef, position, insertionIndex: position === "before" ? 0 : 1 };
+}
+
 export type PointerSplitDropTarget =
-  | { kind: "single" }
+  | { kind: "single"; position: "before" | "after" }
   | {
       kind: "split";
       paneKey: string | null;
@@ -80,7 +101,13 @@ export function resolvePointerSplitDropTarget(
       position,
     };
   }
-  return element.closest("[data-thread-route-workspace]") ? { kind: "single" } : null;
+  const workspace = element.closest<HTMLElement>("[data-thread-route-workspace]");
+  if (!workspace) return null;
+  const bounds = workspace.getBoundingClientRect();
+  return {
+    kind: "single",
+    position: point.x < bounds.left + bounds.width / 2 ? "before" : "after",
+  };
 }
 
 let pointerTarget: PointerSplitDropTarget | null = null;
