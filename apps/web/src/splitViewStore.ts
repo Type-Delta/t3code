@@ -5,7 +5,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "./lib/storage";
 
-export const MAX_SPLIT_VIEW_PANES = 4;
+export const MAX_SPLIT_VIEW_PANES = 10;
 export const SPLIT_VIEW_STORAGE_KEY = "t3code:split-view:v1";
 export const SPLIT_VIEW_STORAGE_VERSION = 2;
 
@@ -18,6 +18,13 @@ export interface SplitViewGroup {
   colorHue: number;
   /** Ordered thread refs rendered from left to right. */
   paneRefs: readonly ScopedThreadRef[];
+  /**
+   * Pane keys that sit in the bottom row. A bottom pane belongs to the column
+   * of the nearest preceding top pane, so the flat order still describes the
+   * whole layout and a column keeps its full height until something is
+   * actually stacked under it.
+   */
+  bottomPaneKeys?: readonly string[];
 }
 
 export interface SplitViewState {
@@ -39,9 +46,14 @@ interface SplitViewStore extends SplitViewState {
     currentRef: ScopedThreadRef,
     targetRef: ScopedThreadRef,
     insertionIndex: number,
+    stackUnderColumn?: boolean,
   ) => OpenInSplitResult;
   /** Reorder a pane in the active split group. */
-  movePane: (threadRef: ScopedThreadRef, insertionIndex: number) => void;
+  movePane: (
+    threadRef: ScopedThreadRef,
+    insertionIndex: number,
+    stackUnderColumn?: boolean,
+  ) => void;
   /** Open the saved group containing this thread and focus the requested pane. */
   resumeSplit: (threadRef: ScopedThreadRef) => void;
   /** Switch to a normal thread while retaining every saved group. */
@@ -133,6 +145,85 @@ export function splitViewGroupChroma(colorHue: number): number {
 /** Split mode is meaningful only when at least two distinct panes are open. */
 export function isSplitViewActive(paneRefs: readonly ScopedThreadRef[]): boolean {
   return paneRefs.length >= 2;
+}
+
+export const SPLIT_VIEW_MAX_COLUMNS = 5;
+
+export interface SplitPaneSlot {
+  readonly paneRef: ScopedThreadRef;
+  /** Zero-based grid column. */
+  readonly column: number;
+  /** Zero-based grid row: 0 is the top row, 1 the stacked one. */
+  readonly row: 0 | 1;
+  /** True while nothing is stacked under this pane, so it fills both rows. */
+  readonly spansBothRows: boolean;
+}
+
+/**
+ * Place every pane on the 5x2 grid. Panes flagged bottom stack under the column
+ * opened by the nearest preceding top pane; a top pane with nothing under it
+ * keeps both of its cells. Panes past the fifth column fall into the leftmost
+ * free bottom cell, which is what the plain "add another pane" path relies on.
+ */
+export function resolveSplitPaneSlots(
+  paneRefs: readonly ScopedThreadRef[],
+  bottomPaneKeys: readonly string[] = [],
+): readonly SplitPaneSlot[] {
+  const stacked = new Set(bottomPaneKeys);
+  const bottomByColumn = new Map<number, number>();
+  const slots: Array<{ paneRef: ScopedThreadRef; column: number; row: 0 | 1 }> = [];
+  let column = -1;
+
+  const takeFreeBottomColumn = (): number | null => {
+    for (let candidate = 0; candidate <= column; candidate += 1) {
+      if (!bottomByColumn.has(candidate)) return candidate;
+    }
+    return null;
+  };
+
+  for (const paneRef of paneRefs) {
+    const key = scopedThreadKey(paneRef);
+    const wantsBottom = stacked.has(key) && column >= 0 && !bottomByColumn.has(column);
+    if (wantsBottom) {
+      bottomByColumn.set(column, slots.length);
+      slots.push({ paneRef, column, row: 1 });
+      continue;
+    }
+    if (column + 1 < SPLIT_VIEW_MAX_COLUMNS) {
+      column += 1;
+      slots.push({ paneRef, column, row: 0 });
+      continue;
+    }
+    const overflowColumn = takeFreeBottomColumn();
+    if (overflowColumn === null) continue;
+    bottomByColumn.set(overflowColumn, slots.length);
+    slots.push({ paneRef, column: overflowColumn, row: 1 });
+  }
+
+  return slots.map((slot) => ({
+    ...slot,
+    spansBothRows: slot.row === 0 && !bottomByColumn.has(slot.column),
+  }));
+}
+
+/** Whether another pane can be stacked under the column this pane opens. */
+export function canStackUnderSplitPane(
+  paneRefs: readonly ScopedThreadRef[],
+  bottomPaneKeys: readonly string[] | undefined,
+  paneIndex: number,
+): boolean {
+  const slots = resolveSplitPaneSlots(paneRefs, bottomPaneKeys ?? []);
+  const slot = slots[paneIndex];
+  return slot !== undefined && slot.row === 0 && slot.spansBothRows;
+}
+
+function retainBottomPaneKeys(
+  paneRefs: readonly ScopedThreadRef[],
+  bottomPaneKeys: readonly string[] | undefined,
+): readonly string[] {
+  if (!bottomPaneKeys || bottomPaneKeys.length === 0) return [];
+  const paneKeys = new Set(paneRefs.map(scopedThreadKey));
+  return bottomPaneKeys.filter((key) => paneKeys.has(key));
 }
 
 export function selectSplitViewGroups(state: SplitViewState): readonly SplitViewGroup[] {
@@ -229,7 +320,12 @@ export function migratePersistedSplitViewState(persistedState: unknown): SplitVi
   const groups: SplitViewGroup[] = [];
   for (const [index, rawGroup] of rawGroups.entries()) {
     if (!rawGroup || typeof rawGroup !== "object") continue;
-    const candidate = rawGroup as { id?: unknown; colorHue?: unknown; paneRefs?: unknown };
+    const candidate = rawGroup as {
+      id?: unknown;
+      colorHue?: unknown;
+      paneRefs?: unknown;
+      bottomPaneKeys?: unknown;
+    };
     const paneRefs = parsePersistedPaneRefs(candidate.paneRefs).filter(
       (paneRef) => !usedThreadKeys.has(scopedThreadKey(paneRef)),
     );
@@ -250,7 +346,13 @@ export function migratePersistedSplitViewState(persistedState: unknown): SplitVi
       groups.every((group) => circularHueDistance(group.colorHue, requestedColorHue) >= 1)
         ? requestedColorHue
         : nextGroupColorHue(groups);
-    groups.push({ id, colorHue, paneRefs });
+    const bottomPaneKeys = retainBottomPaneKeys(
+      paneRefs,
+      Array.isArray(candidate.bottomPaneKeys)
+        ? candidate.bottomPaneKeys.filter((key): key is string => typeof key === "string")
+        : [],
+    );
+    groups.push({ id, colorHue, paneRefs, bottomPaneKeys });
   }
 
   const legacyGroupId =
@@ -299,7 +401,7 @@ export const useSplitViewStore = create<SplitViewStore>()(
         return get().placePane(currentRef, targetRef, Number.MAX_SAFE_INTEGER);
       },
 
-      placePane: (currentRef, targetRef, insertionIndex) => {
+      placePane: (currentRef, targetRef, insertionIndex, stackUnderColumn = false) => {
         const state = get();
         const currentKey = scopedThreadKey(currentRef);
         const targetKey = scopedThreadKey(targetRef);
@@ -341,10 +443,21 @@ export const useSplitViewStore = create<SplitViewStore>()(
 
         const destinationId = destinationGroup?.id ?? nextGroupId(state.groups);
         const destinationColorHue = destinationGroup?.colorHue ?? nextGroupColorHue(state.groups);
+        const nextBottomPaneKeys = (() => {
+          const inherited = retainBottomPaneKeys(
+            panesWithoutTarget,
+            destinationGroup?.bottomPaneKeys,
+          ).filter((key) => key !== targetKey);
+          return stackUnderColumn ? [...inherited, targetKey] : inherited;
+        })();
         const groups: SplitViewGroup[] = [];
         for (const group of state.groups) {
           if (group.id === destinationId) {
-            groups.push({ ...group, paneRefs: panesWithoutTarget });
+            groups.push({
+              ...group,
+              paneRefs: panesWithoutTarget,
+              bottomPaneKeys: nextBottomPaneKeys,
+            });
             continue;
           }
           const filteredPaneRefs = group.paneRefs.filter(
@@ -354,7 +467,11 @@ export const useSplitViewStore = create<SplitViewStore>()(
             groups.push(
               filteredPaneRefs.length === group.paneRefs.length
                 ? group
-                : { ...group, paneRefs: filteredPaneRefs },
+                : {
+                    ...group,
+                    paneRefs: filteredPaneRefs,
+                    bottomPaneKeys: retainBottomPaneKeys(filteredPaneRefs, group.bottomPaneKeys),
+                  },
             );
           }
         }
@@ -363,6 +480,7 @@ export const useSplitViewStore = create<SplitViewStore>()(
             id: destinationId,
             colorHue: destinationColorHue,
             paneRefs: panesWithoutTarget,
+            bottomPaneKeys: nextBottomPaneKeys,
           });
         }
 
@@ -375,7 +493,7 @@ export const useSplitViewStore = create<SplitViewStore>()(
         return existingIndex === targetIndex ? "activated" : "opened";
       },
 
-      movePane: (threadRef, insertionIndex) => {
+      movePane: (threadRef, insertionIndex, stackUnderColumn = false) => {
         const state = get();
         const activeGroup = selectActiveSplitGroup(state);
         if (!activeGroup) return;
@@ -392,7 +510,15 @@ export const useSplitViewStore = create<SplitViewStore>()(
           paneRefs.length,
         );
         paneRefs.splice(targetIndex, 0, movedPane);
+        const bottomPaneKeys = (() => {
+          const inherited = retainBottomPaneKeys(paneRefs, activeGroup.bottomPaneKeys).filter(
+            (key) => key !== threadKey,
+          );
+          return stackUnderColumn ? [...inherited, threadKey] : inherited;
+        })();
+        const wasStacked = (activeGroup.bottomPaneKeys ?? []).includes(threadKey);
         if (
+          wasStacked === stackUnderColumn &&
           paneRefs.every(
             (paneRef, index) =>
               scopedThreadKey(paneRef) === scopedThreadKey(activeGroup.paneRefs[index]!),
@@ -402,7 +528,7 @@ export const useSplitViewStore = create<SplitViewStore>()(
         }
         set({
           groups: state.groups.map((group) =>
-            group.id === activeGroup.id ? { ...group, paneRefs } : group,
+            group.id === activeGroup.id ? { ...group, paneRefs, bottomPaneKeys } : group,
           ),
         });
       },
@@ -481,7 +607,13 @@ export const useSplitViewStore = create<SplitViewStore>()(
             : state.activeThreadKey;
         set({
           groups: state.groups.map((candidate) =>
-            candidate.id === group.id ? { ...candidate, paneRefs } : candidate,
+            candidate.id === group.id
+              ? {
+                  ...candidate,
+                  paneRefs,
+                  bottomPaneKeys: retainBottomPaneKeys(paneRefs, candidate.bottomPaneKeys),
+                }
+              : candidate,
           ),
           ...(isActiveGroup
             ? { activeThreadKey, pendingNavigationThreadKey: activeThreadKey }

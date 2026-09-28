@@ -17,7 +17,9 @@ const THREAD_A = scopeThreadRef("environment-a" as never, ThreadId.make("thread-
 const THREAD_B = scopeThreadRef("environment-a" as never, ThreadId.make("thread-b"));
 const THREAD_C = scopeThreadRef("environment-a" as never, ThreadId.make("thread-c"));
 const THREAD_D = scopeThreadRef("environment-a" as never, ThreadId.make("thread-d"));
-const THREAD_E = scopeThreadRef("environment-a" as never, ThreadId.make("thread-e"));
+const CAPACITY_THREADS = Array.from({ length: MAX_SPLIT_VIEW_PANES + 1 }, (_, index) =>
+  scopeThreadRef("environment-a" as never, ThreadId.make(`capacity-thread-${index + 1}`)),
+);
 const THREAD_A_IN_OTHER_ENVIRONMENT = scopeThreadRef(
   "environment-b" as never,
   ThreadId.make("thread-a"),
@@ -108,15 +110,25 @@ describe("splitViewStore", () => {
 
   it("caps new panes while still allowing existing panes to be focused", () => {
     const store = useSplitViewStore.getState();
-    store.openInSplit(THREAD_A, THREAD_B);
-    store.openInSplit(THREAD_B, THREAD_C);
-    store.openInSplit(THREAD_C, THREAD_D);
+    const [firstThread, secondThread, ...remainingThreads] = CAPACITY_THREADS;
+    expect(firstThread).toBeDefined();
+    expect(secondThread).toBeDefined();
+    store.openInSplit(firstThread!, secondThread!);
+    for (const threadRef of remainingThreads.slice(0, MAX_SPLIT_VIEW_PANES - 2)) {
+      const currentRef = selectActiveSplitPane(useSplitViewStore.getState());
+      expect(currentRef).not.toBeNull();
+      store.openInSplit(currentRef!, threadRef);
+    }
 
     expect(paneKeys()).toHaveLength(MAX_SPLIT_VIEW_PANES);
-    expect(store.openInSplit(THREAD_D, THREAD_E)).toBe("at-capacity");
-    expect(store.openInSplit(THREAD_D, THREAD_B)).toBe("activated");
+    const activeRef = selectActiveSplitPane(useSplitViewStore.getState());
+    const overflowThread = remainingThreads[MAX_SPLIT_VIEW_PANES - 2];
+    expect(activeRef).not.toBeNull();
+    expect(overflowThread).toBeDefined();
+    expect(store.openInSplit(activeRef!, overflowThread!)).toBe("at-capacity");
+    expect(store.openInSplit(activeRef!, secondThread!)).toBe("activated");
     expect(paneKeys()).toHaveLength(MAX_SPLIT_VIEW_PANES);
-    expect(useSplitViewStore.getState().activeThreadKey).toBe(scopedThreadKey(THREAD_B));
+    expect(useSplitViewStore.getState().activeThreadKey).toBe(scopedThreadKey(secondThread!));
   });
 
   it("selects the next pane when detaching the active pane", () => {
