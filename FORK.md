@@ -6,6 +6,16 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
+### DL036 — Ignore route tests during web route generation
+
+The web router ignores `.test.ts` files in the routes directory so route tests do not produce missing-Route warnings during builds.
+
+**Implementation evidence:** `apps/web/vite.config.ts`.
+
+**Recorded validation:** web build, `vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-09-28
+
 ### DL016 — Repository identity for partial clones
 
 Git may append a filter annotation to `git remote -v` fetch lines for partial clones. The repository identity resolver accepts those lines so projects using the same remote can group across environments.
