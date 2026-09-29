@@ -175,7 +175,15 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
     setSplitDropPosition(null);
     endSplitThreadDrag();
     if (drop && currentSplitRef) {
-      useSplitViewStore.getState().placePane(currentSplitRef, drop.threadRef, drop.insertionIndex);
+      const bottomPaneKey =
+        drop.position === "above"
+          ? scopedThreadKey(currentSplitRef)
+          : drop.position === "below"
+            ? scopedThreadKey(drop.threadRef)
+            : undefined;
+      useSplitViewStore
+        .getState()
+        .placePane(currentSplitRef, drop.threadRef, drop.insertionIndex, bottomPaneKey);
     }
   };
 

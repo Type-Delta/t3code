@@ -2376,13 +2376,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         currentRouteTarget?.kind === "draft"
           ? useComposerDraftStore.getState().getDraftSession(currentRouteTarget.draftId)
           : null;
-      const currentSplitThreadRef =
-        selectActiveSplitPane(splitViewState) ??
-        (currentRouteTarget?.kind === "server"
+      const currentRoutedThreadRef =
+        currentRouteTarget?.kind === "server"
           ? currentRouteTarget.threadRef
           : currentRouteDraft
             ? scopeThreadRef(currentRouteDraft.environmentId, currentRouteDraft.threadId)
-            : null);
+            : null;
+      const currentSplitThreadRef = selectActiveSplitPane(splitViewState) ?? currentRoutedThreadRef;
       const canOpenInSplit =
         currentSplitThreadRef !== null && scopedThreadKey(currentSplitThreadRef) !== threadKey;
       const splitViewActionId = threadSplitGroup ? "detach-from-split" : "open-in-split";
@@ -2393,6 +2393,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             label: threadSplitGroup ? "Detach from split view" : "Open in split view",
             ...(!threadSplitGroup && !canOpenInSplit ? { disabled: true } : {}),
           },
+          ...(threadSplitGroup
+            ? [{ id: "detach-all-from-split", label: "Detach all from split view" }]
+            : []),
           ...(thread.branch
             ? [{ id: "new-thread-on-branch", label: `New thread on ${thread.branch}` }]
             : []),
@@ -2434,6 +2437,28 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         });
         if (fallbackThreadRef) {
           navigateToThread(fallbackThreadRef, { replace: true });
+        }
+        return;
+      }
+
+      if (clicked === "detach-all-from-split") {
+        if (!threadSplitGroup) return;
+        const wasActive = threadSplitGroup.id === splitViewState.activeGroupId;
+        const routedThreadRef =
+          currentRoutedThreadRef &&
+          threadSplitGroup.paneRefs.some(
+            (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(currentRoutedThreadRef),
+          )
+            ? currentRoutedThreadRef
+            : null;
+        const detachFallback = splitViewState.detachGroup(threadRef);
+        const navigationTarget = resolveSplitViewDetachNavigationTarget({
+          wasActive,
+          detachFallback: routedThreadRef ?? detachFallback,
+          activePane: selectActiveSplitPane(useSplitViewStore.getState()),
+        });
+        if (navigationTarget) {
+          navigateToThread(navigationTarget, { replace: true });
         }
         return;
       }

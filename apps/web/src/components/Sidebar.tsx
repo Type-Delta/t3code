@@ -3303,7 +3303,7 @@ export default function Sidebar() {
   const pointerDropHandledRef = useRef(false);
   const handlePointerDragMove = useCallback(
     (_activeKey: string, point: { x: number; y: number }) => {
-      const target = resolvePointerSplitDropTarget(document, point);
+      const target = resolvePointerSplitDropTarget(document, point, { draggedPaneKey: _activeKey });
       if (!target) return setPointerSplitDropTarget(null);
       const state = useSplitViewStore.getState();
       const paneRefs = selectSplitPaneRefs(state);
@@ -3324,7 +3324,7 @@ export default function Sidebar() {
   );
   const handlePointerDragRelease = useCallback(
     (activeKey: string, point: { x: number; y: number }) => {
-      const target = resolvePointerSplitDropTarget(document, point);
+      const target = resolvePointerSplitDropTarget(document, point, { draggedPaneKey: activeKey });
       setPointerSplitDropTarget(null);
       const element = document.elementFromPoint(point.x, point.y);
       if (!(element instanceof Element) || !element.closest('[data-sidebar="content"]')) {
@@ -3340,19 +3340,39 @@ export default function Sidebar() {
       if (target.kind === "single") {
         if (!routeRef || scopedThreadKey(routeRef) === activeKey) return;
         if (paneRefs.length === 0) {
-          state.placePane(routeRef, threadRef, target.position === "before" ? 0 : 1);
+          if (target.position === "above" || target.position === "below") {
+            state.placePane(
+              routeRef,
+              threadRef,
+              target.position === "above" ? 0 : 1,
+              target.position === "above" ? scopedThreadKey(routeRef) : activeKey,
+            );
+          } else {
+            state.placePane(routeRef, threadRef, target.position === "before" ? 0 : 1);
+          }
         }
         return;
       }
       if (paneRefs.length === 0) return;
+      const bottomPaneKey =
+        target.position === "above"
+          ? (target.paneKey ?? undefined)
+          : target.position === "below"
+            ? activeKey
+            : undefined;
       if (paneRefs.some((paneRef) => scopedThreadKey(paneRef) === activeKey)) {
-        state.movePane(threadRef, target.insertionIndex);
+        state.movePane(threadRef, target.insertionIndex, bottomPaneKey);
         return;
       }
       if (paneRefs.length >= MAX_SPLIT_VIEW_PANES) return;
-      const anchor = paneRefs[Math.min(target.insertionIndex, paneRefs.length - 1)] ?? routeRef;
+      const anchor =
+        ((target.position === "above" || target.position === "below") && target.paneKey
+          ? paneRefs.find((paneRef) => scopedThreadKey(paneRef) === target.paneKey)
+          : null) ??
+        paneRefs[Math.min(target.insertionIndex, paneRefs.length - 1)] ??
+        routeRef;
       if (!anchor || scopedThreadKey(anchor) === activeKey) return;
-      state.placePane(anchor, threadRef, target.insertionIndex);
+      state.placePane(anchor, threadRef, target.insertionIndex, bottomPaneKey);
     },
     [],
   );
@@ -4286,6 +4306,9 @@ export default function Sidebar() {
                 label: threadSplitGroup ? "Detach from split view" : "Open in split view",
                 ...(!threadSplitGroup && !canOpenInSplit ? { disabled: true } : {}),
               },
+              ...(threadSplitGroup
+                ? [{ id: "detach-all-from-split", label: "Detach all from split view" }]
+                : []),
               ...buildThreadActionMenuItems({
                 branch: thread.branch ?? null,
                 projectFilter: threadProjectGroup
@@ -4344,6 +4367,25 @@ export default function Sidebar() {
             const fallbackThreadRef = resolveSplitViewDetachNavigationTarget({
               wasActive,
               detachFallback,
+              activePane: selectActiveSplitPane(useSplitViewStore.getState()),
+            });
+            if (fallbackThreadRef) void navigateToThread(fallbackThreadRef, { replace: true });
+            return;
+          }
+          case "detach-all-from-split": {
+            if (!threadSplitGroup) return;
+            const wasActive = threadSplitGroup.id === splitViewState.activeGroupId;
+            const routedThreadRef =
+              routeThreadRef &&
+              threadSplitGroup.paneRefs.some(
+                (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(routeThreadRef),
+              )
+                ? routeThreadRef
+                : null;
+            const detachFallback = splitViewState.detachGroup(threadRef);
+            const fallbackThreadRef = resolveSplitViewDetachNavigationTarget({
+              wasActive,
+              detachFallback: routedThreadRef ?? detachFallback,
               activePane: selectActiveSplitPane(useSplitViewStore.getState()),
             });
             if (fallbackThreadRef) void navigateToThread(fallbackThreadRef, { replace: true });

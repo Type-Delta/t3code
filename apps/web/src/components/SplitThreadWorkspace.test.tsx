@@ -8,23 +8,109 @@ import {
   resolveSplitRightPanelOwner,
   splitThreadGridColumnClassName,
 } from "./SplitThreadWorkspace";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { resolveSplitPaneSlots } from "../splitViewStore";
+
+function paneRefs(count: number) {
+  return Array.from({ length: count }, (_, index) =>
+    scopeThreadRef(EnvironmentId.make("env"), ThreadId.make(`thread-${index}`)),
+  );
+}
 
 describe("splitThreadGridColumnClassName", () => {
-  it("keeps two through four panes in a single explicit column row", () => {
-    const classes = [2, 3, 4].map(splitThreadGridColumnClassName);
+  it("keeps the workspace on five deterministic columns", () => {
+    expect([2, 5, 6, 10].map((count) => splitThreadGridColumnClassName(count))).toEqual([
+      "grid-cols-2",
+      "grid-cols-5",
+      "grid-cols-5",
+      "grid-cols-5",
+    ]);
+  });
 
-    expect(classes).toEqual(["grid-cols-2", "grid-cols-3", "grid-cols-4"]);
-    expect(classes.join(" ")).not.toContain("grid-rows");
+  it("lays out two and five panes in one row", () => {
+    for (const count of [2, 5]) {
+      const slots = resolveSplitPaneSlots(paneRefs(count), []);
+      expect(slots).toHaveLength(count);
+      expect(slots.every((slot) => slot.row === 0)).toBe(true);
+      expect(new Set(slots.map((slot) => slot.column)).size).toBe(count);
+    }
+  });
+
+  it("uses a second row for six and ten panes", () => {
+    for (const count of [6, 10]) {
+      const slots = resolveSplitPaneSlots(paneRefs(count), []);
+      expect(slots).toHaveLength(count);
+      expect(slots.some((slot) => slot.row === 1)).toBe(true);
+      expect(slots.every((slot) => slot.column >= 0 && slot.column < 5)).toBe(true);
+    }
+  });
+
+  it("keeps an explicitly stacked pair in one column", () => {
+    const refs = paneRefs(2);
+    const slots = resolveSplitPaneSlots(refs, ["env:thread-1"]);
+
+    expect(slots.map(({ column, row, spansBothRows }) => ({ column, row, spansBothRows }))).toEqual(
+      [
+        { column: 0, row: 0, spansBothRows: false },
+        { column: 0, row: 1, spansBothRows: false },
+      ],
+    );
+    expect(splitThreadGridColumnClassName(refs.length, slots)).toBe("grid-cols-1");
   });
 
   it("uses the pane midpoint to describe before and after drop locations", () => {
     const element = {
       getBoundingClientRect: () =>
-        ({ left: 100, width: 240 }) as ReturnType<HTMLElement["getBoundingClientRect"]>,
+        ({ left: 100, top: 100, width: 240, height: 200 }) as ReturnType<
+          HTMLElement["getBoundingClientRect"]
+        >,
     };
 
-    expect(resolveSplitPaneDropPosition({ clientX: 180 }, element)).toBe("before");
-    expect(resolveSplitPaneDropPosition({ clientX: 260 }, element)).toBe("after");
+    expect(resolveSplitPaneDropPosition({ clientX: 180, clientY: 120 }, element)).toBe("before");
+    expect(resolveSplitPaneDropPosition({ clientX: 260, clientY: 120 }, element)).toBe("after");
+    expect(
+      resolveSplitPaneDropPosition({ clientX: 260, clientY: 280 }, element, {
+        canStackVertically: true,
+      }),
+    ).toBe("below");
+  });
+
+  it("offers top and bottom drops in the outer quarters of a one-row pane", () => {
+    const element = {
+      getBoundingClientRect: () =>
+        ({ left: 100, top: 100, width: 240, height: 200 }) as ReturnType<
+          HTMLElement["getBoundingClientRect"]
+        >,
+    };
+
+    expect(
+      resolveSplitPaneDropPosition({ clientX: 180, clientY: 120 }, element, {
+        canStackVertically: true,
+      }),
+    ).toBe("above");
+    expect(
+      resolveSplitPaneDropPosition({ clientX: 180, clientY: 280 }, element, {
+        canStackVertically: true,
+      }),
+    ).toBe("below");
+    expect(
+      resolveSplitPaneDropPosition({ clientX: 180, clientY: 200 }, element, {
+        canStackVertically: true,
+      }),
+    ).toBe("before");
+    expect(
+      resolveSplitPaneDropPosition({ clientX: 180, clientY: 200 }, element, {
+        canStackVertically: true,
+        canInsertColumn: false,
+      }),
+    ).toBeNull();
+    expect(
+      resolveSplitPaneDropPosition({ clientX: 180, clientY: 120 }, element, {
+        canStackVertically: true,
+        canInsertColumn: false,
+      }),
+    ).toBe("above");
   });
 
   it("keeps an open right panel visible when a pane without one becomes active", () => {

@@ -23,14 +23,22 @@ import {
   endSplitThreadDrag,
   hasSplitThreadDrag,
   readSplitThreadDrag,
+  resolveSplitPaneDropPosition as resolveSplitPaneDropDirection,
+  splitPaneInsertionIndex,
   subscribePointerSplitDropTarget,
+  type SplitPaneDropPosition,
 } from "../splitViewDrag";
 import {
   findSplitViewGroupForThread,
   MAX_SPLIT_VIEW_PANES,
+  SPLIT_VIEW_MAX_COLUMNS,
+  canStackUnderSplitPane,
+  resolveSplitPaneSlots,
   selectActiveSplitPane,
+  selectActiveSplitGroup,
   selectIsSplitViewActive,
   selectSplitPaneRefs,
+  type SplitPaneSlot,
   useSplitViewStore,
 } from "../splitViewStore";
 import { useRightPanelStore } from "../rightPanelStore";
@@ -64,8 +72,6 @@ interface DraftPane {
   threadRef: ScopedThreadRef;
 }
 
-export type SplitPaneDropPosition = "before" | "after";
-
 interface SplitPaneDropTarget {
   paneKey: string;
   position: SplitPaneDropPosition;
@@ -76,23 +82,37 @@ const SPLIT_PANE_ANIMATION_OPTIONS = {
   easing: "ease-out",
 } as const;
 
-export function splitThreadGridColumnClassName(paneCount: number): string {
-  switch (paneCount) {
+export function splitThreadGridColumnClassName(
+  paneCount: number,
+  slots?: readonly Pick<SplitPaneSlot, "column">[],
+): string {
+  const columnCount = slots?.length
+    ? Math.max(...slots.map((slot) => slot.column + 1))
+    : Math.min(5, paneCount);
+  switch (Math.max(1, Math.min(SPLIT_VIEW_MAX_COLUMNS, columnCount))) {
+    case 5:
+      return "grid-cols-5";
     case 4:
       return "grid-cols-4";
     case 3:
       return "grid-cols-3";
-    default:
+    case 2:
       return "grid-cols-2";
+    default:
+      return "grid-cols-1";
   }
 }
 
 export function resolveSplitPaneDropPosition(
-  event: Pick<DragEvent<HTMLElement>, "clientX">,
+  event: Pick<DragEvent<HTMLElement>, "clientX" | "clientY">,
   element: Pick<HTMLElement, "getBoundingClientRect">,
-): SplitPaneDropPosition {
+  options: { canStackVertically?: boolean; canInsertColumn?: boolean } = {},
+): SplitPaneDropPosition | null {
   const bounds = element.getBoundingClientRect();
-  return event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
+  return resolveSplitPaneDropDirection({ x: event.clientX, y: event.clientY }, bounds, {
+    canStackVertically: options.canStackVertically ?? false,
+    canInsertColumn: options.canInsertColumn ?? true,
+  });
 }
 
 export function resolveSplitRightPanelOwner(input: {
@@ -137,20 +157,29 @@ function SplitThreadPane(props: {
   rightPanelOpen: boolean;
   onToggleRightPanel: () => void;
   paneIndex: number;
-  dropTarget: SplitPaneDropTarget | null;
   canPlaceThread: (threadRef: ScopedThreadRef | null) => boolean;
+  isExistingPane: (threadRef: ScopedThreadRef | null) => boolean;
   onActivate: () => void;
   onDetach: () => void;
   onDropTargetChange: (target: SplitPaneDropTarget | null) => void;
-  onPlaceThread: (threadRef: ScopedThreadRef, insertionIndex: number) => void;
+  onPlaceThread: (
+    threadRef: ScopedThreadRef,
+    insertionIndex: number,
+    bottomPaneKey?: string,
+  ) => void;
+  slot: SplitPaneSlot;
+  canStackVertically: boolean;
+  canInsertColumn: boolean;
+  paneColumns: readonly number[];
+  gridHasTwoRows: boolean;
   headerSlot: HTMLElement | null;
   rightPanelSlot: HTMLElement | null;
 }) {
   const {
     active,
     canPlaceThread,
+    isExistingPane,
     draftPane,
-    dropTarget,
     headerSlot,
     isRightPanelOwner,
     onToggleRightPanel,
@@ -160,6 +189,11 @@ function SplitThreadPane(props: {
     onDropTargetChange,
     onPlaceThread,
     paneIndex,
+    slot,
+    canStackVertically,
+    canInsertColumn,
+    paneColumns,
+    gridHasTwoRows,
     rightPanelSlot,
     threadRef,
   } = props;
@@ -179,7 +213,6 @@ function SplitThreadPane(props: {
   const project = useProject(projectRef);
   const serverThreadStarted = threadHasStarted(serverThread);
   const threadKey = scopedThreadKey(threadRef);
-  const isDropTarget = dropTarget?.paneKey === threadKey;
 
   useEffect(() => {
     if (!draftPane || !serverThreadStarted) {
@@ -215,14 +248,26 @@ function SplitThreadPane(props: {
         onDropTargetChange(null);
         return;
       }
+      const position = resolveSplitPaneDropPosition(event, event.currentTarget, {
+        canStackVertically,
+        canInsertColumn: canInsertColumn || isExistingPane(draggedRef),
+      });
+      if (!position) {
+        onDropTargetChange(null);
+        return;
+      }
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
-      onDropTargetChange({
-        paneKey: threadKey,
-        position: resolveSplitPaneDropPosition(event, event.currentTarget),
-      });
+      onDropTargetChange({ paneKey: threadKey, position });
     },
-    [canPlaceThread, onDropTargetChange, threadKey],
+    [
+      canPlaceThread,
+      canStackVertically,
+      canInsertColumn,
+      isExistingPane,
+      onDropTargetChange,
+      threadKey,
+    ],
   );
   const handleDragLeave = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
@@ -236,14 +281,36 @@ function SplitThreadPane(props: {
     (event: DragEvent<HTMLDivElement>) => {
       if (!hasSplitThreadDrag(event.dataTransfer)) return;
       const draggedRef = readSplitThreadDrag(event.dataTransfer);
+      const position = resolveSplitPaneDropPosition(event, event.currentTarget, {
+        canStackVertically,
+        canInsertColumn: canInsertColumn || isExistingPane(draggedRef),
+      });
+      if (!position) return;
       event.preventDefault();
       event.stopPropagation();
       onDropTargetChange(null);
       if (!draggedRef || !canPlaceThread(draggedRef)) return;
-      const position = resolveSplitPaneDropPosition(event, event.currentTarget);
-      onPlaceThread(draggedRef, paneIndex + (position === "before" ? 0 : 1));
+      onPlaceThread(
+        draggedRef,
+        splitPaneInsertionIndex(paneColumns, paneIndex, position),
+        position === "above"
+          ? threadKey
+          : position === "below"
+            ? scopedThreadKey(draggedRef)
+            : undefined,
+      );
     },
-    [canPlaceThread, onDropTargetChange, onPlaceThread, paneIndex],
+    [
+      canPlaceThread,
+      canStackVertically,
+      canInsertColumn,
+      isExistingPane,
+      onDropTargetChange,
+      onPlaceThread,
+      paneColumns,
+      paneIndex,
+      threadKey,
+    ],
   );
 
   if (!serverThread && !draftPane) {
@@ -260,7 +327,13 @@ function SplitThreadPane(props: {
       )}
       data-split-thread-pane
       data-split-thread-pane-key={threadKey}
+      data-split-thread-pane-column={slot.column}
+      data-split-thread-pane-can-stack={canStackVertically ? "true" : "false"}
       data-split-thread-pane-active={active}
+      style={{
+        gridColumn: slot.column + 1,
+        gridRow: slot.spansBothRows && gridHasTwoRows ? "1 / span 2" : slot.row + 1,
+      }}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
@@ -336,9 +409,6 @@ function SplitThreadPane(props: {
           />
         )}
       </div>
-      {isDropTarget ? (
-        <SplitPaneDropHint className="inset-0" position={dropTarget.position} />
-      ) : null}
     </div>
   );
 }
@@ -350,6 +420,7 @@ function SplitThreadPane(props: {
 export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspaceProps) {
   const navigate = useNavigate();
   const paneRefs = useSplitViewStore(selectSplitPaneRefs);
+  const activeGroup = useSplitViewStore(selectActiveSplitGroup);
   const activePane = useSplitViewStore(selectActiveSplitPane);
   const splitActive = useSplitViewStore(selectIsSplitViewActive);
   const allProjectSnapshotsReady = useAllEnvironmentProjectSnapshotsReady();
@@ -360,6 +431,16 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   const rightPanelStateByThreadKey = useRightPanelStore((state) => state.byThreadKey);
   const [rightPanelOwnerThreadKey, setRightPanelOwnerThreadKey] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<SplitPaneDropTarget | null>(null);
+  const bottomPaneKeys = activeGroup?.bottomPaneKeys ?? [];
+  const paneSlots = useMemo(
+    () => resolveSplitPaneSlots(paneRefs, bottomPaneKeys),
+    [bottomPaneKeys, paneRefs],
+  );
+  const paneColumns = useMemo(() => paneSlots.map((slot) => slot.column), [paneSlots]);
+  const canInsertColumn = new Set(paneColumns).size < SPLIT_VIEW_MAX_COLUMNS;
+  const gridHasTwoRows = paneSlots.some((slot) => slot.row === 1);
+  const dropHintSlot =
+    paneSlots[paneRefs.findIndex((paneRef) => scopedThreadKey(paneRef) === dropTarget?.paneKey)];
   useEffect(
     () =>
       subscribePointerSplitDropTarget((target) => {
@@ -553,20 +634,26 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
     },
     [paneRefs],
   );
+  const isExistingPane = useCallback(
+    (threadRef: ScopedThreadRef | null) =>
+      threadRef !== null &&
+      paneRefs.some((paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef)),
+    [paneRefs],
+  );
   const placeThread = useCallback(
-    (threadRef: ScopedThreadRef, insertionIndex: number) => {
+    (threadRef: ScopedThreadRef, insertionIndex: number, bottomPaneKey?: string) => {
       const state = useSplitViewStore.getState();
       const activePaneRefs = selectSplitPaneRefs(state);
       const isExistingPane = activePaneRefs.some(
         (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
       );
       if (isExistingPane) {
-        state.movePane(threadRef, insertionIndex);
+        state.movePane(threadRef, insertionIndex, bottomPaneKey);
         return;
       }
       const anchor = currentRouteRef ?? activePaneRefs[0];
       if (!anchor) return;
-      state.placePane(anchor, threadRef, insertionIndex);
+      state.placePane(anchor, threadRef, insertionIndex, bottomPaneKey);
     },
     [currentRouteRef],
   );
@@ -630,8 +717,9 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
             <div
               ref={attachPaneGridAutoAnimateRef}
               className={cn(
-                "grid min-h-0 min-w-0 flex-1 gap-px overflow-hidden bg-border",
-                splitThreadGridColumnClassName(paneRefs.length),
+                "relative grid min-h-0 min-w-0 flex-1 gap-px overflow-hidden bg-border",
+                splitThreadGridColumnClassName(paneRefs.length, paneSlots),
+                gridHasTwoRows ? "grid-rows-2" : "grid-rows-1",
               )}
               data-split-thread-grid
               onDragEnd={() => {
@@ -643,6 +731,8 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
             >
               {paneRefs.map((threadRef, paneIndex) => {
                 const threadKey = scopedThreadKey(threadRef);
+                const slot = paneSlots[paneIndex];
+                if (!slot) return null;
                 return (
                   <SplitThreadPane
                     key={threadKey}
@@ -653,8 +743,13 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
                     rightPanelOpen={rightPanelOpen}
                     onToggleRightPanel={toggleRightPanel}
                     paneIndex={paneIndex}
-                    dropTarget={dropTarget}
+                    slot={slot}
+                    gridHasTwoRows={gridHasTwoRows}
+                    canStackVertically={canStackUnderSplitPane(paneRefs, bottomPaneKeys, paneIndex)}
+                    canInsertColumn={canInsertColumn}
+                    paneColumns={paneColumns}
                     canPlaceThread={canPlaceThread}
+                    isExistingPane={isExistingPane}
                     onActivate={() => activatePane(threadRef)}
                     onDetach={() => detachPane(threadRef)}
                     onDropTargetChange={setDropTarget}
@@ -664,6 +759,22 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
                   />
                 );
               })}
+              {dropTarget && dropHintSlot ? (
+                <SplitPaneDropHint
+                  className="inset-0"
+                  position={dropTarget.position}
+                  style={{
+                    gridColumn: `${dropHintSlot.column + 1} / span 1`,
+                    gridRow:
+                      gridHasTwoRows &&
+                      (dropHintSlot.spansBothRows ||
+                        dropTarget.position === "before" ||
+                        dropTarget.position === "after")
+                        ? "1 / span 2"
+                        : dropHintSlot.row + 1,
+                  }}
+                />
+              ) : null}
             </div>
           </div>
           <div

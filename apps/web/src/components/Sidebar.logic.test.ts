@@ -35,6 +35,7 @@ import {
   sortLogicalProjectsForSidebar,
   sortSettledThreadsForSidebar,
   resolveSidebarDropTarget,
+  resolveSplitViewDetachNavigationTarget,
   pinOrderKeyBetween,
   planPinnedReorder,
   planSidebarThreadDrop,
@@ -71,6 +72,28 @@ import {
 } from "../types";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+describe("split view group detach navigation", () => {
+  it("keeps the currently routed pane when dissolving its active group", () => {
+    expect(
+      resolveSplitViewDetachNavigationTarget({
+        wasActive: true,
+        detachFallback: "routed-thread",
+        activePane: "selected-thread",
+      }),
+    ).toBe("routed-thread");
+  });
+
+  it("does not navigate when dissolving another saved group", () => {
+    expect(
+      resolveSplitViewDetachNavigationTarget({
+        wasActive: false,
+        detachFallback: "saved-group-thread",
+        activePane: "current-thread",
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("animateSidebarLayoutChanges", () => {
   const baseArgs: Parameters<AnimateLayoutChanges>[0] = {

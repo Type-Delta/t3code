@@ -73,7 +73,7 @@ describe("split view thread drag", () => {
         return this.panes;
       }
       getBoundingClientRect() {
-        return { left: this.left, width: 200 };
+        return { left: this.left, top: 100, width: 200, height: 300 };
       }
       getAttribute() {
         return this.left === 100 ? "pane-a" : "pane-b";
@@ -92,11 +92,11 @@ describe("split view thread drag", () => {
     const doc = (element: HitElement | null) =>
       ({ elementFromPoint: () => element }) as unknown as Document;
 
-    expect(resolvePointerSplitDropTarget(doc(single), { x: 100, y: 0 })).toEqual({
+    expect(resolvePointerSplitDropTarget(doc(single), { x: 100, y: 250 })).toEqual({
       kind: "single",
       position: "before",
     });
-    expect(resolvePointerSplitDropTarget(doc(single), { x: 250, y: 0 })).toEqual({
+    expect(resolvePointerSplitDropTarget(doc(single), { x: 250, y: 250 })).toEqual({
       kind: "single",
       position: "after",
     });
@@ -115,7 +115,170 @@ describe("split view thread drag", () => {
     expect(resolvePointerSplitDropTarget(doc(null), { x: 0, y: 0 })).toBeNull();
   });
 
-  it("accepts a legacy native thread drop on either half of a single workspace", () => {
+  it("resolves top and bottom quarters as vertical drops on a standalone workspace", () => {
+    class Workspace {
+      closest(selector: string) {
+        return selector === "[data-thread-route-workspace]" ? this : null;
+      }
+      getBoundingClientRect() {
+        return { left: 100, top: 100, width: 200, height: 400 };
+      }
+    }
+    vi.stubGlobal("Element", Workspace);
+    const workspace = new Workspace();
+    const doc = () => ({ elementFromPoint: () => workspace }) as unknown as Document;
+
+    expect(resolvePointerSplitDropTarget(doc(), { x: 150, y: 150 })).toEqual({
+      kind: "single",
+      position: "above",
+    });
+    expect(resolvePointerSplitDropTarget(doc(), { x: 250, y: 450 })).toEqual({
+      kind: "single",
+      position: "below",
+    });
+    expect(resolvePointerSplitDropTarget(doc(), { x: 150, y: 300 })).toEqual({
+      kind: "single",
+      position: "before",
+    });
+    expect(resolvePointerSplitDropTarget(doc(), { x: 250, y: 300 })).toEqual({
+      kind: "single",
+      position: "after",
+    });
+  });
+
+  it("uses the lower third for a stack target only on stackable panes", () => {
+    class StackPane {
+      readonly matches: Record<string, StackPane | null> = {};
+      constructor(private readonly stackable: boolean) {}
+      closest(selector: string) {
+        return this.matches[selector] ?? null;
+      }
+      querySelectorAll() {
+        return [this];
+      }
+      getBoundingClientRect() {
+        return { left: 100, top: 100, width: 200, height: 300 };
+      }
+      getAttribute(name: string) {
+        if (name === "data-split-thread-pane-can-stack") return this.stackable ? "true" : null;
+        return "pane-a";
+      }
+    }
+    vi.stubGlobal("Element", StackPane);
+    const stackablePane = new StackPane(true);
+    stackablePane.matches["[data-split-thread-grid]"] = stackablePane;
+    stackablePane.matches["[data-split-thread-pane]"] = stackablePane;
+    const doc = (element: StackPane) =>
+      ({ elementFromPoint: () => element }) as unknown as Document;
+
+    expect(resolvePointerSplitDropTarget(doc(stackablePane), { x: 110, y: 350 })).toEqual({
+      kind: "split",
+      paneKey: "pane-a",
+      insertionIndex: 1,
+      position: "below",
+    });
+
+    const nonStackablePane = new StackPane(false);
+    nonStackablePane.matches["[data-split-thread-grid]"] = nonStackablePane;
+    nonStackablePane.matches["[data-split-thread-pane]"] = nonStackablePane;
+    expect(resolvePointerSplitDropTarget(doc(nonStackablePane), { x: 110, y: 350 })).toEqual({
+      kind: "split",
+      paneKey: "pane-a",
+      insertionIndex: 0,
+      position: "before",
+    });
+  });
+
+  it("resolves top and bottom targets and hides impossible targets at five columns", () => {
+    class GridPane {
+      grid: { querySelectorAll: () => GridPane[] } | null = null;
+      constructor(
+        readonly key: string,
+        readonly column: number,
+        public stackable: boolean,
+      ) {}
+      closest(selector: string) {
+        if (selector === "[data-split-thread-grid]") return this.grid;
+        if (selector === "[data-split-thread-pane]") return this;
+        return null;
+      }
+      getBoundingClientRect() {
+        return { left: 100, top: 100, width: 200, height: 300 };
+      }
+      getAttribute(name: string) {
+        if (name === "data-split-thread-pane-key") return this.key;
+        if (name === "data-split-thread-pane-column") return String(this.column);
+        if (name === "data-split-thread-pane-can-stack") return String(this.stackable);
+        return null;
+      }
+    }
+    vi.stubGlobal("Element", GridPane);
+    const top = new GridPane("top", 0, true);
+    const bottom = new GridPane("bottom", 0, false);
+    const otherColumns = [1, 2, 3, 4].map(
+      (column) => new GridPane(`column-${column}`, column, true),
+    );
+    const panes = [top, ...otherColumns];
+    const grid = { querySelectorAll: () => panes };
+    panes.forEach((pane) => (pane.grid = grid));
+    const doc = (pane: GridPane) => ({ elementFromPoint: () => pane }) as unknown as Document;
+
+    expect(resolvePointerSplitDropTarget(doc(top), { x: 110, y: 120 })).toEqual({
+      kind: "split",
+      paneKey: "top",
+      insertionIndex: 0,
+      position: "above",
+    });
+    expect(resolvePointerSplitDropTarget(doc(top), { x: 290, y: 380 })).toEqual({
+      kind: "split",
+      paneKey: "top",
+      insertionIndex: 1,
+      position: "below",
+    });
+    expect(resolvePointerSplitDropTarget(doc(top), { x: 110, y: 250 })).toBeNull();
+    expect(
+      resolvePointerSplitDropTarget(doc(top), { x: 110, y: 250 }, { draggedPaneKey: "top" }),
+    ).toEqual({
+      kind: "split",
+      paneKey: "top",
+      insertionIndex: 0,
+      position: "before",
+    });
+    panes.splice(1, 0, bottom);
+    bottom.grid = grid;
+    top.stackable = false;
+    expect(resolvePointerSplitDropTarget(doc(bottom), { x: 110, y: 250 })).toBeNull();
+    expect(
+      resolvePointerSplitDropTarget(
+        doc(bottom),
+        { x: 110, y: 250 },
+        {
+          draggedPaneKey: "bottom",
+        },
+      ),
+    ).toEqual({
+      kind: "split",
+      paneKey: "bottom",
+      insertionIndex: 0,
+      position: "before",
+    });
+
+    panes.splice(3);
+    expect(resolvePointerSplitDropTarget(doc(bottom), { x: 110, y: 250 })).toEqual({
+      kind: "split",
+      paneKey: "bottom",
+      insertionIndex: 0,
+      position: "before",
+    });
+    expect(resolvePointerSplitDropTarget(doc(bottom), { x: 290, y: 250 })).toEqual({
+      kind: "split",
+      paneKey: "bottom",
+      insertionIndex: 2,
+      position: "after",
+    });
+  });
+
+  it("accepts a legacy native thread drop on any edge of a single workspace", () => {
     const currentRef = scopeThreadRef(
       EnvironmentId.make("environment-a"),
       ThreadId.make("thread-a"),
@@ -127,35 +290,50 @@ describe("split view thread drag", () => {
     const dataTransfer = createDataTransfer();
     beginSplitThreadDrag(dataTransfer, draggedRef);
     const workspace = {
-      getBoundingClientRect: () => ({ left: 100, width: 200 }),
+      getBoundingClientRect: () => ({ left: 100, top: 100, width: 200, height: 400 }),
     } as HTMLElement;
 
     expect(
       resolveNativeSingleSplitDrop(
-        { dataTransfer, clientX: 150, currentTarget: workspace },
+        { dataTransfer, clientX: 150, clientY: 300, currentTarget: workspace },
         currentRef,
       ),
     ).toEqual({ threadRef: draggedRef, position: "before", insertionIndex: 0 });
     expect(
       resolveNativeSingleSplitDrop(
-        { dataTransfer, clientX: 250, currentTarget: workspace },
+        { dataTransfer, clientX: 250, clientY: 300, currentTarget: workspace },
         currentRef,
       ),
     ).toEqual({ threadRef: draggedRef, position: "after", insertionIndex: 1 });
     expect(
       resolveNativeSingleSplitDrop(
-        { dataTransfer, clientX: 150, currentTarget: workspace },
+        { dataTransfer, clientX: 150, clientY: 150, currentTarget: workspace },
+        currentRef,
+      ),
+    ).toEqual({ threadRef: draggedRef, position: "above", insertionIndex: 0 });
+    expect(
+      resolveNativeSingleSplitDrop(
+        { dataTransfer, clientX: 250, clientY: 450, currentTarget: workspace },
+        currentRef,
+      ),
+    ).toEqual({ threadRef: draggedRef, position: "below", insertionIndex: 1 });
+    expect(
+      resolveNativeSingleSplitDrop(
+        { dataTransfer, clientX: 150, clientY: 150, currentTarget: workspace },
         draggedRef,
       ),
     ).toBeNull();
     expect(
-      resolveNativeSingleSplitDrop({ dataTransfer, clientX: 150, currentTarget: workspace }, null),
+      resolveNativeSingleSplitDrop(
+        { dataTransfer, clientX: 150, clientY: 150, currentTarget: workspace },
+        null,
+      ),
     ).toBeNull();
     const fileTransfer = createDataTransfer();
     fileTransfer.setData("Files", "file.txt");
     expect(
       resolveNativeSingleSplitDrop(
-        { dataTransfer: fileTransfer, clientX: 150, currentTarget: workspace },
+        { dataTransfer: fileTransfer, clientX: 150, clientY: 150, currentTarget: workspace },
         currentRef,
       ),
     ).toBeNull();

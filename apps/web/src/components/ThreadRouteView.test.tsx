@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { HTMLAttributes } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
@@ -50,7 +50,11 @@ vi.mock("../threadRoutes", () => ({
 }));
 vi.mock("../threadSync", () => ({ resolveThreadSyncPhase: () => "loading" }));
 
-import { beginSplitThreadDrag, endSplitThreadDrag } from "../splitViewDrag";
+import {
+  beginSplitThreadDrag,
+  endSplitThreadDrag,
+  setPointerSplitDropTarget,
+} from "../splitViewDrag";
 import { selectSplitPaneRefs, useSplitViewStore } from "../splitViewStore";
 import { ThreadRouteView } from "./ThreadRouteView";
 
@@ -78,6 +82,7 @@ describe("ThreadRouteView native split drop", () => {
   afterEach(() => {
     endSplitThreadDrag();
     useSplitViewStore.getState().clearSplit();
+    setPointerSplitDropTarget(null);
     vi.unstubAllGlobals();
   });
 
@@ -99,7 +104,10 @@ describe("ThreadRouteView native split drop", () => {
     const event = {
       dataTransfer,
       clientX: 150,
-      currentTarget: { getBoundingClientRect: () => ({ left: 100, width: 200 }) },
+      clientY: 300,
+      currentTarget: {
+        getBoundingClientRect: () => ({ left: 100, top: 100, width: 200, height: 400 }),
+      },
       preventDefault: vi.fn(),
     };
 
@@ -123,6 +131,35 @@ describe("ThreadRouteView native split drop", () => {
     expect(renderer!.root.findAllByProps({ "data-drop-hint": "after" })).toHaveLength(0);
     await act(() => workspace.props.onDrop({ ...event, clientX: 250 }));
     expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([currentRef, draggedRef]);
+
+    useSplitViewStore.getState().clearSplit();
+    beginSplitThreadDrag(dataTransfer, draggedRef);
+    await act(() => workspace.props.onDragOver({ ...event, clientX: 250, clientY: 150 }));
+    expect(renderer!.root.findAllByProps({ "data-drop-hint": "above" })).toHaveLength(1);
+    await act(() => workspace.props.onDrop({ ...event, clientX: 250, clientY: 150 }));
+    expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([draggedRef, currentRef]);
+    expect(useSplitViewStore.getState().groups[0]?.bottomPaneKeys).toEqual([
+      scopedThreadKey(currentRef),
+    ]);
+
+    useSplitViewStore.getState().clearSplit();
+    beginSplitThreadDrag(dataTransfer, draggedRef);
+    await act(() => workspace.props.onDragOver({ ...event, clientX: 150, clientY: 450 }));
+    expect(renderer!.root.findAllByProps({ "data-drop-hint": "below" })).toHaveLength(1);
+    await act(() => workspace.props.onDrop({ ...event, clientX: 150, clientY: 450 }));
+    expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([currentRef, draggedRef]);
+    expect(useSplitViewStore.getState().groups[0]?.bottomPaneKeys).toEqual([
+      scopedThreadKey(draggedRef),
+    ]);
+
+    await act(() => {
+      setPointerSplitDropTarget({ kind: "single", position: "above" });
+    });
+    expect(renderer!.root.findAllByProps({ "data-drop-hint": "above" })).toHaveLength(1);
+    await act(() => {
+      setPointerSplitDropTarget({ kind: "single", position: "below" });
+    });
+    expect(renderer!.root.findAllByProps({ "data-drop-hint": "below" })).toHaveLength(1);
 
     await act(() => renderer!.unmount());
     expect(listeners.size).toBe(0);
