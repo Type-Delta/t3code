@@ -2566,7 +2566,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     );
   });
 
-  const navigate = Effect.fn("PreviewManager.navigate")(function* (tabId: string, rawUrl: string) {
+  const navigate = Effect.fn("PreviewManager.navigate")(function* (
+    tabId: string,
+    rawUrl: string,
+    options?: { readonly waitForLoad?: boolean },
+  ) {
     const url = yield* attempt({ operation: "navigate.normalizeUrl", tabId }, () =>
       normalizePreviewUrl(rawUrl),
     );
@@ -2658,9 +2662,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       );
       return;
     }
-    yield* attemptPromise({ operation: "navigate.loadURL", tabId, webContentsId: wc.id }, () =>
-      wc.loadURL(url),
+    const load = attemptPromise(
+      { operation: "navigate.loadURL", tabId, webContentsId: wc.id },
+      () => wc.loadURL(url),
     );
+    if (options?.waitForLoad === false) {
+      // Electron resolves loadURL only after all subresources finish. The
+      // automation host checks readiness separately; did-fail-load publishes
+      // failures even when this promise rejects after navigation returns.
+      yield* Effect.forkIn(load.pipe(Effect.ignore), parentScope, { startImmediately: true });
+    } else {
+      yield* load;
+    }
   });
 
   const withWebContents = Effect.fn("PreviewManager.withWebContents")(function* (
@@ -5257,7 +5270,11 @@ export class PreviewManager extends Context.Service<
       tabId: string,
       webContentsId: number,
     ) => Effect.Effect<void, PreviewManagerError>;
-    readonly navigate: (tabId: string, url: string) => Effect.Effect<void, PreviewManagerError>;
+    readonly navigate: (
+      tabId: string,
+      url: string,
+      options?: { readonly waitForLoad?: boolean },
+    ) => Effect.Effect<void, PreviewManagerError>;
     readonly goBack: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly goForward: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly refresh: (tabId: string) => Effect.Effect<void, PreviewManagerError>;

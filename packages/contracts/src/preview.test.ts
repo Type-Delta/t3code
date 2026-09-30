@@ -18,6 +18,8 @@ import {
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
   PreviewAutomationStatus,
+  PreviewAutomationResponse,
+  PreviewAutomationStreamEvent,
 } from "./previewAutomation.ts";
 
 const decodePreviewEvent = Schema.decodeUnknownSync(PreviewEvent);
@@ -32,6 +34,38 @@ const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResul
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
 const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
+
+describe("preview automation acknowledgement compatibility", () => {
+  it("preserves the negotiated capability and the started response across the wire", () => {
+    const connected = {
+      type: "connected",
+      connectionId: "connection-1",
+      supportsRequestAcknowledgement: true,
+    };
+    expect(Schema.decodeUnknownSync(PreviewAutomationStreamEvent)(connected)).toEqual(connected);
+    const started = {
+      clientId: "client-1",
+      connectionId: "connection-1",
+      requestId: "request-1",
+      phase: "started",
+      ok: true,
+    };
+    expect(Schema.decodeUnknownSync(PreviewAutomationResponse)(started)).toEqual(started);
+  });
+
+  it("accepts connections and final responses from older clients", () => {
+    const connected = { type: "connected", connectionId: "connection-1" };
+    expect(Schema.decodeUnknownSync(PreviewAutomationStreamEvent)(connected)).toEqual(connected);
+    const completed = {
+      clientId: "client-1",
+      connectionId: "connection-1",
+      requestId: "request-1",
+      ok: true,
+      result: { available: true },
+    };
+    expect(Schema.decodeUnknownSync(PreviewAutomationResponse)(completed)).toEqual(completed);
+  });
+});
 
 describe("PreviewAutomationOpenInput", () => {
   it("accepts the inline preview visibility flag", () => {

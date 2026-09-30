@@ -884,6 +884,30 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("starts automation navigation without waiting for a stalled subresource", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const preview = makeFaviconWebContents();
+        fromId.mockReturnValue(preview.webContents);
+        yield* manager.createTab("tab_slow_navigation");
+        yield* manager.registerWebview("tab_slow_navigation", 42);
+        const started = yield* Deferred.make<void>();
+        preview.loadURL.mockImplementationOnce(() => {
+          Deferred.doneUnsafe(started, Effect.void);
+          return new Promise<void>(() => {});
+        });
+        const navigation = yield* manager
+          .navigate("tab_slow_navigation", "https://example.com/slow", { waitForLoad: false })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(started);
+        yield* Effect.yieldNow;
+        expect(navigation.pollUnsafe()).toBeDefined();
+        yield* Fiber.interrupt(navigation);
+        expect((yield* manager.automationStatus("tab_slow_navigation")).available).toBe(true);
+      }),
+    ),
+  );
+
   effectIt.effect("detaches a destroyed webview instead of navigating it", () =>
     withManager((manager) =>
       Effect.gen(function* () {

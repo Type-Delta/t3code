@@ -22,6 +22,7 @@ import {
 import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Atom } from "effect/unstable/reactivity";
+import * as Schema from "effect/Schema";
 
 import {
   applyPreviewServerSnapshot,
@@ -96,6 +97,10 @@ import {
 import { shouldRollbackPreviewViewport } from "./previewViewportRollback";
 
 const PREVIEW_PRESENTATION_SETTLE_TIMEOUT_MS = 500;
+const NavigationSourceDocument = Schema.Struct({
+  href: Schema.String,
+  timeOrigin: Schema.Finite,
+});
 
 const waitForPreviewPresentation = async (runtimeTabId: string): Promise<void> => {
   const deadline = Date.now() + PREVIEW_PRESENTATION_SETTLE_TIMEOUT_MS;
@@ -515,7 +520,9 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
             if (previewAutomationOpenNeedsNavigationReadiness(input) && previewBridge) {
               if (reusedExistingTab && resolvedInputUrl) {
                 assertPreviewRuntimeCurrent(threadRef, activeTabId, activeRuntimeTabId, request);
-                await previewBridge.navigate(activeRuntimeTabId, resolvedInputUrl);
+                await previewBridge.navigate(activeRuntimeTabId, resolvedInputUrl, {
+                  waitForLoad: false,
+                });
               }
               await waitForNavigationReadiness(
                 threadRef,
@@ -524,7 +531,7 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
                 activeRuntimeTabId,
                 request.operation,
                 "load",
-                request.timeoutMs,
+                Math.max(0, hostDeadlineMs - Date.now()),
               );
             }
             return await currentStatus(threadRef, activeTabId);
@@ -539,7 +546,26 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
                 url: input.url!,
               },
             );
-            await ready.bridge.navigate(ready.runtimeTabId, resolution.resolvedUrl);
+            let previousTimeOrigin: number | undefined;
+            if (input.readiness === "domContentLoaded") {
+              const previous = Schema.decodeUnknownSync(NavigationSourceDocument)(
+                await ready.bridge.automation.evaluate(ready.runtimeTabId, {
+                  expression: "({ href: location.href, timeOrigin: performance.timeOrigin })",
+                }),
+              );
+              const previousUrl = new URL(previous.href);
+              const nextUrl = new URL(resolution.resolvedUrl);
+              const hashChanged = previousUrl.hash !== nextUrl.hash;
+              previousUrl.hash = "";
+              nextUrl.hash = "";
+              // Fragment navigation keeps its document. Reloads and redirects
+              // must leave the old document before its readyState can count.
+              if (!hashChanged || previousUrl.href !== nextUrl.href)
+                previousTimeOrigin = previous.timeOrigin;
+            }
+            await ready.bridge.navigate(ready.runtimeTabId, resolution.resolvedUrl, {
+              waitForLoad: false,
+            });
             await waitForNavigationReadiness(
               threadRef,
               request.requestId,
@@ -547,7 +573,8 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
               ready.runtimeTabId,
               request.operation,
               input.readiness ?? "load",
-              input.timeoutMs ?? request.timeoutMs,
+              Math.max(0, hostDeadlineMs - Date.now()),
+              previousTimeOrigin,
             );
             return await currentStatus(threadRef, ready.tabId);
           }
@@ -770,11 +797,13 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
         connectionAtom: automationConnectionAtom,
         environmentId,
         requestHandlerAtom,
-        respond: (response) =>
-          respondToAutomation({
+        respond: async (response) => {
+          const result = await respondToAutomation({
             environmentId,
             input: response,
-          }),
+          });
+          if (result._tag === "Failure") raiseAtomCommandFailure(result);
+        },
         label: `preview:automation-host:${environmentId}:${automationClientId}`,
       }),
     [

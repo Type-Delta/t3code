@@ -53,6 +53,123 @@ const consumerState = (handleRequest: (request: PreviewAutomationRequest) => Pro
 });
 
 describe("previewAutomationRequestConsumer", () => {
+  it("acknowledges a request that arrived before the consumer mounted", async () => {
+    const requestsAtom = Atom.make(
+      AsyncResult.success<PreviewAutomationStreamEvent, Error>({
+        ...requestEvent("request-already-received"),
+        supportsRequestAcknowledgement: true,
+      }),
+    );
+    const handleRequest = vi.fn(async () => "ready");
+    const respond = vi.fn(async () => undefined);
+    const state = consumerState(handleRequest);
+    const consumerAtom = createPreviewAutomationRequestConsumerAtom({
+      requestsAtom,
+      clientId,
+      connectionAtom: state.connectionAtom,
+      environmentId,
+      requestHandlerAtom: state.requestHandlerAtom,
+      respond,
+      label: "test:preview-initial-acknowledgement",
+    });
+    const registry = AtomRegistry.make();
+    registry.mount(consumerAtom);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
+    expect(respond.mock.calls[0]).toEqual([
+      { clientId, connectionId, requestId: "request-already-received", phase: "started", ok: true },
+    ]);
+    expect(handleRequest).toHaveBeenCalledOnce();
+    registry.dispose();
+  });
+
+  it("acknowledges receipt before starting page work when the broker supports it", async () => {
+    const requestsAtom = Atom.make(
+      AsyncResult.success<PreviewAutomationStreamEvent, Error>({
+        type: "connected",
+        connectionId,
+        supportsRequestAcknowledgement: true,
+      }),
+    );
+    let acknowledge!: () => void;
+    const acknowledgement = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    const handleRequest = vi.fn(async () => "ready");
+    const respond = vi.fn(async (response: PreviewAutomationResponse) => {
+      if (response.phase === "started") await acknowledgement;
+    });
+    const state = consumerState(handleRequest);
+    const consumerAtom = createPreviewAutomationRequestConsumerAtom({
+      requestsAtom,
+      clientId,
+      connectionAtom: state.connectionAtom,
+      environmentId,
+      requestHandlerAtom: state.requestHandlerAtom,
+      respond,
+      label: "test:preview-acknowledgement",
+    });
+    const registry = AtomRegistry.make();
+    registry.mount(consumerAtom);
+    registry.set(requestsAtom, AsyncResult.success(requestEvent("request-slow")));
+    expect(respond).toHaveBeenCalledWith({
+      clientId,
+      connectionId,
+      requestId: "request-slow",
+      phase: "started",
+      ok: true,
+    });
+    expect(handleRequest).not.toHaveBeenCalled();
+    acknowledge();
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(2));
+    expect(respond.mock.calls[1]?.[0]).toEqual({
+      clientId,
+      connectionId,
+      requestId: "request-slow",
+      ok: true,
+      result: "ready",
+    });
+    registry.dispose();
+  });
+
+  it("does not run a queued operation after its acknowledged stream is replaced", async () => {
+    const requestsAtom = Atom.make(
+      AsyncResult.success<PreviewAutomationStreamEvent, Error>({
+        type: "connected",
+        connectionId,
+        supportsRequestAcknowledgement: true,
+      }),
+    );
+    let acknowledge!: () => void;
+    const acknowledgement = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    const handleRequest = vi.fn(async () => undefined);
+    const respond = vi.fn(async () => acknowledgement);
+    const state = consumerState(handleRequest);
+    const consumerAtom = createPreviewAutomationRequestConsumerAtom({
+      requestsAtom,
+      clientId,
+      connectionAtom: state.connectionAtom,
+      environmentId,
+      requestHandlerAtom: state.requestHandlerAtom,
+      respond,
+      label: "test:preview-replaced-acknowledgement",
+    });
+    const registry = AtomRegistry.make();
+    registry.mount(consumerAtom);
+    registry.set(requestsAtom, AsyncResult.success(requestEvent("request-old")));
+    registry.set(
+      requestsAtom,
+      AsyncResult.success({ type: "connected", connectionId: "replacement" }),
+    );
+    acknowledge();
+    await acknowledgement;
+    await Promise.resolve();
+    expect(handleRequest).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledOnce();
+    registry.dispose();
+  });
+
   it("acknowledges a replacement stream before consuming requests from it", async () => {
     const requestsAtom = Atom.make(
       AsyncResult.success<PreviewAutomationStreamEvent, Error>({

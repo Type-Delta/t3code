@@ -86,6 +86,7 @@ interface PendingRequest {
   readonly queue: ClientConnection["queue"];
   readonly deferred: Deferred.Deferred<unknown, PreviewAutomationError>;
   readonly context: PreviewAutomationRequestErrorContext;
+  readonly acknowledged: boolean;
 }
 
 /**
@@ -390,7 +391,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     const clientId = host.clientId;
     const queue = yield* Queue.unbounded<PreviewAutomationStreamEvent, Cause.Done>();
     const connectionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
-    yield* Queue.offer(queue, { type: "connected", connectionId });
+    yield* Queue.offer(queue, {
+      type: "connected",
+      connectionId,
+      supportsRequestAcknowledgement: true,
+    });
     const connection: ClientConnection = {
       clientId,
       connectionId,
@@ -463,13 +468,17 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
 
   const quarantineTimedOutConnection = Effect.fn(
     "PreviewAutomationBroker.quarantineTimedOutConnection",
-  )(function* (connection: ClientConnection) {
+  )(function* (connection: ClientConnection, requestId: string) {
     const now = yield* Clock.currentTimeMillis;
     yield* SynchronizedRef.update(state, (current) => {
       const active = current.clients.get(connection.clientId);
       if (active?.connectionId !== connection.connectionId || active.queue !== connection.queue) {
         return current;
       }
+      const pending = current.pending.get(requestId);
+      // A completion may win the race after the response deadline but before
+      // this timeout cleanup runs. There is no stale host to quarantine then.
+      if (!pending || pending.acknowledged) return current;
       const clients = new Map(current.clients);
       clients.set(connection.clientId, {
         ...active,
@@ -510,6 +519,10 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         ] as const;
       }
       const next = new Map(current.pending);
+      if (response.phase === "started") {
+        if (response.ok) next.set(response.requestId, { ...entry, acknowledged: true });
+        return [undefined, { ...current, clients, pending: next }] as const;
+      }
       next.delete(response.requestId);
       return [entry, { ...current, clients, pending: next }] as const;
     });
@@ -609,7 +622,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         ...selectorDiagnostics,
       };
       const pending = new Map(current.pending);
-      pending.set(requestId, { queue: connection.queue, deferred, context });
+      pending.set(requestId, { queue: connection.queue, deferred, context, acknowledged: false });
       return [
         { connection, requestId, requestContext: context, requestSequence },
         { ...current, assignments, pending, requestSequence: current.requestSequence + 1 },
@@ -652,6 +665,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         return Queue.offer(connection.queue, {
           type: "request",
           connectionId: connection.connectionId,
+          supportsRequestAcknowledgement: true,
           request: {
             requestId,
             threadId: providerPreviewContext(input.scope)!.threadId,
@@ -672,15 +686,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       }
       const result = yield* Deferred.await(deferred).pipe(Effect.timeoutOption(timeoutMs));
       return yield* Option.match(result, {
-        // A connected host that misses the response contract is not safe to
-        // keep routing through. In particular, renderer reloads can leave an
-        // old focused request stream looking live until its transport notices
-        // the disconnect. Quarantine it and release its assignments so the
-        // next request can select a healthy replacement. Keep the stream open:
-        // a late response or focus report proves recovery without requiring a
-        // full environment reconnect.
+        // An acknowledged request proves the renderer consumed the command.
+        // Slow page work must not quarantine the entire desktop or forget its
+        // current tabs. A silent stream still needs stale-host failover.
         onNone: () =>
-          quarantineTimedOutConnection(connection).pipe(
+          quarantineTimedOutConnection(connection, requestId).pipe(
             Effect.andThen(Effect.fail(new PreviewAutomationTimeoutError(requestContext))),
           ),
         onSome: (value) => Effect.succeed(value as A),

@@ -46,6 +46,7 @@ export async function waitForNavigationReadiness(
   operation: PreviewAutomationRequest["operation"],
   readiness: PreviewAutomationNavigateInput["readiness"],
   timeoutMs: number,
+  previousTimeOrigin?: number,
 ): Promise<void> {
   const targetReadiness = readiness ?? "load";
   if (!previewBridge) return;
@@ -73,7 +74,10 @@ export async function waitForNavigationReadiness(
     }
     if (targetReadiness === "domContentLoaded") {
       const readyState = await previewBridge.automation.evaluate(runtimeTabId, {
-        expression: "document.readyState",
+        expression:
+          previousTimeOrigin === undefined
+            ? "document.readyState"
+            : `performance.timeOrigin !== ${previousTimeOrigin} && document.readyState`,
       });
       if (readyState === "interactive" || readyState === "complete") return;
     } else {

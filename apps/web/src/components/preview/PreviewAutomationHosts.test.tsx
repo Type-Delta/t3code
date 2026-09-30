@@ -29,7 +29,10 @@ const mocks = vi.hoisted(() => ({
   resize: vi.fn(),
   respond:
     vi.fn<
-      (target: { environmentId: EnvironmentId; input: PreviewAutomationResponse }) => Promise<void>
+      (target: {
+        environmentId: EnvironmentId;
+        input: PreviewAutomationResponse;
+      }) => Promise<AsyncResult.Success<void>>
     >(),
   focus: vi.fn(async () => undefined),
 }));
@@ -109,7 +112,7 @@ let renderer: ReactTestRenderer | null = null;
 beforeEach(async () => {
   vi.clearAllMocks();
   mocks.getClientSettings.mockReset().mockResolvedValue(savedSettings);
-  mocks.respond.mockReset();
+  mocks.respond.mockReset().mockResolvedValue(AsyncResult.success(undefined));
   __resetClientSettingsPersistenceForTests();
   resetPreviewStateForTests();
   appAtomRegistry.set(requestsAtom, AsyncResult.initial(false));
@@ -143,7 +146,10 @@ describe("PreviewAutomationHosts open", () => {
       readStarted.resolve();
       return read.promise;
     });
-    mocks.respond.mockImplementationOnce(async ({ input }) => response.resolve(input));
+    mocks.respond.mockImplementationOnce(async ({ input }) => {
+      response.resolve(input);
+      return AsyncResult.success(undefined);
+    });
 
     await act(async () => {
       appAtomRegistry.set(requestsAtom, AsyncResult.success(requestEvent));
@@ -170,7 +176,10 @@ describe("PreviewAutomationHosts open", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     mocks.getClientSettings.mockRejectedValueOnce(new Error("Settings read failed"));
     const response = deferred<PreviewAutomationResponse>();
-    mocks.respond.mockImplementationOnce(async ({ input }) => response.resolve(input));
+    mocks.respond.mockImplementationOnce(async ({ input }) => {
+      response.resolve(input);
+      return AsyncResult.success(undefined);
+    });
 
     await act(async () => {
       appAtomRegistry.set(requestsAtom, AsyncResult.success(requestEvent));

@@ -40,6 +40,7 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
     let disposed = false;
     let activeConnectionId: PreviewAutomationStreamEvent["connectionId"] | null = null;
     let connectionExplicitlyAnnounced = false;
+    let supportsRequestAcknowledgement = false;
     let reportedConnectionId: PreviewAutomationStreamEvent["connectionId"] | null = null;
     let requestsVersion = 0;
 
@@ -49,6 +50,7 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
       if (event.type === "connected") {
         activeConnectionId = event.connectionId;
         connectionExplicitlyAnnounced = true;
+        supportsRequestAcknowledgement = event.supportsRequestAcknowledgement === true;
       } else if (activeConnectionId === null) {
         activeConnectionId = event.connectionId;
       } else if (activeConnectionId !== event.connectionId) {
@@ -63,33 +65,42 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
         return;
       }
       const request = event.request;
-      void get
-        .once(options.requestHandlerAtom)
-        .handle(request)
-        .then(
-          (value) =>
-            options.respond({
-              clientId: options.clientId,
-              connectionId: event.connectionId,
+      const acknowledge = event.supportsRequestAcknowledgement ?? supportsRequestAcknowledgement;
+      const handle = get.once(options.requestHandlerAtom).handle;
+      const respond = (
+        response: Pick<PreviewAutomationResponse, "ok" | "result" | "error" | "phase">,
+      ) =>
+        options.respond({
+          clientId: options.clientId,
+          connectionId: event.connectionId,
+          requestId: request.requestId,
+          ...response,
+        });
+      const run = async () => {
+        if (acknowledge) await respond({ phase: "started", ok: true });
+        if (disposed || activeConnectionId !== event.connectionId) return;
+        let response: Pick<PreviewAutomationResponse, "ok" | "result" | "error">;
+        try {
+          const value = await handle(request);
+          response = { ok: true, ...(value === undefined ? {} : { result: value }) };
+        } catch (error) {
+          response = {
+            ok: false,
+            error: serializePreviewAutomationError(error, {
               requestId: request.requestId,
-              ok: true,
-              ...(value === undefined ? {} : { result: value }),
+              operation: request.operation,
+              environmentId: options.environmentId,
+              threadId: request.threadId,
+              tabId: request.tabId ?? null,
             }),
-          (error) =>
-            options.respond({
-              clientId: options.clientId,
-              connectionId: event.connectionId,
-              requestId: request.requestId,
-              ok: false,
-              error: serializePreviewAutomationError(error, {
-                requestId: request.requestId,
-                operation: request.operation,
-                environmentId: options.environmentId,
-                threadId: request.threadId,
-                tabId: request.tabId ?? null,
-              }),
-            }),
-        );
+          };
+        }
+        await respond(response);
+      };
+      void run().catch(() => {
+        // Transport reconnect owns response failures. Do not start page work
+        // when the broker could not receive its acknowledgement.
+      });
     };
 
     get.addFinalizer(() => {
@@ -100,6 +111,8 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
       activeConnectionId = initialRequest.value.connectionId;
       connectionExplicitlyAnnounced = initialRequest.value.type === "connected";
       if (initialRequest.value.type === "connected") {
+        supportsRequestAcknowledgement =
+          initialRequest.value.supportsRequestAcknowledgement === true;
         reportedConnectionId = initialRequest.value.connectionId;
         get.set(options.connectionAtom, initialRequest.value.connectionId);
       }

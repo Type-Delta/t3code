@@ -614,10 +614,14 @@ export const PreviewAutomationStreamEvent = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("connected"),
     connectionId: PreviewAutomationConnectionId,
+    /** A host only sends started responses after the broker advertises support. */
+    supportsRequestAcknowledgement: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("request"),
     connectionId: PreviewAutomationConnectionId,
+    /** Also carried by requests because an atom may mount after connected. */
+    supportsRequestAcknowledgement: Schema.optional(Schema.Boolean),
     request: PreviewAutomationRequest,
   }),
 ]);
@@ -627,6 +631,8 @@ export const PreviewAutomationResponse = Schema.Struct({
   clientId: PreviewAutomationClientId,
   connectionId: PreviewAutomationConnectionId,
   requestId: TrimmedNonEmptyString,
+  /** Missing means completion, preserving older desktop/server connections. */
+  phase: Schema.optional(Schema.Literal("started")),
   ok: Schema.Boolean,
   result: Schema.optional(Schema.Unknown),
   error: Schema.optional(

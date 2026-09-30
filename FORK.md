@@ -90,15 +90,17 @@ The fork hardens desktop collaborative preview control. A debugger detach invali
 
 Automation also retries dynamic click/type targets, re-resolves click targets after cursor movement, keeps snapshots coherent across DOM mutations, bounds guest viewport work, and quarantines an unresponsive host so later requests can fail over and recover without reconnecting the environment. Hung native control work now times out below the broker deadline and detaches only its cached debugger session, so the same tab can reattach instead of retaining a blocked control permit.
 
+Desktop hosts now acknowledge receipt to the broker before starting page work. A slow navigation or snapshot can therefore time out without being mistaken for a disconnected host, while a stream that never acknowledges is still quarantined and failed over. Timeout cleanup also preserves hosts whose completion arrived after the deadline. Automation navigation starts Electron loads without waiting for every subresource, then applies the requested readiness milestone in the renderer.
+
 Browser development's single-origin Vite proxy behavior, including shared and Tailscale origins, is upstream behavior and is not a fork divergence. Explicit IPv4 loopback URLs remain only for the desktop renderer and local-preview automation, where they protect Windows local routing.
 
 **Implementation evidence:** `apps/desktop/src/preview/Manager.ts`, `apps/web/src/components/preview/`, `apps/server/src/mcp/PreviewAutomationBroker.ts`, `apps/server/src/mcp/toolkits/preview/handlers.ts`, and `packages/contracts/src/previewAutomation.ts`.
 
 Upstream owns the pinned Electron debugger reference and bounded screenshot retries. Those fixes compose with the fork's stale-session detection and control deadlines; a screenshot that succeeds on retry keeps its debugger session.
 
-**Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage, including same-tab recovery from stalled CDP and capture work, stale-host failover, and `LoadFailed`; `vp check` and `vp run typecheck`. The 2026-09-01 merge-focused suites reran the affected desktop, server, and web preview recovery paths.
+**Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage, including same-tab recovery from stalled CDP and capture work, stale-host failover, acknowledged slow-operation recovery, timeout cleanup races, and `LoadFailed`; `vp check` and `vp run typecheck`. An isolated Electron run reproduced a full-load timeout against a page with a never-ending image request, then confirmed same-tab evaluate and snapshot remained available. The 2026-09-01 merge-focused suites reran the affected desktop, server, and web preview recovery paths.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-30
 
 ### DL005 — Windows portability in CLI fixtures, Git, and tests
 

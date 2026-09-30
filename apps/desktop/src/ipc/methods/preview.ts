@@ -98,9 +98,9 @@ export const navigate = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_NAVIGATE_CHANNEL,
   payload: DesktopPreviewNavigateInputSchema,
   result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.navigate")(function* ({ tabId, url }) {
+  handler: Effect.fn("desktop.ipc.preview.navigate")(function* ({ tabId, url, waitForLoad }) {
     const manager = yield* PreviewManager.PreviewManager;
-    yield* manager.navigate(tabId, url);
+    yield* manager.navigate(tabId, url, waitForLoad === undefined ? undefined : { waitForLoad });
   }),
 });
 
