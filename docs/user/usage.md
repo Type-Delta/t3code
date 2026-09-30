@@ -98,6 +98,10 @@ environment that will connect to the hub and enter its URL and management key.
 The accounts appear under **Usage → Limits**. Codex accounts show banked reset credits; select an
 account and choose **Use reset** to redeem one. No hub plugin is required.
 
+If the hub rejects management access, requests pause to avoid repeated authentication failures.
+Correct the hub URL or management key to resume. A redemption response that only confirms acceptance
+shows "Redemption request accepted"; the refreshed usage and credit count show the current state.
+
 This connection supplies usage information; configure
 the provider separately to send agent requests through the hub. Remove the hub from the same
 settings section when you no longer need it.

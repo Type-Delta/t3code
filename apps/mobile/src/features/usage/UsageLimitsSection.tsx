@@ -181,6 +181,7 @@ const OUTCOME_TEXT: Record<ProviderConsumeResetCreditOutcome, string> = {
   nothingToReset: "Nothing to reset right now.",
   noCredit: "No reset credit left.",
   alreadyRedeemed: "That credit was already redeemed.",
+  accepted: "Redemption request accepted.",
 };
 
 /**

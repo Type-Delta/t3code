@@ -6,6 +6,16 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
+### DL037 — Forgiving CLIProxyAPI usage and redemption
+
+Hub requests pause after management HTTP 401/403 until the URL or management key changes. Optional malformed quota fields and array entries no longer discard usable windows; Codex plan fallback accepts both field names and relative reset times. Credit redemption sends only a stable `redeem_request_id`, preserves known outcomes, and reports unfamiliar successful responses as accepted before refreshing usage. T3 leaves cooldown clearing to CPA instead of resetting the entire account. Web, desktop, and mobile display the accepted result.
+
+**Implementation evidence:** `apps/server/src/usage/cliproxyApi.ts`, its focused tests, `packages/contracts/src/providerUsageLimits.ts`, and the web/mobile usage components.
+
+**Recorded validation:** 26 focused adapter and source-refresh tests, `vp check`, `vp run typecheck`, and `vp run lint:mobile`. Integrated web verification is blocked by `PreviewAutomationNoAvailableHostError`; native mobile verification is blocked by disabled device access.
+
+**Last updated:** 2026-09-30
+
 ### DL036 — Ignore route tests during web route generation
 
 The web router ignores `.test.ts` files in the routes directory so route tests do not produce missing-Route warnings during builds.

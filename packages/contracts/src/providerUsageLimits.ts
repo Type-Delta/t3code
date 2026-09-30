@@ -35,7 +35,7 @@ export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;
 export const ServerProviderResetCredits = Schema.Struct({
   availableCount: NonNegativeInt,
   nextExpiresAt: Schema.optional(IsoDateTime),
-  /** Pins hub redemption to the displayed credit, including retries from another client. */
+  /** Deduplicates hub redemption retries for this displayed credit across clients. */
   nextCreditId: Schema.optional(TrimmedNonEmptyString),
 });
 export type ServerProviderResetCredits = typeof ServerProviderResetCredits.Type;
@@ -128,12 +128,13 @@ export class UsageLimitSourceError extends Schema.TaggedError<UsageLimitSourceEr
   }
 }
 
-/** Mirrors Codex's own outcome set; other providers map onto it. */
+/** Includes an accepted request whose response did not confirm a specific outcome. */
 export const ProviderConsumeResetCreditOutcome = Schema.Literals([
   "reset",
   "nothingToReset",
   "noCredit",
   "alreadyRedeemed",
+  "accepted",
 ]);
 export type ProviderConsumeResetCreditOutcome = typeof ProviderConsumeResetCreditOutcome.Type;
 
