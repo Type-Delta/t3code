@@ -17,6 +17,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
@@ -113,7 +114,13 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
   const first = yield* makeExecutable("runtime 'one");
   const second = yield* makeExecutable("runtime two");
   const signedOut = yield* makeExecutable("runtime signed-out", true);
-  const controls = { selected: first, failResolution: false, beforeAcquire: Effect.void };
+  const controls = {
+    selected: first as AntigravityExecutable,
+    failResolution: false,
+    beforeAcquire: Effect.void,
+    remainingLaunchFailures: 0,
+  };
+  const failedLaunches: string[] = [];
   const acquisitions: Array<{ binaryPath: string | undefined; path: string | undefined }> = [];
   const releases: Array<string | null> = [];
   const launches: Array<{
@@ -165,6 +172,20 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     Effect.gen(function* () {
       if (command._tag !== "StandardCommand")
         return yield* Effect.die("Unexpected process pipeline.");
+      if (
+        controls.remainingLaunchFailures > 0 &&
+        (command.command === controls.selected.executablePath ||
+          command.args.includes(controls.selected.executablePath))
+      ) {
+        failedLaunches.push(controls.selected.executablePath);
+        controls.remainingLaunchFailures -= 1;
+        controls.selected = { ...second, source: controls.selected.source };
+        return yield* PlatformError.systemError({
+          _tag: "NotFound",
+          module: "ChildProcess",
+          method: "spawn",
+        });
+      }
       const handle = yield* spawner.spawn(command);
       const environment = command.options.env ?? {};
       launches.push({
@@ -241,6 +262,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     acquisitions,
     releases,
     launches,
+    failedLaunches,
     readRequests,
     assertClosed,
   };
@@ -261,6 +283,45 @@ const testLayer = ServerConfig.layerTest(process.cwd(), {
 );
 
 it.layer(testLayer)("AntigravityDriver", (it) => {
+  for (const source of ["path", "override", "managed"] as const) {
+    it.effect(
+      `reacquires only PATH Antigravity installations after a failed launch: ${source}`,
+      () =>
+        Effect.gen(function* () {
+          const h = yield* makeHarness();
+          h.controls.selected = { ...h.first, source };
+          h.controls.remainingLaunchFailures = 2;
+          yield* h.refresh().pipe(Effect.flip);
+          expect(h.failedLaunches).toEqual(
+            source === "path"
+              ? [h.first.executablePath, h.second.executablePath]
+              : [h.first.executablePath],
+          );
+          expect(h.acquisitions).toHaveLength(source === "path" ? 2 : 1);
+          expect(h.launches.every((launch) => launch.harnessPath === undefined)).toBe(true);
+          yield* h.assertClosed;
+        }).pipe(Effect.scoped),
+    );
+  }
+
+  it.effect("recovers an Antigravity PATH installation and uses its replacement harness", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      h.controls.selected = { ...h.first, source: "path" };
+      h.controls.remainingLaunchFailures = 1;
+      yield* h.refresh();
+      const snapshot = yield* h.instance.snapshot.getSnapshot;
+      expect(snapshot.auth.status).toBe("authenticated");
+      expect(snapshot.models.length).toBeGreaterThan(0);
+      expect(h.failedLaunches).toEqual([h.first.executablePath]);
+      expect(h.acquisitions).toHaveLength(2);
+      const agentLaunches = h.launches.filter((launch) => launch.harnessPath !== undefined);
+      expect(agentLaunches).toHaveLength(1);
+      expect(agentLaunches[0]?.harnessPath).toBe(h.second.harnessPath);
+      yield* h.assertClosed;
+    }).pipe(Effect.scoped),
+  );
+
   it.effect.skipIf(windowsHost)(
     "preserves the Node install message when starting a standalone provider",
     () =>

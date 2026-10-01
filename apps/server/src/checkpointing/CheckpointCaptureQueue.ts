@@ -107,7 +107,6 @@ export const makeCheckpointCaptureQueueLayer = (
 
       const processJob = Effect.fn("CheckpointCaptureQueue.processJob")(
         function* (job: CheckpointCaptureJob, leaseOwner: string) {
-          const ticket = yield* mutationCoordinator.beginCapture(job.worktreeKey);
           const leaseLost = yield* Deferred.make<void>();
           const heartbeat = Effect.forever(
             Effect.sleep(heartbeatDelay).pipe(
@@ -142,33 +141,54 @@ export const makeCheckpointCaptureQueueLayer = (
               ),
             ),
           );
-          const execute = Effect.gen(function* () {
-            let executionAttempt = 1;
-            while (true) {
-              const result = yield* executor.execute(job, ticket.signal).pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("Checkpoint capture executor failed", {
-                    jobId: job.jobId,
-                    threadId: job.threadId,
-                    requestedBoundary: job.requestedBoundary,
-                    executionAttempt,
-                    cause: Cause.pretty(cause),
-                  }).pipe(Effect.as({ state: "error" as const, errorCode: "capture-failed" })),
+          const execute = (signal: AbortSignal) =>
+            Effect.gen(function* () {
+              let executionAttempt = 1;
+              while (true) {
+                const result = yield* executor.execute(job, signal).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("Checkpoint capture executor failed", {
+                      jobId: job.jobId,
+                      threadId: job.threadId,
+                      requestedBoundary: job.requestedBoundary,
+                      executionAttempt,
+                      cause: Cause.pretty(cause),
+                    }).pipe(Effect.as({ state: "error" as const, errorCode: "capture-failed" })),
+                  ),
+                );
+                if (result.state !== "error" || executionAttempt >= maxExecutionAttempts) {
+                  return result;
+                }
+                yield* Effect.logWarning("Checkpoint capture will retry", {
+                  jobId: job.jobId,
+                  threadId: job.threadId,
+                  requestedBoundary: job.requestedBoundary,
+                  executionAttempt,
+                  errorCode: result.errorCode,
+                });
+                executionAttempt += 1;
+              }
+            });
+          let stable = true;
+          // The gate wait is interruptible, but every acquired ticket must
+          // register its release before cancellation can arrive.
+          const capture = Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* () {
+              const ticket = yield* restore(mutationCoordinator.beginCapture(job.worktreeKey));
+              return yield* restore(execute(ticket.signal)).pipe(
+                Effect.ensuring(
+                  mutationCoordinator.completeCapture(ticket).pipe(
+                    Effect.tap((completedStable) =>
+                      Effect.sync(() => {
+                        stable = completedStable && !ticket.signal.aborted;
+                      }),
+                    ),
+                    Effect.asVoid,
+                  ),
                 ),
               );
-              if (result.state !== "error" || executionAttempt >= maxExecutionAttempts) {
-                return result;
-              }
-              yield* Effect.logWarning("Checkpoint capture will retry", {
-                jobId: job.jobId,
-                threadId: job.threadId,
-                requestedBoundary: job.requestedBoundary,
-                executionAttempt,
-                errorCode: result.errorCode,
-              });
-              executionAttempt += 1;
-            }
-          });
+            }),
+          );
           yield* Effect.logInfo("Checkpoint capture started", {
             jobId: job.jobId,
             threadId: job.threadId,
@@ -180,7 +200,7 @@ export const makeCheckpointCaptureQueueLayer = (
             Effect.gen(function* () {
               yield* Effect.forkScoped(heartbeat);
               return yield* Effect.raceFirst(
-                execute.pipe(
+                capture.pipe(
                   Effect.timeoutOption(executionTimeout),
                   Effect.map(
                     Option.getOrElse(() => ({
@@ -195,11 +215,9 @@ export const makeCheckpointCaptureQueueLayer = (
               );
             }),
           );
-          const stable = yield* mutationCoordinator.completeCapture(ticket);
-          const finalResult: CheckpointCaptureExecutionResult =
-            stable && !ticket.signal.aborted
-              ? result
-              : { state: "contended", errorCode: "workspace-mutated" };
+          const finalResult: CheckpointCaptureExecutionResult = stable
+            ? result
+            : { state: "contended", errorCode: "workspace-mutated" };
           const completedAt = yield* isoNow;
           const completed = yield* repository.complete({
             jobId: job.jobId,

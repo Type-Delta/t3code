@@ -12,7 +12,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   type ClaudeSettings,
@@ -20,7 +20,7 @@ import {
   type ServerProviderModel,
 } from "@t3tools/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { spawnProviderProcess } from "../provider/executableRecovery.ts";
 
 import { TextGenerationError } from "@t3tools/contracts";
 import * as TextGeneration from "./TextGeneration.ts";
@@ -205,7 +205,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
                 ),
               )
           : cwd;
-      const spawnCommand = yield* resolveSpawnCommand(
+      const child = yield* spawnProviderProcess(
+        commandSpawner,
         claudeSettings.binaryPath || "claude",
         [
           "-p",
@@ -228,24 +229,18 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "--permission-mode",
           "dontAsk",
         ],
-        { env: claudeEnvironment },
-      );
-      const command = ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: claudeEnvironment,
-        cwd: workingDirectory,
-        shell: spawnCommand.shell,
-        stdin: {
-          stream: Stream.encodeText(Stream.make(prompt)),
+        {
+          env: claudeEnvironment,
+          cwd: workingDirectory,
+          stdin: {
+            stream: Stream.encodeText(Stream.make(prompt)),
+          },
         },
-      });
-
-      const child = yield* commandSpawner
-        .spawn(command)
-        .pipe(
-          Effect.mapError((cause) =>
-            normalizeCliError("claude", operation, cause, "Failed to spawn Claude CLI process"),
-          ),
-        );
+      ).pipe(
+        Effect.mapError((cause) =>
+          normalizeCliError("claude", operation, cause, "Failed to spawn Claude CLI process"),
+        ),
+      );
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [

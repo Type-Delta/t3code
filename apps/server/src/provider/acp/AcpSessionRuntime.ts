@@ -14,13 +14,12 @@ import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { spawnProviderProcess } from "../executableRecovery.ts";
 
 import { appendAcpStderrTail, sanitizeAcpStderrExcerpt } from "./AcpStderr.ts";
 import {
@@ -455,29 +454,20 @@ export const make = (
         ),
       );
 
-    const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
+    const child = yield* spawnProviderProcess(spawner, options.spawn.command, options.spawn.args, {
+      ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
       ...(options.spawn.env ? { env: options.spawn.env } : {}),
       extendEnv: options.spawn.extendEnv ?? true,
-    });
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-          ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: options.spawn.env } : {}),
-          extendEnv: options.spawn.extendEnv ?? true,
-          shell: spawnCommand.shell,
-        }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new EffectAcpErrors.AcpSpawnError({
-              command: options.spawn.command,
-              cause,
-            }),
-        ),
-      );
+    }).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+      Effect.mapError(
+        (cause) =>
+          new EffectAcpErrors.AcpSpawnError({
+            command: options.spawn.command,
+            cause,
+          }),
+      ),
+    );
 
     yield* child.stderr.pipe(
       Stream.decodeText(),

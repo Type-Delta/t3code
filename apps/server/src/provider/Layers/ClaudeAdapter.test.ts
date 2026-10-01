@@ -24,6 +24,8 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import { assert, describe, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -50,6 +52,7 @@ import {
 } from "../ClaudeModelCatalog.testFixtures.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import { ClaudeExecutableFileCheck } from "../Drivers/ClaudeExecutable.ts";
 import type { ClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
@@ -74,6 +77,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
   public closeCalls = 0;
   public closeError: unknown | undefined;
+  public initializationError: unknown | undefined;
+
+  readonly initializationResult = async (): Promise<void> => {
+    if (this.initializationError !== undefined) throw this.initializationError;
+  };
 
   emit(message: SDKMessage): void {
     if (this.done) {
@@ -174,6 +182,7 @@ function makeHarness(config?: {
   readonly environment?: ClaudeAdapterLiveOptions["environment"];
   readonly getSessionMessages?: ClaudeAdapterLiveOptions["getSessionMessages"];
   readonly forkSession?: ClaudeAdapterLiveOptions["forkSession"];
+  readonly createQuery?: ClaudeAdapterLiveOptions["createQuery"];
 }) {
   const query = new FakeClaudeQuery();
   const queries = [query];
@@ -194,6 +203,7 @@ function makeHarness(config?: {
     createQuery: (input) => {
       if (createInput && config?.getSessionMessages) queries.push(new FakeClaudeQuery());
       createInput = input;
+      if (config?.createQuery) return config.createQuery(input);
       return queries.at(-1)!;
     },
     ...(config?.nativeEventLogger
@@ -436,6 +446,139 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(layer),
     );
+  });
+
+  for (const failureMode of ["create", "initialize"] as const) {
+    it.effect(
+      `refreshes a stale Claude PATH after ${failureMode} fails and caches recovery`,
+      () => {
+        const oldDirectory = "C:\\old-node";
+        const newDirectory = "C:\\new-node";
+        const packageEntry = "\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
+        const oldPath = oldDirectory + packageEntry;
+        const newPath = newDirectory + packageEntry;
+        let currentDirectory = oldDirectory;
+        let resolutions = 0;
+        const paths: Array<string | undefined> = [];
+        const failedQuery = new FakeClaudeQuery();
+        failedQuery.initializationError = new ReferenceError(
+          `Claude Code native binary not found at ${oldPath}.`,
+        );
+        const queries: FakeClaudeQuery[] = [];
+        const harness = makeHarness({
+          createQuery: (input) => {
+            paths.push(input.options.pathToClaudeCodeExecutable);
+            if (input.options.pathToClaudeCodeExecutable === oldPath) {
+              if (failureMode === "create") throw failedQuery.initializationError;
+              return failedQuery;
+            }
+            const query = new FakeClaudeQuery();
+            queries.push(query);
+            return query;
+          },
+        });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          currentDirectory = newDirectory;
+          const eventsFiber = yield* adapter.streamEvents.pipe(
+            Stream.take(4),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello" });
+          const events = yield* Fiber.join(eventsFiber);
+          assert.deepEqual(
+            events.map((event) => event.type),
+            ["session.started", "session.configured", "session.state.changed", "turn.started"],
+          );
+          assert.equal(turn.threadId, THREAD_ID);
+          assert.equal(yield* adapter.hasSession(THREAD_ID), true);
+          yield* adapter.startSession({
+            threadId: ThreadId.make("second-thread"),
+            runtimeMode: "full-access",
+          });
+          assert.deepEqual(paths, [oldPath, newPath, newPath]);
+          assert.equal(resolutions, 2);
+          assert.equal(failedQuery.closeCalls, failureMode === "initialize" ? 1 : 0);
+          assert.equal(queries.length, 2);
+        }).pipe(
+          Effect.provide(harness.layer),
+          Effect.provideService(HostProcessPlatform, "win32"),
+          Effect.provideService(SpawnExecutableResolution, () => {
+            resolutions += 1;
+            return `${currentDirectory}\\claude.cmd`;
+          }),
+          Effect.provideService(
+            ClaudeExecutableFileCheck,
+            (path) => path === currentDirectory + packageEntry,
+          ),
+        );
+      },
+    );
+  }
+
+  for (const binaryPath of ["claude", "C:\\custom\\claude.exe", "./bin/claude"]) {
+    it.effect(`limits failed Claude executable recovery for ${binaryPath}`, () => {
+      let attempts = 0;
+      const queries: FakeClaudeQuery[] = [];
+      const cause = new ReferenceError("Claude Code native binary not found at old.exe.");
+      const harness = makeHarness({
+        claudeConfig: { binaryPath },
+        createQuery: () => {
+          attempts += 1;
+          const query = new FakeClaudeQuery();
+          query.initializationError = cause;
+          queries.push(query);
+          return query;
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const error = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.flip);
+        assert.instanceOf(error, ProviderAdapterProcessError);
+        assert.strictEqual(error.cause, cause);
+        assert.equal(attempts, binaryPath === "claude" ? 2 : 1);
+        assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+        assert.equal(
+          queries.every((query) => query.closeCalls === 1),
+          true,
+        );
+      }).pipe(
+        Effect.provide(harness.layer),
+        Effect.provideService(HostProcessPlatform, "win32"),
+        Effect.provideService(SpawnExecutableResolution, () => "C:\\old\\claude.exe"),
+      );
+    });
+  }
+
+  it.effect("does not retry unrelated Claude initialization failures", () => {
+    let attempts = 0;
+    const query = new FakeClaudeQuery();
+    const cause = new Error("authentication failed");
+    query.initializationError = cause;
+    const harness = makeHarness({
+      createQuery: () => {
+        attempts += 1;
+        return query;
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const error = yield* adapter
+        .startSession({ threadId: THREAD_ID, runtimeMode: "full-access" })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, ProviderAdapterProcessError);
+      assert.strictEqual(error.cause, cause);
+      assert.equal(attempts, 1);
+      assert.equal(query.closeCalls, 1);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.effect("appends prompt suggestion instructions to the session system prompt", () => {
@@ -6509,6 +6652,209 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
+  });
+
+  for (const failure of ["missing-session", "stale-executable"] as const) {
+    it.effect(
+      `delivers the first recovered Claude prompt after ${failure} to the replacement query`,
+      () => {
+        const sessionId = "36b2df51-1140-4cc9-9b30-75cf03090d3e";
+        let attempts = 0;
+        let recordReceipt: (receipt: { attempt: number; message: SDKUserMessage }) => void;
+        const receipt = new Promise<{ attempt: number; message: SDKUserMessage }>((resolve) => {
+          recordReceipt = resolve;
+        });
+        const harness = makeHarness({
+          createQuery: (input) => {
+            const attempt = ++attempts;
+            // The SDK starts reading input even when its initialization fails, and
+            // close() does not cancel a next() already waiting on the input stream.
+            void input.prompt[Symbol.asyncIterator]()
+              .next()
+              .then((item) => {
+                if (!item.done) recordReceipt({ attempt, message: item.value });
+              })
+              .catch(() => {});
+            const query = new FakeClaudeQuery();
+            if (attempt === 1) {
+              query.initializationError =
+                failure === "missing-session"
+                  ? new Error(
+                      `Claude Code returned an error result: No conversation found with session ID: ${sessionId}`,
+                    )
+                  : new ReferenceError("Claude Code native binary not found at old.exe.");
+            }
+            return query;
+          },
+        });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({
+            threadId: RESUME_THREAD_ID,
+            resumeCursor: { resume: sessionId, turnCount: 0 },
+            runtimeMode: "full-access",
+          });
+          yield* adapter.sendTurn({ threadId: RESUME_THREAD_ID, input: "continue" });
+          const received = yield* Effect.promise(() => receipt);
+          assert.equal(received.attempt, 2);
+          assert.deepEqual(received.message.message.content, [{ type: "text", text: "continue" }]);
+          yield* adapter.stopSession(RESUME_THREAD_ID);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  it.effect("recreates a missing zero-turn Claude session before accepting a turn", () => {
+    const sessionId = "36b2df51-1140-4cc9-9b30-75cf03090d3e";
+    const attempts: Array<ClaudeQueryOptions> = [];
+    const failedQuery = new FakeClaudeQuery();
+    failedQuery.initializationError = new Error(
+      `Claude Code returned an error result: No conversation found with session ID: ${sessionId}`,
+    );
+    const query = new FakeClaudeQuery();
+    const harness = makeHarness({
+      createQuery: (input) => {
+        attempts.push({ ...input.options });
+        return input.options.resume ? failedQuery : query;
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        resumeCursor: { threadId: RESUME_THREAD_ID, resume: sessionId, turnCount: 0 },
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: RESUME_THREAD_ID, input: "continue" });
+      assert.equal(attempts.length, 2);
+      assert.equal(attempts[0]?.resume, sessionId);
+      assert.equal(attempts[1]?.resume, undefined);
+      assert.equal(attempts[1]?.sessionId, sessionId);
+      assert.equal(failedQuery.closeCalls, 1);
+      assert.deepEqual(session.resumeCursor, {
+        threadId: RESUME_THREAD_ID,
+        resume: sessionId,
+        turnCount: 0,
+      });
+      assert.equal(
+        yield* Effect.promise(() => readFirstPromptText(harness.getLastCreateQueryInput())),
+        "continue",
+      );
+      assert.deepEqual(
+        (yield* Fiber.join(eventsFiber)).map((event) => event.type),
+        ["session.started", "session.configured", "session.state.changed", "turn.started"],
+      );
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  for (const cursor of [
+    { turnCount: 1 },
+    { turnCount: 0, resumeSessionAt: "assistant-99" },
+    { turnCount: 0, turnStartMessageIds: [null] },
+    {},
+  ]) {
+    it.effect(
+      `does not recreate a missing Claude session with cursor ${JSON.stringify(cursor)}`,
+      () => {
+        const sessionId = "36b2df51-1140-4cc9-9b30-75cf03090d3e";
+        let attempts = 0;
+        const cause = new Error(
+          `Claude Code returned an error result: No conversation found with session ID: ${sessionId}`,
+        );
+        const query = new FakeClaudeQuery();
+        query.initializationError = cause;
+        const harness = makeHarness({
+          createQuery: () => {
+            attempts += 1;
+            return query;
+          },
+        });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const error = yield* adapter
+            .startSession({
+              threadId: RESUME_THREAD_ID,
+              resumeCursor: { resume: sessionId, ...cursor },
+              runtimeMode: "full-access",
+            })
+            .pipe(Effect.flip);
+          assert.strictEqual(error.cause, cause);
+          assert.equal(attempts, 1);
+          assert.equal(query.closeCalls, 1);
+          assert.equal(yield* adapter.hasSession(RESUME_THREAD_ID), false);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  for (const message of [
+    "authentication failed",
+    "Claude Code returned an error result: No conversation found with session ID: 550e8400-e29b-41d4-a716-446655440000",
+  ]) {
+    it.effect(`does not recreate a zero-turn Claude session for ${message}`, () => {
+      let attempts = 0;
+      const query = new FakeClaudeQuery();
+      const cause = new Error(message);
+      query.initializationError = cause;
+      const harness = makeHarness({
+        createQuery: () => {
+          attempts += 1;
+          return query;
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const error = yield* adapter
+          .startSession({
+            threadId: RESUME_THREAD_ID,
+            resumeCursor: { resume: "36b2df51-1140-4cc9-9b30-75cf03090d3e", turnCount: 0 },
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.flip);
+        assert.strictEqual(error.cause, cause);
+        assert.equal(attempts, 1);
+        assert.equal(query.closeCalls, 1);
+        assert.equal(yield* adapter.hasSession(RESUME_THREAD_ID), false);
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  it.effect("limits missing zero-turn Claude session recovery to one attempt", () => {
+    const sessionId = "36b2df51-1140-4cc9-9b30-75cf03090d3e";
+    const cause = new Error(
+      `Claude Code returned an error result: No conversation found with session ID: ${sessionId}`,
+    );
+    const queries: FakeClaudeQuery[] = [];
+    const harness = makeHarness({
+      createQuery: () => {
+        const query = new FakeClaudeQuery();
+        query.initializationError = cause;
+        queries.push(query);
+        return query;
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const error = yield* adapter
+        .startSession({
+          threadId: RESUME_THREAD_ID,
+          resumeCursor: { resume: sessionId, turnCount: 0 },
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.flip);
+      assert.strictEqual(error.cause, cause);
+      assert.equal(queries.length, 2);
+      assert.equal(
+        queries.every((query) => query.closeCalls === 1),
+        true,
+      );
+      assert.equal(yield* adapter.hasSession(RESUME_THREAD_ID), false);
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.effect("preserves durable resume ids across Claude resume hooks", () => {

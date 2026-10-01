@@ -17,9 +17,10 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { spawnProviderProcess } from "../executableRecovery.ts";
 import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -31,7 +32,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
@@ -1506,6 +1507,7 @@ export const makeCodexSessionRuntime = (
     const pendingCollabWaitRef = yield* Ref.make<PendingCollabWait | undefined>(undefined);
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
+    const failureRef = yield* Ref.make<CodexErrors.CodexAppServerError | undefined>(undefined);
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -1517,38 +1519,22 @@ export const makeCodexSessionRuntime = (
     };
     const extendEnv = options.environment === undefined;
     const appServerArgs = codexSessionAppServerArgs(options.appServerArgs, options.launchArgs);
-    const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, appServerArgs, {
+    const child = yield* spawnProviderProcess(spawner, options.binaryPath, appServerArgs, {
+      cwd: options.cwd,
       env,
       extendEnv,
-    });
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-          cwd: options.cwd,
-          env,
-          extendEnv,
-          forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
-          shell: spawnCommand.shell,
-        }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new CodexErrors.CodexAppServerSpawnError({
-              command: `${options.binaryPath} app-server`,
-              cause,
-            }),
-        ),
-      );
-
-    const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
-      Layer.build,
+      forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
+    }).pipe(
       Effect.provideService(Scope.Scope, runtimeScope),
+      Effect.mapError(
+        (cause) =>
+          new CodexErrors.CodexAppServerSpawnError({
+            command: `${options.binaryPath} app-server`,
+            cause,
+          }),
+      ),
     );
-    const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-      Effect.provide(clientContext),
-    );
+
     const serverNotifications = yield* Queue.unbounded<CodexServerNotification>();
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const randomUUIDv4 = (purpose: CodexErrors.CodexAppServerIdentifierPurpose) =>
@@ -1596,6 +1582,35 @@ export const makeCodexSessionRuntime = (
         method,
         message,
       });
+
+    const failSession = Effect.fnUntraced(function* (error: CodexErrors.CodexAppServerError) {
+      if (yield* Ref.get(closedRef)) return;
+      const accepted = yield* Ref.modify(failureRef, (existing) =>
+        existing ? [false, existing] : [true, error],
+      );
+      if (!accepted) return;
+      yield* updateSession(sessionRef, {
+        status: "error",
+        activeTurnId: undefined,
+        lastError: error.message,
+      });
+      yield* emitSessionEvent("session/error", error.message).pipe(
+        Effect.catch((cause) =>
+          Effect.logError("Failed to emit Codex session error event.", { cause }),
+        ),
+      );
+      // The peer may still be working after its pipe failed. End only the
+      // process this runtime owns; a later message can resume its durable thread.
+      yield* child.kill().pipe(Effect.ignore, Effect.forkIn(runtimeScope));
+    });
+
+    const clientContext = yield* CodexClient.layerChildProcess(child, {
+      onTermination: (error) =>
+        error._tag === "CodexAppServerProcessExitedError" ? Effect.void : failSession(error),
+    }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
+    const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+      Effect.provide(clientContext),
+    );
 
     const completeCollabWait = (matches: (pending: PendingCollabWait) => boolean) =>
       Ref.modify(pendingCollabWaitRef, (pending) =>
@@ -2817,6 +2832,16 @@ export const makeCodexSessionRuntime = (
 
     yield* Stream.fromQueue(serverNotifications).pipe(
       Stream.runForEach(handleRawNotification),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : failSession(
+              new CodexErrors.CodexAppServerTransportError({
+                operation: "handle-notification",
+                cause,
+              }),
+            ),
+      ),
       Effect.forkIn(runtimeScope),
     );
 
@@ -2855,27 +2880,19 @@ export const makeCodexSessionRuntime = (
 
     yield* child.exitCode.pipe(
       Effect.flatMap((exitCode) =>
-        Ref.get(closedRef).pipe(
-          Effect.flatMap((closed) => {
-            if (closed) {
-              return Effect.void;
-            }
-            const nextStatus = exitCode === 0 ? "closed" : "error";
-            return updateSession(sessionRef, {
-              status: nextStatus,
-              activeTurnId: undefined,
-            }).pipe(
-              Effect.andThen(
-                emitSessionEvent(
-                  "session/exited",
-                  exitCode === 0
-                    ? "Codex App Server exited."
-                    : `Codex App Server exited with code ${exitCode}.`,
-                ),
-              ),
-            );
-          }),
-        ),
+        Effect.gen(function* () {
+          if ((yield* Ref.get(closedRef)) || (yield* Ref.get(failureRef))) return;
+          yield* updateSession(sessionRef, {
+            status: exitCode === 0 ? "closed" : "error",
+            activeTurnId: undefined,
+          });
+          yield* emitSessionEvent(
+            "session/exited",
+            exitCode === 0
+              ? "Codex App Server exited."
+              : `Codex App Server exited with code ${exitCode}.`,
+          );
+        }),
       ),
       Effect.forkIn(runtimeScope),
     );
@@ -2912,6 +2929,8 @@ export const makeCodexSessionRuntime = (
     });
 
     const readProviderThreadId = Effect.gen(function* () {
+      const failure = yield* Ref.get(failureRef);
+      if (failure) return yield* failure;
       const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
       if (!providerThreadId) {
         return yield* new CodexSessionRuntimeThreadIdMissingError({

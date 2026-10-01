@@ -165,7 +165,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Effect.promise(() => this.startImpl());
   }
 
-  getSession = Effect.promise(() => this.startImpl());
+  getSession: Effect.Effect<ProviderSession> = Effect.promise(() => this.startImpl());
 
   sendTurn(input: CodexSessionRuntimeSendTurnInput) {
     return Effect.promise(() => this.sendTurnImpl(input));
@@ -2359,6 +2359,44 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
       NodeAssert.equal(firstEvent.value.threadId, "thread-1");
       NodeAssert.equal(firstEvent.value.payload.reason, "Session stopped");
+    }),
+  );
+
+  it.effect("reports a failed transport and excludes its session from reuse", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const threadId = asThreadId("thread-1");
+      NodeAssert.equal(yield* adapter.hasSession(threadId), true);
+      runtime.getSession = Effect.succeed({
+        ...(yield* runtime.getSession),
+        status: "error",
+        activeTurnId: undefined,
+        lastError: "Codex wire reader failed",
+      });
+      NodeAssert.equal(yield* adapter.hasSession(threadId), true);
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 2)).pipe(
+        Effect.forkChild,
+      );
+      yield* runtime.emit({
+        id: asEventId("evt-session-wire-error"),
+        kind: "session",
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "session/error",
+        message: "Codex wire reader failed",
+      });
+      const events = yield* Fiber.join(eventsFiber);
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["runtime.error", "session.exited"],
+      );
+      NodeAssert.equal(yield* adapter.hasSession(threadId), false);
+      const failure = events[0];
+      if (failure?.type === "runtime.error") {
+        NodeAssert.equal(failure.payload.message, "Codex wire reader failed");
+        NodeAssert.equal(failure.payload.class, "provider_error");
+      }
     }),
   );
 

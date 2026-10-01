@@ -505,6 +505,62 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
   });
 
   describe("sidecar checkpoints", () => {
+    it.effect(
+      "captures unstaged tracked deletions and renames without changing the user index",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir("checkpoint-sidecar-deletions-");
+          yield* initRepoWithCommit(tmp);
+          const fileSystem = yield* FileSystem.FileSystem;
+          const checkpointStore = yield* CheckpointStore.CheckpointStore;
+          yield* writeTextFile(NodePath.join(tmp, "deleted.txt"), "delete me\n");
+          yield* git(tmp, ["add", "deleted.txt"]);
+          yield* git(tmp, ["commit", "-m", "tracked file"]);
+          const userIndex = yield* fileSystem.readFile(NodePath.join(tmp, ".git/index"));
+          const before = yield* makeSidecarRef(tmp, "before-deletions");
+          const after = yield* makeSidecarRef(tmp, "after-deletions");
+          yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: before });
+
+          yield* fileSystem.remove(NodePath.join(tmp, "deleted.txt"));
+          yield* fileSystem.rename(
+            NodePath.join(tmp, "README.md"),
+            NodePath.join(tmp, "renamed.md"),
+          );
+          yield* checkpointStore.captureCheckpointWithMetadata({ cwd: tmp, checkpointRef: after });
+          expect(yield* fileSystem.readFile(NodePath.join(tmp, ".git/index"))).toEqual(userIndex);
+
+          expect(
+            yield* checkpointStore.restoreCheckpoint({ cwd: tmp, checkpointRef: before }),
+          ).toBe(true);
+          expect(
+            (yield* fileSystem.readFileString(NodePath.join(tmp, "deleted.txt"))).replaceAll(
+              "\r\n",
+              "\n",
+            ),
+          ).toBe("delete me\n");
+          expect(
+            (yield* fileSystem.readFileString(NodePath.join(tmp, "README.md"))).replaceAll(
+              "\r\n",
+              "\n",
+            ),
+          ).toBe("# test\n");
+          expect(yield* fileSystem.exists(NodePath.join(tmp, "renamed.md"))).toBe(false);
+
+          expect(yield* checkpointStore.restoreCheckpoint({ cwd: tmp, checkpointRef: after })).toBe(
+            true,
+          );
+          expect(yield* fileSystem.exists(NodePath.join(tmp, "deleted.txt"))).toBe(false);
+          expect(yield* fileSystem.exists(NodePath.join(tmp, "README.md"))).toBe(false);
+          expect(
+            (yield* fileSystem.readFileString(NodePath.join(tmp, "renamed.md"))).replaceAll(
+              "\r\n",
+              "\n",
+            ),
+          ).toBe("# test\n");
+          expect(yield* fileSystem.readFile(NodePath.join(tmp, ".git/index"))).toEqual(userIndex);
+        }),
+    );
+
     it.effect("captures and restores an unborn repository without creating project objects", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir("checkpoint-sidecar-unborn-");

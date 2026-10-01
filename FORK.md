@@ -54,13 +54,21 @@ Keep stable IDs when updating this section; gaps are intentional. When upstream 
 
 Windows Claude commands are resolved before the Agent SDK starts a session. The resolver follows npm launcher shims to the installed native executable or JavaScript entry point and preserves explicit executable paths. Provider snapshots and DevTools expose sanitized resolver diagnostics; startup provenance identifies installed web artifacts without exposing command output or environment values.
 
+When a PATH-based provider executable disappears before startup, the backend resolves it again and retries once. Claude waits for the SDK initialization handshake before reporting ready and caches a replacement path only after successful initialization. Codex, Cursor, Grok, local OpenCode, and Claude/Codex metadata commands apply the retry at process launch; Antigravity reacquires its PATH installation and harness together. Explicit executable paths and managed Antigravity installations never use this fallback. Failures after a process starts do not replay agent work.
+
+Older failed Claude startups could persist a generated session ID before its transcript existed. If Claude explicitly rejects that resume ID and the cursor records zero turns with no assistant checkpoint or turn boundaries, the adapter recreates the session with the same ID once before accepting a turn. Missing sessions with recorded history remain errors.
+
+Each Claude startup attempt owns a separate prompt queue. Closing a failed SDK query does not cancel its pending input read, so sharing a queue across retries could lose the replacement session's first prompt. Failed attempts now close their query and shut down their queue before recovery.
+
 The current server bundle includes the SDK and uses the configured Claude installation. Upstream packaging removes unused SDK native optional dependencies; the older SDK patch and lockfile-free patch-pinning workaround are no longer active. Windows and WSL ship separate runtime archives, each with its own platform dependencies.
 
-**Implementation evidence:** `apps/server/src/provider/Drivers/ClaudeExecutable.ts`, `apps/server/src/provider/Layers/ClaudeProvider.ts`, `apps/server/src/provider/providerSnapshot.ts`, `scripts/build-desktop-artifact.ts`, and `pnpm-workspace.yaml`.
+**Implementation evidence:** `apps/server/src/provider/executableRecovery.ts`, the Claude and Codex adapter runtimes, `apps/server/src/provider/acp/AcpSessionRuntime.ts`, `apps/server/src/provider/opencodeRuntime.ts`, `apps/server/src/provider/Drivers/{ClaudeExecutable,AntigravityDriver}.ts`, `apps/server/src/provider/Layers/ClaudeProvider.ts`, `apps/server/src/provider/providerSnapshot.ts`, `scripts/build-desktop-artifact.ts`, and `pnpm-workspace.yaml`.
 
-**Recorded validation:** Windows initialization and packaging were verified during earlier integrations. The 2026-09-23 merge audit checks the current executable-resolution and packaging paths; it does not claim a new Windows runtime verification.
+**Recorded validation:** 352 focused tests passed across 11 affected suites on Windows, with 14 existing platform skips. Recovery tests cover synchronous and asynchronous Claude startup failures, replacement-path caching, one retry, explicit-path exclusions, real child-process launches, and Antigravity executable/harness reacquisition. The stale Cursor rollback assertion now checks the current navigation contract. Codex metadata tests were run without the inherited `T3CODE_CODEX_LAUNCH_ARGS` override. The OpenCode localhost output fixture timed out in combined runs and passed isolated reruns. `vp check`, `vp run typecheck`, and `git diff --check` passed. Earlier integrations verified initialization and packaging.
 
-**Last updated:** 2026-09-23
+The empty-session follow-up initially verified initialization only. A later real-SDK probe reproduced the failed query stealing the replacement's first prompt; the fixed probe delivered that prompt to the replacement and received native `system/init`. All 159 Claude adapter tests passed, including prompt delivery after missing-session and stale-executable recovery.
+
+**Last updated:** 2026-09-30
 
 ### DL002 — Machine context beside the empty-state hero
 
@@ -128,11 +136,13 @@ Terminal provider events end the workspace mutation for their exact turn before 
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
+Sidecar capture excludes deleted tracked paths from `git add`. Its private index starts empty, so those paths already represent deletions; including them as pathspecs would reject an otherwise valid capture. Deleted and renamed files restore correctly without changing the user's Git index.
+
 **Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,047_AuthSessionClientConnection,048_ProjectionThreadLinkedPullRequest,049_ProjectionThreadsUnsettledAt,053_ReconcileUpstream47History,054_ClearAutomaticProjectModelDefaults,055_ProjectionProjectsAutoPull,056_RepairAutomaticSettlementTimestamps,057_ProjectionProjectIcon}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
 
-**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated.
+**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated. The deletion/rename regression and all 15 sidecar checkpoint tests passed on Windows with the user-index preservation assertion.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-09-30
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -313,13 +323,17 @@ The 2026-09-05 authentication fix passed 48 focused tests, including a tray inte
 
 Starting a provider turn no longer waits indefinitely when the previous turn has finished but its post-turn checkpoint capture is still pending. In that state, the server dispatches the next turn without a checkpoint mutation so authentication failures and stalled captures cannot freeze the thread. Active provider mutations retain their existing brief handoff grace period. This behavior applies to every provider through the shared command reactor.
 
-Checkpoint workers also reclaim expired leases while the server remains running, retry transient capture errors up to three times, and terminate an executor that exceeds five minutes. Structured lifecycle logs identify the job, thread, boundary, durable attempt, execution attempt, result, and recovery action so capture failures can be diagnosed without inspecting SQLite.
+Checkpoint workers also reclaim expired leases while the server remains running and retry transient capture errors up to three times. Their lease heartbeat and five-minute deadline cover both the workspace gate wait and capture execution. Cancellation releases an acquired gate ticket, and a long gate wait cannot let the same job occupy both capture workers through lease expiry. Structured lifecycle logs identify the job, thread, boundary, durable attempt, execution attempt, result, and recovery action so capture failures can be diagnosed without inspecting SQLite.
 
-**Implementation evidence:** `apps/server/src/checkpointing/CheckpointCaptureQueue.ts`, `apps/server/src/checkpointing/CheckpointCaptureQueue.test.ts`, `apps/server/src/orchestration/Layers/CheckpointReactor.ts`, `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts`, and `apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts`.
+Provider intents are processed in order per thread. An unanswered interrupt or approval response in one thread no longer blocks other threads. Codex transport and notification-consumer failures terminate the affected session with visible error and exit events, reject pending requests, and stop the owned subprocess. Recoverable provider turn errors still permit session reuse, and failed agent work is never replayed automatically.
 
-**Recorded validation:** focused checkpoint queue recovery, retry, timeout, and provider command barrier regressions; `vp check`; and `vp run typecheck`.
+Compaction replay waits for each provider send to finish before resuming the next queued message. Stopping during a blocked send therefore reports the remaining queued message as canceled instead of silently dispatching it later.
 
-**Last updated:** 2026-08-11
+**Implementation evidence:** `apps/server/src/checkpointing/CheckpointCaptureQueue.ts` and its tests, `apps/server/src/orchestration/Layers/{CheckpointReactor,ProviderCommandReactor}.ts`, the provider command tests, `apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter}.ts` and their regressions, and `packages/effect-codex-app-server/src/{client,protocol}.ts` and protocol tests.
+
+**Recorded validation:** 82 provider command tests, six capture queue tests, and 159 Codex protocol/client/runtime/adapter tests passed. Deterministic regressions cover gate-wait lease renewal and timeout, post-timeout ticket release, cross-thread progress with same-thread command ordering, compaction replay cancellation, and visible transport failures. `vp check`, `vp run typecheck`, and `git diff --check` passed.
+
+**Last updated:** 2026-09-30
 
 ### DL021 — Clickable Windows file links in thread Markdown
 

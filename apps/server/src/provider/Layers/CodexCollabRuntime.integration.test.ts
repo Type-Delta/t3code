@@ -31,6 +31,7 @@ const ROOT = wireFixture.rootThreadId;
 const [CHILD_A, CHILD_B] = wireFixture.childThreadIds as [string, string];
 const MEMORY = "memory-consolidation-thread";
 const PROVISIONAL_CHILD = "provisional-child-thread";
+const encodeScript = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeMcpElicitationResponse = Schema.decodeUnknownEffect(
   Schema.fromJsonString(
     Schema.Struct({
@@ -198,6 +199,63 @@ const peerPath = NodePath.join(
 );
 
 describe("CodexSessionRuntime collab integration", () => {
+  it.effect("ends a running session when its wire reader fails before the provider exits", () =>
+    Effect.gen(function* () {
+      const directory = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-codex-wire-failure-"),
+      );
+      const malformedScriptPath = NodePath.join(directory, "script.json");
+      NodeFS.writeFileSync(
+        malformedScriptPath,
+        encodeScript({
+          rootThreadId: ROOT,
+          holdTurnOpen: true,
+          malformedWireOnCompact: true,
+          notifications: [],
+        }),
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("thread-wire-reader-failure"),
+        binaryPath: peerPath,
+        cwd: directory,
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: malformedScriptPath },
+      });
+      const events: Array<ProviderEvent> = [];
+      const sessionFailed = yield* Deferred.make<void>();
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          Effect.sync(() => events.push(event)).pipe(
+            Effect.andThen(
+              event.method === "session/error"
+                ? Deferred.succeed(sessionFailed, undefined)
+                : Effect.void,
+            ),
+          ),
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "wait for the scripted transport failure" });
+      const failure = yield* runtime.compactThread.pipe(Effect.flip);
+      assert.equal(failure._tag, "CodexAppServerProtocolParseError");
+      yield* Deferred.await(sessionFailed);
+      const session = yield* runtime.getSession;
+      assert.equal(session.status, "error");
+      assert.isUndefined(session.activeTurnId);
+      assert.include(session.lastError, "decode-wire-message");
+      assert.isFalse(events.some((event) => event.method === "turn/completed"));
+      assert.isTrue(events.some((event) => event.method === "session/error"));
+      const nextFailure = yield* runtime
+        .sendTurn({ input: "must fail without replaying" })
+        .pipe(Effect.flip);
+      assert.equal(nextFailure._tag, "CodexAppServerProtocolParseError");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("settles a root collaboration wait that never completes", () =>
     Effect.gen(function* () {
       const waitStarted = wireFixture.notifications.find((entry) => {

@@ -1116,9 +1116,11 @@ describe("ProviderCommandReactor", () => {
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
       const titleGenerated = yield* Deferred.make<void>();
+      const sent = yield* Deferred.make<void>();
       const harness = yield* Effect.promise(() =>
         createHarness({
           unreadableHistory: true,
+          sendTurnStarted: sent,
           startSessionEffect: (session) =>
             Deferred.succeed(started, undefined).pipe(Effect.as(session)),
         }),
@@ -1143,6 +1145,7 @@ describe("ProviderCommandReactor", () => {
       });
       yield* Deferred.await(started);
       yield* Deferred.await(titleGenerated);
+      yield* Deferred.await(sent);
       yield* Effect.promise(() => harness.drain());
 
       expect(harness.sendTurn).toHaveBeenCalledWith(
@@ -4356,6 +4359,93 @@ describe("ProviderCommandReactor", () => {
       },
     });
   });
+
+  effectIt.effect("preserves thread command order while another thread starts", () =>
+    Effect.gen(function* () {
+      const interruptEntered = yield* Deferred.make<void>();
+      const releaseInterrupt = yield* Deferred.make<void>();
+      const turnSent = yield* Deferred.make<void>();
+      const sessionStopped = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          interruptTurnEffect: () =>
+            Deferred.succeed(interruptEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseInterrupt)),
+            ),
+          sendTurnStarted: turnSent,
+          stopSessionEffect: () => Deferred.succeed(sessionStopped, undefined),
+        }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+      yield* harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-create-independent-thread"),
+        threadId: ThreadId.make("thread-2"),
+        projectId: asProjectId("project-1"),
+        title: "Independent thread",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-set-stalled-session"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-stalled"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("cmd-interrupt-stalled-thread"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      });
+      yield* Deferred.await(interruptEntered);
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-stop-after-stalled-interrupt"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-start-independent-thread"),
+        threadId: ThreadId.make("thread-2"),
+        message: {
+          messageId: asMessageId("independent-prompt"),
+          role: "user",
+          text: "continue",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* Deferred.await(turnSent).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            expect(harness.stopSession).not.toHaveBeenCalled();
+            expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+            expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ threadId: "thread-2" });
+          }),
+        ),
+        Effect.ensuring(Deferred.succeed(releaseInterrupt, undefined)),
+      );
+      yield* Deferred.await(sessionStopped);
+      yield* Effect.promise(() => harness.drain());
+    }),
+  );
 
   it("reacts to thread.turn.interrupt-requested by calling provider interrupt", async () => {
     const harness = await createHarness();

@@ -579,7 +579,19 @@ export const make = Effect.gen(function* () {
           const buildVerificationTree = Effect.fn(
             "SidecarCheckpointRepository.capture.buildVerificationTree",
           )(function* (index: string, pathspecFile: string, operationSuffix: string) {
-            const paths = yield* workspacePaths(input.cwd, identity.worktreeRoot);
+            const [workspace, deleted] = yield* Effect.all([
+              workspacePaths(input.cwd, identity.worktreeRoot),
+              git(
+                "SidecarCheckpointRepository.capture.deletedPaths",
+                input.cwd,
+                ["-C", identity.worktreeRoot, "ls-files", "--deleted", "-z"],
+                { maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES },
+              ),
+            ]);
+            // The private index starts empty, so absent tracked files already
+            // represent deletions. Passing them to git add would fail its pathspec.
+            const deletedPaths = new Set(deleted.stdout.split("\0"));
+            const paths = workspace.filter((relativePath) => !deletedPaths.has(relativePath));
             yield* fileSystem
               .writeFileString(pathspecFile, paths.length === 0 ? "" : `${paths.join("\0")}\0`)
               .pipe(

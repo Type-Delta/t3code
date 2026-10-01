@@ -5,7 +5,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   type CodexSettings,
@@ -15,7 +15,7 @@ import {
   TextGenerationError,
 } from "@t3tools/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { spawnProviderProcess } from "../provider/executableRecovery.ts";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -193,7 +193,8 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
         DEFAULT_TEXT_GENERATION_REASONING_EFFORT;
       const serviceTier = getCodexServiceTierOptionValue(modelSelection);
-      const spawnCommand = yield* resolveSpawnCommand(
+      const child = yield* spawnProviderProcess(
+        commandSpawner,
         codexConfig.binaryPath || "codex",
         [
           "exec",
@@ -214,27 +215,21 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           ...imagePaths.flatMap((imagePath) => ["--image", imagePath]),
           "-",
         ],
-        { env: resolvedEnvironment },
+        {
+          env: {
+            ...resolvedEnvironment,
+            ...(codexConfig.homePath ? { CODEX_HOME: expandHomePath(codexConfig.homePath) } : {}),
+          },
+          cwd,
+          stdin: {
+            stream: Stream.encodeText(Stream.make(prompt)),
+          },
+        },
+      ).pipe(
+        Effect.mapError((cause) =>
+          normalizeCliError("codex", operation, cause, "Failed to spawn Codex CLI process"),
+        ),
       );
-      const command = ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: {
-          ...resolvedEnvironment,
-          ...(codexConfig.homePath ? { CODEX_HOME: expandHomePath(codexConfig.homePath) } : {}),
-        },
-        cwd,
-        shell: spawnCommand.shell,
-        stdin: {
-          stream: Stream.encodeText(Stream.make(prompt)),
-        },
-      });
-
-      const child = yield* commandSpawner
-        .spawn(command)
-        .pipe(
-          Effect.mapError((cause) =>
-            normalizeCliError("codex", operation, cause, "Failed to spawn Codex CLI process"),
-          ),
-        );
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [

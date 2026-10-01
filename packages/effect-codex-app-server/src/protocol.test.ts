@@ -1,8 +1,10 @@
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 
@@ -35,6 +37,66 @@ const decodeConsumeRateLimitResetCreditResponse = Schema.decodeUnknownEffect(
 );
 
 it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
+  it.effect("fails pending requests when a notification callback defects", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onNotification: () => Effect.die(new Error("scripted notification callback failure")),
+      });
+      const request = yield* transport.request("thread/read", {}).pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+      yield* Queue.offer(input, encodeJsonl({ method: "x/fixture-notification" }));
+      const failure = yield* Fiber.join(request).pipe(
+        Effect.match({
+          onFailure: (error) => error,
+          onSuccess: () => assert.fail("Expected the failed reader to reject its pending request"),
+        }),
+      );
+      assert.instanceOf(failure, CodexError.CodexAppServerTransportError);
+      assert.equal(failure.operation, "read-input-stream");
+      const nextFailure = yield* transport.request("thread/read", {}).pipe(
+        Effect.match({
+          onFailure: (error) => error,
+          onSuccess: () => assert.fail("Expected the failed reader to reject subsequent requests"),
+        }),
+      );
+      assert.strictEqual(nextFailure, failure);
+    }),
+  );
+
+  it.effect("fails pending requests when the output writer stops", () =>
+    Effect.gen(function* () {
+      const { stdio: baseStdio } = yield* makeInMemoryStdio();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio: Stdio.make({
+          args: baseStdio.args,
+          stdin: baseStdio.stdin,
+          stdout: () =>
+            Sink.fail(
+              PlatformError.systemError({
+                _tag: "WriteZero",
+                module: "Stdio",
+                method: "write",
+                description: "scripted closed stdin pipe",
+              }),
+            ),
+          stderr: baseStdio.stderr,
+        }),
+      });
+      const failure = yield* transport.request("thread/read", {}).pipe(
+        Effect.match({
+          onFailure: (error) => error,
+          onSuccess: () => assert.fail("Expected the failed writer to reject its pending request"),
+        }),
+      );
+      assert.instanceOf(failure, CodexError.CodexAppServerTransportError);
+      assert.equal(failure.operation, "write-output-stream");
+      const nextFailure = yield* transport.notify("initialized").pipe(Effect.flip);
+      assert.strictEqual(nextFailure, failure);
+    }),
+  );
+
   it.effect("maps account usage responses to the upstream token usage schema", () =>
     Effect.gen(function* () {
       assert.strictEqual(

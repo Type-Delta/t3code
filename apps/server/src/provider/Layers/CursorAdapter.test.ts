@@ -176,7 +176,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       });
       yield* adapter.sendTurn({ threadId, input: "Remember this turn", attachments: [] });
       const originalTurns = [...(yield* adapter.readThread(threadId)).turns];
-      assert.isFalse(adapter.capabilities.supportsConversationRollback);
+      assert.equal(adapter.capabilities.conversationNavigation, "unsupported");
       const error = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
       assert.equal(error._tag, "ProviderAdapterRequestError");
       assert.deepStrictEqual((yield* adapter.readThread(threadId)).turns, originalTurns);

@@ -117,6 +117,7 @@ import {
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { spawnAndCollect } from "../providerSnapshot.ts";
+import { withExecutablePathRecovery } from "../executableRecovery.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
@@ -459,6 +460,7 @@ interface ClaudeSessionContext {
 }
 
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
+  readonly initializationResult: () => Promise<unknown>;
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
@@ -2083,7 +2085,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
-  const claudeSdkExecutablePath = yield* resolveClaudeSdkExecutablePath(
+  let claudeSdkExecutablePath = yield* resolveClaudeSdkExecutablePath(
     claudeSettings.binaryPath,
     claudeEnvironment,
   );
@@ -4455,16 +4457,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const runFork = Effect.runForkWith(runtimeContext);
       const runPromise = Effect.runPromiseWith(runtimeContext);
 
-      const promptQueue = yield* Queue.unbounded<PromptQueueItem>();
-      const prompt = Stream.fromQueue(promptQueue).pipe(
-        Stream.filter((item) => item.type === "message"),
-        Stream.map((item) => item.message),
-        Stream.catchCause((cause) =>
-          Cause.hasInterruptsOnly(cause) ? Stream.empty : Stream.failCause(cause),
-        ),
-        Stream.toAsyncIterable,
-      );
-
       const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
       const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
       const inFlightTools = new Map<string, ToolInFlight>();
@@ -5028,20 +5020,99 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.path_to_executable": claudeBinaryPath,
       });
 
-      const queryRuntime = yield* Effect.try({
-        try: () =>
-          createQuery({
-            prompt,
-            options: queryOptions,
-          }),
-        catch: (cause) =>
-          new ProviderAdapterProcessError({
-            provider: PROVIDER,
-            threadId,
-            detail: "Failed to start Claude runtime session.",
-            cause,
-          }),
+      const startupError = (cause: unknown) =>
+        new ProviderAdapterProcessError({
+          provider: PROVIDER,
+          threadId,
+          detail: "Failed to start Claude runtime session.",
+          cause,
+        });
+      const initializeQuery = Effect.fnUntraced(function* (executablePath: string) {
+        // SDK close() leaves pending input reads alive. Each launch owns its
+        // queue so a failed query cannot consume the replacement's first turn.
+        const promptQueue = yield* Queue.unbounded<PromptQueueItem>();
+        const prompt = Stream.fromQueue(promptQueue).pipe(
+          Stream.filter((item) => item.type === "message"),
+          Stream.map((item) => item.message),
+          Stream.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause) ? Stream.empty : Stream.failCause(cause),
+          ),
+          Stream.toAsyncIterable,
+        );
+        const runtime = yield* Effect.try({
+          try: () =>
+            createQuery({
+              prompt,
+              options: { ...queryOptions, pathToClaudeCodeExecutable: executablePath },
+            }),
+          catch: startupError,
+        }).pipe(Effect.onError(() => Queue.shutdown(promptQueue)));
+        // query() returns before the subprocess starts. Await initialization
+        // before publishing ready or letting sendTurn touch a failed query.
+        yield* Effect.tryPromise({
+          try: () => runtime.initializationResult(),
+          catch: startupError,
+        }).pipe(
+          Effect.onError(() =>
+            Effect.gen(function* () {
+              yield* Effect.try({
+                try: () => runtime.close(),
+                catch: startupError,
+              }).pipe(Effect.ignore);
+              yield* Queue.shutdown(promptQueue);
+            }),
+          ),
+        );
+        return { runtime, promptQueue };
       });
+      const startQuery = Effect.fnUntraced(function* (executablePath: string) {
+        return yield* initializeQuery(executablePath).pipe(
+          Effect.catch((error) =>
+            Effect.gen(function* () {
+              const missingSessionId = queryOptions.resume;
+              if (
+                missingSessionId === undefined ||
+                resumeState?.turnCount !== 0 ||
+                resumeState.resumeSessionAt !== undefined ||
+                (resumeState.turnStartMessageIds?.length ?? 0) !== 0 ||
+                !(error.cause instanceof Error) ||
+                error.cause.message.trim() !==
+                  `Claude Code returned an error result: No conversation found with session ID: ${missingSessionId}`
+              ) {
+                return yield* Effect.fail(error);
+              }
+              // Older startups persisted a generated ID before Claude created
+              // its transcript. Recreate only a confirmed missing, empty session.
+              delete queryOptions.resume;
+              queryOptions.sessionId = missingSessionId;
+              yield* Effect.annotateCurrentSpan({
+                "claude.query.resume": "",
+                "claude.query.session_id": missingSessionId,
+                "claude.resume.empty_session_recovered": true,
+              });
+              return yield* initializeQuery(executablePath);
+            }),
+          ),
+        );
+      });
+      const { runtime: queryRuntime, promptQueue } = yield* withExecutablePathRecovery(
+        claudeSettings.binaryPath,
+        startQuery(claudeBinaryPath),
+        () =>
+          Effect.gen(function* () {
+            const refreshedPath = yield* resolveClaudeSdkExecutablePath(
+              claudeSettings.binaryPath,
+              claudeEnvironment,
+            );
+            const runtime = yield* startQuery(refreshedPath);
+            claudeSdkExecutablePath = refreshedPath;
+            yield* Effect.annotateCurrentSpan({
+              "claude.query.path_to_executable": refreshedPath,
+              "claude.query.executable_recovered": true,
+            });
+            return runtime;
+          }),
+      );
 
       const session: ProviderSession = {
         threadId,

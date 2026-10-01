@@ -162,6 +162,7 @@ interface CodexAdapterSessionContext {
   readonly modelContextWindow: number | undefined;
   readonly turnTokenUsage: CodexTurnTokenUsageState;
   stopped: boolean;
+  failed: boolean;
 }
 
 type CodexCumulativeTokenUsage = {
@@ -1677,6 +1678,21 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "session/error") {
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "runtime.error",
+        payload: { message: event.message ?? "Codex session failed.", class: "provider_error" },
+      },
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "session.exited",
+        payload: { reason: event.message ?? "Codex session failed." },
+      },
+    ];
+  }
+
   if (event.method === "thread/started") {
     const payload = readPayload(EffectCodexSchema.V2ThreadStartedNotification, event.payload);
     if (!payload) {
@@ -2543,6 +2559,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
+            if (event.method === "session/error" || event.method === "session/exited") {
+              const session = sessions.get(event.threadId);
+              if (session?.runtime === runtime) session.failed = true;
+            }
             if (event.method === "turn/started" && event.turnId) {
               if (turnTokenUsage.activeTurnId !== event.turnId) {
                 turnTokenUsage.byTurnId.clear();
@@ -2712,6 +2732,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           modelContextWindow,
           turnTokenUsage,
           stopped: false,
+          failed: false,
         });
         sessionScopeTransferred = true;
 
@@ -3045,7 +3066,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
 
   const hasSession: CodexAdapterShape["hasSession"] = (threadId) =>
-    Effect.succeed(Boolean(sessions.get(threadId) && !sessions.get(threadId)?.stopped));
+    Effect.sync(() => {
+      const session = sessions.get(threadId);
+      return Boolean(session && !session.stopped && !session.failed);
+    });
 
   const stopAll: CodexAdapterShape["stopAll"] = () =>
     Effect.forEach(Array.from(sessions.values()), stopSessionInternal, {

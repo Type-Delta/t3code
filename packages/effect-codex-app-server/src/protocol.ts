@@ -442,10 +442,27 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
             }),
           ),
       }),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : handleTermination(() =>
+              Effect.succeed(normalizeIncomingError(Cause.squash(cause), "read-input-stream")),
+            ),
+      ),
       Effect.forkScoped,
     );
 
-    yield* Stream.fromQueue(outgoing).pipe(Stream.run(options.stdio.stdout()), Effect.forkScoped);
+    yield* Stream.fromQueue(outgoing).pipe(
+      Stream.run(options.stdio.stdout()),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : handleTermination(() =>
+              Effect.succeed(normalizeIncomingError(Cause.squash(cause), "write-output-stream")),
+            ),
+      ),
+      Effect.forkScoped,
+    );
 
     const request = (method: string, payload?: unknown) =>
       Effect.gen(function* () {

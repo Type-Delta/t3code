@@ -32,7 +32,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { CheckpointRepositoryIdentityResolver } from "../../checkpointing/CheckpointRepositoryIdentity.ts";
@@ -1835,7 +1835,15 @@ const make = Effect.gen(function* () {
       return turn;
     }).pipe(Effect.catchCause(recoverTurnStartFailure));
 
-    yield* withProviderTurnDispatch(event.payload.threadId, runTurnStart).pipe(Effect.forkScoped);
+    // A replay leaves event processing here, but the next queued message must
+    // wait until its provider send finishes. Early returns settle in the worker.
+    if (resumed && receivedEvent.commandId !== null) {
+      resumedTurnStarts.delete(receivedEvent.commandId);
+    }
+    yield* withProviderTurnDispatch(event.payload.threadId, runTurnStart).pipe(
+      Effect.ensuring(resumed ? Deferred.succeed(resumed.sent, undefined) : Effect.void),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
@@ -2181,7 +2189,19 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  // Keep each thread's intent order without letting a stalled provider request
+  // prevent other threads from starting or responding to approvals.
+  const workers = new Map<ThreadId, DrainableWorker<ProviderIntentEvent>>();
+  const dispatcher = yield* makeDrainableWorker(
+    Effect.fnUntraced(function* (event: ProviderIntentEvent) {
+      let worker = workers.get(event.payload.threadId);
+      if (worker === undefined) {
+        worker = yield* makeDrainableWorker(processDomainEventSafely);
+        workers.set(event.payload.threadId, worker);
+      }
+      yield* worker.enqueue(event);
+    }),
+  );
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     yield* Effect.addFinalizer(() =>
@@ -2211,7 +2231,7 @@ const make = Effect.gen(function* () {
         event.type === "thread.session-stop-requested" ||
         event.type === "thread.settled"
       ) {
-        return yield* worker.enqueue(event);
+        return yield* dispatcher.enqueue(event);
       }
     });
 
@@ -2248,7 +2268,11 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: Effect.gen(function* () {
-      yield* worker.drain;
+      yield* dispatcher.drain;
+      yield* Effect.forEach(workers.values(), (worker) => worker.drain, {
+        concurrency: "unbounded",
+        discard: true,
+      });
       yield* threadTitleRegenerationWorker.drain;
     }),
   } satisfies ProviderCommandReactorShape;

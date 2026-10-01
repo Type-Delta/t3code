@@ -59,6 +59,7 @@ import {
 } from "../ProviderDriver.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
+import { withExecutablePathRecovery } from "../executableRecovery.ts";
 import { discoverAntigravitySkills, resolveAntigravityUserHome } from "./AntigravitySkills.ts";
 
 const DRIVER = ProviderDriverKind.make("antigravity");
@@ -147,7 +148,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
             detail: authConfigIssue,
           });
         }
-        const executable = yield* installation
+        const acquireExecutable = installation
           .acquire(settings.binaryPath, processEnvironment)
           .pipe(
             Effect.mapError(
@@ -160,6 +161,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
                 }),
             ),
           );
+        let executable = yield* acquireExecutable;
         const profile = yield* prepareAntigravityProfile({
           profileDirectory,
           baseEnv: processEnvironment,
@@ -206,19 +208,29 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
                 ),
               ),
         );
-        const runtime = yield* makeAntigravityAcpRuntime({
-          ...input,
-          authMethod: auth.authMethod,
-          childProcessSpawner: spawner,
-          spawn: buildAntigravityAcpSpawnInput({
-            installation: executable,
-            profile,
-            cwd: input.cwd,
-            baseEnv: withAgentDeviceEnvironment(processEnvironment, input),
-            auth,
-            runtimeTempDirectory,
-          }),
-        }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+        const launchRuntime = () =>
+          makeAntigravityAcpRuntime({
+            ...input,
+            authMethod: auth.authMethod,
+            childProcessSpawner: spawner,
+            spawn: buildAntigravityAcpSpawnInput({
+              installation: executable,
+              profile,
+              cwd: input.cwd,
+              baseEnv: withAgentDeviceEnvironment(processEnvironment, input),
+              auth,
+              runtimeTempDirectory,
+            }),
+          }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+        const runtime = yield* withExecutablePathRecovery(
+          executable.source === "path" ? "antigravity" : executable.executablePath,
+          launchRuntime(),
+          () =>
+            Effect.gen(function* () {
+              executable = yield* acquireExecutable;
+              return yield* launchRuntime();
+            }),
+        );
         return {
           ...runtime,
           start: () =>

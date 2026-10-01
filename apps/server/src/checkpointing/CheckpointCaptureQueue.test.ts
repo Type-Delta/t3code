@@ -10,7 +10,10 @@ import {
   CheckpointCaptureQueue,
   makeCheckpointCaptureQueueLayer,
 } from "./CheckpointCaptureQueue.ts";
-import { WorkspaceMutationCoordinatorLive } from "./WorkspaceMutationCoordinator.ts";
+import {
+  WorkspaceMutationCoordinator,
+  WorkspaceMutationCoordinatorLive,
+} from "./WorkspaceMutationCoordinator.ts";
 import { CheckpointCaptureJobRepositoryLive } from "../persistence/Layers/CheckpointCaptureJobs.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CheckpointCaptureJobRepository } from "../persistence/Services/CheckpointCaptureJobs.ts";
@@ -385,6 +388,79 @@ it.layer(HangingQueueLive)("CheckpointCaptureQueue timeouts", (it) => {
       const completed = yield* awaitTerminal("hanging-job");
       assert.equal(completed.state, "error");
       assert.equal(completed.errorCode, "capture-timeout");
+      const coordinator = yield* WorkspaceMutationCoordinator;
+      const mutation = yield* coordinator.beginMutation("hanging-worktree");
+      yield* coordinator.completeMutation(mutation);
+    }),
+  );
+});
+
+const GateQueueLive = makeCheckpointCaptureQueueLayer({
+  workerId: "queue-gate-worker",
+  concurrency: 2,
+  leaseDuration: "1 second",
+  executionTimeout: "2 seconds",
+}).pipe(Layer.provideMerge(DependenciesLive));
+
+it.layer(GateQueueLive)("CheckpointCaptureQueue mutation waits", (it) => {
+  it.effect("renews a waiting lease and bounds gate waits without starving another workspace", () =>
+    Effect.gen(function* () {
+      const repository = yield* CheckpointCaptureJobRepository;
+      const queue = yield* CheckpointCaptureQueue;
+      const coordinator = yield* WorkspaceMutationCoordinator;
+      const mutation = yield* coordinator.beginMutation("gate-worktree");
+      const now = "2026-07-16T00:00:00.000Z";
+      yield* repository.upsertRepository({
+        repositoryKey: "gate-repo",
+        commonDirFingerprint: "gate-fingerprint",
+        objectFormat: "sha1",
+        sidecarRelativePath: "repositories/gate-repo.git",
+        createdAt: now,
+        lastUsedAt: now,
+      });
+      const enqueue = (key: string) =>
+        queue.enqueue({
+          snapshot: {
+            snapshotId: `${key}-snapshot`,
+            repositoryKey: "gate-repo",
+            worktreeKey: `${key}-worktree`,
+            kind: "turn",
+            createdAt: now,
+            expiresAt: null,
+          },
+          job: {
+            jobId: `${key}-job`,
+            snapshotId: `${key}-snapshot`,
+            threadId: `${key}-thread`,
+            timelineGeneration: 0,
+            turnId: `${key}-turn`,
+            providerTurnId: null,
+            turnOrdinal: 1,
+            repositoryKey: "gate-repo",
+            worktreeKey: `${key}-worktree`,
+            requestedBoundary: "turn-completed",
+            requestedGeneration: 0,
+            createdAt: now,
+          },
+        });
+      yield* enqueue("gate");
+      yield* enqueue("healthy");
+      assert.equal((yield* awaitTerminal("healthy-job")).state, "ready");
+      yield* TestClock.adjust("1500 millis");
+      assert.equal(yield* queue.recover, 0);
+      const waiting = Option.getOrThrow(yield* repository.getById({ jobId: "gate-job" }));
+      assert.equal(waiting.state, "running");
+      assert.equal(waiting.attemptCount, 1);
+
+      yield* TestClock.adjust("500 millis");
+      const completed = yield* awaitTerminal("gate-job");
+      assert.equal(completed.state, "error");
+      assert.equal(completed.errorCode, "capture-timeout");
+      yield* enqueue("after-timeout");
+      assert.equal((yield* awaitTerminal("after-timeout-job")).state, "ready");
+      yield* coordinator.completeMutation(mutation);
+      const capture = yield* coordinator.beginCapture("gate-worktree");
+      assert.equal(yield* coordinator.completeCapture(capture), true);
     }),
   );
 });
