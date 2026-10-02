@@ -288,23 +288,40 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
-      yield* sql`DELETE FROM projection_projects
-        WHERE project_id NOT IN (SELECT project_id FROM kept_projects)`;
-      yield* sql`DELETE FROM projection_threads
-        WHERE thread_id NOT IN (SELECT thread_id FROM kept_threads)`;
+      // Live work must not wake up against a copied environment. Clear it even
+      // for retained threads, then remove checkpoint children before entries
+      // and legacy journals before the projection turns they reference.
+      yield* sql`DELETE FROM checkpoint_navigation_operations`;
+      yield* sql`DELETE FROM checkpoint_capture_jobs`;
+      yield* sql`DELETE FROM auto_resume_jobs`;
       for (const table of [
+        "thread_checkpoint_cursors",
+        "thread_checkpoint_generations",
+        "checkpoint_legacy_migrations",
+        "thread_checkpoint_entries",
+        "thread_provider_bindings",
         "projection_thread_messages",
         "projection_thread_activities",
         "projection_thread_sessions",
         "projection_turns",
         "projection_pending_approvals",
         "projection_thread_proposed_plans",
+        "projection_thread_pull_requests",
         "checkpoint_diff_blobs",
       ]) {
         yield* sql.unsafe(
           `DELETE FROM ${table} WHERE thread_id NOT IN (SELECT thread_id FROM kept_threads)`,
         ).unprepared;
       }
+      yield* sql`DELETE FROM checkpoint_snapshots
+        WHERE snapshot_id NOT IN (SELECT snapshot_id FROM thread_checkpoint_entries)
+          AND snapshot_id NOT IN (SELECT snapshot_id FROM checkpoint_legacy_migrations)`;
+      yield* sql`DELETE FROM checkpoint_repositories
+        WHERE repository_key NOT IN (SELECT repository_key FROM checkpoint_snapshots)`;
+      yield* sql`DELETE FROM projection_threads
+        WHERE thread_id NOT IN (SELECT thread_id FROM kept_threads)`;
+      yield* sql`DELETE FROM projection_projects
+        WHERE project_id NOT IN (SELECT project_id FROM kept_projects)`;
       yield* sql`DELETE FROM orchestration_events
         WHERE (aggregate_kind = 'thread'
             AND stream_id NOT IN (SELECT thread_id FROM kept_threads))
@@ -314,6 +331,7 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
       yield* sql`DELETE FROM provider_session_runtime`;
       yield* sql`DELETE FROM auth_sessions`;
       yield* sql`DELETE FROM auth_pairing_links`;
+      yield* sql`DELETE FROM management_api_keys`;
     }),
   );
 
@@ -332,17 +350,102 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
   };
 });
 
-/** Compare this checkout's migration registry against what the cloned
- * database recorded: same slot under a different name means the migration
- * was skipped, not applied. */
+// These deployed histories are repaired by 039 and 053. Accept their ledger
+// names only when the repair is recorded and its resulting schema is present.
+const reconciledMigrationAliases = [
+  [33, "CheckpointDurableState", 39],
+  [34, "CheckpointLegacyMigration", 39],
+  [35, "CheckpointCaptureProviderMetadata", 39],
+  [36, "CheckpointNavigationMode", 39],
+  [37, "ProjectionThreadsSettled", 39],
+  [38, "ProjectionThreadsSnoozed", 39],
+  [36, "ProjectionThreadsPinned", 53],
+  [37, "ProjectionTurnsKeysetIndex", 53],
+  [38, "ProjectionThreadsPinOrderKey", 53],
+  [39, "ProjectionProjectsDefaultThreadEnvMode", 53],
+  [40, "ProjectionProjectFaviconPath", 53],
+  [41, "AuthSessionClientConnection", 53],
+  [42, "ProjectionThreadLinkedPullRequest", 53],
+  [43, "ProjectionThreadsUnsettledAt", 53],
+  [44, "ClearAutomaticProjectModelDefaults", 53],
+  [45, "ProjectionProjectsAutoPull", 53],
+  [46, "RepairAutomaticSettlementTimestamps", 53],
+  [47, "ProjectionProjectIcon", 53],
+] as const;
+
 const verifyMigrationSlots = Effect.fn("verifyMigrationSlots")(function* () {
   const sql = yield* SqlClient.SqlClient;
   const applied = yield* sql<{ migration_id: number; name: string }>`
     SELECT migration_id, name FROM effect_sql_migrations`;
   const appliedById = new Map(applied.map((row) => [Number(row.migration_id), row.name]));
-  for (const [slot, codeName] of migrationManifest) {
+  const mismatches = migrationManifest.filter(([slot, codeName]) => {
     const appliedName = appliedById.get(slot);
-    if (appliedName !== undefined && appliedName !== codeName) {
+    return appliedName !== undefined && appliedName !== codeName;
+  });
+  if (mismatches.length === 0) return;
+
+  const requiredSchema = [
+    ["checkpoint_repositories", ["repository_key"]],
+    ["checkpoint_snapshots", ["snapshot_id"]],
+    ["thread_checkpoint_entries", ["provider_binding_json", "provider_cursor_json"]],
+    ["thread_checkpoint_cursors", ["navigation_version"]],
+    ["thread_checkpoint_generations", ["thread_id"]],
+    ["thread_provider_bindings", ["thread_id"]],
+    ["checkpoint_legacy_migrations", ["thread_id"]],
+    ["checkpoint_navigation_operations", ["mode"]],
+    ["checkpoint_capture_jobs", ["provider_binding_json", "provider_cursor_json"]],
+    [
+      "projection_threads",
+      [
+        "settled_override",
+        "settled_at",
+        "snoozed_until",
+        "snoozed_at",
+        "title_regeneration_request_id",
+        "title_regeneration_started_at",
+      ],
+    ],
+  ] as const;
+  let checkpointSchemaPresent = true;
+  for (const [table, requiredColumns] of requiredSchema) {
+    const columns = yield* sql<{ name: string }>`SELECT name FROM pragma_table_info(${table})`;
+    if (!requiredColumns.every((name) => columns.some((column) => column.name === name))) {
+      checkpointSchemaPresent = false;
+    }
+  }
+  const subagentMessageColumns = yield* sql<{ name: string }>`
+    SELECT name FROM pragma_table_info('projection_thread_messages')`;
+  const subagentActivityColumns = yield* sql<{ name: string }>`
+    SELECT name FROM pragma_table_info('projection_thread_activities')`;
+  const subagentSchemaPresent = [subagentMessageColumns, subagentActivityColumns].every((columns) =>
+    columns.some((column) => column.name === "subagent_id"),
+  );
+  let upstreamSchemaPresent = subagentSchemaPresent;
+  for (const [table, requiredColumns] of [
+    ["projection_threads", ["pinned_at", "pin_order_key"]],
+    ["projection_projects", ["default_thread_env_mode", "favicon_path"]],
+    ["auth_sessions", ["client_surface", "client_app_version"]],
+  ] as const) {
+    const columns = yield* sql<{ name: string }>`SELECT name FROM pragma_table_info(${table})`;
+    if (!requiredColumns.every((name) => columns.some((column) => column.name === name))) {
+      upstreamSchemaPresent = false;
+    }
+  }
+  const keysetIndexes = yield* sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_projection_turns_thread_keyset'`;
+  upstreamSchemaPresent &&= keysetIndexes.length === 1;
+  for (const [slot, codeName] of mismatches) {
+    const appliedName = appliedById.get(slot)!;
+    const alias = reconciledMigrationAliases.find(
+      ([aliasSlot, aliasName]) => aliasSlot === slot && aliasName === appliedName,
+    );
+    const repairName = alias && migrationManifest.find(([id]) => id === alias[2])?.[1];
+    if (
+      !alias ||
+      appliedById.get(alias[2]) !== repairName ||
+      !checkpointSchemaPresent ||
+      (alias[2] === 53 && !upstreamSchemaPresent)
+    ) {
       return yield* new MigrateDevDbSlotCollisionError({ slot, codeName, appliedName });
     }
   }

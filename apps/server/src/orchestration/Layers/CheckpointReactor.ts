@@ -16,6 +16,8 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -223,7 +225,6 @@ const makeCaptureObserver = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const receiptBus = yield* RuntimeReceiptBus;
-  const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const mutationCoordinator = yield* WorkspaceMutationCoordinator;
@@ -269,6 +270,10 @@ const makeCaptureObserver = Effect.gen(function* () {
   )(function* (
     threadId: ThreadId,
     thread: {
+      readonly checkpoints: ReadonlyArray<{
+        readonly turnId: TurnId;
+        readonly assistantMessageId: MessageId | null;
+      }>;
       readonly messages: ReadonlyArray<{
         readonly id: MessageId;
         readonly role: string;
@@ -282,10 +287,13 @@ const makeCaptureObserver = Effect.gen(function* () {
       const assistantMessageId =
         readyJob.requestedBoundary === BASELINE_BOUNDARY
           ? null
-          : (thread.messages
+          : (thread.checkpoints.find((checkpoint) => checkpoint.turnId === readyJob.turnId)
+              ?.assistantMessageId ??
+            thread.messages
               .toReversed()
               .find((message) => message.role === "assistant" && message.turnId === readyJob.turnId)
-              ?.id ?? MessageId.make(`assistant:${readyJob.turnId}`));
+              ?.id ??
+            MessageId.make(`assistant:${readyJob.turnId}`));
       yield* publishTimelineEntryObserved({ job: readyJob, assistantMessageId });
     }
   });
@@ -325,7 +333,6 @@ const makeCaptureObserver = Effect.gen(function* () {
       readonly deletions: number;
     }> = [];
     if (result.state === "ready") {
-      yield* workspaceEntries.refresh(context.cwd);
       const previousRef = yield* checkpointStore.allocateCheckpointRef({
         cwd: context.cwd,
         snapshotId: checkpointSnapshotIdFor(
@@ -370,6 +377,8 @@ const makeCaptureObserver = Effect.gen(function* () {
     const status =
       result.state === "ready" ? "ready" : result.state === "error" ? "error" : "missing";
     const assistantMessageId =
+      context.thread.checkpoints.find((checkpoint) => checkpoint.turnId === turnId)
+        ?.assistantMessageId ??
       context.thread.messages
         .toReversed()
         .find((entry) => entry.role === "assistant" && entry.turnId === turnId)?.id ??
@@ -462,6 +471,27 @@ const make = Effect.gen(function* () {
   const checkpointIdentities = yield* CheckpointRepositoryIdentityResolver;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const activeProviderMutations = yield* Ref.make(new Map<string, PendingProviderMutation>());
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const queuedEntryRefreshes = new Set<string>();
+  const entryRefreshWorker = yield* makeDrainableWorker((cwd: string) =>
+    Effect.sync(() => queuedEntryRefreshes.delete(cwd)).pipe(
+      Effect.andThen(workspaceEntries.refresh(cwd)),
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterruptsOnly(cause),
+        () =>
+          Effect.logWarning("failed to refresh checkpoint workspace entries", {
+            cwd,
+          }),
+      ),
+    ),
+  );
+  const refreshWorkspaceEntries = Effect.fn("refreshWorkspaceEntries")(function* (cwd: string) {
+    if (queuedEntryRefreshes.has(cwd)) return;
+    queuedEntryRefreshes.add(cwd);
+    yield* entryRefreshWorker.enqueue(cwd);
+  });
+
   const startedTurns = new Map<ThreadId, TurnId>();
   const pendingTurnStarts = new Set<ThreadId>();
 
@@ -663,9 +693,9 @@ const make = Effect.gen(function* () {
     });
   });
 
-  // Captures a real git checkpoint when a turn completes via a runtime event.
+  // Capture the files left by a completed or interrupted turn.
   const captureCheckpointFromTurnCompletion = Effect.fn("captureCheckpointFromTurnCompletion")(
-    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) {
+    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>) {
       const turnId = toTurnId(event.turnId);
       if (!turnId) {
         return false;
@@ -753,6 +783,15 @@ const make = Effect.gen(function* () {
       yield* Effect.logWarning("checkpoint capture from placeholder skipped: thread not found", {
         threadId,
       });
+      return;
+    }
+
+    // A provider diff can arrive before its final workspace edits. Wait for
+    // the terminal runtime event before creating the durable completion job.
+    if (
+      (thread.session?.status === "running" && thread.session.activeTurnId === turnId) ||
+      (thread.latestTurn?.state === "running" && thread.latestTurn.turnId === turnId)
+    ) {
       return;
     }
 
@@ -982,8 +1021,7 @@ const make = Effect.gen(function* () {
         thread.branch === null ||
         thread.branch === checkedOutBranch ||
         thread.worktreePath === null ||
-        thread.worktreePath !== input.cwd ||
-        isTemporaryWorktreeBranch(thread.branch)
+        thread.worktreePath !== input.cwd
       ) {
         return;
       }
@@ -1012,17 +1050,44 @@ const make = Effect.gen(function* () {
         branch: checkedOutBranch,
       });
     }).pipe(
-      Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
-        }
-        return Effect.logWarning("failed to follow worktree branch drift", {
-          threadId: input.threadId,
-          cause: Cause.pretty(cause),
-        });
-      }),
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterruptsOnly(cause),
+        (cause) =>
+          Effect.logWarning("failed to follow worktree branch drift", {
+            threadId: input.threadId,
+            cause: Cause.pretty(cause),
+          }),
+      ),
     );
   });
+
+  // Refreshing git status ends in a remote PR lookup under the vcs status
+  // write lock. Run it on its own worker so file capture for this turn (and
+  // checkpoints for other threads) never wait behind that network call.
+  const statusRefreshWorker = yield* makeDrainableWorker(
+    (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) =>
+      refreshLocalGitStatusFromTurnCompletion(event).pipe(
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          () =>
+            Effect.logWarning("failed to refresh git status after turn completion", {
+              threadId: event.threadId,
+            }),
+        ),
+      ),
+  );
+
+  const projectPullRequestRefreshWorker = yield* makeDrainableWorker((projectId: ProjectId) =>
+    pullRequests.refreshAfterTurn(projectId).pipe(
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterruptsOnly(cause),
+        () =>
+          Effect.logWarning("failed to refresh project pull requests after turn completion", {
+            projectId,
+          }),
+      ),
+    ),
+  );
 
   const ensurePreTurnBaselineFromDomainTurnStart = Effect.fn(
     "ensurePreTurnBaselineFromDomainTurnStart",
@@ -1077,6 +1142,51 @@ const make = Effect.gen(function* () {
     });
   });
 
+  // Checkpoints contain the whole checkout, so restoring a shared cwd can erase a sibling's work.
+  const isRestoreWorkspaceIsolated = Effect.fn("isRestoreWorkspaceIsolated")(function* (
+    thread: { readonly id: ThreadId; readonly worktreePath: string | null },
+    cwd: string,
+  ) {
+    if (thread.worktreePath === null) return false;
+    const canonicalCwd = yield* fileSystem.realPath(cwd);
+    if ((yield* fileSystem.realPath(thread.worktreePath)) !== canonicalCwd) return false;
+    const active = yield* projectionSnapshotQuery.getShellSnapshot();
+    const archived = yield* projectionSnapshotQuery.getArchivedShellSnapshot();
+    const projects = [...active.projects, ...archived.projects];
+    const paths = new Set<string>();
+    for (const other of [...active.threads, ...archived.threads]) {
+      if (other.id === thread.id) continue;
+      const candidate =
+        other.worktreePath ??
+        projects.find((project) => project.id === other.projectId)?.workspaceRoot;
+      if (candidate !== undefined) paths.add(candidate);
+    }
+    for (const session of yield* providerService.listSessions()) {
+      if (
+        session.threadId !== thread.id &&
+        session.status !== "closed" &&
+        session.cwd !== undefined
+      )
+        paths.add(session.cwd);
+    }
+    for (const candidate of paths) {
+      const otherCwd = yield* fileSystem
+        .realPath(candidate)
+        .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(null)));
+      if (otherCwd === null) continue;
+      const isWithin = (parent: string, child: string) => {
+        const relative = path.relative(parent, child);
+        return (
+          relative === "" ||
+          (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+        );
+      };
+      // Parent and nested owners can both have files inside the restore target.
+      if (isWithin(canonicalCwd, otherCwd) || isWithin(otherCwd, canonicalCwd)) return false;
+    }
+    return true;
+  });
+
   const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
     event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
   ) {
@@ -1098,7 +1208,7 @@ const make = Effect.gen(function* () {
       preferSessionRuntime: true,
     }).pipe(
       Effect.catch((error) =>
-        event.payload.restoreFiles === false ? Effect.succeed(undefined) : Effect.fail(error),
+        event.payload.restoreFiles === false ? Effect.undefined : Effect.fail(error),
       ),
     );
     const currentTurnCount = thread.checkpoints.reduce(
@@ -1121,6 +1231,16 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           turnCount: event.payload.turnCount,
           detail: "Checkpoint workspace is unavailable or is not a git repository.",
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+      if (!(yield* isRestoreWorkspaceIsolated(thread, checkpointCwd))) {
+        yield* appendRevertFailureActivity({
+          threadId: thread.id,
+          turnCount: event.payload.turnCount,
+          detail:
+            "File restore requires an isolated worktree. This workspace may contain changes from another thread. Rewind the conversation without restoring files instead.",
           createdAt: now,
         }).pipe(Effect.catch(() => Effect.void));
         return;
@@ -1154,7 +1274,7 @@ const make = Effect.gen(function* () {
         }).pipe(Effect.catch(() => Effect.void));
         return;
       }
-      yield* workspaceEntries.refresh(checkpointCwd);
+      yield* refreshWorkspaceEntries(checkpointCwd);
     }
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0)
@@ -1209,6 +1329,20 @@ const make = Effect.gen(function* () {
     // replace it. ProviderService broadcasts runtime events to each subscriber.
     // This domain-event path also captures checkpoints from turn diff updates.
     if (event.type === "thread.turn-diff-completed") {
+      const context = yield* resolveCaptureCwd(event.payload.threadId, true).pipe(
+        Effect.provideService(CheckpointStore.CheckpointStore, checkpointStore),
+        Effect.provideService(ProjectionSnapshotQuery, projectionSnapshotQuery),
+        Effect.provideService(ProviderService, providerService),
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) =>
+            Effect.logWarning("failed to resolve checkpoint workspace refresh", {
+              threadId: event.payload.threadId,
+              cause: Cause.pretty(cause),
+            }).pipe(Effect.as(null)),
+        ),
+      );
+      if (context) yield* refreshWorkspaceEntries(context.cwd);
       yield* captureCheckpointFromPlaceholder(event).pipe(
         Effect.catch((error) =>
           Effect.flatMap(nowIso, (createdAt) =>
@@ -1271,7 +1405,7 @@ const make = Effect.gen(function* () {
 
       yield* completeProviderTurnMutation(event);
       if (event.type === "turn.completed") {
-        yield* refreshLocalGitStatusFromTurnCompletion(event);
+        yield* statusRefreshWorker.enqueue(event);
       }
       if (
         turnId !== null &&
@@ -1281,10 +1415,14 @@ const make = Effect.gen(function* () {
           (startedTurnId === undefined && !thread.session?.activeTurnId))
       ) {
         pendingTurnStarts.delete(event.threadId);
-        yield* pullRequests.refreshAfterTurn(thread.projectId);
+        // Network refreshes must not delay the checkpoint capture boundary.
+        yield* projectPullRequestRefreshWorker.enqueue(thread.projectId);
       }
-      if (event.type === "turn.aborted") {
-        yield* mutationCoordinator.releaseProviderMutation(event.threadId);
+      if (
+        event.type === "turn.aborted" &&
+        !isTrackedTurn &&
+        !sameId(thread?.session?.activeTurnId, turnId)
+      ) {
         return;
       }
 
@@ -1321,16 +1459,15 @@ const make = Effect.gen(function* () {
 
   const processInputSafely = (input: ReactorInput) =>
     processInput(input).pipe(
-      Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
-        }
-        return Effect.logWarning("checkpoint reactor failed to process input", {
-          source: input.source,
-          eventType: input.event.type,
-          cause: Cause.pretty(cause),
-        });
-      }),
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterruptsOnly(cause),
+        (cause) =>
+          Effect.logWarning("checkpoint reactor failed to process input", {
+            source: input.source,
+            eventType: input.event.type,
+            cause: Cause.pretty(cause),
+          }),
+      ),
     );
 
   const worker = yield* makeDrainableWorker(processInputSafely);
@@ -1374,7 +1511,11 @@ const make = Effect.gen(function* () {
 
   return {
     start,
-    drain: worker.drain,
+    drain: worker.drain.pipe(
+      Effect.andThen(statusRefreshWorker.drain),
+      Effect.andThen(projectPullRequestRefreshWorker.drain),
+      Effect.andThen(entryRefreshWorker.drain),
+    ),
   } satisfies CheckpointReactorShape;
 });
 

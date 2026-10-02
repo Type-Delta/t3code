@@ -9,6 +9,7 @@ import {
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -48,6 +49,7 @@ const makeProjectionSnapshotQueryLayer = (importedWorkspaceRoots: ReadonlyArray<
         updatedAt: "2026-01-01T00:00:00.000Z",
       }),
     getDeletedWorktreeThreads: () => Effect.die("unused"),
+    listThreadsWithPullRequests: () => Effect.die("unused"),
     getArchivedShellSnapshot: () => Effect.die("unused"),
     getSnapshotSequence: () => Effect.die("unused"),
     getCounts: () => Effect.die("unused"),
@@ -514,49 +516,76 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("keeps case variants distinct when the filesystem identities differ", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const backingUpper = yield* makeTempDir("t3code-backing-upper-");
-        const backingLower = yield* makeTempDir("t3code-backing-lower-");
-        const aliasParent = yield* makeTempDir("t3code-case-aliases-");
-        const upperWorkspace = path.join(aliasParent, "Repo");
-        const lowerWorkspace = path.join(aliasParent, "repo");
+    it.effect.each([false, true])(
+      "keeps case variants distinct when the filesystem identities differ (unsafe inode: %s)",
+      (unsafeInode) =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const backingUpper = yield* makeTempDir("t3code-backing-upper-");
+          const backingLower = yield* makeTempDir("t3code-backing-lower-");
+          const aliasParent = yield* makeTempDir("t3code-case-aliases-");
+          const upperWorkspace = path.join(aliasParent, "Repo");
+          const lowerWorkspace = path.join(aliasParent, "repo");
 
-        yield* writeTranscript({
-          filePath: path.join(claudeHomePath, "projects", "-upper", "a.jsonl"),
-          contents: claudeSessionLine(upperWorkspace),
-          mtimeMs: Date.parse("2026-01-02T00:00:00.000Z"),
-        });
-        yield* writeTranscript({
-          filePath: path.join(claudeHomePath, "projects", "-lower", "b.jsonl"),
-          contents: claudeSessionLine(lowerWorkspace),
-          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
-        });
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", "-upper", "a.jsonl"),
+            contents: claudeSessionLine(upperWorkspace),
+            mtimeMs: Date.parse("2026-01-02T00:00:00.000Z"),
+          });
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", "-lower", "b.jsonl"),
+            contents: claudeSessionLine(lowerWorkspace),
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          });
 
-        const simulatedFileSystem = FileSystem.FileSystem.of({
-          ...fileSystem,
-          stat: (filePath) =>
-            fileSystem.stat(
-              filePath === upperWorkspace
-                ? backingUpper
-                : filePath === lowerWorkspace
-                  ? backingLower
-                  : filePath,
-            ),
-        });
-        const result = yield* runScan({ claudeHomePath, codexHomePath }).pipe(
-          Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
-        );
+          const simulatedFileSystem = FileSystem.FileSystem.of({
+            ...fileSystem,
+            stat: (filePath) =>
+              fileSystem
+                .stat(
+                  filePath === upperWorkspace
+                    ? backingUpper
+                    : filePath === lowerWorkspace
+                      ? backingLower
+                      : filePath,
+                )
+                .pipe(
+                  Effect.map((stats) =>
+                    filePath === upperWorkspace || filePath === lowerWorkspace
+                      ? {
+                          ...stats,
+                          ino: Option.some(
+                            unsafeInode
+                              ? Number.MAX_SAFE_INTEGER + 1
+                              : filePath === upperWorkspace
+                                ? 1
+                                : 2,
+                          ),
+                        }
+                      : stats,
+                  ),
+                ),
+            realPath: (filePath) =>
+              fileSystem.realPath(
+                filePath === upperWorkspace
+                  ? backingUpper
+                  : filePath === lowerWorkspace
+                    ? backingLower
+                    : filePath,
+              ),
+          });
+          const result = yield* runScan({ claudeHomePath, codexHomePath }).pipe(
+            Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
+          );
 
-        expect(result.candidates.map((candidate) => candidate.path)).toEqual([
-          upperWorkspace,
-          lowerWorkspace,
-        ]);
-      }),
+          expect(result.candidates.map((candidate) => candidate.path)).toEqual([
+            upperWorkspace,
+            lowerWorkspace,
+          ]);
+        }),
     );
 
     it.effect("uses explicit provider instance homes instead of overridden legacy homes", () =>
@@ -1887,73 +1916,117 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }
     }
 
-    it.effect("checks file identity and provider before skipping completed history", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
-        yield* TestClock.setTime(nowMs);
-        const claudeHomePath = yield* makeTempDir("t3code-completed-claude-");
-        const codexHomePath = yield* makeTempDir("t3code-completed-codex-");
-        const workspace = yield* makeTempDir("t3code-completed-workspace-");
-        const filePath = path.join(
-          codexHomePath,
-          "sessions",
-          "2026",
-          "08",
-          "24",
-          "rollout-replaced.jsonl",
-        );
-        const contents = (sessionId: string) =>
-          [
-            encodeTranscriptRecord({
-              type: "session_meta",
-              payload: { id: sessionId, cwd: workspace },
-            }),
-            encodeTranscriptRecord({
-              type: "event_msg",
-              payload: { type: "user_message", message: "Imported prompt" },
-            }),
-          ].join("\n");
-        yield* writeTranscript({
-          filePath,
-          contents: contents("original-session"),
-          mtimeMs: nowMs,
-        });
-
-        yield* Effect.gen(function* () {
-          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
-          const initial = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
-          const imported = initial[0];
-          expect(imported?._tag).toBe("Importable");
-          if (imported?._tag !== "Importable") return;
-          const completed = yield* scanner
-            .recentThreads(workspace, [imported.source])
-            .pipe(Stream.runCollect);
-          expect(completed[0]?._tag).toBe("AlreadyImported");
-          const wrongProvider = yield* scanner
-            .recentThreads(workspace, [{ ...imported.source, provider: "claudeAgent" }])
-            .pipe(Stream.runCollect);
-          expect(wrongProvider[0]?._tag).toBe("Importable");
-
-          // Keep the old inode allocated while replacing the path with an equal-size file.
-          yield* fileSystem.open(filePath);
-          yield* fileSystem.remove(filePath);
+    it.effect.each(["safe", "unsafe", "missing"] as const)(
+      "checks file identity and provider before skipping completed history (inode: %s)",
+      (inodeKind) =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-completed-claude-");
+          const codexHomePath = yield* makeTempDir("t3code-completed-codex-");
+          const workspace = yield* makeTempDir("t3code-completed-workspace-");
+          const filePath = path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-replaced.jsonl",
+          );
+          let transcriptInode =
+            inodeKind === "missing"
+              ? Option.none<number>()
+              : Option.some(inodeKind === "unsafe" ? Number.MAX_SAFE_INTEGER + 1 : 1);
+          const contents = (sessionId: string) =>
+            [
+              encodeTranscriptRecord({
+                type: "session_meta",
+                payload: { id: sessionId, cwd: workspace },
+              }),
+              encodeTranscriptRecord({
+                type: "event_msg",
+                payload: { type: "user_message", message: "Imported prompt" },
+              }),
+            ].join("\n");
           yield* writeTranscript({
             filePath,
-            contents: contents("replaced-session"),
+            contents: contents("original-session"),
             mtimeMs: nowMs,
           });
-          const replaced = yield* scanner
-            .recentThreads(workspace, [imported.source])
-            .pipe(Stream.runCollect);
-          expect(replaced[0]).toMatchObject({
-            _tag: "Importable",
-            thread: { providerSessionId: "replaced-session" },
-            source: { size: imported.source.size, mtimeMs: imported.source.mtimeMs },
-          });
-        }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })));
-      }),
+
+          yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            const initial = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+            const imported = initial[0];
+            expect(imported?._tag).toBe("Importable");
+            if (imported?._tag !== "Importable") return;
+            const completed = yield* scanner
+              .recentThreads(workspace, [imported.source])
+              .pipe(Stream.runCollect);
+            expect(completed[0]?._tag).toBe("AlreadyImported");
+            const wrongProvider = yield* scanner
+              .recentThreads(workspace, [{ ...imported.source, provider: "claudeAgent" }])
+              .pipe(Stream.runCollect);
+            expect(wrongProvider[0]?._tag).toBe("Importable");
+
+            // Keep the old inode allocated while replacing the path with an equal-size file.
+            yield* fileSystem.open(filePath);
+            yield* fileSystem.remove(filePath);
+            yield* writeTranscript({
+              filePath,
+              contents: contents("replaced-session"),
+              mtimeMs: nowMs,
+            });
+            if (inodeKind === "safe") transcriptInode = Option.some(2);
+            const replaced = yield* scanner
+              .recentThreads(workspace, [imported.source])
+              .pipe(Stream.runCollect);
+            expect(replaced[0]).toMatchObject({
+              _tag: "Importable",
+              thread: { providerSessionId: "replaced-session" },
+              source: { size: imported.source.size, mtimeMs: imported.source.mtimeMs },
+            });
+          }).pipe(
+            Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })),
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fileSystem,
+              open: (target, options) =>
+                fileSystem.open(target, options).pipe(
+                  Effect.map((file) =>
+                    target === filePath
+                      ? {
+                          ...file,
+                          stat: file.stat.pipe(
+                            Effect.map((stats) => ({
+                              ...stats,
+                              ino: transcriptInode,
+                              birthtime: Option.some(
+                                DateTime.toDateUtc(DateTime.makeUnsafe(nowMs)),
+                              ),
+                            })),
+                          ),
+                          readAlloc: (size) => file.readAlloc(size),
+                        }
+                      : file,
+                  ),
+                ),
+              stat: (target) =>
+                fileSystem.stat(target).pipe(
+                  Effect.map((stats) =>
+                    target === filePath
+                      ? {
+                          ...stats,
+                          ino: transcriptInode,
+                          birthtime: Option.some(DateTime.toDateUtc(DateTime.makeUnsafe(nowMs))),
+                        }
+                      : stats,
+                  ),
+                ),
+            }),
+          );
+        }),
     );
 
     it.effect("imports visible history from a transcript with an oversized tool record", () =>

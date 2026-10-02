@@ -135,7 +135,7 @@ function MetadataTextField(props: {
         spellCheck={false}
       />
       {props.description ? (
-        <span className="text-[11px] leading-snug text-muted-foreground">{props.description}</span>
+        <span className="text-2xs leading-snug text-muted-foreground">{props.description}</span>
       ) : null}
     </label>
   );
@@ -184,64 +184,66 @@ export function CustomModelMetadataDialog({
             estimating them.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="grid gap-4">
-          <MetadataTextField
-            id="custom-model-display-name"
-            label="Display name"
-            value={draft.displayName}
-            placeholder={slug}
-            onChange={(displayName) => update({ displayName })}
-          />
-          <div className="grid gap-4 sm:grid-cols-2">
+        <DialogPanel>
+          <div className="grid gap-4">
             <MetadataTextField
-              id="custom-model-context-window"
-              label="Usable context window"
-              description="Tokens this provider account can actually accept."
+              id="custom-model-display-name"
+              label="Display name"
+              value={draft.displayName}
+              placeholder={slug}
+              onChange={(displayName) => update({ displayName })}
+            />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <MetadataTextField
+                id="custom-model-context-window"
+                label="Usable context window"
+                description="Tokens this provider account can actually accept."
+                type="number"
+                value={draft.contextWindowTokens}
+                placeholder="200000"
+                onChange={(contextWindowTokens) => update({ contextWindowTokens })}
+              />
+              <MetadataTextField
+                id="custom-model-max-context-window"
+                label="Maximum context window"
+                description="Optional theoretical model maximum."
+                type="number"
+                value={draft.maxContextWindowTokens}
+                placeholder="1000000"
+                onChange={(maxContextWindowTokens) => update({ maxContextWindowTokens })}
+              />
+            </div>
+            <MetadataTextField
+              id="custom-model-max-output"
+              label="Maximum output"
+              description="Maximum output tokens reported by the gateway or provider."
               type="number"
-              value={draft.contextWindowTokens}
-              placeholder="200000"
-              onChange={(contextWindowTokens) => update({ contextWindowTokens })}
+              value={draft.maxOutputTokens}
+              placeholder="32768"
+              onChange={(maxOutputTokens) => update({ maxOutputTokens })}
             />
             <MetadataTextField
-              id="custom-model-max-context-window"
-              label="Maximum context window"
-              description="Optional theoretical model maximum."
-              type="number"
-              value={draft.maxContextWindowTokens}
-              placeholder="1000000"
-              onChange={(maxContextWindowTokens) => update({ maxContextWindowTokens })}
+              id="custom-model-reasoning-efforts"
+              label="Supported reasoning efforts"
+              description="Comma-separated IDs passed to the provider, such as low, medium, high."
+              value={draft.reasoningEfforts}
+              placeholder="low, medium, high"
+              onChange={(reasoningEfforts) => update({ reasoningEfforts })}
             />
+            <MetadataTextField
+              id="custom-model-default-reasoning-effort"
+              label="Default reasoning effort"
+              description="Must match one of the supported effort IDs above."
+              value={draft.defaultReasoningEffort}
+              placeholder="medium"
+              onChange={(defaultReasoningEffort) => update({ defaultReasoningEffort })}
+            />
+            {error ? (
+              <p role="alert" className="text-xs text-destructive">
+                {error}
+              </p>
+            ) : null}
           </div>
-          <MetadataTextField
-            id="custom-model-max-output"
-            label="Maximum output"
-            description="Maximum output tokens reported by the gateway or provider."
-            type="number"
-            value={draft.maxOutputTokens}
-            placeholder="32768"
-            onChange={(maxOutputTokens) => update({ maxOutputTokens })}
-          />
-          <MetadataTextField
-            id="custom-model-reasoning-efforts"
-            label="Supported reasoning efforts"
-            description="Comma-separated IDs passed to the provider, such as low, medium, high."
-            value={draft.reasoningEfforts}
-            placeholder="low, medium, high"
-            onChange={(reasoningEfforts) => update({ reasoningEfforts })}
-          />
-          <MetadataTextField
-            id="custom-model-default-reasoning-effort"
-            label="Default reasoning effort"
-            description="Must match one of the supported effort IDs above."
-            value={draft.defaultReasoningEffort}
-            placeholder="medium"
-            onChange={(defaultReasoningEffort) => update({ defaultReasoningEffort })}
-          />
-          {error ? (
-            <p role="alert" className="text-xs text-destructive">
-              {error}
-            </p>
-          ) : null}
         </DialogPanel>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>

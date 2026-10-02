@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Native bigint file IDs retain NTFS identities omitted by Effect numeric inode stats.
+import * as NodeFSP from "node:fs/promises";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -61,17 +63,30 @@ export const resolveNodeExecutable = Effect.fn("nodeRuntime.resolveNodeExecutabl
     fs.stat(executablePath).pipe(Effect.option),
     fs.stat(nodePath).pipe(Effect.option),
   ]);
-  if (
-    Option.isSome(hostInfo) &&
-    Option.isSome(nodeInfo) &&
-    hostInfo.value.dev === nodeInfo.value.dev &&
-    Option.isSome(hostInfo.value.ino) &&
-    Option.isSome(nodeInfo.value.ino) &&
-    Number.isSafeInteger(hostInfo.value.ino.value) &&
-    hostInfo.value.ino.value > 0 &&
-    hostInfo.value.ino.value === nodeInfo.value.ino.value
-  ) {
-    return yield* new NodeRuntimeUnavailableError({ feature });
+  if (Option.isSome(hostInfo) && Option.isSome(nodeInfo)) {
+    const hostInode = Option.getOrNull(hostInfo.value.ino);
+    const nodeInode = Option.getOrNull(nodeInfo.value.ino);
+    const reliableNumericIdentity =
+      hostInode !== null &&
+      nodeInode !== null &&
+      Number.isSafeInteger(hostInode) &&
+      Number.isSafeInteger(nodeInode) &&
+      hostInode > 0 &&
+      nodeInode > 0;
+    const sameFile = reliableNumericIdentity
+      ? hostInfo.value.dev === nodeInfo.value.dev && hostInode === nodeInode
+      : yield* Effect.tryPromise(() =>
+          Promise.all([
+            NodeFSP.stat(executablePath, { bigint: true }),
+            NodeFSP.stat(nodePath, { bigint: true }),
+          ]),
+        ).pipe(
+          Effect.map(
+            ([host, node]) => host.dev === node.dev && host.ino > 0n && host.ino === node.ino,
+          ),
+          Effect.orElseSucceed(() => false),
+        );
+    if (sameFile) return yield* new NodeRuntimeUnavailableError({ feature });
   }
   // Launchers such as Vite+ dispatch by argv[0]; keep the node name intact.
   return nodePath;

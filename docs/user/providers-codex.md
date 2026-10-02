@@ -1,8 +1,29 @@
 # Codex
 
-For one account, use the default Codex provider with your normal Codex login.
-[Provider setup](./install.md#providers) covers installation, Settings > Providers,
-and custom binaries or environment variables.
+Use your ChatGPT plan or an existing Codex CLI login to code in T3 Code.
+
+## Connect with ChatGPT
+
+Connect during onboarding or in **Settings → Providers**. For a remote machine,
+select that environment first. T3 Code handles Codex installation; sign in on
+OpenAI and allow sharing of your ChatGPT plan.
+
+Manage shared usage and credits in ChatGPT through **Manage usage** in T3 Code.
+If a request uses a feature that ChatGPT sharing does not support, use another
+provider for that request.
+
+When reconnecting, choose the same account in T3 Code and on OpenAI's sign-in
+page. Disconnecting stops running threads but keeps their history and lets you
+reconnect later.
+
+If remote sign-in cannot return automatically, paste the full URL from the final
+localhost page into the sign-in panel, even if that page could not load.
+
+## Use an existing Codex login
+
+T3 Code can use your installed Codex and its existing login. Run `codex login`
+on the environment's machine to sign in. [Provider setup](./install.md#providers)
+covers installation and custom configuration.
 
 ## Subagent transcripts
 
@@ -24,6 +45,12 @@ Compatible API gateways do not expose an authoritative reset through Codex, so
 generic gateway `429` errors do not trigger automatic continuation.
 
 ## Use multiple accounts
+
+Add another ChatGPT account in **Settings → Providers**, then select the account
+from the thread's model picker. Compatible accounts can continue the same thread.
+Connecting accounts through T3 Code leaves your CLI login unchanged.
+
+### Multiple CLI logins
 
 A shared Codex home with a shadow home lets work and personal accounts continue
 the same threads. The accounts share Codex sessions and configuration while
@@ -68,8 +95,10 @@ Codex setup. Use a fresh shadow directory and sign in again.
 
 ## Use a compatible API gateway
 
-Add or edit a Codex instance, open **Config**, and enable **Compatible API
-gateway**. Set **Gateway base URL** to the gateway origin or path prefix. T3 Code
+Add or edit a Codex instance that uses an existing CLI login and enable
+**Compatible API gateway** in its settings. ChatGPT accounts connected through
+T3 Code use OpenAI's sharing connection. Set **Gateway base URL** to the gateway
+origin or path prefix. T3 Code
 adds `/v1` when Codex needs it and preserves an existing `/v1` suffix. The gateway
 must support the Responses API.
 

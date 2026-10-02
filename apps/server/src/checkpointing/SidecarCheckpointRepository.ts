@@ -327,27 +327,85 @@ export const make = Effect.gen(function* () {
     // Only worktree interpretation is copied. The project config itself is
     // never copied, so credentials, hooks, filters, remotes and signing stay
     // outside this repository.
-    for (const key of [
-      "core.fileMode",
+    const keys = [
+      "core.autocrlf",
+      "core.eol",
+      "core.filemode",
       "core.symlinks",
-      "core.ignoreCase",
-      "core.precomposeUnicode",
-    ]) {
-      const source = yield* git(
-        "SidecarCheckpointRepository.readWorktreeConfig",
-        cwd,
-        ["-C", identity.worktreeRoot, "config", "--get", key],
-        { allowNonZeroExit: true, maxOutputBytes: 4_096 },
+      "core.ignorecase",
+      "core.precomposeunicode",
+    ];
+    const pattern = "^core\\.(autocrlf|eol|filemode|symlinks|ignorecase|precomposeunicode)$";
+    // Batch optional settings: a missing key's nonzero exit triggers costly
+    // process-tree cleanup on Windows. Read local values too to avoid no-op writes.
+    const source = yield* git(
+      "SidecarCheckpointRepository.readWorktreeConfig",
+      cwd,
+      ["-C", identity.worktreeRoot, "config", "--null", "--get-regexp", pattern],
+      { allowNonZeroExit: true, maxOutputBytes: keys.length * 4_096, outputMode: "error" },
+    );
+    const destination = yield* git(
+      "SidecarCheckpointRepository.readSidecarConfig",
+      cwd,
+      sidecarGitArgs(gitDir, identity.worktreeRoot, [
+        "config",
+        "--local",
+        "--null",
+        "--get-regexp",
+        pattern,
+      ]),
+      { allowNonZeroExit: true, maxOutputBytes: keys.length * 4_096, outputMode: "error" },
+    );
+    for (const result of [source, destination]) {
+      if (result.exitCode !== 0 && result.exitCode !== 1) {
+        return yield* checkpointError(
+          "SidecarCheckpointRepository.readWorktreeConfig",
+          cwd,
+          "Unable to read Git worktree configuration.",
+        );
+      }
+    }
+    // Git lists global and included values before local overrides. Keep the
+    // last value, matching `git config --get`, and retain empty settings as present.
+    const values = (output: string) =>
+      new Map(
+        output
+          .split("\0")
+          .filter(Boolean)
+          .map((record) => {
+            const separator = record.indexOf("\n");
+            return separator < 0
+              ? ([record, ""] as const)
+              : ([record.slice(0, separator), record.slice(separator + 1).trim()] as const);
+          }),
       );
-      if (source.exitCode === 0 && source.stdout.trim()) {
+    const sourceValues = values(source.stdout);
+    const destinationValues = values(destination.stdout);
+    for (const key of keys) {
+      const value = sourceValues.get(key);
+      if (value && destinationValues.get(key) !== value) {
         yield* git("SidecarCheckpointRepository.writeWorktreeConfig", cwd, [
-          ...sidecarGitArgs(gitDir, identity.worktreeRoot, [
-            "config",
-            "--local",
-            key,
-            source.stdout.trim(),
-          ]),
+          ...sidecarGitArgs(gitDir, identity.worktreeRoot, ["config", "--local", key, value]),
         ]);
+      } else if (
+        value === undefined &&
+        destinationValues.has(key) &&
+        (key === "core.autocrlf" || key === "core.eol")
+      ) {
+        const cleared = yield* git(
+          "SidecarCheckpointRepository.clearWorktreeConfig",
+          cwd,
+          sidecarGitArgs(gitDir, identity.worktreeRoot, ["config", "--local", "--unset-all", key]),
+          { allowNonZeroExit: true, maxOutputBytes: 4_096 },
+        );
+        // Git exits 5 when the local value was already absent.
+        if (cleared.exitCode !== 0 && cleared.exitCode !== 5) {
+          return yield* checkpointError(
+            "SidecarCheckpointRepository.clearWorktreeConfig",
+            cwd,
+            "Unable to clear inherited Git line-ending configuration.",
+          );
+        }
       }
     }
     return gitDir;

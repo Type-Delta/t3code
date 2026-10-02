@@ -4,9 +4,7 @@ import * as Schema from "effect/Schema";
 
 import { WsSubscribeServerConfigRpc } from "./rpc.ts";
 
-const decodeServerConfigSubscription = Schema.decodeUnknownSync(
-  WsSubscribeServerConfigRpc.payloadSchema,
-);
+const decodeServerConfigSubscription = Schema.decodeSync(WsSubscribeServerConfigRpc.payloadSchema);
 
 /**
  * The client always sends `environmentThemes`, including to servers built
@@ -17,7 +15,7 @@ const decodeServerConfigSubscription = Schema.decodeUnknownSync(
 describe("subscribeServerConfig payload compatibility", () => {
   it("is accepted by a server whose schema predates the field", () => {
     const oldServerPayload = Schema.Struct({});
-    const decoded = Schema.decodeUnknownExit(oldServerPayload)({ environmentThemes: true });
+    const decoded = Schema.decodeExit(oldServerPayload)({ environmentThemes: true });
     expect(Exit.isSuccess(decoded)).toBe(true);
   });
 

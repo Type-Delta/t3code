@@ -6,7 +6,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Deferred from "effect/Deferred";
+import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientError from "effect/unstable/http/HttpClientError";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
@@ -79,6 +81,7 @@ const makeConfig = (port: number, credential: string) =>
 
 const makeInstance = (
   configRef: Ref.Ref<Option.Option<DesktopBackendManager.DesktopBackendStartConfig>>,
+  readyRef: Ref.Ref<boolean>,
 ) =>
   ({
     id: DesktopBackendPool.BackendInstanceId(PRIMARY_LOCAL_ENVIRONMENT_ID),
@@ -86,7 +89,7 @@ const makeInstance = (
     currentConfig: Ref.get(configRef),
     start: Effect.void,
     stop: () => Effect.void,
-    snapshot: Effect.succeed({}),
+    snapshot: Ref.get(readyRef).pipe(Effect.map((ready) => ({ ready }))),
     waitForReady: () => Effect.succeed(true),
   }) as unknown as DesktopBackendPool.DesktopBackendInstance;
 
@@ -115,12 +118,22 @@ describe("DesktopTray authentication integration", () => {
         const exchangeStarted = yield* Deferred.make<void>();
         const releaseExchange = yield* Deferred.make<void>();
         const configRef = yield* Ref.make(Option.some(makeConfig(3773, "desktop-bootstrap-token")));
+        const readyRef = yield* Ref.make(false);
+        const countFails = yield* Ref.make(false);
         const httpClientLayer = Layer.succeed(
           HttpClient.HttpClient,
           HttpClient.make((request) => {
             const pathname = new URL(request.url).pathname;
             if (pathname === "/oauth/token") {
               return Effect.gen(function* () {
+                if (!(yield* Ref.get(readyRef))) {
+                  return yield* new HttpClientError.HttpClientError({
+                    reason: new HttpClientError.TransportError({
+                      request,
+                      cause: "backend not ready",
+                    }),
+                  });
+                }
                 const exchange = yield* Ref.modify(
                   requestCount,
                   (count) => [count + 1, count + 1] as const,
@@ -136,6 +149,14 @@ describe("DesktopTray authentication integration", () => {
             }
             if (pathname === "/api/orchestration/running-thread-count") {
               return Effect.gen(function* () {
+                if (yield* Ref.get(countFails)) {
+                  return yield* new HttpClientError.HttpClientError({
+                    reason: new HttpClientError.TransportError({
+                      request,
+                      cause: "count transport failed",
+                    }),
+                  });
+                }
                 const authorization = request.headers.authorization;
                 if (authorization !== undefined) {
                   yield* Ref.update(trayBearerTokens, (tokens) => [...tokens, authorization]);
@@ -154,7 +175,7 @@ describe("DesktopTray authentication integration", () => {
             );
           }),
         );
-        const poolLayer = DesktopBackendPool.layerTest([makeInstance(configRef)]);
+        const poolLayer = DesktopBackendPool.layerTest([makeInstance(configRef, readyRef)]);
         const authLayer = DesktopLocalEnvironmentAuth.layer.pipe(
           Layer.provide(Layer.mergeAll(poolLayer, httpClientLayer)),
         );
@@ -164,7 +185,7 @@ describe("DesktopTray authentication integration", () => {
             icns: Option.none(),
             png: Option.none(),
           }),
-          resolveResourcePath: () => Effect.succeed(Option.none()),
+          resolveResourcePath: () => Effect.succeedNone,
         } as unknown as DesktopAssets.DesktopAssets["Service"]);
         const windowLayer = Layer.succeed(DesktopWindow.DesktopWindow, {
           activate: Effect.void,
@@ -199,12 +220,19 @@ describe("DesktopTray authentication integration", () => {
           };
         }).pipe(Effect.provide(appLayer));
         electronState.trayCount = 0;
+        const startupTooltip = new Promise<string>((resolve) => {
+          electronState.resolveTooltip = resolve;
+        });
+        yield* tray.configure;
+        expect(yield* Effect.promise(() => startupTooltip)).toBe("T3 Code: 0 threads running");
+        expect(yield* Ref.get(requestCount)).toBe(0);
+        yield* Ref.set(readyRef, true);
         const tooltip = new Promise<string>((resolve) => {
           electronState.resolveTooltip = resolve;
         });
         const windowTokenFiber = yield* auth.getBearerToken().pipe(Effect.forkScoped);
         yield* Deferred.await(exchangeStarted);
-        yield* tray.configure;
+        yield* TestClock.adjust("5 seconds");
         yield* Deferred.succeed(releaseExchange, undefined);
         const [windowToken, label] = yield* Effect.all(
           [Fiber.join(windowTokenFiber), Effect.promise(() => tooltip)],
@@ -217,6 +245,21 @@ describe("DesktopTray authentication integration", () => {
         expect(windowToken).toBe("desktop-bearer-token-1");
         expect(label).toBe("T3 Code: 4 threads running");
         expect(electronState.trayCount).toBe(1);
+        const staleTooltip = new Promise<string>((resolve) => {
+          electronState.resolveTooltip = resolve;
+        });
+        yield* Ref.set(countFails, true);
+        yield* TestClock.adjust("5 seconds");
+        expect(yield* Effect.promise(() => staleTooltip)).toBe(
+          "T3 Code: 4 threads running (last known)",
+        );
+        const recoveredTooltip = new Promise<string>((resolve) => {
+          electronState.resolveTooltip = resolve;
+        });
+        yield* Ref.set(countFails, false);
+        yield* TestClock.adjust("5 seconds");
+        expect(yield* Effect.promise(() => recoveredTooltip)).toBe("T3 Code: 4 threads running");
+        expect(yield* Ref.get(requestCount)).toBe(1);
         electronState.resolveTooltip = undefined;
       }),
     ),

@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
 import {
@@ -129,28 +130,60 @@ describe("Node runtime selection", () => {
     ),
   );
 
-  it.effect("rejects a hard-linked node alias pointing back at the standalone app", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped();
-      const platform = yield* HostProcessPlatform;
-      const executable = path.join(directory, platform === "win32" ? "t3.exe" : "t3");
-      const node = path.join(directory, platform === "win32" ? "node.exe" : "node");
-      yield* fs.writeFileString(executable, "standalone executable fixture");
-      yield* fs.chmod(executable, 0o755);
-      yield* fs.link(executable, node);
-      const error = yield* resolveNodeExecutable("Local device support", { PATH: directory }).pipe(
-        Effect.provideService(HostProcessExecutablePath, executable),
-        Effect.flip,
-      );
-      expect(error._tag).toBe("NodeRuntimeUnavailableError");
-      expect(error.message).toContain("Install Node.js");
-    }).pipe(
-      Effect.scoped,
-      Effect.provideService(HostProcessIsExecutable, true),
-      Effect.provide(NodeServices.layer),
-    ),
+  it.effect.each(["native", "missing", "unsafe"] as const)(
+    "rejects a hard-linked node alias pointing back at the standalone app with %s file identity",
+    (identity) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const platform = yield* HostProcessPlatform;
+        const executable = path.join(directory, platform === "win32" ? "t3.exe" : "t3");
+        const node = path.join(directory, platform === "win32" ? "node.exe" : "node");
+        yield* fs.writeFileString(executable, "standalone executable fixture");
+        yield* fs.chmod(executable, 0o755);
+        yield* fs.link(executable, node);
+        const fixtureFs =
+          identity === "native"
+            ? fs
+            : {
+                ...fs,
+                stat: (target: string) =>
+                  fs.stat(target).pipe(
+                    Effect.map((info) => ({
+                      ...info,
+                      ino:
+                        identity === "missing"
+                          ? Option.none<number>()
+                          : Option.some(Number.MAX_SAFE_INTEGER + 1),
+                    })),
+                  ),
+              };
+        const error = yield* resolveNodeExecutable("Local device support", {
+          PATH: directory,
+        }).pipe(
+          Effect.provideService(HostProcessExecutablePath, executable),
+          Effect.provideService(FileSystem.FileSystem, fixtureFs),
+          Effect.flip,
+        );
+        expect(error._tag).toBe("NodeRuntimeUnavailableError");
+        expect(error.message).toContain("Install Node.js");
+        if (identity !== "native") {
+          yield* fs.remove(node);
+          yield* fs.copyFile(executable, node);
+          yield* fs.chmod(node, 0o755);
+          expect(
+            yield* resolveNodeExecutable("Local device support", { PATH: directory }).pipe(
+              Effect.provideService(HostProcessExecutablePath, executable),
+              Effect.provideService(FileSystem.FileSystem, fixtureFs),
+            ),
+          ).toBe(node);
+        }
+      }).pipe(
+        Effect.scoped,
+        Effect.provideService(HostProcessIsExecutable, true),
+        Effect.provide(NodeServices.layer),
+      ),
   );
 
   it.effect.skipIf(!symlinksSupported)("preserves the node alias used by runtime launchers", () =>

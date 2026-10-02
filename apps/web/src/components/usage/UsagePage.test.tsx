@@ -1,46 +1,22 @@
 import { EnvironmentId, UsageDay, USAGE_CONTRACT_VERSION } from "@t3tools/contracts";
 import { mergeUsage } from "@t3tools/shared/usageMerge";
-import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const testState = vi.hoisted(() => ({
   useUsage: vi.fn(),
+  navigate: vi.fn(),
+  canGoBack: true,
   metric: "cost" as "cost" | "tokens" | "limits",
-  breakdown: "time" as "model" | "time",
 }));
 
-vi.mock("react", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react")>();
-  return {
-    ...actual,
-    useState: vi.fn((initial: unknown) => [
-      initial === readUsagePagePreferences
-        ? { metric: testState.metric, windowDays: 30 }
-        : typeof initial === "function"
-          ? {
-              days: 1,
-              window: {
-                sinceDay: "2026-08-10",
-                untilDay: "2026-08-11",
-                timeZone: "UTC",
-                resolution: "hour",
-                sinceTime: "2026-08-10T12:37:00.000Z",
-                untilTime: "2026-08-11T12:37:00.000Z",
-              },
-            }
-          : initial === "cost"
-            ? testState.metric
-            : initial === "model"
-              ? testState.breakdown
-              : initial,
-      vi.fn(),
-    ]),
-  };
-});
-
 vi.mock("../../env", () => ({ isElectron: false }));
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => testState.navigate,
+  useCanGoBack: () => testState.canGoBack,
+}));
 vi.mock("../../state/usage", () => ({ useUsage: testState.useUsage }));
-vi.mock("../ui/button", () => ({ Button: "button" }));
 vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
 vi.mock("../ui/select", () => ({
   Select: "div",
@@ -50,7 +26,10 @@ vi.mock("../ui/select", () => ({
   SelectValue: "div",
 }));
 vi.mock("../ui/sidebar", () => ({ SidebarInset: "div" }));
-vi.mock("../ui/toggle-group", () => ({ Toggle: "button", ToggleGroup: "div" }));
+vi.mock("./usagePagePreferences", () => ({
+  readUsagePagePreferences: () => ({ metric: testState.metric, windowDays: 1 }),
+  saveUsagePagePreferences: vi.fn(),
+}));
 vi.mock("../WorkspaceBreadcrumb", () => ({
   WorkspaceBreadcrumb: "div",
   WorkspaceBreadcrumbItem: "div",
@@ -72,8 +51,6 @@ vi.mock("./usageProviders", async (importOriginal) => {
 });
 
 import { UsagePage } from "./UsagePage";
-import { readUsagePagePreferences } from "./usagePagePreferences";
-
 const providerTotals = (codex: number, claude: number) =>
   new Map([
     ["codex", { costUsd: codex, totalTokens: codex * 1_000 }],
@@ -141,7 +118,6 @@ const environments = [
 
 beforeEach(() => {
   testState.metric = "cost";
-  testState.breakdown = "time";
   testState.useUsage.mockReturnValue({
     merged: {
       ...mergeUsage([], USAGE_CONTRACT_VERSION),
@@ -151,14 +127,14 @@ beforeEach(() => {
           day: "2026-08-10",
           hourStart: "2026-08-10T13:37:00.000Z",
           costUsd: 13,
-          totalTokens: 13_000,
+          totalTokens: 13000,
           byProvider: providerTotals(7, 6),
         },
         {
           day: "2026-08-11",
           hourStart: "2026-08-11T11:37:00.000Z",
           costUsd: 11,
-          totalTokens: 11_000,
+          totalTokens: 11000,
           byProvider: providerTotals(6, 5),
         },
       ],
@@ -171,37 +147,45 @@ beforeEach(() => {
   });
 });
 
-describe("UsagePage hourly breakdown", () => {
-  it("keeps recent activity visible first without empty hourly rows", () => {
-    const markup = renderToStaticMarkup(<UsagePage />);
-    const body = markup.match(/<tbody>(.*?)<\/tbody>/)?.[1] ?? "";
+describe("UsagePage Escape navigation", () => {
+  let renderer: Root;
+  let container: HTMLDivElement;
+  let back: ReturnType<typeof vi.spyOn>;
 
-    expect(body.match(/<tr/g)).toHaveLength(2);
-    expect(body).toContain("$11.00");
-    expect(body).toContain("$13.00");
-    expect(body.indexOf("$11.00")).toBeLessThan(body.indexOf("$13.00"));
+  beforeEach(async () => {
+    back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    testState.navigate.mockClear();
+    testState.canGoBack = true;
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    container = document.createElement("div");
+    document.body.append(container);
+    renderer = createRoot(container);
+    await act(() => {
+      renderer.render(<UsagePage />);
+    });
   });
 
-  it("shows answered usage while another environment is still reporting", () => {
+  afterEach(async () => {
+    await act(() => renderer.unmount());
+    container.remove();
+    back.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows answered usage while another environment is still reporting", async () => {
     testState.useUsage.mockReturnValue({
-      merged: {
-        ...mergeUsage([], USAGE_CONTRACT_VERSION),
-        costUsd: 42,
-        sessions: 2,
-      },
+      merged: { ...mergeUsage([], USAGE_CONTRACT_VERSION), costUsd: 42, sessions: 2 },
       environments: [
         {
-          environmentId: "answered",
+          ...environments[0],
+          environmentId: EnvironmentId.make("answered"),
           label: "Answered host",
-          isPending: false,
-          error: null,
-          summary: {},
         },
         {
-          environmentId: "pending",
+          ...environments[0],
+          environmentId: EnvironmentId.make("pending"),
           label: "Pending host",
           isPending: true,
-          error: null,
           summary: null,
         },
       ],
@@ -209,57 +193,86 @@ describe("UsagePage hourly breakdown", () => {
       isPartial: true,
       refresh: vi.fn(),
     });
-
-    const markup = renderToStaticMarkup(<UsagePage />);
-
-    expect(markup).toContain("$42.00");
-    expect(markup).toContain("1 device still scanning");
+    await act(() => renderer.render(<UsagePage />));
+    expect(container.textContent).toContain("$42.00");
+    expect(container.textContent).toContain("1 device still scanning");
   });
 
-  it("keeps chronological ordering when the token metric is selected", () => {
-    testState.metric = "tokens";
+  it("keeps recent activity first in both cost and token breakdowns", async () => {
+    const hour = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Hour",
+    )!;
+    await act(() => hour.click());
+    const rows = () => [...container.querySelectorAll("tbody tr")].map((row) => row.textContent);
+    expect(rows()).toHaveLength(2);
+    expect(rows()[0]).toContain("$11.00");
+    expect(rows()[1]).toContain("$13.00");
+    await act(() =>
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "t" })),
+    );
+    expect(rows()[0]).toContain("$11.00");
+    expect(rows()[1]).toContain("$13.00");
+  });
 
-    const markup = renderToStaticMarkup(<UsagePage />);
-    const body = markup.match(/<tbody>(.*?)<\/tbody>/)?.[1] ?? "";
+  it("orders model costs, marks unknown rates, and sorts token totals without mutating data", async () => {
+    const rows = () => [...container.querySelectorAll("tbody tr")].map((row) => row.textContent);
+    expect(rows()[0]).toContain("expensive-model");
+    expect(rows()[1]).toContain("token-heavy-model");
+    const unpriced = rows().find((row) => row?.includes("unpriced-model"));
+    expect(unpriced).toContain("Unpriced");
+    expect(unpriced).not.toContain("$0.00");
+    await act(() =>
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "t" })),
+    );
+    expect(rows()[0]).toContain("token-heavy-model");
+    expect(rows()[1]).toContain("token-heavy-cheaper-model");
+    expect(modelTotals[0]?.model).toBe("expensive-model");
+  });
 
-    expect(body).toMatch(/\$11\.00.*\$13\.00/);
+  function escape(properties: { repeat?: boolean; isComposing?: boolean } = {}) {
+    return new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "Escape",
+      ...properties,
+    });
+  }
+
+  it("returns to the previous page on Escape", () => {
+    document.body.dispatchEvent(escape());
+    expect(back).toHaveBeenCalledOnce();
+    expect(testState.navigate).not.toHaveBeenCalled();
+  });
+
+  it("returns home when there is no previous app page", async () => {
+    testState.canGoBack = false;
+    await act(() => renderer.render(<UsagePage />));
+
+    document.body.dispatchEvent(escape());
+    expect(testState.navigate).toHaveBeenCalledWith({ to: "/" });
+    expect(back).not.toHaveBeenCalled();
+  });
+
+  it("closes the environment menu before Escape navigates back", async () => {
+    const trigger = container.querySelector<HTMLButtonElement>('[data-slot="menu-trigger"]')!;
+    await act(() => trigger.click());
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+
+    await act(() => {
+      document.activeElement!.dispatchEvent(escape());
+    });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(back).not.toHaveBeenCalled();
+
+    document.body.dispatchEvent(escape());
+    expect(back).toHaveBeenCalledOnce();
+  });
+
+  it.each([{ repeat: true }, { isComposing: true }])("ignores Escape with %j", (properties) => {
+    document.body.dispatchEvent(escape(properties));
+    expect(back).not.toHaveBeenCalled();
+    expect(testState.navigate).not.toHaveBeenCalled();
   });
 });
 
-describe("UsagePage model breakdown", () => {
-  it("sorts models by cost when the cost metric is selected", () => {
-    testState.breakdown = "model";
-
-    const markup = renderToStaticMarkup(<UsagePage />);
-    const body = markup.match(/<tbody>(.*?)<\/tbody>/)?.[1] ?? "";
-
-    expect(body).toMatch(/expensive-model.*token-heavy-model.*token-heavy-cheaper-model/);
-  });
-
-  it("flags a model with no known rates instead of showing it as free", () => {
-    testState.breakdown = "model";
-
-    const markup = renderToStaticMarkup(<UsagePage />);
-    const body = markup.match(/<tbody>(.*?)<\/tbody>/)?.[1] ?? "";
-    const unpricedRow = body.split("<tr").find((row) => row.includes("unpriced-model")) ?? "";
-
-    expect(unpricedRow).toContain("Unpriced");
-    expect(unpricedRow).not.toContain("$0.00");
-  });
-
-  it("sorts models by token usage when the token metric is selected", () => {
-    testState.metric = "tokens";
-    testState.breakdown = "model";
-
-    const markup = renderToStaticMarkup(<UsagePage />);
-    const body = markup.match(/<tbody>(.*?)<\/tbody>/)?.[1] ?? "";
-
-    expect(body).toMatch(/token-heavy-model.*token-heavy-cheaper-model.*expensive-model/);
-    expect(modelTotals.map((model) => model.model)).toEqual([
-      "expensive-model",
-      "token-heavy-model",
-      "token-heavy-cheaper-model",
-      "unpriced-model",
-    ]);
-  });
-});
+// @vitest-environment jsdom

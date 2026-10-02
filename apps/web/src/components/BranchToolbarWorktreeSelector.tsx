@@ -40,7 +40,7 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
     return (
       <span
         className={cn(
-          "inline-flex min-w-0 items-center gap-1 border border-transparent px-[calc(--spacing(3)-1px)] text-sm font-medium text-muted-foreground/70 sm:text-xs",
+          "inline-flex min-w-0 items-center gap-1 border border-transparent px-2.75 text-sm font-medium text-muted-foreground/70 sm:text-xs",
           className,
         )}
       >
@@ -68,8 +68,9 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
     >
       <SelectTrigger
         variant="ghost"
+        weight="medium"
         size="xs"
-        className={cn("min-w-0 font-medium", className)}
+        className={cn("min-w-0", className)}
         aria-label="Worktree"
       >
         {selectedWorktree?.isPrimary ? (

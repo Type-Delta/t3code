@@ -1,10 +1,12 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
+import * as NodeHttp from "node:http";
 import * as NodeProcess from "node:process";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 
 import {
   type DeviceServiceState,
@@ -132,6 +134,7 @@ import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationE
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { ProviderAuthService } from "./provider/Services/ProviderAuthService.ts";
 import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
@@ -139,10 +142,14 @@ import {
   AntigravityInstallation,
   AntigravityInstallationError,
 } from "./provider/AntigravityInstallation.ts";
+import { CodexInstallation } from "./provider/CodexInstallation.ts";
 import type { ProviderInstance } from "./provider/ProviderDriver.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import { ProviderAdapterRequestError } from "./provider/Errors.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
+import {
+  makeManualOnlyProviderMaintenanceCapabilities,
+  ProviderVersionCache,
+} from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
@@ -169,12 +176,14 @@ import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
+import { REPLAY_MARKER_MAX_AGE } from "./auth/replayMarkers.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ManagementApiKeyService from "./auth/ManagementApiKeyService.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
 import * as ZrokShare from "./remoteAccess/ZrokShare.ts";
+import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
@@ -217,6 +226,8 @@ import {
   transferBudgetViolations,
 } from "../integration/TransferBudgetReport.integration.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { DEFAULT_SIGNAL_EXPORT, otlpSerializationLayer } from "@t3tools/shared/observability";
+import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 
 const defaultProjectId = ProjectId.make("project-default");
 const defaultThreadId = ThreadId.make("thread-default");
@@ -482,7 +493,7 @@ const makeBrowserOtlpPayload = (spanName: string) =>
         url: collector.url,
         exportInterval: "10 millis",
         resource: {
-          serviceName: "t3-web",
+          serviceName: "t3code-web",
           attributes: {
             "service.runtime": "t3-web",
             "service.mode": "browser",
@@ -523,11 +534,13 @@ const buildAppUnderTest = (options?: {
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
     environmentTheme?: Partial<EnvironmentTheme.EnvironmentThemeService["Service"]>;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
+    modelManifest?: Partial<ModelManifest.ModelManifest["Service"]>;
     usageLimitSources?: Partial<UsageLimitSources.UsageLimitSources["Service"]>;
     providerService?: Partial<ProviderService.ProviderService["Service"]>;
     providerAuth?: Partial<ProviderAuthService["Service"]>;
     providerInstanceRegistry?: Partial<ProviderInstanceRegistry["Service"]>;
     antigravityInstallation?: Partial<AntigravityInstallation["Service"]>;
+    codexInstallation?: Partial<CodexInstallation["Service"]>;
     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
     externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
     vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
@@ -563,7 +576,9 @@ const buildAppUnderTest = (options?: {
       CloudManagedEndpointRuntime.CloudManagedEndpointRuntime["Service"]
     >;
     relayClient?: Partial<RelayClient.RelayClient["Service"]>;
+    agentAwarenessRelay?: Partial<AgentAwarenessRelay.AgentAwarenessRelay["Service"]>;
     cloudCliTokenManager?: Partial<CloudCliTokenManager.CloudCliTokenManager["Service"]>;
+    httpClient?: HttpClient.HttpClient;
     nativeTelemetryClient?: Partial<NativeTelemetryClient.NativeTelemetryClient["Service"]>;
     desktopTelemetryReceiver?: Partial<
       DesktopTelemetryReceiver.DesktopTelemetryReceiver["Service"]
@@ -589,7 +604,7 @@ const buildAppUnderTest = (options?: {
       otlpTracesExport: DEFAULT_SIGNAL_EXPORT,
       otlpMetricsExport: DEFAULT_SIGNAL_EXPORT,
       otlpLogsExport: DEFAULT_SIGNAL_EXPORT,
-      otlpServiceName: "t3-server",
+      otelEnvironment: OtelEnvironment.none,
       mode: "desktop",
       port: 0,
       host: "127.0.0.1",
@@ -655,25 +670,25 @@ const buildAppUnderTest = (options?: {
       get: () => Effect.succeed(defaultVcsDriver),
       detect: (input) =>
         defaultVcsDriver.detectRepository(input.cwd).pipe(
-          Effect.flatMap((repository) =>
-            repository
-              ? Effect.succeed(repository)
-              : defaultVcsDriver.isInsideWorkTree(input.cwd).pipe(
-                  Effect.map((isInsideWorkTree) =>
-                    isInsideWorkTree
-                      ? {
-                          kind: "git" as const,
-                          rootPath: input.cwd,
-                          metadataPath: null,
-                          freshness: {
-                            source: "live-local" as const,
-                            observedAt: TEST_EPOCH,
-                            expiresAt: Option.none(),
-                          },
-                        }
-                      : null,
-                  ),
+          Effect.filterOrElse(
+            (repository) => repository !== null,
+            () =>
+              defaultVcsDriver.isInsideWorkTree(input.cwd).pipe(
+                Effect.map((isInsideWorkTree) =>
+                  isInsideWorkTree
+                    ? {
+                        kind: "git" as const,
+                        rootPath: input.cwd,
+                        metadataPath: null,
+                        freshness: {
+                          source: "live-local" as const,
+                          observedAt: TEST_EPOCH,
+                          expiresAt: Option.none(),
+                        },
+                      }
+                    : null,
                 ),
+              ),
           ),
           Effect.map((repository) =>
             repository
@@ -794,6 +809,10 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(ModelManifest.ModelManifest)({
+            forceRefresh: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
+            ...options?.layers?.modelManifest,
+          }),
           Layer.mock(ProviderRegistry.ProviderRegistry)({
             getProviders: Effect.succeed([]),
             refresh: () => Effect.succeed([]),
@@ -814,9 +833,13 @@ const buildAppUnderTest = (options?: {
             ...options?.layers?.providerAuth,
           }),
           Layer.mock(ProviderInstanceRegistry)({
-            getInstance: () => Effect.succeed(undefined),
+            getInstance: () => Effect.undefined,
             listInstances: Effect.succeed([]),
             ...options?.layers?.providerInstanceRegistry,
+          }),
+          Layer.mock(CodexInstallation)({
+            managedDirectory: "unused-test-codex-runtime",
+            ...options?.layers?.codexInstallation,
           }),
           Layer.mock(AntigravityInstallation)({
             managedDirectory: "unused-test-antigravity-runtime",
@@ -824,7 +847,7 @@ const buildAppUnderTest = (options?: {
           }),
           Layer.mock(ProviderSessionDirectory.ProviderSessionDirectory)({
             upsert: () => Effect.void,
-            getBinding: () => Effect.succeed(Option.none()),
+            getBinding: () => Effect.succeedNone,
             listThreadIds: () => Effect.succeed([]),
             listBindings: () => Effect.succeed([]),
             ...options?.layers?.providerSessionDirectory,
@@ -837,20 +860,10 @@ const buildAppUnderTest = (options?: {
         ),
       ),
       Layer.provide(
-        Layer.mock(ServerSettings.ServerSettingsService)({
-          start: Effect.void,
-          ready: Effect.void,
-          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          streamChanges: Stream.empty,
-          ...options?.layers?.serverSettings,
-        }),
-      ),
-      Layer.provide(
         Layer.mergeAll(
           Layer.mock(ExternalLauncher.ExternalLauncher)({
             resolveAvailableEditors: () => Effect.succeed([]),
-            resolveFileManagerRevealKind: () => Effect.sync((): undefined => undefined),
+            resolveFileManagerRevealKind: () => Effect.undefined,
             ...options?.layers?.externalLauncher,
           }),
           Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({
@@ -925,6 +938,16 @@ const buildAppUnderTest = (options?: {
 
     const servedRoutesLayer = servedRoutesBaseLayer.pipe(
       Layer.provide(ThreadCommandDispatcher.ThreadCommandDispatcherLive),
+      Layer.provide(
+        Layer.mock(ServerSettings.ServerSettingsService)({
+          start: Effect.void,
+          ready: Effect.void,
+          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+          updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
+          streamChanges: Stream.empty,
+          ...options?.layers?.serverSettings,
+        }),
+      ),
       Layer.provide(gitManagerLayer),
       Layer.provide(gitVcsDriverLayer),
       Layer.provide(gitWorkflowLayer),
@@ -1020,20 +1043,20 @@ const buildAppUnderTest = (options?: {
             }),
           searchThreads: () => Effect.succeed({ matches: [] }),
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
-          getProjectShellById: () => Effect.succeed(Option.none()),
-          getThreadShellById: () => Effect.succeed(Option.none()),
-          getThreadDetailById: () => Effect.succeed(Option.none()),
-          getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+          getProjectShellById: () => Effect.succeedNone,
+          getThreadShellById: () => Effect.succeedNone,
+          getThreadDetailById: () => Effect.succeedNone,
+          getThreadDetailSnapshot: () => Effect.succeedNone,
           getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
           getEventReplayStats: ({ fromSequenceExclusive, toSequenceInclusive }) =>
             Effect.succeed({
               eventCount: Math.max(0, toSequenceInclusive - fromSequenceExclusive),
               payloadBytes: 0,
             }),
-          getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
-          getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+          getActiveProjectByWorkspaceRoot: () => Effect.succeedNone,
+          getFirstActiveThreadIdByProjectId: () => Effect.succeedNone,
           getImportedAgentSessionSources: () => Effect.succeed([]),
-          getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          getThreadCheckpointContext: () => Effect.succeedNone,
           ...options?.layers?.projectionSnapshotQuery,
         }),
       ),
@@ -1158,11 +1181,20 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.succeed(
-          CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
-          CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
-            applyConfig: () => Effect.succeed({ status: "disabled" }),
-            ...options?.layers?.cloudManagedEndpointRuntime,
+        Layer.mergeAll(
+          Layer.succeed(
+            CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
+            CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
+              applyConfig: () => Effect.succeed({ status: "disabled" }),
+              recoveryRequests: Stream.empty,
+              requestRecovery: () => Effect.void,
+              withLinkStateLock: (effect) => effect,
+              ...options?.layers?.cloudManagedEndpointRuntime,
+            }),
+          ),
+          Layer.mock(AgentAwarenessRelay.AgentAwarenessRelay)({
+            requestCatchUp: () => Effect.void,
+            ...options?.layers?.agentAwarenessRelay,
           }),
         ),
       ),
@@ -1203,7 +1235,7 @@ const buildAppUnderTest = (options?: {
       Layer.provide(
         Layer.mock(CloudCliTokenManager.CloudCliTokenManager)({
           get: Effect.die(new Error("Unexpected T3 Connect CLI authorization request.")),
-          getExisting: Effect.succeed(Option.none()),
+          getExisting: Effect.succeedNone,
           hasCredential: Effect.succeed(false),
           clear: Effect.void,
           ...options?.layers?.cloudCliTokenManager,
@@ -1249,16 +1281,22 @@ const buildAppUnderTest = (options?: {
       Layer.provideMerge(
         ProjectCloneTracker.layer.pipe(
           Layer.provide(
-            Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
+            Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+              ...options?.layers?.sourceControlRepositoryService,
+            }),
           ),
         ),
       ),
       Layer.provideMerge(WorktreeSetupTracker.layer),
-      Layer.provideMerge(OtlpSerialization.layerJson),
+      Layer.provideMerge(otlpSerializationLayer(config.otlpTracesExport.protocol)),
       Layer.provideMerge(ServerSecretStore.layer),
       Layer.provide(workspaceAndProjectServicesLayer),
-      Layer.provideMerge(FetchHttpClient.layer),
-      Layer.provide(VcsProcess.layer),
+      Layer.provideMerge(
+        options?.layers?.httpClient === undefined
+          ? FetchHttpClient.layer
+          : Layer.succeed(HttpClient.HttpClient, options.layers.httpClient),
+      ),
+      Layer.provide(GitHubCli.layer.pipe(Layer.provideMerge(VcsProcess.layer))),
       Layer.provide(layerConfig),
     );
 
@@ -1721,14 +1759,16 @@ const getWsServerUrl = (
     );
   });
 
-// Mirrors NodeHttpServer.layerTest, which does not expose server options,
-// with the production `websocket: { perMessageDeflate: true }` setting.
+// Windows can assign ports such as 6566 that Fetch rejects. Use scoped native
+// HTTP agents for real loopback requests while keeping OS-assigned ports.
+const NodeHttpServerTest = HttpServer.layerTestClient.pipe(
+  Layer.provide(Layer.fresh(NodeHttpClient.layerNodeHttp)),
+  Layer.provideMerge(NodeHttpServer.layer(NodeHttp.createServer, { port: 0 })),
+);
+
+// Match production WebSocket compression while using the same loopback client.
 const NodeHttpServerTestWithWsDeflate = HttpServer.layerTestClient.pipe(
-  Layer.provide(
-    Layer.fresh(FetchHttpClient.layer).pipe(
-      Layer.provide(Layer.succeed(FetchHttpClient.RequestInit)({ keepalive: false })),
-    ),
-  ),
+  Layer.provide(Layer.fresh(NodeHttpClient.layerNodeHttp)),
   Layer.provideMerge(
     Layer.unwrap(
       Effect.map(
@@ -1786,7 +1826,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* Deferred.succeed(ready, undefined);
       assert.equal((yield* Fiber.join(request)).status, 200);
       assert.isTrue(yield* Deferred.isDone(completed));
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("serves static index content for GET / when staticDir is configured", () =>
@@ -1802,7 +1842,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const response = yield* HttpClient.get("/");
       assert.equal(response.status, 200);
       assert.include(yield* response.text, "router-static-ok");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("revalidates static files without sending unchanged bodies", () =>
@@ -1849,7 +1889,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(changed.status, 200);
       assert.notEqual(changed.headers.etag, etag);
       assert.include(yield* changed.text, "next build");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("serves changed HTML with the same size and timestamp", () =>
@@ -1889,7 +1929,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(head.status, 200);
       assert.equal(head.headers["content-length"], String(Buffer.byteLength(nextHtml)));
       assert.equal(yield* head.text, "");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("caches hashed static assets without freezing mutable files or SPA fallbacks", () =>
@@ -2006,7 +2046,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(changed.headers["cache-control"], "no-cache");
         assert.notEqual(changed.headers.etag, initial.headers.etag);
         assert.equal(yield* changed.text, "replacement config");
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
     );
   }
 
@@ -2071,7 +2111,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.isTrue(replaced.has(path.join(staticDir, name)));
         assert.equal(yield* fileSystem.readFileString(path.join(staticDir, name)), replacement);
       }
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("closes static file handles after GET, HEAD, 304, and request cancellation", () =>
@@ -2155,7 +2195,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* Fiber.interrupt(cancelled);
       yield* Queue.take(closed);
       assert.equal(active.size, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("redirects to dev URL when configured", () =>
@@ -2169,7 +2209,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.status, 302);
       assert.equal(response.headers.location, "http://127.0.0.1:5173/foo/bar?token=test-token");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("serves the public environment descriptor without requiring auth", () =>
@@ -2182,7 +2222,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.status, 200);
       assert.deepEqual(body, testEnvironmentDescriptor);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("serves snapshots for MCP handoff thread IDs above the router default", () =>
@@ -2217,7 +2257,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.status, 200);
       assert.equal(snapshot.thread.id, threadId);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("compresses large JSON responses through the composed routes", () =>
@@ -2264,7 +2304,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assertBrowserApiCorsResponseHeaders(response.headers);
       assert.deepEqual(body, testEnvironmentDescriptor);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("reports unauthenticated session state without requiring auth", () =>
@@ -2295,7 +2335,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       // Desktop, so port-scoped: instances scan for a free port and share
       // 127.0.0.1, and cookies are not scoped by port.
       assert.isTrue(body.auth.sessionCookieName.startsWith("t3_session_"));
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("bootstraps a browser session and authenticates the session endpoint via cookie", () =>
@@ -2328,7 +2368,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(sessionResponse.status, 200);
       assert.equal(sessionBody.authenticated, true);
       assert.equal(sessionBody.sessionMethod, "browser-session-cookie");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("migrates a valid legacy remote-web session cookie", () =>
@@ -2347,7 +2387,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(body.authenticated, true);
       assert.equal(response.headers["set-cookie"], cookie);
       assert.equal(response.headers["cache-control"], "no-store");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect.each(["cookie", "bearer"])(
@@ -2370,7 +2410,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         assert.equal(body.authenticated, true);
         assert.isUndefined(response.headers["set-cookie"]);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("exchanges a bootstrap grant for a scoped bearer access token", () =>
@@ -2413,7 +2453,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "access:write",
         "relay:write",
       ]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("replaces the local desktop credential on repeated bootstrap exchanges", () =>
@@ -2445,7 +2485,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         const state = (yield* response.json) as { readonly authenticated: boolean };
         assert.equal(state.authenticated, false);
       }
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("persists token exchange client display metadata for authorized-client listings", () =>
@@ -2506,7 +2546,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ipAddress: "127.0.0.1",
         userAgent: "undici",
       });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -2582,7 +2622,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         }>(dpopResponse);
         assert.equal(dpopState.authenticated, true);
         assert.equal(dpopState.sessionMethod, "dpop-access-token");
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("reports clock skew for a future-dated DPoP token exchange proof", () =>
@@ -2614,7 +2654,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(exchange.body.reason, "invalid_credential");
       assert.equal(exchange.body.dpopFailureReason, "time_window");
       assert.equal(typeof exchange.body.traceId, "string");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects replayed DPoP proofs across token exchanges", () =>
@@ -2668,7 +2708,41 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(replayBootstrap.body.reason, "invalid_credential");
       assert.equal(replayBootstrap.body.dpopFailureReason, "replay");
       assert.equal(typeof replayBootstrap.body.traceId, "string");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("rejects a DPoP replay by time alone once its marker can be pruned", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const credentialResponse = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: ownerCookie },
+        body: yield* HttpBody.json({}),
+      });
+      const credential = (yield* credentialResponse.json) as { readonly credential: string };
+      const tokenUrl = yield* getHttpServerUrl("/oauth/token");
+      const acceptedAt = yield* DateTime.now;
+      // The longest-lived proof: `iat` at the 5 s future skew the verifier allows.
+      const dpop = makeDpopProof({
+        method: "POST",
+        url: tokenUrl,
+        iat: Math.floor(acceptedAt.epochMilliseconds / 1_000) + 5,
+      });
+      const exchange = exchangeAccessToken(credential.credential, {
+        headers: { dpop: dpop.proof },
+        scope: "orchestration:read orchestration:operate terminal:operate review:write",
+      });
+
+      assert.equal((yield* exchange).response.status, 200);
+      // While the proof is fresh, only the replay marker rejects it.
+      assert.equal((yield* exchange).body.dpopFailureReason, "replay");
+      // Once the marker can be pruned, the time check rejects the proof by itself.
+      yield* TestClock.setTime(
+        acceptedAt.epochMilliseconds + Duration.toMillis(REPLAY_MARKER_MAX_AGE),
+      );
+      assert.equal((yield* exchange).body.dpopFailureReason, "time_window");
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("ignores forwarded host headers when validating token exchange DPoP URLs", () =>
@@ -2703,7 +2777,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(bootstrap.response.status, 200);
       assert.equal(bootstrap.body.token_type, "DPoP");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects token exchange DPoP proofs bound to spoofed forwarded hosts", () =>
@@ -2744,7 +2818,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(bootstrap.body.reason, "invalid_credential");
       assert.equal(bootstrap.body.dpopFailureReason, "request_mismatch");
       assert.equal(typeof bootstrap.body.traceId, "string");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud link proofs for non-loopback managed endpoint origins", () =>
@@ -2781,7 +2855,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(linkProofResponse.status, 400);
       assert.equal(body._tag, "EnvironmentHttpBadRequestError");
       assert.equal(body.message, "Invalid managed endpoint origin.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud link proofs for unsupported endpoint providers", () =>
@@ -2822,7 +2896,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(linkProofResponse.status, 400);
       assert.equal(body._tag, "EnvironmentHttpBadRequestError");
       assert.equal(body.message, "Invalid managed endpoint origin.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud link proofs requested through a public managed endpoint", () =>
@@ -2864,7 +2938,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(linkProofResponse.status, 400);
       assert.equal(body._tag, "EnvironmentHttpBadRequestError");
       assert.equal(body.message, "Invalid managed endpoint origin.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -2908,7 +2982,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(linkProofResponse.status, 400);
         assert.equal(body._tag, "EnvironmentHttpBadRequestError");
         assert.equal(body.message, "Invalid managed endpoint origin.");
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud link proofs with malformed forwarded request hosts", () =>
@@ -2950,7 +3024,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(linkProofResponse.status, 400);
       assert.equal(body._tag, "EnvironmentHttpBadRequestError");
       assert.equal(body.message, "Invalid managed endpoint origin.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects local cloud link proofs for a different loopback port", () =>
@@ -2988,7 +3062,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(linkProofResponse.status, 400);
       assert.equal(body._tag, "EnvironmentHttpBadRequestError");
       assert.equal(body.message, "Invalid managed endpoint origin.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("allows standard clients to read managed relay configuration state", () =>
@@ -3014,7 +3088,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assert.equal(body.linked, false);
       assert.equal(body.publishAgentActivity, false);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -3060,7 +3134,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           { type: "progress", stage: "downloading" },
           { type: "complete", status: installedRelayClient },
         ]);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("requires relay write scope to update agent activity publication", () =>
@@ -3104,7 +3178,56 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(pairedResponse.status, 403);
       assert.equal(pairedBody._tag, "EnvironmentScopeRequiredError");
       assert.equal(pairedBody.requiredScope, "relay:write");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("wakes the agent awareness relay when this server links or changes publishing", () =>
+    Effect.gen(function* () {
+      let catchUpRequests = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          agentAwarenessRelay: {
+            requestCatchUp: () =>
+              Effect.sync(() => {
+                catchUpRequests += 1;
+              }),
+          },
+        },
+      });
+
+      const cloudKeyPair = NodeCrypto.generateKeyPairSync("ed25519", {
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      });
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const relayConfigResponse = yield* fetchEffect(
+        yield* getHttpServerUrl("/api/connect/relay-config"),
+        {
+          method: "POST",
+          headers: { cookie: ownerCookie, "content-type": "application/json" },
+          body: jsonRequestBody({
+            relayUrl: "https://relay.example.test",
+            cloudUserId: "user_123",
+            environmentCredential: "t3env_test_credential",
+            cloudMintPublicKey: cloudKeyPair.publicKey,
+            endpointRuntime: null,
+          }),
+        },
+      );
+      assert.equal(relayConfigResponse.status, 200);
+      assert.equal(catchUpRequests, 1);
+
+      const preferencesResponse = yield* fetchEffect(
+        yield* getHttpServerUrl("/api/connect/preferences"),
+        {
+          method: "POST",
+          headers: { cookie: ownerCookie, "content-type": "application/json" },
+          body: jsonRequestBody({ publishAgentActivity: true }),
+        },
+      );
+      assert.equal(preferencesResponse.status, 200);
+      assert.equal(catchUpRequests, 2);
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects relay config with an invalid cloud mint public key", () =>
@@ -3135,7 +3258,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(relayConfigResponse.status, 400);
       assert.equal(body._tag, "EnvironmentHttpBadRequestError");
       assert.equal(body.message, "Cloud mint public key must be a valid Ed25519 public key.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects relay config with insecure relay metadata or empty credentials", () =>
@@ -3212,7 +3335,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(nonOriginRelayUrlBody.message, "Relay URL must be a secure absolute HTTPS URL.");
       assert.equal(emptyCredential.status, 400);
       assert.equal(emptyCredentialBody.message, "Relay environment credential is required.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects relay config replacement from a different cloud account", () =>
@@ -3255,7 +3378,69 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         replacementBody.message,
         "This environment is already linked to a different cloud account. Unlink it before switching accounts.",
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("rejects a non-Cloudflare managed endpoint runtime without persisting the link", () =>
+    Effect.gen(function* () {
+      const appliedRuntimeConfigs: Array<unknown> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          cloudManagedEndpointRuntime: {
+            applyConfig: (config) =>
+              Effect.sync(() => {
+                appliedRuntimeConfigs.push(config);
+                return config === null
+                  ? ({ status: "disabled" } as const)
+                  : ({ status: "unsupported", providerKind: config.providerKind } as const);
+              }),
+          },
+        },
+      });
+
+      const cloudKeyPair = NodeCrypto.generateKeyPairSync("ed25519", {
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      });
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const relayConfigUrl = yield* getHttpServerUrl("/api/connect/relay-config");
+      const relayConfigResponse = yield* fetchEffect(relayConfigUrl, {
+        method: "POST",
+        headers: {
+          cookie: ownerCookie,
+          "content-type": "application/json",
+        },
+        body: jsonRequestBody({
+          relayUrl: "https://relay.example.test",
+          cloudUserId: "user_123",
+          environmentCredential: "t3env_test_credential",
+          cloudMintPublicKey: cloudKeyPair.publicKey,
+          endpointRuntime: {
+            providerKind: "manual",
+            connectorToken: "manual-token",
+          },
+        }),
+      });
+      const relayConfigBody = yield* responseJsonEffect<{
+        readonly _tag?: string;
+        readonly endpointRuntimeStatus?: { readonly status?: string };
+      }>(relayConfigResponse);
+      const linkStateUrl = yield* getHttpServerUrl("/api/connect/link-state");
+      const linkStateResponse = yield* fetchEffect(linkStateUrl, {
+        headers: { cookie: ownerCookie },
+      });
+      const linkStateBody = yield* responseJsonEffect<{ readonly linked?: boolean }>(
+        linkStateResponse,
+      );
+
+      assert.equal(relayConfigResponse.status, 503);
+      assert.equal(relayConfigBody._tag, "EnvironmentCloudEndpointUnavailableError");
+      assert.equal(relayConfigBody.endpointRuntimeStatus?.status, "unsupported");
+      // The connector is never touched for a rejected runtime.
+      assert.deepEqual(appliedRuntimeConfigs, []);
+      assert.equal(linkStateResponse.status, 200);
+      assert.equal(linkStateBody.linked, false);
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("reports local cloud link state from persisted relay config", () =>
@@ -3317,7 +3502,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(linkedBody.cloudUserId, "user_123");
       assert.equal(linkedBody.relayUrl, "https://transport.example.test");
       assert.equal(linkedBody.relayIssuer, "https://relay.example.test");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("does not expose internal cloud reconciliation over HTTP", () =>
@@ -3330,12 +3515,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
 
       assert.equal(response.status, 404);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("unlinks local cloud state and disables the managed endpoint runtime", () =>
     Effect.gen(function* () {
       const appliedRuntimeConfigs: Array<unknown> = [];
+      const requestedRecoveryConfigs: Array<unknown> = [];
       yield* buildAppUnderTest({
         layers: {
           cloudManagedEndpointRuntime: {
@@ -3352,7 +3538,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 ...(config.tunnelName ? { tunnelName: config.tunnelName } : {}),
               });
             },
+            requestRecovery: (config) =>
+              Effect.sync(() => {
+                requestedRecoveryConfigs.push(config);
+              }),
           },
+          httpClient: HttpClient.make((request) =>
+            Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ status: "ready" }))),
+          ),
         },
       });
 
@@ -3418,6 +3611,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(linkStateBody.relayUrl, null);
       assert.equal(linkStateBody.relayIssuer, null);
       assert.deepEqual(appliedRuntimeConfigs, [
+        null,
         {
           providerKind: "cloudflare_tunnel",
           connectorToken: "connector-token",
@@ -3426,7 +3620,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         },
         null,
       ]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      assert.deepEqual(requestedRecoveryConfigs, []);
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects replayed cloud mint requests atomically", () =>
@@ -3485,7 +3680,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(replayResponse.status, 409);
       assert.equal(replayBody._tag, "EnvironmentHttpConflictError");
       assert.equal(replayBody.message, "Cloud mint request was already consumed.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("serves the documented T3 Connect mint credential endpoint", () =>
@@ -3544,7 +3739,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         decodeCompactJwtPayload<{ readonly requestNonce?: string }>(body.proof!).requestNonce,
         "cloud-mint-nonce-documented-endpoint",
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("serves signed T3 Connect environment health checks", () =>
@@ -3604,7 +3799,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         decodeCompactJwtPayload<{ readonly requestNonce?: string }>(body.proof!).requestNonce,
         "cloud-health-nonce-documented-endpoint",
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects replayed cloud health requests atomically", () =>
@@ -3663,7 +3858,83 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(replayResponse.status, 409);
       assert.equal(replayBody._tag, "EnvironmentHttpConflictError");
       assert.equal(replayBody.message, "Cloud health request was already consumed.");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("rejects cloud replays by time alone once their markers can be pruned", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+
+      const cloudKeyPair = NodeCrypto.generateKeyPairSync("ed25519", {
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      });
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const relayConfigResponse = yield* fetchEffect(
+        yield* getHttpServerUrl("/api/connect/relay-config"),
+        {
+          method: "POST",
+          headers: { cookie: ownerCookie, "content-type": "application/json" },
+          body: jsonRequestBody({
+            relayUrl: "https://relay.example.test",
+            cloudUserId: "user_123",
+            environmentCredential: "t3env_test_credential",
+            cloudMintPublicKey: cloudKeyPair.publicKey,
+            endpointRuntime: null,
+          }),
+        },
+      );
+      assert.equal(relayConfigResponse.status, 200);
+
+      const acceptedAt = yield* DateTime.now;
+      // The longest-lived proofs: `iat` at the 60 s future skew the handlers
+      // allow, and the 5 minute maximum lifetime.
+      const issuedAt = DateTime.add(acceptedAt, { minutes: 1 });
+      const proofTimes = {
+        issuedAt: DateTime.formatIso(issuedAt),
+        expiresAt: DateTime.formatIso(DateTime.add(issuedAt, { minutes: 5 })),
+      };
+      const requests = [
+        [
+          "/api/t3-connect/health",
+          makeCloudEnvironmentHealthRequest({
+            privateKey: cloudKeyPair.privateKey,
+            environmentId: testEnvironmentDescriptor.environmentId,
+            nonce: "cloud-health-nonce-pruned",
+            ...proofTimes,
+          }),
+        ],
+        [
+          "/api/t3-connect/mint-credential",
+          makeCloudMintCredentialRequest({
+            privateKey: cloudKeyPair.privateKey,
+            environmentId: testEnvironmentDescriptor.environmentId,
+            clientProofKeyThumbprint: "client-proof-key-thumbprint",
+            nonce: "cloud-mint-nonce-pruned",
+            ...proofTimes,
+          }),
+        ],
+      ] as const;
+      const postAll = Effect.forEach(requests, ([pathname, request]) =>
+        Effect.gen(function* () {
+          const response = yield* fetchEffect(yield* getHttpServerUrl(pathname), {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: jsonRequestBody(request),
+          });
+          return response.status;
+        }),
+      );
+
+      assert.deepStrictEqual(yield* postAll, [200, 200]);
+      // While the proofs are fresh, only the replay markers reject them (409).
+      assert.deepStrictEqual(yield* postAll, [409, 409]);
+      // Once the markers can be pruned, the time checks reject the proofs by themselves (401).
+      yield* TestClock.setTime(
+        acceptedAt.epochMilliseconds + Duration.toMillis(REPLAY_MARKER_MAX_AGE),
+      );
+      assert.deepStrictEqual(yield* postAll, [401, 401]);
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -3733,22 +4004,172 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         assert.equal(acceptedResponse.status, 200);
         assert.equal(rejectedResponse.status, 401);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("keeps a managed connector stopped when relay registration fails", () =>
+    Effect.gen(function* () {
+      const appliedRuntimeConfigs: Array<unknown> = [];
+      const relayRequests: Array<HttpClientRequest.HttpClientRequest> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          cloudManagedEndpointRuntime: {
+            applyConfig: (config) =>
+              Effect.sync(() => {
+                appliedRuntimeConfigs.push(config);
+                return config === null
+                  ? ({ status: "disabled" } as const)
+                  : ({ status: "running", providerKind: "cloudflare_tunnel", pid: 123 } as const);
+              }),
+          },
+          httpClient: HttpClient.make((request) =>
+            Effect.sync(() => {
+              relayRequests.push(request);
+              return HttpClientResponse.fromWeb(
+                request,
+                Response.json({ message: "relay unavailable" }, { status: 503 }),
+              );
+            }),
+          ),
+        },
+      });
+
+      const cloudKeyPair = NodeCrypto.generateKeyPairSync("ed25519", {
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      });
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const relayConfigUrl = yield* getHttpServerUrl("/api/connect/relay-config");
+      const relayConfigResponse = yield* fetchEffect(relayConfigUrl, {
+        method: "POST",
+        headers: {
+          cookie: ownerCookie,
+          "content-type": "application/json",
+        },
+        body: jsonRequestBody({
+          relayUrl: "https://relay.example.test",
+          cloudUserId: "user_123",
+          environmentCredential: "t3env_test_credential",
+          cloudMintPublicKey: cloudKeyPair.publicKey,
+          endpointRuntime: {
+            providerKind: "cloudflare_tunnel",
+            connectorToken: "connector-token",
+            tunnelId: "tunnel-1",
+          },
+        }),
+      });
+      const relayConfigBody = yield* responseJsonEffect<{ readonly _tag?: string }>(
+        relayConfigResponse,
+      );
+
+      assert.equal(relayConfigResponse.status, 500);
+      assert.equal(relayConfigBody._tag, "EnvironmentHttpInternalServerError");
+      assert.equal(relayRequests.length, 3);
+      assert.deepEqual(appliedRuntimeConfigs, [null]);
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect(
+    "queues recovery without starting a connector when relay registration requires it",
+    () =>
+      Effect.gen(function* () {
+        const appliedRuntimeConfigs: Array<unknown> = [];
+        const requestedRecoveryConfigs: Array<unknown> = [];
+        const relayRequests: Array<HttpClientRequest.HttpClientRequest> = [];
+        yield* buildAppUnderTest({
+          layers: {
+            cloudManagedEndpointRuntime: {
+              applyConfig: (config) =>
+                Effect.sync(() => {
+                  appliedRuntimeConfigs.push(config);
+                  return config === null
+                    ? ({ status: "disabled" } as const)
+                    : ({ status: "running", providerKind: "cloudflare_tunnel", pid: 123 } as const);
+                }),
+              requestRecovery: (config) =>
+                Effect.sync(() => {
+                  requestedRecoveryConfigs.push(config);
+                }),
+            },
+            httpClient: HttpClient.make((request) =>
+              Effect.sync(() => {
+                relayRequests.push(request);
+                return HttpClientResponse.fromWeb(
+                  request,
+                  Response.json({ status: "recovery_required" }),
+                );
+              }),
+            ),
+          },
+        });
+
+        const cloudKeyPair = NodeCrypto.generateKeyPairSync("ed25519", {
+          privateKeyEncoding: { format: "pem", type: "pkcs8" },
+          publicKeyEncoding: { format: "pem", type: "spki" },
+        });
+        const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+        const relayConfigUrl = yield* getHttpServerUrl("/api/connect/relay-config");
+        const relayConfigResponse = yield* fetchEffect(relayConfigUrl, {
+          method: "POST",
+          headers: {
+            cookie: ownerCookie,
+            "content-type": "application/json",
+          },
+          body: jsonRequestBody({
+            relayUrl: "https://relay.example.test",
+            cloudUserId: "user_123",
+            environmentCredential: "t3env_test_credential",
+            cloudMintPublicKey: cloudKeyPair.publicKey,
+            endpointRuntime: {
+              providerKind: "cloudflare_tunnel",
+              connectorToken: "connector-token",
+              tunnelId: "tunnel-1",
+            },
+          }),
+        });
+        const relayConfigBody = yield* responseJsonEffect<{
+          readonly _tag?: string;
+          readonly endpointRuntimeStatus?: { readonly status?: string };
+        }>(relayConfigResponse);
+
+        assert.equal(relayConfigResponse.status, 503);
+        assert.equal(relayConfigBody._tag, "EnvironmentCloudEndpointUnavailableError");
+        assert.equal(relayConfigBody.endpointRuntimeStatus?.status, "disabled");
+        assert.equal(relayRequests.length, 1);
+        assert.deepEqual(appliedRuntimeConfigs, [null]);
+        assert.deepEqual(requestedRecoveryConfigs, [
+          {
+            providerKind: "cloudflare_tunnel",
+            connectorToken: "connector-token",
+            tunnelId: "tunnel-1",
+          },
+        ]);
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("fails relay config when the managed endpoint connector cannot start", () =>
     Effect.gen(function* () {
+      const appliedRuntimeConfigs: Array<unknown> = [];
       yield* buildAppUnderTest({
         layers: {
           cloudManagedEndpointRuntime: {
-            applyConfig: () =>
-              Effect.succeed({
-                status: "failed",
-                providerKind: "cloudflare_tunnel",
-                reason: "cloudflared missing",
-                tunnelId: "tunnel-1",
+            applyConfig: (config) =>
+              Effect.sync(() => {
+                appliedRuntimeConfigs.push(config);
+                return config === null
+                  ? ({ status: "disabled" } as const)
+                  : ({
+                      status: "failed",
+                      providerKind: "cloudflare_tunnel",
+                      failure: "not-installed",
+                      reason: "cloudflared missing",
+                      tunnelId: "tunnel-1",
+                    } as const);
               }),
           },
+          httpClient: HttpClient.make((request) =>
+            Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ status: "ready" }))),
+          ),
         },
       });
 
@@ -3787,34 +4208,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(relayConfigBody.message, "Managed endpoint runtime could not be started.");
       assert.equal(relayConfigBody.endpointRuntimeStatus?.status, "failed");
       assert.equal(relayConfigBody.endpointRuntimeStatus?.reason, "cloudflared missing");
-
-      const now = yield* DateTime.now;
-      const healthRequest = makeCloudEnvironmentHealthRequest({
-        privateKey: cloudKeyPair.privateKey,
-        environmentId: testEnvironmentDescriptor.environmentId,
-        nonce: "cloud-health-after-failed-runtime",
-        issuedAt: DateTime.formatIso(now),
-        expiresAt: DateTime.formatIso(DateTime.add(now, { minutes: 5 })),
-      });
-      const healthUrl = yield* getHttpServerUrl("/api/t3-connect/health");
-      const healthResponse = yield* fetchEffect(healthUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
+      assert.deepEqual(appliedRuntimeConfigs, [
+        null,
+        {
+          providerKind: "cloudflare_tunnel",
+          connectorToken: "connector-token",
+          tunnelId: "tunnel-1",
         },
-        body: jsonRequestBody(healthRequest),
-      });
-      const healthBody = yield* responseJsonEffect<{
-        _tag?: string;
-        message?: string;
-      }>(healthResponse);
-      assert.equal(healthResponse.status, 500);
-      assert.equal(healthBody._tag, "EnvironmentHttpInternalServerError");
-      assert.equal(
-        healthBody.message,
-        "Cloud mint public key is not installed for this environment.",
-      );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      ]);
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud mint requests with the wrong issuer or audience", () =>
@@ -3881,7 +4283,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(wrongIssuer.status, 401);
       assert.equal(wrongAudience.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud mint requests for a cloud subject other than the linked user", () =>
@@ -3932,7 +4334,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
 
       assert.equal(response.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud mint requests without the exact connect scope", () =>
@@ -3983,7 +4385,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
 
       assert.equal(response.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud health requests with the wrong issuer or audience", () =>
@@ -4048,7 +4450,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(wrongIssuer.status, 401);
       assert.equal(wrongAudience.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud health requests for a cloud subject other than the linked user", () =>
@@ -4098,7 +4500,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
 
       assert.equal(response.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects cloud health requests without the exact status scope", () =>
@@ -4148,7 +4550,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
 
       assert.equal(response.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("negotiates permessage-deflate with clients that offer it", () =>
@@ -4200,7 +4602,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(typeof wsTicketBody.ticket, "string");
       assert.isTrue(wsTicketBody.ticket.length > 0);
       assert.equal(typeof wsTicketBody.expiresAt, "string");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("does not allow management-only access tokens to operate the environment", () =>
@@ -4248,7 +4650,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       if (rpcError._tag === "EnvironmentAuthorizationError") {
         assert.equal(rpcError.requiredScope, "orchestration:read");
       }
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("includes CORS headers on remote auth success responses", () =>
@@ -4300,7 +4702,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(wsTicketResponse.status, 200);
       assertBrowserApiCorsResponseHeaders(wsTicketResponse.headers);
       assert.equal(typeof wsTicketBody.ticket, "string");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -4321,7 +4723,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         assert.equal(response.status, 204);
         assertBrowserApiCorsPreflightHeaders(response.headers);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("allows credentialed cloud link proof preflights from the configured dev UI", () =>
@@ -4345,7 +4747,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         origin: crossOriginClientOrigin,
         credentials: true,
       });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("allows configured development origins through ServerConfig", () =>
@@ -4373,7 +4775,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         origin: tailnetOrigin,
         credentials: true,
       });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   for (const desktopOrigin of ["t3code://app", "t3code-dev://app"]) {
@@ -4398,7 +4800,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           origin: desktopOrigin,
           credentials: true,
         });
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
     );
   }
 
@@ -4426,7 +4828,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(body.code, "auth_invalid");
       assert.equal(body.reason, "missing_credential");
       assert.equal(typeof body.traceId, "string");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("issues authenticated one-time pairing credentials for additional clients", () =>
@@ -4454,7 +4856,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       const reusedResult = yield* bootstrapBrowserSession(body.credential);
       assert.equal(reusedResult.response.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("issues pairing credentials for bearer sessions with access management scope", () =>
@@ -4476,7 +4878,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 200);
       assert.isTrue(body.credential.length > 0);
       assert.equal(body.label, "Hosted web");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("lets any authenticated T3 session administer external management API keys", () =>
@@ -4619,7 +5021,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(revokeBody.revoked, true);
       assert.equal(revokeAgainResponse.status, 200);
       assert.equal(revokeAgainBody.revoked, false);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects pairing credentials with an empty scope grant", () =>
@@ -4640,7 +5042,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.status, 400);
       assert.equal(body.code, "invalid_request");
       assert.equal(body.reason, "invalid_scope");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects unauthenticated pairing credential requests", () =>
@@ -4651,7 +5053,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         body: yield* HttpBody.json({}),
       });
       assert.equal(response.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("returns only pairing metadata to access-read HTTP sessions", () =>
@@ -4703,7 +5105,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(authorized.body.scope, AuthStandardClientScopes.join(" "));
       const reused = yield* exchangeAccessToken(created.credential, { scope: "terminal:operate" });
       assert.equal(reused.response.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("returns only pairing metadata in access-read WebSocket snapshots and updates", () =>
@@ -4773,7 +5175,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         (frame) => frames.push(frame),
       );
-    }).pipe(Effect.scoped, Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.scoped, Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("lists and revokes pairing links for access management sessions", () =>
@@ -4819,7 +5221,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.isTrue(listedLinks.some((entry) => entry.id === createdBody.id));
       assert.equal(revokeResponse.status, 200);
       assert.equal(revokedBootstrap.response.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects pairing credential requests without access management scope", () =>
@@ -4860,7 +5262,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(pairedBody.code, "insufficient_scope");
       assert.equal(pairedBody.requiredScope, "access:write");
       assert.equal(typeof pairedBody.traceId, "string");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("lists paired clients and revokes other sessions while keeping the administrator", () =>
@@ -4971,7 +5373,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(pairedClientPairingBody.code, "auth_invalid");
       assert.equal(pairedClientPairingBody.reason, "invalid_credential");
       assert.equal(typeof pairedClientPairingBody.traceId, "string");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("separates access inventory reads from credential management writes", () =>
@@ -5030,7 +5432,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(readWriteBody.requiredScope, "access:write");
       assert.equal(writeListResponse.status, 403);
       assert.equal(writeListBody.requiredScope, "access:read");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("revokes an individual paired client session", () =>
@@ -5083,7 +5485,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(revokeResponse.status, 200);
       assert.equal(pairedClientPairingResponse.status, 401);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("allows reusing the desktop bootstrap credential", () =>
@@ -5099,7 +5501,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(first.response.status, 200);
       assert.equal(second.response.status, 200);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("accepts websocket rpc handshake with a bootstrapped browser session cookie", () =>
@@ -5125,7 +5527,285 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.isUndefined(response.shellRevealInFileManager);
       assert.isUndefined(response.shellRevealInFileManagerKind);
       assert.equal(response.threadResumeCompletionMarker, true);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("creates the Scratch project once and restores its folder on reuse", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const created: Array<{ readonly projectId: ProjectId; readonly workspaceRoot: string }> = [];
+      const iconUpdates: Array<unknown> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                if (command.type === "project.create") {
+                  created.push({
+                    projectId: command.projectId,
+                    workspaceRoot: command.workspaceRoot,
+                  });
+                }
+                if (command.type === "project.meta.update") iconUpdates.push(command.projectIcon);
+                return { sequence: created.length + iconUpdates.length };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getActiveProjectByWorkspaceRoot: (workspaceRoot) =>
+              Effect.succeed(
+                Option.fromNullishOr(
+                  created.find((project) => project.workspaceRoot === workspaceRoot),
+                ).pipe(
+                  Option.map((project) => ({
+                    ...makeDefaultOrchestrationReadModel().projects[0]!,
+                    id: project.projectId,
+                    workspaceRoot,
+                  })),
+                ),
+              ),
+          },
+        },
+      });
+
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          Effect.gen(function* () {
+            const config = yield* client[WS_METHODS.serverGetConfig]({});
+            const scratchRoot = config.scratchWorkspaceRoot ?? "";
+            const first = yield* client[WS_METHODS.projectsEnsureScratch]({});
+            // A user may delete the folder; reuse must bring it back.
+            yield* fileSystem.remove(scratchRoot, { recursive: true });
+            const second = yield* client[WS_METHODS.projectsEnsureScratch]({});
+
+            assert.isTrue(scratchRoot.endsWith("scratch"));
+            assert.equal(created.length, 1);
+            assert.equal(created[0]?.workspaceRoot, scratchRoot);
+            assert.equal(first.projectId, created[0]?.projectId);
+            assert.equal(second.projectId, first.projectId);
+            // The icon is set once, at create.
+            assert.deepEqual(iconUpdates, [
+              { kind: "lucide", name: "message-square-dashed", color: "gray" },
+            ]);
+            assert.isTrue(yield* fileSystem.exists(scratchRoot));
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("resolves a lost Scratch create race to the winning project", () =>
+    Effect.gen(function* () {
+      const winnerId = ProjectId.make("project-scratch-winner");
+      let lookups = 0;
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.fail(
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: "Active project already exists for workspace root.",
+                }),
+              ),
+          },
+          projectionSnapshotQuery: {
+            // Empty before the create, then the other client's project.
+            getActiveProjectByWorkspaceRoot: (workspaceRoot) =>
+              Effect.sync(() =>
+                lookups++ === 0
+                  ? Option.none()
+                  : Option.some({
+                      ...makeDefaultOrchestrationReadModel().projects[0]!,
+                      id: winnerId,
+                      workspaceRoot,
+                    }),
+              ),
+          },
+        },
+      });
+
+      const result = yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          client[WS_METHODS.projectsEnsureScratch]({}),
+        ),
+      );
+      assert.equal(result.projectId, winnerId);
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("gives each new Scratch thread its own folder", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const scratchProjectId = ProjectId.make("project-scratch");
+      let scratchRoot = "";
+      const created: Array<string | null> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                if (command.type === "thread.create") created.push(command.worktreePath);
+                return { sequence: created.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+          projectionSnapshotQuery: {
+            getProjectShellById: (projectId) =>
+              Effect.succeed(
+                projectId === scratchProjectId
+                  ? Option.some({
+                      id: scratchProjectId,
+                      title: "Scratch",
+                      workspaceRoot: scratchRoot,
+                      defaultModelSelection: null,
+                      scripts: [],
+                      createdAt: "2026-09-25T00:00:00.000Z",
+                      updatedAt: "2026-09-25T00:00:00.000Z",
+                    })
+                  : Option.none(),
+              ),
+          },
+        },
+      });
+
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          Effect.gen(function* () {
+            scratchRoot =
+              (yield* client[WS_METHODS.serverGetConfig]({})).scratchWorkspaceRoot ?? "";
+            const createdAt = "2026-09-25T10:00:00.000Z";
+            // The second id shares the first's short prefix, the third tries to
+            // climb out of the scratch root, and the fourth pastes a long token.
+            const text = "Convert these PNGs to WebP, please!";
+            const starts = [
+              { id: "a1b2c3d4-scratch-thread", text },
+              { id: "a1b2c3d4-other", text },
+              { id: "../../escape", text },
+              { id: "f00dcafe-long", text: "x".repeat(300) },
+            ];
+            for (const [index, { id, text: messageText }] of starts.entries()) {
+              yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.turn.start",
+                commandId: CommandId.make(`cmd-scratch-turn-start-${index}`),
+                threadId: ThreadId.make(id),
+                message: {
+                  messageId: MessageId.make(`msg-scratch-${index}`),
+                  role: "user",
+                  text: messageText,
+                  attachments: [],
+                },
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                bootstrap: {
+                  createThread: {
+                    projectId: scratchProjectId,
+                    title: "New thread",
+                    modelSelection: defaultModelSelection,
+                    runtimeMode: "full-access",
+                    interactionMode: "default",
+                    branch: null,
+                    worktreePath: null,
+                    createdAt,
+                  },
+                },
+                createdAt,
+              });
+            }
+          }),
+        ),
+      );
+
+      // The date is the server's receipt time, not the client's createdAt.
+      const names = created.map((folder) => path.basename(folder ?? ""));
+      assert.match(names[0] ?? "", /^\d{4}-\d{2}-\d{2}-convert-these-pngs-to-webp-a1b2c3d4$/);
+      assert.match(names[1] ?? "", /-convert-these-pngs-to-webp-a1b2c3d4other$/);
+      assert.match(names[2] ?? "", /-convert-these-pngs-to-webp-escape$/);
+      assert.match(names[3] ?? "", /^\d{4}-\d{2}-\d{2}-x{48}-f00dcafe$/);
+      for (const folder of created) {
+        assert.equal(path.dirname(folder ?? ""), scratchRoot);
+        assert.isTrue(yield* fileSystem.exists(folder ?? ""));
+      }
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("withholds Scratch when the data dir sits inside a work tree", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({
+        layers: { vcsDriver: { isInsideWorkTree: () => Effect.succeed(true) } },
+      });
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          Effect.gen(function* () {
+            const config = yield* client[WS_METHODS.serverGetConfig]({});
+            const ensure = yield* Effect.flip(client[WS_METHODS.projectsEnsureScratch]({}));
+
+            assert.isUndefined(config.scratchWorkspaceRoot);
+            assert.include(String(ensure.message), "not available");
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("creates a project from just a name in the projects folder", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const created: Array<{ readonly title: string; readonly workspaceRoot: string }> = [];
+      const gitCalls: Array<string> = [];
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                if (command.type === "project.create") {
+                  created.push({ title: command.title, workspaceRoot: command.workspaceRoot });
+                }
+                return { sequence: created.length };
+              }),
+          },
+          gitVcsDriver: {
+            readConfigValue: () => Effect.succeed(null),
+            execute: (input) =>
+              Effect.sync(() => {
+                gitCalls.push(input.args.join(" "));
+                return {
+                  exitCode: ChildProcessSpawner.ExitCode(0),
+                  stdout: "",
+                  stderr: "",
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                };
+              }),
+          },
+        },
+      });
+
+      yield* Effect.scoped(
+        withWsRpcClient(yield* getWsServerUrl("/ws"), (client) =>
+          Effect.gen(function* () {
+            const root = (yield* client[WS_METHODS.serverGetConfig]({})).newProjectsRoot ?? "";
+            const result = yield* client[WS_METHODS.projectsCreateNew]({ name: "Pinball Stats" });
+
+            assert.equal(result.workspaceRoot, path.join(root, "pinball-stats"));
+            assert.isUndefined(result.commitError);
+            assert.deepEqual(created, [
+              { title: "Pinball Stats", workspaceRoot: result.workspaceRoot },
+            ]);
+            assert.deepEqual(gitCalls, [
+              "init --initial-branch=main",
+              "add --force -- README.md assets/icon.svg",
+              "commit --message Initial commit",
+            ]);
+            assert.isTrue(
+              yield* fileSystem.exists(path.join(result.workspaceRoot, "assets", "icon.svg")),
+            );
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("advertises the usable file manager and its reveal label", () =>
@@ -5151,7 +5831,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(response.availableEditors, ["file-manager"]);
       assert.equal(response.shellRevealInFileManager, true);
       assert.equal(response.shellRevealInFileManagerKind, "file-explorer");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("does not block server config when editor discovery never resolves", () =>
@@ -5205,7 +5885,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         assert.equal(error._tag, "RpcClientError");
         assertInclude(String(error), "SocketOpenError");
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -5233,7 +5913,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         assert.equal(response.environment.environmentId, testEnvironmentDescriptor.environmentId);
         assert.equal(response.auth.policy, "desktop-managed-local");
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("proxies browser OTLP trace exports through the server", () =>
@@ -5250,7 +5930,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               attributes: [
                 {
                   key: "service.name",
-                  value: { stringValue: "t3-web" },
+                  value: { stringValue: "t3code-web" },
                 },
               ],
             },
@@ -5392,7 +6072,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             "rpc.method": "server.getSettings",
           },
           resourceAttributes: {
-            "service.name": "t3-web",
+            "service.name": "t3code-web",
           },
           scope: {
             name: "effect",
@@ -5420,7 +6100,111 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           contentType: "application/json",
         },
       ]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("forwards browser OTLP traces as protobuf when the protocol is http/protobuf", () =>
+    Effect.gen(function* () {
+      const upstreamRequests: Array<{
+        readonly body: string;
+        readonly contentType: string | null;
+      }> = [];
+      const localTraceRecords: Array<unknown> = [];
+      // Produced by effect's own tracer, so enum fields are numeric and the
+      // protobuf encoder accepts them. The hand-written payload in the JSON
+      // test uses enum names, which only the JSON path tolerates.
+      const payload = yield* makeBrowserOtlpPayload("client.protobuf.test");
+
+      const collector = yield* Effect.acquireRelease(
+        Effect.promise(async () => {
+          const NodeHttp = await import("node:http");
+
+          return await new Promise<{
+            readonly close: () => Promise<void>;
+            readonly url: string;
+          }>((resolve, reject) => {
+            const server = NodeHttp.createServer((request, response) => {
+              const chunks: Buffer[] = [];
+              request.on("data", (chunk) => {
+                chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+              });
+              request.on("end", () => {
+                upstreamRequests.push({
+                  body: Buffer.concat(chunks).toString("utf8"),
+                  contentType: request.headers["content-type"] ?? null,
+                });
+                response.statusCode = 204;
+                response.end();
+              });
+            });
+
+            server.on("error", reject);
+            server.listen(0, "127.0.0.1", () => {
+              const address = server.address();
+              if (!address || typeof address === "string") {
+                reject(new Error("Expected TCP collector address"));
+                return;
+              }
+
+              resolve({
+                url: `http://127.0.0.1:${address.port}/v1/traces`,
+                close: () =>
+                  new Promise<void>((resolveClose, rejectClose) => {
+                    server.close((error) => {
+                      if (error) {
+                        rejectClose(error);
+                        return;
+                      }
+                      resolveClose();
+                    });
+                  }),
+              });
+            });
+          });
+        }),
+        ({ close }) => Effect.promise(close),
+      );
+
+      yield* buildAppUnderTest({
+        config: {
+          otlpTracesUrl: collector.url,
+          otlpTracesExport: { ...DEFAULT_SIGNAL_EXPORT, protocol: "http/protobuf" },
+        },
+        layers: {
+          browserTraceCollector: {
+            record: (records) =>
+              Effect.sync(() => {
+                localTraceRecords.push(...records);
+              }),
+          },
+        },
+      });
+
+      const response = yield* HttpClient.post("/api/observability/v1/traces", {
+        headers: {
+          cookie: yield* getAuthenticatedSessionCookieHeader(),
+          "content-type": "application/json",
+        },
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        body: HttpBody.text(JSON.stringify(payload), "application/json"),
+      });
+
+      assert.equal(response.status, 204);
+      // The local collector still decodes the browser's JSON before forwarding.
+      assert.equal(localTraceRecords.length, 1);
+      assert.equal(upstreamRequests.length, 1);
+      const forwarded = upstreamRequests[0];
+      assert.notEqual(forwarded, undefined);
+      if (!forwarded) {
+        return;
+      }
+      assert.equal(forwarded.contentType, "application/x-protobuf");
+      // Protobuf strings are raw UTF-8, so the span and service names survive
+      // the stub's utf8 decode even though the surrounding bytes don't.
+      assert.notEqual(forwarded.body[0], "{");
+      assert.include(forwarded.body, "client.protobuf.test");
+      assert.include(forwarded.body, "t3code-web");
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("responds to browser OTLP trace preflight requests with CORS headers", () =>
@@ -5449,7 +6233,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "dpop",
         "traceparent",
       ]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -5520,9 +6304,59 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(record.links, []);
         assert.equal(record.scope.name, scopeSpan.scope.name);
         assert.deepEqual(record.scope.attributes, {});
-        assert.equal(record.resourceAttributes["service.name"], "t3-web");
+        assert.equal(record.resourceAttributes["service.name"], "t3code-web");
         assert.equal(record.status?.code, String(span.status.code));
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("does not trace browser OTLP trace exports on the server", () =>
+    Effect.gen(function* () {
+      const spanNames: Array<string> = [];
+      const forwardedUrls: Array<string> = [];
+      yield* buildAppUnderTest({
+        config: { otlpTracesUrl: "http://collector.test/v1/traces" },
+        layers: {
+          httpClient: HttpClient.make((request) =>
+            Effect.sync(() => {
+              forwardedUrls.push(request.url);
+              return HttpClientResponse.fromWeb(request, new Response(null, { status: 204 }));
+            }),
+          ),
+        },
+      }).pipe(
+        Effect.provideService(
+          Tracer.Tracer,
+          Tracer.make({
+            span: (options) => {
+              spanNames.push(options.name);
+              return new Tracer.NativeSpan(options);
+            },
+          }),
+        ),
+      );
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      spanNames.length = 0;
+
+      // The query string must not bring back the HTTP server span.
+      for (const url of ["/api/observability/v1/traces", "/api/observability/v1/traces?x=1"]) {
+        const response = yield* HttpClient.post(url, {
+          headers: { cookie, "content-type": "application/json" },
+          body: yield* HttpBody.json({ resourceSpans: [] }),
+        });
+        assert.equal(response.status, 204);
+      }
+
+      assert.deepEqual(forwardedUrls, [
+        "http://collector.test/v1/traces",
+        "http://collector.test/v1/traces",
+      ]);
+      assert.deepEqual(spanNames, []);
+
+      // Other routes keep their HTTP server span.
+      const session = yield* HttpClient.get("/api/auth/session", { headers: { cookie } });
+      assert.equal(session.status, 200);
+      assert.include(spanNames, "http.server GET");
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc server.upsertKeybinding", () =>
@@ -5558,7 +6392,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.deepEqual(response.issues, []);
       assert.deepEqual(response.keybindings, [resolved]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc server.removeKeybinding", () =>
@@ -5594,7 +6428,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.deepEqual(response.issues, []);
       assert.deepEqual(response.keybindings, [resolved]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("keeps agent session import project failures structured over websocket rpc", () =>
@@ -5613,7 +6447,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       if (error._tag === "AgentSessionImportProjectNotFoundError") {
         assert.equal(error.projectId, projectId);
       }
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("returns scanner skip counts over websocket rpc", () =>
@@ -5691,7 +6525,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(result, { importedCount: 0, skippedCount: 1 });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("uploads Codex thread feedback through websocket rpc", () =>
@@ -5716,7 +6550,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.deepStrictEqual(response, { feedbackId: "codex-thread-feedback" });
       assert.deepStrictEqual(uploadFeedback.mock.calls, [[input]]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("serves absolute host media without a local thread and rejects relative media", () =>
@@ -5753,7 +6587,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("serves draft workspace files without a thread", () =>
@@ -5778,7 +6612,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("uploads image bytes through a signed URL issued by websocket rpc", () =>
@@ -5878,7 +6712,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects an over-limit chunked upload through the route without hanging", () =>
@@ -5934,7 +6768,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("keeps feedback errors structured across websocket rpc", () =>
@@ -5968,7 +6802,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.strictEqual(error.message, `Failed to upload feedback for thread ${threadId}.`);
         assert.isDefined(error.cause);
       }
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("shares one preview automation broker across websocket sessions", () =>
@@ -6008,7 +6842,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.notEqual(replacementEvent.connectionId, firstConnectionId);
         assert.isTrue(Option.isSome(firstStreamClosed));
       }),
-    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    ).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("rejects websocket rpc handshake when session authentication is missing", () =>
@@ -6043,7 +6877,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         failureMessage.includes("Unauthorized") ||
           failureMessage.includes("An error occurred during Open"),
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("provider setup lets read-only clients observe installation but not change setup", () =>
@@ -6119,7 +6953,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
       assert.equal(installStarts, 0);
       assert.equal(authCalls, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("provider setup binds private sign-in to the authenticated websocket session", () =>
@@ -6268,7 +7102,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         calls.map((call) => call.ownerSessionId),
         [firstOwner, firstOwner, secondOwner, secondOwner, firstOwner, firstOwner],
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -6344,7 +7178,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
         assert.deepEqual(calls, ["start", "cancel:old-operation", "cancel:install-operation"]);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc subscribeServerConfig streams snapshot then update", () =>
@@ -6416,10 +7250,103 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         type: "keybindingsUpdated",
         payload: { keybindings: [], issues: [] },
       });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
-  it.effect("does not refresh providers for each subscribeServerConfig connection", () =>
+  for (const mode of ["all", "targeted", "background"] as const) {
+    it.effect(`provider refresh invalidates T3 caches before probing (${mode})`, () => {
+      const driver = ProviderDriverKind.make("codex");
+      const instanceIds = [ProviderInstanceId.make("codex"), ProviderInstanceId.make("codex_work")];
+      const packageNames = ["@example/personal", "@example/work"];
+      const versionCache = new Map(
+        packageNames.map((name) => [
+          name,
+          {
+            expiresAt: Number.MAX_SAFE_INTEGER,
+            version: "1.0.0",
+          },
+        ]),
+      );
+      const invalidated: string[] = [];
+      const freshMaintenance: string[] = [];
+      let manifestRefreshed = false;
+      let probed = false;
+      const instances = instanceIds.map(
+        (instanceId, index) =>
+          ({
+            instanceId,
+            driverKind: driver,
+            continuationIdentity: { driverKind: driver, continuationKey: instanceId },
+            displayName: undefined,
+            enabled: true,
+            invalidateCaches: Effect.sync(() => {
+              invalidated.push(instanceId);
+            }),
+            snapshot: {
+              resolveMaintenance: (options) =>
+                Effect.sync(() => {
+                  assert.isTrue(options?.fresh);
+                  freshMaintenance.push(instanceId);
+                  return makeManualOnlyProviderMaintenanceCapabilities({
+                    provider: driver,
+                    packageName: packageNames[index]!,
+                  });
+                }),
+              getSnapshot: Effect.never,
+              refresh: Effect.never,
+              streamChanges: Stream.empty,
+              applyUsageLimits: () => Effect.void,
+            },
+            adapter: {} as ProviderInstance["adapter"],
+            textGeneration: {} as ProviderInstance["textGeneration"],
+          }) satisfies ProviderInstance,
+      );
+      const expected =
+        mode === "background" ? [] : mode === "targeted" ? [instanceIds[1]!] : instanceIds;
+      const probe = Effect.sync(() => {
+        probed = true;
+        assert.equal(manifestRefreshed, mode !== "background");
+        assert.deepEqual(invalidated.toSorted(), expected.toSorted());
+        assert.deepEqual(freshMaintenance.toSorted(), expected.toSorted());
+        for (let index = 0; index < instanceIds.length; index++) {
+          assert.equal(
+            versionCache.has(packageNames[index]!),
+            !expected.includes(instanceIds[index]!),
+          );
+        }
+        return [];
+      });
+      return Effect.gen(function* () {
+        yield* buildAppUnderTest({
+          layers: {
+            modelManifest: {
+              forceRefresh: Effect.sync(() => {
+                manifestRefreshed = true;
+                return ModelManifest.BUNDLED_MODEL_MANIFEST;
+              }),
+            },
+            providerInstanceRegistry: { listInstances: Effect.succeed(instances) },
+            providerRegistry: { refresh: () => probe, refreshInstance: () => probe },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverRefreshProviders]({
+              ...(mode === "targeted" ? { instanceId: instanceIds[1]! } : {}),
+              ...(mode !== "background" ? { refreshModels: true } : {}),
+            }),
+          ),
+        );
+        assert.isTrue(probed);
+      }).pipe(
+        Effect.provideService(ProviderVersionCache, versionCache),
+        Effect.provide(NodeHttpServerTest),
+      );
+    });
+  }
+
+  it.effect("serves config on reconnect without starting provider probes", () =>
     Effect.gen(function* () {
       const refreshCalls = yield* Ref.make(0);
 
@@ -6448,7 +7375,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.equal(yield* Ref.get(refreshCalls), 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("returns cached whole-host resources over websocket", () =>
@@ -6476,7 +7403,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.isAtLeast(first.cpuUtilization, 0);
         assert.isAtMost(first.cpuUtilization, 1);
       }
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect("counts macOS reclaimable memory once and shares concurrent samples", () =>
@@ -6553,7 +7480,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assertTrue(Option.isSome(snapshot));
       assert.equal(snapshot.value.processes.length, 0);
       assert.equal(snapshot.value.groups.backend.processCount, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   // An already-shipped client decodes this stream against an event union
@@ -6596,7 +7523,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       // array twice on every connect.
       if (first?.type === "snapshot") assert.equal(first.config.environmentThemes, undefined);
       assert.equal(second?.type, "environmentThemesUpdated");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeServerConfig withholds published themes from other subscribers", () =>
@@ -6631,7 +7558,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = Array.from(events)[0];
       assert.equal(first?.type, "snapshot");
       if (first?.type === "snapshot") assert.equal(first.config.environmentThemes, undefined);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect.each([false, true])(
@@ -6714,7 +7641,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               : nextProviders,
           },
         });
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -6768,7 +7695,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           type: "providerStatuses",
           payload: { providers: [{ ...codex, version: "1.0.1" }] },
         });
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -6855,7 +7782,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             ],
           },
         });
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -6905,7 +7832,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.equal(first?.sequence, 1);
         assert.equal(second?.type, "ready");
         assert.equal(second?.sequence, 2);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeServerLifecycle buffers updates published during snapshot capture", () =>
@@ -6997,7 +7924,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(second.payload.bootstrapThreadId, bootstrapThreadId);
       assert.equal(second.payload.bootstrapProjectCreated, true);
       assert.equal(second.payload.bootstrapThreadCreated, true);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc projects.searchEntries", () =>
@@ -7026,7 +7953,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.isAtLeast(response.entries.length, 1);
       assert.isTrue(response.entries.some((entry) => entry.path === "needle-file.ts"));
       assert.equal(response.truncated, false);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect("routes websocket rpc projects.listEntries and projects.readFile", () =>
@@ -7062,7 +7989,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         byteLength: 26,
         truncated: false,
       });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect("routes websocket rpc projects.searchEntries excludes gitignored files", () =>
@@ -7119,7 +8046,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.entries.length, 0);
       assert.equal(response.truncated, false);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect.skipIf(!symlinksSupported)("preserves structured workspace rpc failures", () =>
@@ -7240,7 +8167,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(browseError.failure, "read_directory_failed");
       assert.equal(browseError.parentPath, missingBrowseParent);
       assert.isDefined(browseError.cause);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("reports workspace root stat failures without relabeling them as missing", () =>
@@ -7273,7 +8200,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(error.failure, "workspace_root_stat_failed");
       assert.equal(error.normalizedCwd, workspaceRoot);
       assert.equal(error.detail, "validate-existing");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc projects.writeFile", () =>
@@ -7298,7 +8225,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(response.relativePath, "nested/created.txt");
       const persisted = yield* fs.readFileString(path.join(workspaceDir, "nested", "created.txt"));
       assert.equal(persisted, "written-by-rpc");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("creates a missing workspace root during websocket project.create dispatch", () =>
@@ -7332,7 +8259,188 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.isAtLeast(response.sequence, 0);
       assert.equal(stat.type, "Directory");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("starts a project clone in the background and blocks threads until it lands", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const parentDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-project-clone-" });
+      const destinationPath = path.join(parentDir, "t3code");
+      const projectId = ProjectId.make("project-clone-1");
+      const dispatched: Array<string> = [];
+      const cloneGate = yield* Deferred.make<void>();
+      const metaUpdateDispatched = yield* Deferred.make<void>();
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatched.push(command.type);
+                return { sequence: dispatched.length };
+              }).pipe(
+                Effect.tap(() =>
+                  command.type === "project.meta.update"
+                    ? Deferred.succeed(metaUpdateDispatched, undefined)
+                    : Effect.void,
+                ),
+              ),
+          },
+          sourceControlRepositoryService: {
+            prepareClone: (input) =>
+              Effect.succeed({
+                destinationPath: input.destinationPath,
+                remoteUrl: input.remoteUrl ?? "",
+                cloneUrl: input.remoteUrl ?? "",
+                repository: null,
+              }),
+            cloneRepository: (input) =>
+              Deferred.await(cloneGate).pipe(
+                Effect.as({
+                  cwd: input.destinationPath,
+                  remoteUrl: input.remoteUrl ?? "",
+                  repository: null,
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const started = yield* client[WS_METHODS.projectCloneStart]({
+              projectId,
+              title: "t3code",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              remoteUrl: "git@github.com:octocat/t3code.git",
+              destinationPath,
+            });
+            assert.equal(started.cwd, destinationPath);
+            // The project exists before the clone finishes.
+            assert.deepEqual(dispatched, ["project.create"]);
+
+            const blocked = yield* Effect.flip(
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.create",
+                commandId: CommandId.make("cmd-thread-create-while-cloning"),
+                threadId: ThreadId.make("thread-while-cloning"),
+                projectId,
+                title: "Draft",
+                modelSelection: {
+                  instanceId: ProviderInstanceId.make("codex"),
+                  model: "gpt-5-codex",
+                },
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: null,
+                createdAt: "2026-01-01T00:00:01.000Z",
+              }),
+            );
+            assert.include(String(blocked.message), "still being cloned");
+
+            const snapshots = yield* client[WS_METHODS.subscribeProjectClones]({}).pipe(
+              Stream.takeUntil((clones) => clones[0]?.phase === "done"),
+              Stream.runCollect,
+              Effect.forkChild,
+            );
+            yield* Effect.yieldNow;
+            yield* Deferred.succeed(cloneGate, undefined);
+            const lists = yield* Fiber.join(snapshots);
+            assert.equal(lists.at(-1)?.[0]?.phase, "done");
+            // The finished clone refreshes the project so its repository
+            // identity updates. That hook runs after the done snapshot.
+            yield* Deferred.await(metaUpdateDispatched);
+            assert.deepEqual(dispatched, ["project.create", "project.meta.update"]);
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeHttpServerTest)),
+  );
+
+  it.effect("finds a cloned project's icon once the clone lands", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const parentDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-clone-favicon-" });
+      const destinationPath = path.join(parentDir, "app");
+      const projectId = ProjectId.make("project-clone-favicon");
+      const cloneGate = yield* Deferred.make<void>();
+      const metaUpdateDispatched = yield* Deferred.make<void>();
+
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: (command) =>
+              (command.type === "project.meta.update"
+                ? Deferred.succeed(metaUpdateDispatched, undefined)
+                : Effect.void
+              ).pipe(Effect.as({ sequence: 1 })),
+          },
+          projectionSnapshotQuery: {
+            getActiveProjectByWorkspaceRoot: (workspaceRoot) =>
+              Effect.succeed(
+                workspaceRoot === destinationPath
+                  ? Option.some({
+                      ...makeDefaultOrchestrationReadModel().projects[0]!,
+                      id: projectId,
+                      workspaceRoot,
+                    })
+                  : Option.none(),
+              ),
+          },
+          sourceControlRepositoryService: {
+            prepareClone: (input) =>
+              Effect.succeed({
+                destinationPath: input.destinationPath,
+                remoteUrl: input.remoteUrl ?? "",
+                cloneUrl: input.remoteUrl ?? "",
+                repository: null,
+              }),
+            cloneRepository: (input) =>
+              Deferred.await(cloneGate).pipe(
+                Effect.andThen(
+                  fs.writeFileString(path.join(input.destinationPath, "favicon.svg"), "<svg/>"),
+                ),
+                Effect.orDie,
+                Effect.as({
+                  cwd: input.destinationPath,
+                  remoteUrl: input.remoteUrl ?? "",
+                  repository: null,
+                }),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            yield* client[WS_METHODS.projectCloneStart]({
+              projectId,
+              title: "app",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              remoteUrl: "git@github.com:octocat/app.git",
+              destinationPath,
+            });
+            const resource = { _tag: "project-favicon" as const, cwd: destinationPath };
+            const duringClone = yield* client[WS_METHODS.assetsCreateUrl]({ resource });
+            assert.isTrue(duringClone.relativeUrl.endsWith("/project-favicon-missing"));
+
+            yield* Deferred.succeed(cloneGate, undefined);
+            yield* Deferred.await(metaUpdateDispatched);
+            // The lookup during the clone must not leave a cached miss behind.
+            const afterClone = yield* client[WS_METHODS.assetsCreateUrl]({ resource });
+            assert.equal(afterClone.sourcePath, "favicon.svg");
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("records thread analytics only after a client command succeeds", () =>
@@ -7445,7 +8553,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           connectionMethod: "relay",
         },
       ]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("keeps telemetry separate for simultaneous clients", () =>
@@ -7530,7 +8638,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
         ],
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("ignores invalid client telemetry without rejecting the connection", () =>
@@ -7556,7 +8664,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(connectedProperties, [{}]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc projects.writeFile errors", () =>
@@ -7590,7 +8698,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(writeError.failure, "workspace_path_outside_root");
       assert.isDefined(writeError.cause);
       assert.notProperty(writeError, "contents");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc shell.openInEditor", () =>
@@ -7618,7 +8726,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(openedInput, { cwd: "/tmp/project", editor: "cursor" });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc shell.openInEditor errors", () =>
@@ -7646,7 +8754,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assertFailure(result, externalLauncherError);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc git methods", () =>
@@ -7974,7 +9082,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
       assert.equal(diffFileContents.oldContents, "before\n");
       assert.equal(diffFileContents.newContents, "after\n");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc git.pull errors", () =>
@@ -8054,7 +9162,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assertFailure(result, gitError);
       assert.equal(invalidationCalls, 0);
       assert.equal(statusCalls, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc git.runStackedAction errors after refreshing git status", () =>
@@ -8136,7 +9244,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assertFailure(result, gitError);
       assert.equal(invalidationCalls, 0);
       assert.equal(statusCalls, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("completes websocket rpc git.pull before background git status refresh finishes", () =>
@@ -8186,7 +9294,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(result.status, "pulled");
       assertTrue(elapsedMs < 1_000);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -8261,7 +9369,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
 
         assertTrue(elapsedMs < 1_000);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -8341,7 +9449,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
 
         yield* Deferred.await(localRefreshStarted);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc orchestration methods", () =>
@@ -8479,7 +9587,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           messageCreatedAt: now,
         },
       ]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc orchestration shell snapshot errors", () =>
@@ -8507,7 +9615,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assertTrue(result.failure._tag === "OrchestrationGetSnapshotError");
       assertTrue(result.failure.cause instanceof Error);
       assert.include(result.failure.cause.message, projectionError.message);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("marks an empty shell catch-up replay as synchronized when requested", () =>
@@ -8531,7 +9639,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assert.deepEqual(Option.getOrThrow(firstItem), { kind: "synchronized" });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("marks a socket thread snapshot as synchronized when requested", () =>
@@ -8540,8 +9648,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           projectionSnapshotQuery: {
-            getThreadDetailSnapshot: () =>
-              Effect.succeed(Option.some({ snapshotSequence: 1, thread })),
+            getThreadDetailSnapshot: () => Effect.succeedSome({ snapshotSequence: 1, thread }),
           },
         },
       });
@@ -8558,7 +9665,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(items[0]?.kind, "snapshot");
       assert.deepEqual(items[1], { kind: "synchronized" });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("buffers shell events published while the fallback snapshot loads", () =>
@@ -8613,7 +9720,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(items[0]?.kind, "snapshot");
       assert.equal(items[1]?.kind, "thread-removed");
       assert.deepEqual(items[2], { kind: "synchronized" });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect("buffers thread events published while the initial snapshot loads", () =>
@@ -8675,7 +9782,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(items[1]?.kind, "event");
       assert.equal(items[1]?.kind === "event" ? items[1].event.sequence : null, 2);
       assert.equal(items[2]?.kind, "synchronized");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   for (const subscription of ["thread", "shell"] as const) {
@@ -8714,16 +9821,13 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               streamDomainEvents: Stream.concat(Stream.make(event), Stream.never),
             },
             projectionSnapshotQuery: {
-              getThreadDetailSnapshot: () =>
-                Effect.succeed(Option.some({ snapshotSequence: 1, thread })),
+              getThreadDetailSnapshot: () => Effect.succeedSome({ snapshotSequence: 1, thread }),
               getThreadShellById: (threadId) =>
-                Effect.succeed(
-                  Option.some({
-                    ...makeDefaultOrchestrationThreadShell(),
-                    id: threadId,
-                    title: "Build complete",
-                  }),
-                ),
+                Effect.succeedSome({
+                  ...makeDefaultOrchestrationThreadShell(),
+                  id: threadId,
+                  title: "Build complete",
+                }),
             },
           },
         });
@@ -8772,7 +9876,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           assert.equal(update.thread.title, "Build complete");
         }
         assert.deepEqual(items[2], { kind: "synchronized" });
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
     );
   }
 
@@ -8813,7 +9917,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(items[0]?.kind, "snapshot");
       assert.equal(items[1]?.kind, "event");
       assert.equal(items[1]?.kind === "event" ? items[1].event.sequence : null, 4);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect("flushes more than one tool chunk before the synchronization marker", () =>
@@ -8897,7 +10001,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ],
       );
       assert.deepEqual(items[3], { kind: "synchronized" });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect("flushes a tool update before an interleaved message", () =>
@@ -8973,7 +10077,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           : null,
         "tool.completed",
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect(
@@ -9001,7 +10105,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             },
             projectionSnapshotQuery: {
               getThreadDetailSnapshot: () =>
-                Effect.succeed(Option.some({ snapshotSequence: 100_000, thread })),
+                Effect.succeedSome({ snapshotSequence: 100_000, thread }),
             },
           },
         });
@@ -9026,7 +10130,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         }
         assert.equal(second?.kind, "synchronized");
         assert.equal(readEventsCalls, 0);
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -9191,7 +10295,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
           Effect.provide(withFirstWsAckHeld(wsUrl, ackHeld, releaseAck)),
         );
-      }).pipe(Effect.scoped, Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.scoped, Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("stops an overflowing shell producer without an ACK and recovers deleted entries", () =>
@@ -9298,7 +10402,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
         Effect.provide(withFirstWsAckHeld(wsUrl, ackHeld, releaseAck)),
       );
-    }).pipe(Effect.scoped, Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.scoped, Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeThread replaces a cursor ahead of the authoritative head", () =>
@@ -9319,8 +10423,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               }),
           },
           projectionSnapshotQuery: {
-            getThreadDetailSnapshot: () =>
-              Effect.succeed(Option.some({ snapshotSequence: 5, thread })),
+            getThreadDetailSnapshot: () => Effect.succeedSome({ snapshotSequence: 5, thread }),
           },
         },
       });
@@ -9337,7 +10440,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(Option.getOrThrow(first).kind, "snapshot");
       assert.equal(readEventsCalls, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeThread replays a small thread range across a large global gap", () =>
@@ -9383,7 +10486,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const first = items[0];
       assertTrue(first?.kind === "event" && first.event.type === "thread.activity-appended");
       assert.equal(first.event.payload.activity.kind, "tool.completed");
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeThread resets cached history when its ID is created again", () =>
@@ -9408,7 +10511,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           projectionSnapshotQuery: {
             getThreadDetailSnapshot: (_threadId, options) => {
               requestedTurnLimit = options?.turnLimit;
-              return Effect.succeed(Option.some({ snapshotSequence: 5, thread }));
+              return Effect.succeedSome({ snapshotSequence: 5, thread });
             },
           },
         },
@@ -9433,7 +10536,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(first.snapshot.snapshotSequence, 5);
       assert.equal(requestedTurnLimit, 1);
       assert.deepEqual(items[1], { kind: "synchronized" });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   for (const { createBeforeDelete, oversized } of [
@@ -9501,7 +10604,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 readEvents: store.readFromSequence,
               },
               projectionSnapshotQuery: {
-                getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+                getThreadDetailSnapshot: () => Effect.succeedNone,
               },
             },
           });
@@ -9547,7 +10650,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           Effect.provide(
             Layer.mergeAll(
               OrchestrationEventStoreLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
-              NodeHttpServer.layerTest,
+              NodeHttpServerTest,
             ),
           ),
         ),
@@ -9630,7 +10733,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         [3, 51, "synchronized"],
       );
       assert.equal(replayHead, 50);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeShell sends a fresh snapshot instead of replaying a large gap", () =>
@@ -9692,7 +10795,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       }
       assert.equal(second?.kind, "synchronized");
       assert.equal(readEventsCalls, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscriptions snapshot instead of decoding an oversized replay range", () =>
@@ -9731,8 +10834,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 replayStatsCalls += 1;
                 return { eventCount: 5, payloadBytes: 8 * 1024 * 1024 + 1 };
               }),
-            getThreadDetailSnapshot: () =>
-              Effect.succeed(Option.some({ snapshotSequence: 5, thread })),
+            getThreadDetailSnapshot: () => Effect.succeedSome({ snapshotSequence: 5, thread }),
             getShellSnapshot: () =>
               Effect.succeed({
                 snapshotSequence: 5,
@@ -9769,7 +10871,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(shellItems[1]?.kind, "synchronized");
       assert.equal(replayStatsCalls, 2);
       assert.equal(readEventsCalls, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeShell replaces a cursor ahead of the authoritative head", () =>
@@ -9809,7 +10911,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(Option.getOrThrow(first).kind, "snapshot");
       assert.equal(readEventsCalls, 0);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeShell coalesces a per-thread burst without stalling other threads", () =>
@@ -9894,7 +10996,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(collected[2]?.kind, "synchronized");
       assert.equal(shellFetches.filter((id) => id === busyThreadId).length, 1);
       assert.equal(replayLimit, 50);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeShell coalesces live bursts after the synchronization marker", () =>
@@ -9995,7 +11097,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.include(liveUpsertedIds, busyThreadId);
       assert.include(liveUpsertedIds, newThreadId);
       assert.isBelow(shellFetches.filter((id) => id === busyThreadId).length, 20);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+    }).pipe(Effect.provide(NodeHttpServerTest), TestClock.withLive),
   );
 
   it.effect("subscribeShell coalescing still emits a removal for a deleted thread", () =>
@@ -10036,7 +11138,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               ]),
           },
           projectionSnapshotQuery: {
-            getThreadShellById: () => Effect.succeed(Option.none()),
+            getThreadShellById: () => Effect.succeedNone,
           },
         },
       });
@@ -10054,7 +11156,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const [first] = Array.from(items);
       assert.equal(first?.kind, "thread-removed");
       assert.equal(first?.kind === "thread-removed" ? first.threadId : null, goneThreadId);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeShell retries a transient shell projection refetch failure", () =>
@@ -10094,9 +11196,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                         detail: "transient failure",
                       }),
                     )
-                  : Effect.succeed(
-                      Option.some(makeDefaultOrchestrationThreadShell({ id: threadId })),
-                    );
+                  : Effect.succeedSome(makeDefaultOrchestrationThreadShell({ id: threadId }));
               }),
           },
         },
@@ -10116,7 +11216,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(first?.kind, "thread-upserted");
       assert.equal(first?.kind === "thread-upserted" ? first.thread.id : null, threadId);
       assert.equal(attempts, 2);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("subscribeShell coalescing still removes a project after a trailing update", () =>
@@ -10156,7 +11256,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               ]),
           },
           projectionSnapshotQuery: {
-            getProjectShellById: () => Effect.succeed(Option.none()),
+            getProjectShellById: () => Effect.succeedNone,
           },
         },
       });
@@ -10174,7 +11274,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const [first] = Array.from(items);
       assert.equal(first?.kind, "project-removed");
       assert.equal(first?.kind === "project-removed" ? first.projectId : null, projectId);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("stops the provider session and closes thread terminals after archive", () =>
@@ -10202,22 +11302,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
           projectionSnapshotQuery: {
             getThreadShellById: () =>
-              Effect.succeed(
-                Option.some(
-                  makeDefaultOrchestrationThreadShell({
-                    id: threadId,
+              Effect.succeedSome(
+                makeDefaultOrchestrationThreadShell({
+                  id: threadId,
+                  updatedAt: now,
+                  session: {
+                    threadId,
+                    status: "ready",
+                    providerName: "claudeAgent",
+                    runtimeMode: "full-access",
+                    activeTurnId: null,
+                    lastError: null,
                     updatedAt: now,
-                    session: {
-                      threadId,
-                      status: "ready",
-                      providerName: "claudeAgent",
-                      runtimeMode: "full-access",
-                      activeTurnId: null,
-                      lastError: null,
-                      updatedAt: now,
-                    },
-                  }),
-                ),
+                  },
+                }),
               ),
           },
         },
@@ -10245,7 +11343,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       if (sessionStopCommand?.type === "thread.session.stop") {
         assert.equal(sessionStopCommand.threadId, threadId);
       }
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("checks session status before archiving removes the thread from active lookups", () =>
@@ -10323,7 +11421,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         dispatchedCommands.map((command) => command.type),
         ["thread.archive", "thread.session.stop"],
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("archives without dispatching session stop when the thread has no session", () =>
@@ -10350,8 +11448,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
           projectionSnapshotQuery: {
             getThreadShellById: () =>
-              Effect.succeed(
-                Option.some(makeDefaultOrchestrationThreadShell({ id: threadId, session: null })),
+              Effect.succeedSome(
+                makeDefaultOrchestrationThreadShell({ id: threadId, session: null }),
               ),
           },
         },
@@ -10374,7 +11472,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         dispatchedCommands.map((command) => command.type),
         ["thread.archive"],
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -10404,22 +11502,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             },
             projectionSnapshotQuery: {
               getThreadShellById: () =>
-                Effect.succeed(
-                  Option.some(
-                    makeDefaultOrchestrationThreadShell({
-                      id: threadId,
+                Effect.succeedSome(
+                  makeDefaultOrchestrationThreadShell({
+                    id: threadId,
+                    updatedAt: now,
+                    session: {
+                      threadId,
+                      status: "stopped",
+                      providerName: "claudeAgent",
+                      runtimeMode: "full-access",
+                      activeTurnId: null,
+                      lastError: null,
                       updatedAt: now,
-                      session: {
-                        threadId,
-                        status: "stopped",
-                        providerName: "claudeAgent",
-                        runtimeMode: "full-access",
-                        activeTurnId: null,
-                        lastError: null,
-                        updatedAt: now,
-                      },
-                    }),
-                  ),
+                    },
+                  }),
                 ),
             },
           },
@@ -10442,7 +11538,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           dispatchedCommands.map((command) => command.type),
           ["thread.archive"],
         );
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("leaves settle cleanup to the event reactor", () =>
@@ -10470,22 +11566,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
           projectionSnapshotQuery: {
             getThreadShellById: () =>
-              Effect.succeed(
-                Option.some(
-                  makeDefaultOrchestrationThreadShell({
-                    id: threadId,
+              Effect.succeedSome(
+                makeDefaultOrchestrationThreadShell({
+                  id: threadId,
+                  updatedAt: now,
+                  session: {
+                    threadId,
+                    status: "ready",
+                    providerName: "claudeAgent",
+                    runtimeMode: "full-access",
+                    activeTurnId: null,
+                    lastError: null,
                     updatedAt: now,
-                    session: {
-                      threadId,
-                      status: "ready",
-                      providerName: "claudeAgent",
-                      runtimeMode: "full-access",
-                      activeTurnId: null,
-                      lastError: null,
-                      updatedAt: now,
-                    },
-                  }),
-                ),
+                  },
+                }),
               ),
           },
         },
@@ -10508,7 +11602,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         dispatchedCommands.map((command) => command.type),
         ["thread.settle", "thread.session.stop"],
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("forwards the friendly blocked-settlement message over websocket rpc", () =>
@@ -10538,7 +11632,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         error.message,
         "This thread still needs attention. Resolve or interrupt it first, then try again.",
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("archives and still closes terminals when session stop fails", () =>
@@ -10573,22 +11667,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
           projectionSnapshotQuery: {
             getThreadShellById: () =>
-              Effect.succeed(
-                Option.some(
-                  makeDefaultOrchestrationThreadShell({
-                    id: threadId,
+              Effect.succeedSome(
+                makeDefaultOrchestrationThreadShell({
+                  id: threadId,
+                  updatedAt: now,
+                  session: {
+                    threadId,
+                    status: "ready",
+                    providerName: "claudeAgent",
+                    runtimeMode: "full-access",
+                    activeTurnId: null,
+                    lastError: null,
                     updatedAt: now,
-                    session: {
-                      threadId,
-                      status: "ready",
-                      providerName: "claudeAgent",
-                      runtimeMode: "full-access",
-                      activeTurnId: null,
-                      lastError: null,
-                      updatedAt: now,
-                    },
-                  }),
-                ),
+                  },
+                }),
               ),
           },
         },
@@ -10615,7 +11707,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         dispatchedCommands.map((command) => command.type),
         ["thread.archive", "thread.session.stop"],
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("archives and still closes terminals when session stop defects", () =>
@@ -10645,22 +11737,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
           projectionSnapshotQuery: {
             getThreadShellById: () =>
-              Effect.succeed(
-                Option.some(
-                  makeDefaultOrchestrationThreadShell({
-                    id: threadId,
+              Effect.succeedSome(
+                makeDefaultOrchestrationThreadShell({
+                  id: threadId,
+                  updatedAt: now,
+                  session: {
+                    threadId,
+                    status: "ready",
+                    providerName: "claudeAgent",
+                    runtimeMode: "full-access",
+                    activeTurnId: null,
+                    lastError: null,
                     updatedAt: now,
-                    session: {
-                      threadId,
-                      status: "ready",
-                      providerName: "claudeAgent",
-                      runtimeMode: "full-access",
-                      activeTurnId: null,
-                      lastError: null,
-                      updatedAt: now,
-                    },
-                  }),
-                ),
+                  },
+                }),
               ),
           },
         },
@@ -10687,7 +11777,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         dispatchedCommands.map((command) => command.type),
         ["thread.archive", "thread.session.stop"],
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect(
@@ -10916,7 +12006,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         if (finalCommand?.type === "thread.turn.start") {
           assert.equal(finalCommand.bootstrap, undefined);
         }
-      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+      }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect.each([
@@ -11036,7 +12126,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         baseRefName: "main",
         path: null,
       });
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("records setup-script failures without aborting bootstrap turn start", () =>
@@ -11153,7 +12243,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         worktreePath: "/tmp/bootstrap-worktree",
       });
       assertTrue(dispatchedCommands.every((command) => command.type !== "thread.delete"));
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("does not misattribute setup activity dispatch failures as setup launch failures", () =>
@@ -11289,7 +12379,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         setupActivities.every((command) => command.activity.kind !== "setup-script.failed"),
       );
       assertTrue(dispatchedCommands.every((command) => command.type !== "thread.delete"));
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("cleans up created bootstrap threads when worktree creation defects", () =>
@@ -11404,7 +12494,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepEqual(yield* fileSystem.readDirectory(config.attachmentsDir), [
         `${pendingAttachmentId}.png`,
       ]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("drains deletion cleanup through the re-created thread event", () =>
@@ -11514,7 +12604,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         "thread.message.user.append",
         "thread.turn.start",
       ]);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("does not report a deleted bootstrap thread when cleanup fails", () =>
@@ -11606,7 +12696,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           "thread.session.set",
         ],
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc terminal methods", () =>
@@ -11702,7 +12792,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 
   it.effect("routes websocket rpc terminal.write errors", () =>
@@ -11731,7 +12821,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       );
 
       assertFailure(result, terminalError);
-    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    }).pipe(Effect.provide(NodeHttpServerTest)),
   );
 });
 
@@ -12025,5 +13115,5 @@ it.live(
       }
       assert.deepEqual(transferBudgetViolations(runs), []);
     }).pipe(Effect.provide(NodeServices.layer)),
-  NodeProcess.platform === "win32" ? 180_000 : 120_000,
+  NodeProcess.platform === "win32" ? 360_000 : 120_000,
 );

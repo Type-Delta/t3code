@@ -61,6 +61,7 @@ import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistr
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
+import { TerminalManager } from "../terminal/Manager.ts";
 import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 import { importRecentAgentThreads } from "./AgentSessionImporter.ts";
@@ -237,7 +238,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           upsert: (binding) => Effect.sync(() => void bindings.push(binding)),
           getProvider: () => Effect.die("unused"),
           recordImportedTranscript: () => Effect.void,
-          getBinding: () => Effect.succeed(Option.none()),
+          getBinding: () => Effect.succeedNone,
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
         });
@@ -461,7 +462,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           upsert: () => Effect.die("must not replace an active binding"),
           getProvider: () => Effect.die("unused"),
           recordImportedTranscript: () => Effect.void,
-          getBinding: () => Effect.succeed(Option.some(runningBinding)),
+          getBinding: () => Effect.succeedSome(runningBinding),
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
         });
@@ -516,7 +517,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           upsert: () => Effect.die("must not bind malformed or wrong-project sessions"),
           getProvider: () => Effect.die("unused"),
           recordImportedTranscript: () => Effect.die("unused"),
-          getBinding: () => Effect.succeed(Option.none()),
+          getBinding: () => Effect.succeedNone,
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
         });
@@ -650,9 +651,15 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
     }),
   );
 
-  it.effect(
-    "retries a bounded import after scanner restart without rereading completed transcripts",
-    () =>
+  it.effect.each([
+    { inodeKind: "safe", transcriptCount: 101 },
+    { inodeKind: "missing", transcriptCount: 101 },
+    { inodeKind: "unsafe", transcriptCount: 101 },
+    { inodeKind: "missing", transcriptCount: 201 },
+    { inodeKind: "unsafe", transcriptCount: 201 },
+  ] as const)(
+    "retries a bounded import after scanner restart (inode: $inodeKind, histories: $transcriptCount)",
+    ({ inodeKind, transcriptCount }) =>
       Effect.gen(function* () {
         const engine = yield* OrchestrationEngine.OrchestrationEngineService;
         const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
@@ -672,9 +679,10 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         yield* fileSystem.makeDirectory(claudeHomePath);
         yield* fileSystem.makeDirectory(sessionsDir, { recursive: true });
 
-        const projectId = ProjectId.make("project-bounded-import-retry");
-        const transcripts = Array.from({ length: 101 }, (_, index) => {
-          const providerSessionId = `bounded-session-${String(index).padStart(3, "0")}`;
+        const fixtureId = `${inodeKind}-${transcriptCount}`;
+        const projectId = ProjectId.make(`project-bounded-import-retry-${fixtureId}`);
+        const transcripts = Array.from({ length: transcriptCount }, (_, index) => {
+          const providerSessionId = `bounded-${fixtureId}-session-${String(index).padStart(3, "0")}`;
           return {
             providerSessionId,
             threadId: ThreadId.make(`import:codex:${providerSessionId}`),
@@ -706,7 +714,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         const remaining = transcripts[100]!;
         yield* engine.dispatch({
           type: "project.create",
-          commandId: CommandId.make("create-bounded-import-project"),
+          commandId: CommandId.make(`create-bounded-import-project-${fixtureId}`),
           projectId,
           title: "Bounded import",
           workspaceRoot,
@@ -725,7 +733,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         });
         yield* engine.dispatch({
           type: "thread.create",
-          commandId: CommandId.make("create-legacy-bounded-import"),
+          commandId: CommandId.make(`create-legacy-bounded-import-${fixtureId}`),
           threadId: legacy.threadId,
           projectId,
           title: "Legacy import",
@@ -739,7 +747,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         });
         yield* engine.dispatch({
           type: "thread.history.import",
-          commandId: CommandId.make("import-legacy-bounded-history"),
+          commandId: CommandId.make(`import-legacy-bounded-history-${fixtureId}`),
           threadId: legacy.threadId,
           messages: [
             {
@@ -779,6 +787,10 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
           },
         });
         const transcriptPaths = new Set(transcripts.map((transcript) => transcript.filePath));
+        const transcriptInode =
+          inodeKind === "missing"
+            ? Option.none<number>()
+            : Option.some(inodeKind === "unsafe" ? Number.MAX_SAFE_INTEGER + 1 : 1);
         const runAttempt = Effect.fn("runBoundedImportAttempt")(function* (
           completedPaths: ReadonlySet<string>,
         ) {
@@ -786,6 +798,14 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
           const fullReads: string[] = [];
           const observedFileSystem = FileSystem.FileSystem.of({
             ...fileSystem,
+            stat: (filePath) =>
+              fileSystem
+                .stat(filePath)
+                .pipe(
+                  Effect.map((stats) =>
+                    transcriptPaths.has(filePath) ? { ...stats, ino: transcriptInode } : stats,
+                  ),
+                ),
             open: (filePath, options) =>
               Effect.suspend(() => {
                 if (transcriptPaths.has(filePath)) {
@@ -794,12 +814,24 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
                   // A fresh scanner first opens each file for project discovery.
                   if (count > 1) {
                     fullReads.push(filePath);
-                    if (completedPaths.has(filePath)) {
+                    if (inodeKind === "safe" && completedPaths.has(filePath)) {
                       return Effect.die(new Error(`Completed transcript reopened: ${filePath}`));
                     }
                   }
                 }
-                return fileSystem.open(filePath, options);
+                return fileSystem.open(filePath, options).pipe(
+                  Effect.map((file) =>
+                    transcriptPaths.has(filePath)
+                      ? {
+                          ...file,
+                          stat: file.stat.pipe(
+                            Effect.map((stats) => ({ ...stats, ino: transcriptInode })),
+                          ),
+                          readAlloc: (size) => file.readAlloc(size),
+                        }
+                      : file,
+                  ),
+                );
               }),
           });
           const result = yield* importRecentAgentThreads({ projectId }).pipe(
@@ -815,7 +847,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         });
 
         const first = yield* runAttempt(new Set());
-        expect(first.result).toEqual({ importedCount: 99, skippedCount: 2 });
+        expect(first.result).toEqual({ importedCount: 99, skippedCount: transcriptCount - 99 });
         expect(failHistory).toBe(false);
         expect(first.fullReads).toEqual(transcripts.slice(0, 100).map((entry) => entry.filePath));
         expect(first.openCounts.get(remaining.filePath)).toBe(1);
@@ -836,14 +868,44 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
 
         const completedPaths = new Set(completedSources.map((entry) => entry.source.filePath));
         const second = yield* runAttempt(completedPaths);
-        expect(second.result).toEqual({ importedCount: 101, skippedCount: 0 });
-        expect(second.fullReads).toEqual([failed.filePath, remaining.filePath]);
+        const secondCompletedCount = Math.min(transcriptCount, 199);
+        expect(second.result).toEqual({
+          importedCount: secondCompletedCount,
+          skippedCount: transcriptCount - secondCompletedCount,
+        });
+        const secondNewReads = [failed, ...transcripts.slice(100)].slice(0, 100);
+        const secondReadPaths =
+          inodeKind === "safe"
+            ? secondNewReads.map((entry) => entry.filePath)
+            : transcripts.slice(0, secondCompletedCount).map((entry) => entry.filePath);
+        expect(second.fullReads).toEqual(secondReadPaths);
         for (const transcript of transcripts) {
           expect(second.openCounts.get(transcript.filePath)).toBe(
-            completedPaths.has(transcript.filePath) ? 1 : 2,
+            secondReadPaths.includes(transcript.filePath) ? 2 : 1,
           );
         }
-        expect(yield* snapshots.getImportedAgentSessionSources(projectId)).toHaveLength(101);
+        const secondSources = yield* snapshots.getImportedAgentSessionSources(projectId);
+        expect(secondSources).toHaveLength(secondCompletedCount);
+        if (transcriptCount === 201) {
+          const third = yield* runAttempt(
+            new Set(secondSources.map((entry) => entry.source.filePath)),
+          );
+          expect(third.result).toEqual({ importedCount: 102, skippedCount: 99 });
+          expect(third.fullReads).toEqual(
+            [...transcripts.slice(0, 100), ...transcripts.slice(199)].map(
+              (entry) => entry.filePath,
+            ),
+          );
+          const last = transcripts[200]!;
+          expect(
+            Option.getOrThrow(yield* snapshots.getThreadDetailById(last.threadId)).messages.map(
+              (message) => message.text,
+            ),
+          ).toEqual([`Prompt ${last.providerSessionId}`]);
+        }
+        expect(yield* snapshots.getImportedAgentSessionSources(projectId)).toHaveLength(
+          transcriptCount,
+        );
         expect(
           Option.getOrThrow(yield* snapshots.getThreadDetailById(legacy.threadId)).messages.map(
             (message) => message.text,
@@ -936,6 +998,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
           Layer.provide(Layer.mock(GitWorkflowService)({})),
           Layer.provide(Layer.mock(VcsStatusBroadcaster)({})),
           Layer.provide(Layer.mock(TextGeneration)({})),
+          Layer.provide(Layer.mock(TerminalManager)({ closeIdle: () => Effect.void })),
           Layer.provide(ServerSettingsService.layerTest()),
           Layer.provide(
             Layer.mock(CheckpointNavigationService)({

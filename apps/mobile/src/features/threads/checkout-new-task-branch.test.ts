@@ -20,6 +20,7 @@ beforeEach(async () => {
   directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-branch-selection-"));
   cwd = NodePath.join(directory, "project");
   await exec("git", ["init", "-b", "main", cwd]);
+  await git("config", "core.autocrlf", "false");
   await git("config", "user.name", "Branch test");
   await git("config", "user.email", "branch-test@example.com");
   await NodeFSP.writeFile(NodePath.join(cwd, "file.txt"), "main\n");

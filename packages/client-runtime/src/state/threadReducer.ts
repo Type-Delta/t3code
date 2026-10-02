@@ -133,6 +133,7 @@ export function applyThreadDetailEvent(
           settledAt: null,
           unsettledAt: null,
           activeOrderKey: null,
+          autoSettleDisabledAt: null,
           snoozedUntil: null,
           snoozedAt: null,
           deletedAt: null,
@@ -247,6 +248,16 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           pinOrderKey: event.payload.orderKey,
+          updatedAt: event.payload.updatedAt,
+        },
+      };
+
+    case "thread.auto-settle-set":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          autoSettleDisabledAt: event.payload.autoSettleDisabledAt,
           updatedAt: event.payload.updatedAt,
         },
       };
@@ -409,7 +420,9 @@ export function applyThreadDetailEvent(
                   streaming: message.streaming,
                   // Re-streaming invalidates any earlier suggestion; completion sets it.
                   ...(message.streaming
-                    ? { suggestion: undefined }
+                    ? entry.suggestion !== undefined
+                      ? { suggestion: undefined }
+                      : {}
                     : message.suggestion !== undefined
                       ? { suggestion: message.suggestion }
                       : {}),

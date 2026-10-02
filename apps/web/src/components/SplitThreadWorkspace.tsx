@@ -348,7 +348,7 @@ function SplitThreadPane(props: {
         <GripVerticalIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground/55" />
         <span className="min-w-0 flex-1 text-left leading-tight">
           <span className="block truncate text-xs font-medium text-foreground">{threadTitle}</span>
-          <span className="mt-0.5 block truncate text-[11px] text-muted-foreground/75">
+          <span className="mt-0.5 block truncate text-2xs text-muted-foreground/75">
             {projectName}
           </span>
         </span>
@@ -705,7 +705,7 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   }
 
   return (
-    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
+    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh">
       <DiffWorkerPoolProvider>
         <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

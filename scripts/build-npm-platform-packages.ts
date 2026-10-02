@@ -294,11 +294,78 @@ const packAndPlace = Effect.fn("packAndPlace")(function* (input: {
   readonly stageDir: string;
   readonly packageDir: string;
   readonly tarball: string;
+  readonly sourceArchive?: string;
+  readonly executable: string;
 }) {
   const fs = yield* FileSystem.FileSystem;
   yield* fs.remove(input.tarball, { force: true });
+  const tar = yield* hostTar;
+  let archiveInput = "package";
+  let archiveDirectory = input.stageDir;
+  if ((yield* HostProcessPlatform) === "win32") {
+    // NTFS drops Unix execute bits. Supply explicit modes from the release
+    // archive and let mtree read file contents from the extracted stage.
+    const sourceModes = new Map<string, string>();
+    const metadataPath = `${input.stageDir}/package.mtree`;
+    if (input.sourceArchive) {
+      const sourceMetadataPath = `${input.stageDir}/source.mtree`;
+      yield* runCommand(
+        ChildProcess.make(tar, [
+          "--format=mtree",
+          "-cf",
+          sourceMetadataPath,
+          `@${input.sourceArchive}`,
+        ]),
+        "tar (release metadata)",
+      );
+      for (const line of (yield* fs.readFileString(sourceMetadataPath)).split(/\r?\n/u)) {
+        const name = line.split(" ")[0]?.replace(/^\.\//u, "");
+        const mode = /(?:^| )mode=(\d+)(?: |$)/u.exec(line)?.[1];
+        if (name && mode) sourceModes.set(`package/${name.split("/").slice(1).join("/")}`, mode);
+      }
+    }
+    yield* runCommand(
+      ChildProcess.make(tar, [
+        "--format=mtree",
+        "-cf",
+        metadataPath,
+        "-C",
+        input.stageDir,
+        "package",
+      ]),
+      "tar (package metadata)",
+    );
+    const metadata = (yield* fs.readFileString(metadataPath))
+      .split(/\r?\n/u)
+      .map((line) => {
+        const normalized = line.replace(/^\.\//u, "");
+        const name = normalized.split(" ")[0];
+        const mode =
+          name === `package/${input.executable}`
+            ? "755"
+            : (sourceModes.get(name ?? "") ?? (line.includes("type=dir") ? "755" : "644"));
+        const entry = normalized.replace(/(?:^| )mode=\d+(?= |$)/u, ` mode=${mode}`);
+        if (!line.includes("type=file") || !name) return entry;
+        // mtree uses octal escapes for whitespace, backslashes, and '#' in paths.
+        const decodedName = name.replace(/\\([0-7]{3})/gu, (_, octal: string) =>
+          String.fromCharCode(Number.parseInt(octal, 8)),
+        );
+        const contents = `${input.stageDir.replaceAll("\\", "/")}/${decodedName}`.replace(
+          /[\s\\#]/gu,
+          (character) => `\\${character.charCodeAt(0).toString(8).padStart(3, "0")}`,
+        );
+        return `${entry} contents=${contents}`;
+      })
+      .join("\n");
+    yield* fs.writeFileString(metadataPath, metadata);
+    archiveInput = `@${metadataPath}`;
+    // Windows' mtree reader follows existing symlinks while checking types.
+    // An empty cwd leaves link entries declarative; regular files use contents.
+    archiveDirectory = `${input.stageDir}/mtree-input`;
+    yield* fs.makeDirectory(archiveDirectory);
+  }
   yield* runCommand(
-    ChildProcess.make(yield* hostTar, ["-czf", input.tarball, "-C", input.stageDir, "package"]),
+    ChildProcess.make(tar, ["-czf", input.tarball, "-C", archiveDirectory, archiveInput]),
     `tar (${input.tarball})`,
   );
   yield* fs.remove(input.packageDir, { recursive: true, force: true });
@@ -361,7 +428,12 @@ const stagePlatformPackage = Effect.fn("stagePlatformPackage")(function* (input:
     packageDir: path.join(input.outputDir, name),
     tarball: path.join(input.outputDir, `${name}.tgz`),
   };
-  yield* packAndPlace({ stageDir: scratch, ...output });
+  yield* packAndPlace({
+    stageDir: scratch,
+    sourceArchive: input.archive,
+    executable: executableName,
+    ...output,
+  });
   return output;
 }, Effect.scoped);
 
@@ -399,7 +471,7 @@ const stageLauncherPackage = Effect.fn("stageLauncherPackage")(function* (input:
     packageDir: path.join(input.outputDir, NPM_LAUNCHER_PACKAGE_NAME),
     tarball: path.join(input.outputDir, `${NPM_LAUNCHER_PACKAGE_NAME}.tgz`),
   };
-  yield* packAndPlace({ stageDir: scratch, ...output });
+  yield* packAndPlace({ stageDir: scratch, executable: "bin/t3.js", ...output });
   return output;
 }, Effect.scoped);
 
@@ -429,24 +501,22 @@ export const buildNpmPlatformPackages = Effect.fn("buildNpmPlatformPackages")(fu
   yield* fs.makeDirectory(path.join(input.outputDir, NPM_PLATFORM_PACKAGE_SCOPE), {
     recursive: true,
   });
-  const outputs: Array<NpmPackageOutput> = [];
-  for (const { key, archive } of archives) {
-    outputs.push(
-      yield* stagePlatformPackage({
-        key,
-        archive,
-        outputDir: input.outputDir,
-        version: input.version,
-      }),
-    );
-  }
-  outputs.push(
+  // Each archive stages in its own scratch dir, so all of them unpack and
+  // compress at once. Sequentially this took about 45s for five archives.
+  const platformOutputs = yield* Effect.forEach(
+    archives,
+    ({ key, archive }) =>
+      stagePlatformPackage({ key, archive, outputDir: input.outputDir, version: input.version }),
+    { concurrency: "unbounded" },
+  );
+  const outputs = [
+    ...platformOutputs,
     yield* stageLauncherPackage({
       outputDir: input.outputDir,
       version: input.version,
       platformKeys: archives.map((entry) => entry.key),
     }),
-  );
+  ];
 
   for (const output of outputs) {
     yield* Effect.log(`[npm-packages] Wrote ${output.packageDir} and ${output.tarball}`);

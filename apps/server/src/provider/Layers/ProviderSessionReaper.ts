@@ -41,7 +41,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
     const sweepIntervalMs = Math.max(1, options?.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
 
     const sweep = Effect.gen(function* () {
-      const bindings = yield* directory.listBindings();
+      const bindings = yield* directory.listBindings({ excludeStopped: true });
       const liveThreadIds = new Set(
         (yield* providerService.listSessions()).map((session) => session.threadId),
       );
@@ -49,10 +49,6 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       let reapedCount = 0;
 
       for (const binding of bindings) {
-        if (binding.status === "stopped") {
-          continue;
-        }
-
         const lastSeenMs = Date.parse(binding.lastSeenAt);
         if (Number.isNaN(lastSeenMs)) {
           yield* Effect.logWarning("provider.session.reaper.invalid-last-seen", {
@@ -81,15 +77,6 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         if (idleDurationMs < inactivityThresholdMs) {
           continue;
         }
-        if (thread?.session?.activeTurnId != null) {
-          yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
-            threadId: binding.threadId,
-            activeTurnId: thread.session.activeTurnId,
-            idleDurationMs,
-          });
-          continue;
-        }
-
         // Background work owns the provider process even when the parent turn
         // projection still looks active but its session directory entry is
         // briefly absent. Never settle or reap that parent out from under live
@@ -158,7 +145,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       if (reapedCount > 0) {
         yield* Effect.logInfo("provider.session.reaper.sweep-complete", {
           reapedCount,
-          totalBindings: bindings.length,
+          liveBindings: bindings.length,
         });
       }
     });

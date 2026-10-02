@@ -27,6 +27,7 @@ import * as Tracer from "effect/Tracer";
 import * as CheckpointStore from "../src/checkpointing/CheckpointStore.ts";
 import * as CheckpointDiffQuery from "../src/checkpointing/CheckpointDiffQuery.ts";
 import { TextGeneration } from "../src/textGeneration/TextGeneration.ts";
+import * as TerminalManager from "../src/terminal/Manager.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../src/persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
 import { ProjectionCheckpointRepositoryLive } from "../src/persistence/Layers/ProjectionCheckpoints.ts";
@@ -121,6 +122,7 @@ function runGit(cwd: string, args: ReadonlyArray<string>) {
 
 const initializeGitWorkspace = Effect.fn(function* (cwd: string) {
   runGit(cwd, ["init", "--initial-branch=main"]);
+  runGit(cwd, ["config", "core.autocrlf", "false"]);
   runGit(cwd, ["config", "user.email", "test@example.com"]);
   runGit(cwd, ["config", "user.name", "Test User"]);
   const fileSystem = yield* FileSystem.FileSystem;
@@ -390,6 +392,7 @@ export const makeOrchestrationIntegrationHarness = (
           tryHandlePromptCommand: () => Effect.succeed(false),
         }),
       ),
+      Layer.provide(Layer.mock(TerminalManager.TerminalManager)({ closeIdle: () => Effect.void })),
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(checkpointNavigationServiceLayer),
       Layer.provideMerge(CheckpointNavigationRepositoryLive),
@@ -469,6 +472,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(
         Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
           publishThread: () => Effect.void,
+          requestCatchUp: () => Effect.void,
           start: () => Effect.void,
         }),
       ),

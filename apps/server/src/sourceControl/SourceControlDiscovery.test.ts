@@ -423,7 +423,7 @@ it.effect("reports implemented tools separately from locally available executabl
             account: Option.none(),
             host: Option.some("bitbucket.org"),
             detail: Option.some(
-              "Set T3CODE_BITBUCKET_EMAIL and T3CODE_BITBUCKET_API_TOKEN, or T3CODE_BITBUCKET_ACCESS_TOKEN.",
+              "Add a Bitbucket token in Settings → Source Control, or set the T3CODE_BITBUCKET_* environment variables on the server.",
             ),
           }),
         },
@@ -1455,6 +1455,7 @@ it.effect(
       yield* fs.makeDirectory(source);
       for (const args of [
         ["init", "-b", "main"],
+        ["config", "core.autocrlf", "false"],
         ["config", "user.name", "Test"],
         ["config", "user.email", "test@example.com"],
       ])
@@ -1475,7 +1476,7 @@ it.effect(
         operation: "test.setup",
         command: "git",
         cwd: root,
-        args: ["clone", source, cwd],
+        args: ["clone", "--config", "core.autocrlf=false", source, cwd],
       });
       yield* fs.writeFileString(path.join(source, "feature.txt"), "pull request change\n");
       for (const args of [

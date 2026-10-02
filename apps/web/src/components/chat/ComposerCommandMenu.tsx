@@ -70,6 +70,7 @@ export type ComposerCommandItem =
     };
 
 export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
+  listId: string;
   items: ComposerCommandItem[];
   resolvedTheme: "light" | "dark";
   isLoading: boolean;
@@ -105,11 +106,16 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
         data-composer-command-drawer="true"
       >
         {props.items.length > 0 ? (
-          <CommandList className="max-h-72 min-h-0 scroll-pb-6">
+          <CommandList
+            id={props.listId}
+            aria-label={props.triggerKind ? LISTBOX_LABEL_BY_TRIGGER[props.triggerKind] : undefined}
+            className="max-h-72 min-h-0 scroll-pb-6"
+          >
             <CommandGroup>
               {props.items.map((item) => (
                 <ComposerCommandMenuItem
                   key={item.id}
+                  optionId={composerSuggestionOptionId(props.listId, item.id)}
                   item={item}
                   triggerKind={props.triggerKind}
                   resolvedTheme={props.resolvedTheme}
@@ -144,6 +150,7 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
 });
 
 const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
+  optionId: string;
   item: ComposerCommandItem;
   triggerKind: ComposerTriggerKind | null;
   resolvedTheme: "light" | "dark";
@@ -161,13 +168,12 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
 
   return (
     <CommandItem
+      render={<div id={props.optionId} />}
+      aria-selected={props.isActive}
       value={props.item.id}
       data-composer-item-id={props.item.id}
-      className={cn(
-        "cursor-pointer select-none gap-3 rounded-lg px-3 py-2! hover:bg-transparent hover:text-inherit data-highlighted:bg-transparent data-highlighted:text-inherit",
-        disabledReason && "cursor-not-allowed opacity-50",
-        props.isActive && "bg-accent! text-accent-foreground!",
-      )}
+      active={props.isActive}
+      disabled={Boolean(disabledReason)}
       onMouseMove={() => {
         if (!props.isActive) props.onHighlight(props.item.id);
       }}
@@ -217,6 +223,18 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
     </CommandItem>
   );
 });
+
+export function composerSuggestionOptionId(listId: string, itemId: string): string {
+  // JSON escapes lone UTF-16 surrogates before URI encoding without losing identity.
+  return `${listId}-${encodeURIComponent(JSON.stringify(itemId))}`;
+}
+
+const LISTBOX_LABEL_BY_TRIGGER: Record<ComposerTriggerKind, string> = {
+  path: "Files and folders",
+  "pull-request": "Pull requests",
+  "slash-command": "Commands",
+  skill: "Skills",
+};
 
 const SKILL_SOURCE_ICON_BY_KIND: Record<ProviderSkillSourceKind, LucideIcon> = {
   app: BlocksIcon,

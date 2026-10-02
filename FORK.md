@@ -6,6 +6,16 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
+### DL038 — Precise transcript identity checks on Windows
+
+Session scanning skips parsing completed history from matching file metadata only when the inode is present and a safe JavaScript integer. Windows can omit inode values or round NTFS file IDs, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts, 4 GiB, and 100,000 records per scan. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
+
+**Implementation evidence:** `apps/server/src/project/AgentSessionScanner.ts`, its replacement identity tests, and bounded retry tests in `AgentSessionImporter.test.ts`.
+
+**Recorded validation:** 100 scanner/importer tests, including 201-history imports across three attempts with missing or unsafe inodes. Server typecheck, scoped lint, and formatting passed.
+
+**Last updated:** 2026-10-02
+
 ### DL037 — Forgiving CLIProxyAPI usage and redemption
 
 Hub requests pause after management HTTP 401/403 until the URL or management key changes. Optional malformed quota fields and array entries no longer discard usable windows; Codex plan fallback accepts both field names and relative reset times. Credit redemption sends only a stable `redeem_request_id`, preserves known outcomes, and reports unfamiliar successful responses as accepted before refreshing usage. T3 leaves cooldown clearing to CPA instead of resetting the entire account. Web, desktop, and mobile display the accepted result.
@@ -74,11 +84,13 @@ The empty-session follow-up initially verified initialization only. A later real
 
 The upstream draft hero remains the empty-state headline. The fork adds `On <machine-name>` as its supporting line and uses the same machine label in the existing non-draft empty state. The project already appears in the hero headline, so the supporting line identifies the environment instead of repeating the project name.
 
+Projectless drafts retain upstream's scratch-project picker beside the machine context.
+
 **Implementation evidence:** `apps/web/src/components/ChatView.tsx`, `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/chat/MessagesTimeline.test.tsx`.
 
 **Recorded validation:** `vp test apps/web/src/components/chat/MessagesTimeline.test.tsx`, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-10-02
 
 ### DL003 — Compact Claude and Codex subscription meters
 
@@ -114,13 +126,17 @@ Upstream owns the pinned Electron debugger reference and bounded screenshot retr
 
 The shared fixture launcher dispatches by shebang: shell fixtures use Git for Windows `sh.exe` and Node fixtures use the current Node executable. These dispatch rules and the remaining platform-specific test expectations compose with upstream's broader Windows fixture portability fixes.
 
+Git fixtures set repository-local `core.autocrlf=false` when exact LF content is part of an assertion, preserving the tested reset and restore behavior across Windows installations.
+
 Git worktree comparison uses native realpaths and case-folding on Windows so Git for Windows path canonicalization cannot mistake the main checkout for another worktree.
 
-**Implementation evidence:** `packages/shared/src/shell.ts`, `apps/server/src/git/GitManager.ts`, their remaining fork-specific fixture and canonical-path tests, `packages/tailscale/src/tailscale.test.ts`, and `oxlint-plugin-t3code/test/utils.ts`.
+Server-router and HTTP MCP fixtures use native HTTP clients with OS-assigned loopback ports. Windows can assign port `6566`, which Fetch blocks before connecting. Explicit compression checks retain Fetch and its automatic decompression. The fixtures retain real HTTP requests and their status, body, and session assertions.
+
+**Implementation evidence:** `packages/shared/src/shell.ts`, `apps/server/src/git/GitManager.ts`, their remaining fork-specific fixture and canonical-path tests, `apps/server/src/server.test.ts`, `apps/server/src/mcp/McpHttpServer.test.ts`, `packages/tailscale/src/tailscale.test.ts`, and `oxlint-plugin-t3code/test/utils.ts`.
 
 **Recorded validation:** targeted Cursor/Grok ACP, provider-runtime ingestion, checkpoint, Git PR-selector, desktop, relay, workspace, Tailscale, and oxlint suites on Windows; `vp check` and `vp run typecheck`.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-10-02
 
 ### DL006 — Durable sidecar checkpoints and recoverable navigation
 
@@ -132,7 +148,15 @@ Fork migrations `036`–`038` establish durable checkpoint state. The reconcilia
 
 Migration `053_ReconcileUpstream47History` repairs a database carrying upstream history through `047`, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at `050`–`052`. Incoming upstream behavior then runs as `054`–`061`, with fork prompt suggestions at `062`, and the latest upstream title-state and pull-request-file tables at `063`–`064`. Migration `065_ReconcileBranchPullRequestHistory` repairs the known deployed-ID-58 collision idempotently before startup. Schema checks keep these changes safe for both fork and upstream database histories.
 
+Upstream's per-thread auto-settle migration runs at `066`, preserving the deployed fork ledger. The isolated migration helper accepts documented historical ledger names only after it verifies their reconciliation markers and repaired schema. Codex checkpoint navigation uses the current native `thread/revert` protocol and retains the fork's conversation cursor safeguards.
+
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
+
+Durable completion retains the provider placeholder assistant-message identity, including interrupted turns. Workspace status refresh runs through a coalesced background worker after capture receipts, so slow Git inspection cannot delay turn completion.
+
+Sidecar repositories inherit the workspace's `core.autocrlf` and `core.eol` settings so restoring a checkpoint preserves its line endings under Windows Git defaults. Empty nested workspaces remain present after checkpoint cleanup.
+
+Batched allowlisted config reads preserve Git includes and global/local precedence. The sidecar skips unchanged writes and clears removed line-ending overrides only when present. This avoids repeated Windows process cleanup after normal missing-setting queries.
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
@@ -142,9 +166,13 @@ Sidecar capture excludes deleted tracked paths from `git add`. Its private index
 
 **Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated. The deletion/rename regression and all 15 sidecar checkpoint tests passed on Windows with the user-index preservation assertion.
 
-**Last updated:** 2026-09-30
+The 2026-10-02 config repair passed all 28 checkpoint-store tests, including exact restored bytes, conditional includes, repeated values, and removed overrides. A single-file capture benchmark measured 3.2–3.4 seconds against 4.6–4.8 seconds for the original fork implementation.
+
+**Last updated:** 2026-10-02
 
 ### DL008 — Persistent multi-thread split workspaces
+
+Collapsed Working, snoozed, and settled shelves keep all displayed split panes visible in the sidebar.
 
 The fork supports up to ten visible thread panes in five columns and two rows. Panes fill columns at full height until a sixth pane opens the lower row. A full-height pane accepts a thread above or below it in its outer quarters; its middle half accepts left/right placement while fewer than five columns exist. A stacked column accepts only left/right placement while fewer than five columns exist. Left/right drop hints cover the full destination column, including both rows of a stacked column. Blocked drop areas show no hint. Split layouts retain focused-pane routing, a shared toolbar, one right panel, and controlled ownership of global keyboard, preview, and composer behavior. The right-panel toggle reflects the shared split layout and closes every open pane panel together, so changing focus cannot reopen a panel owned by another pane. Panes can be opened or detached from the sidebar, safely reconcile draft promotion/archive/deletion, and animate layout changes without leaving stale portals or listeners. Reconciliation never returns a deleted thread as the fallback when all panes disappear.
 
@@ -307,6 +335,8 @@ Closing the last desktop window leaves Electron's main process and local T3 back
 
 The desktop main process owns one shared bearer session per local backend for the window, tray polling, and parallel WSL connections. This preserves upstream's replacement of stale desktop sessions without allowing a tray refresh or another renderer to revoke the active window's login. Closing and reopening the window reuses the backend's shared session.
 
+Tray refresh waits for backend readiness before requesting a bearer session or thread counts. An early tray token exchange therefore cannot delay renderer authentication. Failed count requests retain the last known count and recover without replacing the shared session.
+
 On Windows, the standalone service launcher terminates the known server PID and its descendants during stop, update, and fatal shutdown. This prevents launcher-owned provider processes from surviving as orphaned Codex writers without scanning or killing processes by name; direct-child signaling remains the fallback when process-tree termination fails.
 
 **Implementation evidence:** desktop lifecycle and native tray/status-item modules and their focused tests under `apps/desktop/src/`, dedicated macOS template-image assets and packaging checks, `apps/server/src/orchestration/http.ts`, `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts`, `packages/contracts/src/environmentHttp.ts`, and `apps/server/src/serviceLauncher.ts`.
@@ -316,6 +346,8 @@ Updater-controlled exits retain upstream's synchronous window destruction before
 **Recorded validation:** focused desktop tray, lifecycle, running-count projection, packaging, and Windows process-tree integration tests; Windows notification-area runtime verification of the count, open, and graceful quit controls; `vp check`; `vp run typecheck`; and `git diff --check`. The 2026-09-01 merge-focused desktop and server suites reran tray continuity and running-count behavior with upstream activity-liveness fixes.
 
 The 2026-09-05 authentication fix passed 48 focused tests, including a tray integration regression that fails with the original independent token exchange. An isolated Windows Electron run verified automatic login, continued authentication after tray polling, and closing and reopening the window against the same backend. A separate browser paired successfully with cookie authentication. `vp check` and `vp run typecheck` passed.
+
+The 2026-10-02 readiness guard passed 12 focused tests. An isolated source startup exchanged its token after readiness and completed 16 count polls without errors. Renderer bearer acquisition took 0.21 ms. The final packaged startup completed 17 count polls without errors. The integration test also verifies recovery from a failed count request without another token exchange.
 
 **Last updated:** 2026-09-05
 
@@ -381,6 +413,7 @@ and a thread cannot message itself. Lists default to 50 threads and cap at 200. 
 10 turns, hide output, and cap at 50 turns and 20,000 characters per item. Wait targets are
 limited to eight threads and five minutes. A failed worktree bootstrap closes its setup terminal,
 deletes the durable thread, removes the worktree when safe, and then removes its generated branch.
+Worktree bootstrap uses upstream progress and cancellation tracking, scoped origin fetches, submodule setup, and guarded failure cleanup. Synchronous callers wait for setup before dispatching; asynchronous callers continue through the same shared dispatcher after setup completes.
 Every successful `thread.create`, including bootstrap creation, now drains deletion cleanup through
 the create event's sequence before setup or later dispatch continues. The shared
 `ThreadCommandDispatcher` owns this fence, so web, mobile, RPC, and agent-tool creation cannot race
@@ -396,7 +429,7 @@ developer instruction tests, plus `vp check` and `vp run typecheck`. Dispatcher 
 the deletion drain for direct and bootstrapped creation and preserves cleanup order on failed
 setup.
 
-**Last updated:** 2026-09-21
+**Last updated:** 2026-10-02
 
 ### DL026 — Per-instance API gateway model catalogs
 
@@ -420,6 +453,8 @@ without inventing missing metadata.
 The gateway controls remain part of upstream's split provider settings editor. Existing opaque
 credentials survive settings refreshes, and the UI replaces or removes a stored key without
 round-tripping its value through provider snapshots.
+
+Codex gateway controls apply to CLI-managed instances. Managed ChatGPT accounts use upstream authentication and hide gateway controls that cannot affect those accounts. Saved gateway configuration remains available for CLI-managed instances.
 
 The add-instance wizard keeps its title, description, and step tabs pinned above a single scrollable
 step body, with the Back and confirm buttons pinned below, so the long Config step scrolls inside the
@@ -497,13 +532,13 @@ tests, `vp check`, and `vp run typecheck`.
 
 ### DL029 — Selectable sidebar thread ordering
 
-The default web and desktop sidebar offers **Manual** ordering by default and **Last input** ordering in General settings. Manual preserves saved positions and sidebar drag actions. Last input ignores saved active-order keys and promotes threads on user messages while retaining creation and un-settle lifecycle anchors. Switching modes preserves saved keys. Dragging a row into the conversation creates or extends a split in either mode, without a separate grip control. Initial split creation reuses the existing pane-drop overlay to show its right-side placement. The dragged row uses the same row appearance in a document-level drag overlay, preserving sidebar scroll position and avoiding clipping behind the conversation.
+When Working is disabled, the web and desktop sidebar offers **Manual** ordering by default and **Last input** ordering in General settings. Manual preserves saved positions and sidebar drag actions. Last input ignores saved active-order keys and promotes threads on user messages while retaining creation and un-settle lifecycle anchors. Switching modes preserves saved keys. While upstream Working is enabled, the Inbox uses return-priority order, placing threads that most recently returned for attention first. Disabling Working restores the saved Manual or Last input preference. Active-row manual reordering is unavailable while Working is enabled; pin actions, shelf moves, and dragging into splits remain available. Dragging a row into the conversation creates or extends a split in either mode, without a separate grip control. Initial split creation reuses the existing pane-drop overlay to show its right-side placement. The dragged row uses the same row appearance in a document-level drag overlay, preserving sidebar scroll position and avoiding clipping behind the conversation.
 
 **Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/web/src/components/settings/SettingsPanels.tsx`, `apps/web/src/components/Sidebar.tsx`, `apps/web/src/components/Sidebar.logic.ts`, and their focused tests.
 
 **Recorded validation:** focused settings, sidebar sorting, pointer lifecycle, and split target tests; isolated browser checks for initial split creation, pane placement, manual reordering, Last input mode, and settings persistence; `vp check`; and `vp run typecheck`.
 
-**Last updated:** 2026-09-24
+**Last updated:** 2026-10-02
 
 ### DL030 — Isolated macOS GitHub releases
 
@@ -647,6 +682,8 @@ turn. Claude pins the preference and instructions at its first session start in 
 preserving them across session recovery and restarts. Each viewing client independently
 controls whether suggestions appear in its composer. See [prompt suggestions](docs/user/composer.md#prompt-suggestions).
 
+Suggestion-less streaming updates retain message and timeline-row identity. Clearing an existing suggestion still updates the message metadata.
+
 **Implementation evidence:** `packages/shared/src/promptSuggestion.ts`,
 `packages/contracts/src/{settings,orchestration,provider}.ts`,
 `apps/server/src/provider/Layers/{ProviderService,CodexSessionRuntime,ClaudeAdapter}.ts`,
@@ -659,7 +696,7 @@ controls whether suggestions appear in its composer. See [prompt suggestions](do
 `apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/ComposerPromptEditor.tsx`,
 and `apps/web/src/components/settings/SettingsPanels.tsx`.
 
-**Last updated:** 2026-09-16
+**Last updated:** 2026-10-02
 
 ### DL035 — Manual-only release actions
 
@@ -676,6 +713,26 @@ The fork's release workflow runs only through an explicit `workflow_dispatch` re
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-10-02 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `1a906fc529` (fork) and `b33eda1399` (upstream/main)
+
+- Preserved deployed fork migrations through `065` and appended upstream's per-thread auto-settle migration at `066`. The isolated clone helper verifies known historical ledger aliases against reconciliation markers and repaired schema, prunes child records before parents, and clears copied runtime jobs and management credentials.
+- Working uses upstream return-priority Inbox ordering. Disabling Working restores the saved Manual or Last input preference. Visible split panes remain accessible in collapsed shelves, and the scratch hero retains machine context.
+- Retained provider gateway metadata, launch recovery, prompt suggestions, automatic resume, compact usage meters, subagent transcript isolation, and durable checkpoints while adopting upstream title refinement, deferred worktree input, paced reasoning, current Claude SDK, and native Codex `thread/revert`.
+- Combined upstream tracked worktree setup, cancellation, submodules, and scoped fetches with the fork's shared dispatcher and cleanup fences. Restored upstream review-index isolation, per-file preview limits and complete stats, plus carriage-return progress and callbacks after stored-output truncation. Thread deletion completes worktree cleanup even when client navigation fails. Retained UI styles use the upstream component variants and named theme utilities required by the new lint rules.
+- Retained sidecar checkpoint navigation and provider cursor guards. Mid-turn placeholders do not replace durable capture jobs; completed and aborted turns retain their assistant-message identity. Coalesced workspace refresh runs after receipt delivery. Dedicated worktrees follow an agent-renamed branch even when the saved branch was a temporary placeholder; temporary current checkouts and shared worktrees remain guarded.
+- Session scanning uses metadata-only completion skipping only when the file inode is present and a safe JavaScript integer. Separate bounded validation of completed histories preserves retry progress with missing or imprecise Windows inodes. The standalone runtime uses exact bigint file identity when numeric metadata cannot reject a hard link to itself.
+- Checkpoint sidecars inherit workspace line-ending settings, and empty nested workspaces survive restore cleanup. Batched allowlisted config reads preserve effective precedence and avoid repeated Windows cleanup for missing settings. Streaming updates preserve unchanged message identity when no prompt suggestion exists. Timestamp fallbacks follow upstream for threads without valid user input. Integration settings retain both Devices and fork management keys.
+- Tray refresh waits for backend readiness before authentication and count requests. The shared renderer/tray session remains stable through count-request failures.
+- Restored stale orphan-session recovery while retaining live-turn and background-work guards. Screenshot cleanup shares one completion promise. Windows-built npm platform archives preserve executable modes, symlinks, and file contents. Root tests load the terminal's WebAssembly assets; standalone CI scripts run with Node's test runner.
+- Server-router and HTTP MCP fixtures use native HTTP clients because Windows can assign ports that Fetch blocks. A listening server on port `6566` returned HTTP 200 through `node:http`, while Fetch rejected it before connecting.
+- Migration smoke used a read-only snapshot of the live database. The pruned isolated copy passed SQLite integrity and foreign-key checks and applied `066`. Authenticated Codex and Claude turns wrote files, persisted replies, and produced ready checkpoints; settle/unsettle and archive/unarchive roundtrips passed. Claude's completed checkpoint recovered after a development-watcher restart.
+- An authenticated web client rendered the migrated history and checkpoint diff. A real Codex follow-up moved into Working and returned to the top of the Inbox after completion while the saved ordering remained Manual. Further web checks verified saved Last input across Working toggles, split-pane attach/detach, terminal splitting, and Devices alongside management keys. A final packaged Browser-panel pass could not proceed because open/navigation calls timed out. Native mobile verification remained unavailable because device access was disabled.
+- `vp check` and `vp run typecheck` passed on the final source. Windows x64 desktop and unsigned NSIS packaging passed, including validation of 46 payload files and 16 native sidecars. The isolated packaged app authenticated after backend readiness, completed all 17 observed tray polls, and advanced onboarding with no renderer page or request errors. All captured app and child processes stopped. The mobile static-check wrapper passed while skipping unavailable SwiftLint, ktlint, and detekt binaries.
+- The final full suite recorded 1,403 passing files, 11 skipped files, and two failing files. It recorded 18,771 passing tests, 148 skipped tests, and two loopback connection timeouts. Both failed cases passed unchanged reruns. The affected files then passed all 201 server tests and 19 MCP tests with the native HTTP fixtures. Each original failed case also passed 10 serial reruns. The exact cause of the original TCP timeouts remains unproven. The original failure logs remain available.
 
 ### 2026-09-23 — Audit of September sync regressions
 

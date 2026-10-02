@@ -1,11 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off - integration test exercises the Windows process-tree boundary.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -24,6 +26,21 @@ import {
   SERVICE_RESTART_PENDING_FILE,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
+
+// Windows cannot execute a shebang fixture. Keep real child IPC and lifecycle
+// behavior, routing only our fake runtime files through the host Node binary.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    spawn: (command: string, args: readonly string[], options: NodeChildProcess.SpawnOptions) => {
+      const source = `${command}.test-source.mjs`;
+      return NodePath.sep === "\\" && NodeFS.existsSync(source)
+        ? actual.spawn(process.execPath, [source, ...args], options)
+        : actual.spawn(command, args, options);
+    },
+  };
+});
 
 it("accepts only exact semantic versions", () => {
   for (const version of ["0.0.0", "1.2.3", "1.2.3-alpha.1", "1.2.3-0", "1.2.3+001"]) {
@@ -152,9 +169,11 @@ const writeFakeRuntime = (
   childSource: string,
 ) =>
   Effect.gen(function* () {
-    const entryPath = path.join(versionDir, "t3");
+    const windows = path.sep === "\\";
+    const entryPath = path.join(versionDir, windows ? "t3.exe" : "t3");
     yield* fs.makeDirectory(versionDir, { recursive: true });
     yield* fs.writeFileString(entryPath, `#!${process.execPath}\n${childSource}`);
+    if (windows) yield* fs.writeFileString(`${entryPath}.test-source.mjs`, childSource);
     yield* fs.chmod(entryPath, 0o755);
     yield* fs.writeFileString(
       path.join(versionDir, ".install-complete"),

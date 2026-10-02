@@ -15,6 +15,7 @@ import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import {
   createProviderVersionAdvisory,
+  makeTargetedProviderUpdateAction,
   enrichProviderSnapshotWithVersionAdvisory,
   homebrewOwnershipFromCommandPath,
   makeCachedProviderMaintenanceResolution,
@@ -86,7 +87,7 @@ function writeExecutable(path: string) {
 function linkIntoPackage(tempDir: string, name: string, packageSegments: ReadonlyArray<string>) {
   const target = NodePath.join(tempDir, ...packageSegments, "bin", `${name}.js`);
   writeExecutable(target);
-  const link = NodePath.join(tempDir, "bin", name);
+  const link = NodePath.join(tempDir, "bin", `${name}${windowsHost ? ".cmd" : ""}`);
   NodeFS.mkdirSync(NodePath.dirname(link), { recursive: true });
   NodeFS.symlinkSync(target, link);
   return link;
@@ -262,17 +263,18 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           },
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn));
 
+        const prefix = tempDir.replaceAll("\\", "/");
         expect(capabilities).toEqual({
           provider: driver("packageTool"),
           packageName: "@example/package-tool",
           update: {
-            command: `npm install -g --prefix ${tempDir} --allow-scripts=@example/package-tool @example/package-tool@latest`,
+            command: `npm install -g --prefix ${prefix} --allow-scripts=@example/package-tool @example/package-tool@latest`,
             executable: "npm",
             args: [
               "install",
               "-g",
               "--prefix",
-              tempDir,
+              prefix,
               "--allow-scripts=@example/package-tool",
               "@example/package-tool@latest",
             ],
@@ -525,7 +527,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           "package-tool.js",
         );
         writeExecutable(target);
-        const link = NodePath.join(tempDir, "bin", "package-tool");
+        const link = NodePath.join(tempDir, "bin", `package-tool${windowsHost ? ".cmd" : ""}`);
         NodeFS.mkdirSync(NodePath.dirname(link), { recursive: true });
         NodeFS.symlinkSync(target, link);
 
@@ -539,7 +541,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
 
         expect(capabilities.update).toMatchObject({
           executable: "npm",
-          args: expect.arrayContaining(["--prefix", keg]),
+          args: expect.arrayContaining(["--prefix", keg.replaceAll("\\", "/")]),
           lockKey: `npm-global:${normalizeCommandPath(keg)}`,
         });
       }),
@@ -642,7 +644,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       Effect.gen(function* () {
         const tempDir = yield* makeTempDir("t3-homebrew-capabilities");
         const brewBinDir = NodePath.join(tempDir, "brew-bin");
-        const brewPath = NodePath.join(brewBinDir, "brew");
+        const brewPath = NodePath.join(brewBinDir, `brew${windowsHost ? ".CMD" : ""}`);
         writeExecutable(brewPath);
         const ownedBinary = NodePath.join(
           tempDir,
@@ -652,7 +654,11 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
           "package-tool-0.148.0",
         );
         writeExecutable(ownedBinary);
-        const link = NodePath.join(tempDir, "bin", "custom-package-tool");
+        const link = NodePath.join(
+          tempDir,
+          "bin",
+          `custom-package-tool${windowsHost ? ".cmd" : ""}`,
+        );
         NodeFS.mkdirSync(NodePath.dirname(link), { recursive: true });
         NodeFS.symlinkSync(ownedBinary, link);
         const spawned: Array<ReadonlyArray<string>> = [];
@@ -664,7 +670,7 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
             env: { PATH: brewBinDir },
           },
         ).pipe(
-          Effect.provideService(HostProcessPlatform, "darwin"),
+          Effect.provideService(HostProcessPlatform, windowsHost ? "win32" : "darwin"),
           Effect.provideService(
             ChildProcessSpawner.ChildProcessSpawner,
             stdoutSpawner((command, args) => {
@@ -785,4 +791,46 @@ it.layer(NodeServices.layer)("providerMaintenance", (it) => {
       expect(resolutions).toBe(2);
     }),
   );
+});
+
+it("pins only owned package-manager installs and preserves their execution context", () => {
+  const capabilities = makeProviderMaintenanceCapabilities({
+    provider: driver("codex"),
+    packageName: "@openai/codex",
+    updateExecutable: "npm",
+    updateLockKey: "npm-global:/opt/node",
+    updateArgs: [
+      "install",
+      "-g",
+      "--prefix",
+      "/opt/node",
+      "--allow-scripts=@openai/codex",
+      "@openai/codex@latest",
+    ],
+    env: { PATH: "/opt/node/bin" },
+  });
+  const pinned = makeTargetedProviderUpdateAction(capabilities, "2.0.0");
+  expect(pinned).toMatchObject({
+    executable: "npm",
+    lockKey: capabilities.update?.lockKey,
+    env: capabilities.update?.env,
+    args: [
+      "install",
+      "-g",
+      "--prefix",
+      "/opt/node",
+      "--allow-scripts=@openai/codex",
+      "@openai/codex@2.0.0",
+    ],
+  });
+  expect(pinned?.command).toContain("@openai/codex@2.0.0");
+  for (const lockKey of ["codex-native", "homebrew", "manual"]) {
+    expect(
+      makeTargetedProviderUpdateAction(
+        { ...capabilities, update: { ...capabilities.update!, lockKey } },
+        "2.0.0",
+      ),
+    ).toBeNull();
+  }
+  expect(makeTargetedProviderUpdateAction(capabilities, "2.0.0; rm -rf /")).toBeNull();
 });

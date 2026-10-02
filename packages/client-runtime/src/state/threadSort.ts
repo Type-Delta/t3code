@@ -47,6 +47,24 @@ export function resolveSettledThreadTimestamp(thread: SettledThreadTimestampInpu
   return toSortableTimestamp(thread.updatedAt) === null ? null : thread.updatedAt;
 }
 
+/** Settled rows are history, so they order by when the work ENDED, newest
+    first, with an id tiebreak. Each key resolves once per sort, not once
+    per comparison. Shared by web and mobile so both render the same order. */
+export function sortSettledThreads<T extends SettledThreadTimestampInput & { readonly id: string }>(
+  threads: readonly T[],
+): T[] {
+  return threads
+    .map((thread) => {
+      const timestamp = resolveSettledThreadTimestamp(thread);
+      return { thread, timestampMs: timestamp === null ? 0 : Date.parse(timestamp) };
+    })
+    .sort(
+      (left, right) =>
+        right.timestampMs - left.timestampMs || left.thread.id.localeCompare(right.thread.id),
+    )
+    .map(({ thread }) => thread);
+}
+
 function getFirstSortableTimestamp(...values: Array<string | null | undefined>): number | null {
   for (const value of values) {
     const timestamp = toSortableTimestamp(value ?? undefined);
@@ -82,7 +100,7 @@ function getLatestUserMessageTimestamp(thread: ThreadSortInput): number {
     return latestUserMessageTimestamp;
   }
 
-  return toSortableTimestamp(thread.createdAt) ?? Number.NEGATIVE_INFINITY;
+  return getFirstSortableTimestamp(thread.updatedAt, thread.createdAt) ?? Number.NEGATIVE_INFINITY;
 }
 
 export function getThreadSortTimestamp(
@@ -90,7 +108,9 @@ export function getThreadSortTimestamp(
   sortOrder: SidebarThreadSortOrder | Exclude<SidebarProjectSortOrder, "manual">,
 ): number {
   if (sortOrder === "created_at") {
-    return toSortableTimestamp(thread.createdAt) ?? Number.NEGATIVE_INFINITY;
+    return (
+      getFirstSortableTimestamp(thread.createdAt, thread.updatedAt) ?? Number.NEGATIVE_INFINITY
+    );
   }
   return getLatestUserMessageTimestamp(thread);
 }

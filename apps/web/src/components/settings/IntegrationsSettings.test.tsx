@@ -24,6 +24,7 @@ vi.mock("../../env", () => ({ isElectron: true }));
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({ environments: [], isReady: true }),
   usePrimaryEnvironment: () => null,
+  usePrimaryEnvironmentId: () => null,
 }));
 vi.mock("../../hooks/useSettings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../hooks/useSettings")>()),
@@ -103,6 +104,7 @@ describe("Integrations browser discovery", () => {
       .map((node) => node.props.id)
       .filter(Boolean);
     expect(sections.indexOf("devices")).toBeGreaterThan(sections.indexOf("browser"));
+    expect(sections.indexOf("management-api-keys")).toBeGreaterThan(sections.indexOf("devices"));
   });
 });
 

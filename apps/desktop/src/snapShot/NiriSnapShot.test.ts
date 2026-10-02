@@ -42,7 +42,11 @@ const send = (socket: NodeNet.Socket, value: unknown) => socket.write(`${JSON.st
 
 beforeEach(async () => {
   directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-niri-test-"));
-  socketPath = NodePath.join(directory, "ipc");
+  // Node exposes local IPC as named pipes on Windows and Unix sockets elsewhere.
+  socketPath =
+    NodePath.sep === "\\"
+      ? `\\\\.\\pipe\\${NodePath.basename(directory)}-ipc`
+      : NodePath.join(directory, "ipc");
   sockets = new Set();
   events = [];
   calls = [];

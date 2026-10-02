@@ -77,7 +77,8 @@ function SubscriptionUsageRing(props: {
                   cy="24"
                   r={radius}
                   fill="none"
-                  stroke="color-mix(in oklab, var(--color-muted-foreground) 35%, transparent)"
+                  stroke="currentColor"
+                  className="text-muted-foreground/35"
                   strokeWidth="6"
                 />
                 <circle
@@ -97,13 +98,13 @@ function SubscriptionUsageRing(props: {
           </button>
         }
       />
-      <PopoverPopup tooltipStyle side="top" align="end" className="w-64 max-w-none p-0">
+      <PopoverPopup tooltipStyle padding="none" side="top" align="end" className="w-64 max-w-none">
         <div className="flex flex-col gap-2 p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="font-medium text-muted-foreground text-xs">
               {WINDOW_LABELS[props.kind]} usage
             </div>
-            <div className="text-[11px] tabular-nums text-muted-foreground/70">
+            <div className="text-2xs tabular-nums text-muted-foreground/70">
               {Math.round(remaining)}% left
             </div>
           </div>
@@ -121,7 +122,7 @@ function SubscriptionUsageRing(props: {
             />
           </div>
           {resetTime ? (
-            <div className="text-[11px] leading-4 text-muted-foreground/60">Resets {resetTime}</div>
+            <div className="text-2xs leading-4 text-muted-foreground/60">Resets {resetTime}</div>
           ) : null}
         </div>
       </PopoverPopup>

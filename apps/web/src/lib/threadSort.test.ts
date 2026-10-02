@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import type { Thread } from "../types";
 import { getLatestThreadForProject, sortThreads } from "./threadSort";
+import { sortThreadsForSidebar } from "../components/Sidebar.logic";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const PROJECT_ID = ProjectId.make("project-1");
@@ -85,7 +86,7 @@ describe("sortThreads", () => {
     ]);
   });
 
-  it("uses creation time when there is no user message", () => {
+  it("falls back to thread timestamps when there is no user message", () => {
     const sorted = sortThreads(
       [
         makeThread({
@@ -119,7 +120,7 @@ describe("sortThreads", () => {
     ]);
   });
 
-  it("ignores updatedAt when there is no user message", () => {
+  it("falls back to updatedAt and then createdAt when there is no user message", () => {
     const sorted = sortThreads(
       [
         makeThread({
@@ -139,8 +140,8 @@ describe("sortThreads", () => {
     );
 
     expect(sorted.map((thread) => thread.id)).toEqual([
-      ThreadId.make("thread-1"),
       ThreadId.make("thread-2"),
+      ThreadId.make("thread-1"),
     ]);
   });
 
@@ -192,7 +193,7 @@ describe("sortThreads", () => {
     ]);
   });
 
-  it("does not use updatedAt as a fallback for created_at sorting", () => {
+  it("uses updatedAt for created_at sorting only when createdAt is invalid", () => {
     const sorted = sortThreads(
       [
         makeThread({
@@ -210,8 +211,8 @@ describe("sortThreads", () => {
     );
 
     expect(sorted.map((thread) => thread.id)).toEqual([
-      ThreadId.make("thread-2"),
       ThreadId.make("thread-1"),
+      ThreadId.make("thread-2"),
     ]);
   });
 
@@ -242,5 +243,27 @@ describe("sortThreads", () => {
     );
 
     expect(latestThread?.id).toBe(ThreadId.make("thread-3"));
+  });
+});
+
+describe("sidebar last input sorting", () => {
+  it("keeps creation order when threads without user input receive background updates", () => {
+    const threads = [
+      makeThread({
+        id: ThreadId.make("newer-created"),
+        createdAt: "2026-03-09T10:00:00.000Z",
+        updatedAt: "2026-03-09T10:00:00.000Z",
+      }),
+      makeThread({
+        id: ThreadId.make("older-created"),
+        createdAt: "2026-03-09T09:00:00.000Z",
+        updatedAt: "2026-03-09T11:30:00.000Z",
+      }),
+    ];
+
+    expect(sortThreadsForSidebar(threads, "last_input").map((thread) => thread.id)).toEqual([
+      ThreadId.make("newer-created"),
+      ThreadId.make("older-created"),
+    ]);
   });
 });

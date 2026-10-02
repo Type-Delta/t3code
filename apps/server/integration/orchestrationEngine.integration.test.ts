@@ -149,6 +149,13 @@ const seedProjectAndThread = (harness: OrchestrationIntegrationHarness) =>
       worktreePath: harness.workspaceDir,
       createdAt,
     });
+
+    // These fixtures assert completed checkpoints, not baseline contention.
+    // Establish the initial snapshot before a provider can mutate the workspace.
+    return yield* harness.waitForReceipt(
+      (receipt): receipt is CheckpointBaselineCapturedReceipt =>
+        receipt.type === "checkpoint.baseline.captured" && receipt.threadId === THREAD_ID,
+    );
   });
 
 const startTurn = (input: {
@@ -182,7 +189,7 @@ const startTurn = (input: {
 it.live("runs a single turn end-to-end and persists checkpoint state in sqlite + sidecar", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
-      yield* seedProjectAndThread(harness);
+      const baseline = yield* seedProjectAndThread(harness);
 
       const turnResponse: TestTurnResponse = {
         events: [
@@ -246,10 +253,6 @@ it.live("runs a single turn end-to-end and persists checkpoint state in sqlite +
       assert.equal(thread.checkpoints[0]?.checkpointTurnCount, 1);
       assert.deepEqual(thread.checkpoints[0]?.files, []);
 
-      const baseline = yield* harness.waitForReceipt(
-        (receipt): receipt is CheckpointBaselineCapturedReceipt =>
-          receipt.type === "checkpoint.baseline.captured" && receipt.threadId === THREAD_ID,
-      );
       if (baseline.type !== "checkpoint.baseline.captured") {
         throw new Error("Expected checkpoint.baseline.captured receipt.");
       }
@@ -382,7 +385,7 @@ it.live.skipIf(!process.env.CODEX_BINARY_PATH)(
 it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
   withHarness((harness) =>
     Effect.gen(function* () {
-      yield* seedProjectAndThread(harness);
+      const baseline = yield* seedProjectAndThread(harness);
 
       yield* harness.adapterHarness!.queueTurnResponseForNextSession({
         events: [
@@ -449,10 +452,6 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
         (entry) => entry.checkpoints.length === 1 && entry.session?.threadId === "thread-1",
       );
       const firstCheckpointRef = firstTurnThread.checkpoints[0]!.checkpointRef;
-      const baseline = yield* harness.waitForReceipt(
-        (receipt): receipt is CheckpointBaselineCapturedReceipt =>
-          receipt.type === "checkpoint.baseline.captured" && receipt.threadId === THREAD_ID,
-      );
       if (baseline.type !== "checkpoint.baseline.captured") {
         throw new Error("Expected checkpoint.baseline.captured receipt.");
       }
@@ -849,13 +848,24 @@ it.live("navigates to an earlier checkpoint and retains forward sidecar history"
         createdAt: "2026-02-24T10:05:00.900Z",
       });
 
+      yield* harness.waitForReceipt(
+        (receipt): receipt is CheckpointDiffFinalizedReceipt =>
+          receipt.type === "checkpoint.diff.finalized" &&
+          receipt.threadId === THREAD_ID &&
+          receipt.checkpointTurnCount === 2,
+      );
+      yield* harness.waitForReceipt(
+        (receipt): receipt is TurnProcessingQuiescedReceipt =>
+          receipt.type === "turn.processing.quiesced" &&
+          receipt.threadId === THREAD_ID &&
+          receipt.checkpointTurnCount === 2,
+      );
       const beforeRevert = yield* harness.waitForThread(
         THREAD_ID,
         (entry) =>
           entry.latestTurn?.turnId === "turn-2" &&
           entry.checkpoints.length === 2 &&
           entry.activities.some((activity) => activity.turnId === "turn-2"),
-        8000,
       );
       const abandonedCheckpointRef = beforeRevert.checkpoints[1]!.checkpointRef;
 
@@ -924,7 +934,7 @@ it.live("navigates to an earlier checkpoint and retains forward sidecar history"
 );
 
 it.live(
-  "appends checkpoint.revert.failed activity when revert is requested without a provider binding",
+  "emits checkpoint navigation failure when revert is requested without a provider binding",
   () =>
     withHarness((harness) =>
       Effect.gen(function* () {
@@ -938,24 +948,16 @@ it.live(
           createdAt: nowIso(),
         });
 
-        const thread = yield* harness.waitForThread(THREAD_ID, (entry) =>
-          entry.activities.some(
-            (activity) =>
-              activity.kind === "checkpoint.revert.failed" &&
-              typeof activity.payload === "object" &&
-              activity.payload !== null,
-          ),
+        const events = yield* harness.waitForDomainEvent(
+          (event) => event.type === "thread.checkpoint-navigation-failed",
         );
-        const failureActivity = thread.activities.find(
-          (activity) => activity.kind === "checkpoint.revert.failed",
+        const failure = events.findLast(
+          (event) => event.type === "thread.checkpoint-navigation-failed",
         );
-        assert.equal(failureActivity !== undefined, true);
-        assert.equal(
-          String(
-            (failureActivity?.payload as { readonly detail?: string } | undefined)?.detail,
-          ).includes("no persisted provider binding exists"),
-          true,
-        );
+        assert.equal(failure?.type, "thread.checkpoint-navigation-failed");
+        if (failure?.type === "thread.checkpoint-navigation-failed") {
+          assert.equal(failure.payload.code, "provider-capability-failed");
+        }
       }),
     ),
 );
@@ -1454,10 +1456,21 @@ it.live("requires confirmation for Claude files-only checkpoint restore", () =>
           text: "Second Claude edit",
         });
 
+        yield* harness.waitForReceipt(
+          (receipt): receipt is CheckpointDiffFinalizedReceipt =>
+            receipt.type === "checkpoint.diff.finalized" &&
+            receipt.threadId === THREAD_ID &&
+            receipt.checkpointTurnCount === 2,
+        );
+        yield* harness.waitForReceipt(
+          (receipt): receipt is TurnProcessingQuiescedReceipt =>
+            receipt.type === "turn.processing.quiesced" &&
+            receipt.threadId === THREAD_ID &&
+            receipt.checkpointTurnCount === 2,
+        );
         const beforeRevert = yield* harness.waitForThread(
           THREAD_ID,
           (entry) => entry.checkpoints.length === 2,
-          5000,
         );
         assert.equal(beforeRevert.session?.providerName, "claudeAgent");
         const abandonedCheckpointRef = beforeRevert.checkpoints[1]!.checkpointRef;
@@ -1473,7 +1486,6 @@ it.live("requires confirmation for Claude files-only checkpoint restore", () =>
 
         const failureEvents = yield* harness.waitForDomainEvent(
           (event) => event.type === "thread.checkpoint-navigation-failed",
-          5000,
         );
         const failure = failureEvents.findLast(
           (event) => event.type === "thread.checkpoint-navigation-failed",
@@ -1493,13 +1505,9 @@ it.live("requires confirmation for Claude files-only checkpoint restore", () =>
         });
         yield* harness.waitForDomainEvent(
           (event) => event.type === "thread.checkpoint-navigation-completed",
-          5000,
         );
-        const restoredThread = yield* harness.waitForThread(
-          THREAD_ID,
-          (entry) =>
-            entry.activities.some((activity) => activity.kind === "checkpoint.files-restored"),
-          5000,
+        const restoredThread = yield* harness.waitForThread(THREAD_ID, (entry) =>
+          entry.activities.some((activity) => activity.kind === "checkpoint.files-restored"),
         );
         assert.deepEqual(restoredThread.messages, messagesBeforeRestore);
         assert.equal(restoredThread.checkpoints.length, 2);

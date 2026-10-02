@@ -69,6 +69,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { VcsDriverRegistry } from "../../vcs/VcsDriverRegistry.ts";
+import * as TerminalManager from "../../terminal/Manager.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
@@ -85,7 +86,8 @@ type ProviderIntentEvent = Extract<
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
       | "thread.session-stop-requested"
-      | "thread.settled";
+      | "thread.settled"
+      | "thread.session-set";
   }
 >;
 
@@ -352,6 +354,7 @@ const make = Effect.gen(function* () {
   const checkpointIdentities = yield* CheckpointRepositoryIdentityResolver;
   const mutationCoordinator = yield* WorkspaceMutationCoordinator;
   const vcsRegistry = yield* VcsDriverRegistry;
+  const terminalManager = yield* TerminalManager.TerminalManager;
   /** Environment settings with the thread's project overrides applied. */
   const projectSettingsForThread = Effect.fnUntraced(function* (threadId: ThreadId) {
     const settings = yield* serverSettingsService.getSettings;
@@ -679,16 +682,24 @@ const make = Effect.gen(function* () {
     });
     // A directory deleted without `git worktree remove` leaves an admin entry
     // that makes `git worktree add` refuse the path; prune clears it.
+    // Best effort like the rest of this recovery: a settings read failure
+    // falls back to the checkout's t3.json.
+    const submodules = yield* projectSettingsForThread(thread.id).pipe(
+      Effect.map((settings) => settings.worktreeSubmodules),
+      Effect.orElseSucceed(() => null),
+    );
     yield* gitWorkflow.pruneWorktrees({ cwd }).pipe(
-      Effect.andThen(gitWorkflow.createWorktree({ cwd, refName: branch, path: worktreePath })),
-      Effect.catchCause((cause) =>
-        Cause.hasInterruptsOnly(cause)
-          ? Effect.failCause(cause)
-          : Effect.logWarning("provider command reactor failed to recreate worktree", {
-              threadId: thread.id,
-              worktreePath,
-              cause: Cause.pretty(cause),
-            }),
+      Effect.andThen(
+        gitWorkflow.createWorktree({ cwd, refName: branch, path: worktreePath }, { submodules }),
+      ),
+      Effect.catchCauseIf(
+        (cause) => !Cause.hasInterruptsOnly(cause),
+        (cause) =>
+          Effect.logWarning("provider command reactor failed to recreate worktree", {
+            threadId: thread.id,
+            worktreePath,
+            cause: Cause.pretty(cause),
+          }),
       ),
     );
   });
@@ -744,6 +755,9 @@ const make = Effect.gen(function* () {
       readonly modelSelection?: ModelSelection;
       readonly pendingTurnStart?: boolean;
       readonly promptSuggestion?: PromptSuggestionPreference;
+      // First-turn prompt seed. A manual title that still equals this seed was
+      // written by the client's auto-title, not a user rename.
+      readonly titleSeed?: string;
     },
   ) {
     const thread = yield* resolveThreadShell(threadId);
@@ -881,6 +895,15 @@ const make = Effect.gen(function* () {
           .refreshWorkspaceSnapshot({ instanceId: desiredInstanceId, cwd: effectiveCwd })
           .pipe(Effect.forkDetach)
       : Effect.void;
+    // OpenCode skips SessionPrompt.ensureTitle when session.create already has
+    // a title. Prompt seeds and "New thread" are not user titles, so omit them
+    // and let the provider generate one. A real rename is source "manual" and
+    // differs from the first-turn prompt seed (the web client writes that seed
+    // through thread.meta.update, which also marks the title manual).
+    const manualTitle = thread.titleState?.source === "manual" ? thread.title.trim() : "";
+    const promptSeed = options?.titleSeed?.trim();
+    const sessionTitle =
+      manualTitle.length > 0 && manualTitle !== promptSeed ? thread.title : undefined;
 
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
@@ -892,7 +915,7 @@ const make = Effect.gen(function* () {
           ...(preferredProvider ? { provider: preferredProvider } : {}),
           providerInstanceId: desiredInstanceId,
           ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-          ...(thread.title ? { title: thread.title } : {}),
+          ...(sessionTitle ? { title: sessionTitle } : {}),
           modelSelection: desiredModelSelection,
           ...(options?.promptSuggestion !== undefined
             ? { promptSuggestion: options.promptSuggestion }
@@ -1012,6 +1035,7 @@ const make = Effect.gen(function* () {
     readonly interactionMode?: "default" | "plan";
     readonly promptSuggestion?: PromptSuggestionPreference;
     readonly createdAt: string;
+    readonly titleSeed?: string;
   }) {
     const thread = yield* resolveThreadShell(input.threadId);
     if (!thread) {
@@ -1021,6 +1045,7 @@ const make = Effect.gen(function* () {
     }
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      ...(input.titleSeed !== undefined ? { titleSeed: input.titleSeed } : {}),
       pendingTurnStart: true,
       ...(input.promptSuggestion !== undefined ? { promptSuggestion: input.promptSuggestion } : {}),
     });
@@ -1135,6 +1160,8 @@ const make = Effect.gen(function* () {
       readonly messageText: string;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
       readonly titleSeed?: string;
+      readonly expectedTitle: string;
+      readonly expectedVersion: CommandId | null;
     }) {
       const attachments = input.attachments ?? [];
       yield* Effect.gen(function* () {
@@ -1164,10 +1191,14 @@ const make = Effect.gen(function* () {
         }
 
         yield* orchestrationEngine.dispatch({
-          type: "thread.meta.update",
+          type: "thread.title.generate.complete",
           commandId: yield* serverCommandId("thread-title-rename"),
           threadId: input.threadId,
-          title: generated.title,
+          title: generated.title === DEFAULT_THREAD_TITLE ? input.expectedTitle : generated.title,
+          expectedTitle: input.expectedTitle,
+          expectedVersion: input.expectedVersion,
+          needsRefinement:
+            generated.needsRefinement === true || generated.title === DEFAULT_THREAD_TITLE,
         });
       }).pipe(
         Effect.catchCause((cause) =>
@@ -1180,6 +1211,29 @@ const make = Effect.gen(function* () {
       );
     },
   );
+
+  const maybeRefineThreadTitle = Effect.fn("maybeRefineThreadTitle")(function* (
+    threadId: ThreadId,
+  ) {
+    const thread = yield* resolveThreadShell(threadId);
+    if (
+      !thread?.titleState?.needsRefinement ||
+      thread.titleState.source !== "generated" ||
+      thread.titleRegeneration != null ||
+      thread.latestTurn?.state !== "completed" ||
+      thread.session?.status !== "ready"
+    )
+      return;
+    const detail = yield* resolveThreadDetail(threadId);
+    if (!detail || detail.messages.filter((message) => message.role === "user").length !== 1)
+      return;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.title.refine",
+      commandId: yield* serverCommandId("thread-title-refine"),
+      threadId,
+      expectedVersion: thread.titleState.version,
+    });
+  });
 
   const prepareProviderTurnMutation = Effect.fn(
     "ProviderCommandReactor.prepareProviderTurnMutation",
@@ -1346,14 +1400,17 @@ const make = Effect.gen(function* () {
       ...(input.title !== undefined ? { title: input.title } : {}),
     });
   });
-  const findInterruptedThreadTitleRegenerations = Effect.fn(
-    "findInterruptedThreadTitleRegenerations",
-  )(function* () {
+  const findPendingThreadTitles = Effect.fn("findPendingThreadTitles")(function* () {
     const readModel = yield* projectionSnapshotQuery.getCommandReadModel();
-    return readModel.threads.flatMap((thread) => {
-      const requestId = thread.titleRegeneration?.requestId;
-      return requestId === undefined ? [] : [{ threadId: thread.id, requestId }];
-    });
+    return {
+      interruptedRegenerations: readModel.threads.flatMap((thread) => {
+        const requestId = thread.titleRegeneration?.requestId;
+        return requestId === undefined ? [] : [{ threadId: thread.id, requestId }];
+      }),
+      refinementThreadIds: readModel.threads
+        .filter((thread) => thread.titleState?.needsRefinement)
+        .map((thread) => thread.id),
+    };
   });
   const clearInterruptedThreadTitleRegenerations = Effect.fn(
     "clearInterruptedThreadTitleRegenerations",
@@ -1395,15 +1452,14 @@ const make = Effect.gen(function* () {
         return;
       }
       const result = yield* regenerateThreadTitle(event, requestId).pipe(
-        Effect.catchCause((cause) => {
-          if (Cause.hasInterruptsOnly(cause)) {
-            return Effect.failCause(cause);
-          }
-          return Effect.logWarning("provider command reactor failed to regenerate thread title", {
-            threadId: event.payload.threadId,
-            cause: Cause.pretty(cause),
-          }).pipe(Effect.as({ _tag: "Completed", title: undefined } as const));
-        }),
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) =>
+            Effect.logWarning("provider command reactor failed to regenerate thread title", {
+              threadId: event.payload.threadId,
+              cause: Cause.pretty(cause),
+            }).pipe(Effect.as({ _tag: "Completed", title: undefined } as const)),
+        ),
       );
       if (result._tag === "Superseded") {
         return;
@@ -1415,34 +1471,26 @@ const make = Effect.gen(function* () {
         ...(result.title !== undefined ? { title: result.title } : {}),
       };
       yield* dispatchThreadTitleRegenerationCompletion(completion).pipe(
-        Effect.catchCause((cause) => {
-          if (Cause.hasInterruptsOnly(cause)) {
-            return Effect.failCause(cause);
-          }
-          return Effect.logWarning(
-            "provider command reactor retrying title regeneration completion",
-            {
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) =>
+            Effect.logWarning("provider command reactor retrying title regeneration completion", {
               threadId: event.payload.threadId,
               cause: Cause.pretty(cause),
-            },
-          ).pipe(Effect.andThen(dispatchThreadTitleRegenerationCompletion(completion)));
-        }),
+            }).pipe(Effect.andThen(dispatchThreadTitleRegenerationCompletion(completion))),
+        ),
       );
     },
     (effect, event) =>
       effect.pipe(
-        Effect.catchCause((cause) => {
-          if (Cause.hasInterruptsOnly(cause)) {
-            return Effect.failCause(cause);
-          }
-          return Effect.logWarning(
-            "provider command reactor failed to complete title regeneration",
-            {
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) =>
+            Effect.logWarning("provider command reactor failed to complete title regeneration", {
               threadId: event.payload.threadId,
               cause: Cause.pretty(cause),
-            },
-          );
-        }),
+            }),
+        ),
       ),
   );
   const threadTitleRegenerationWorker = yield* makeDrainableWorker(
@@ -1617,10 +1665,15 @@ const make = Effect.gen(function* () {
         ...generationInput,
       }).pipe(Effect.forkScoped);
 
-      if (canReplaceThreadTitle(thread.title, event.payload.titleSeed)) {
+      if (
+        thread.titleState?.source !== "manual" &&
+        canReplaceThreadTitle(thread.title, event.payload.titleSeed)
+      ) {
         yield* maybeGenerateThreadTitleForFirstTurn({
           threadId: event.payload.threadId,
           cwd: generationCwd,
+          expectedTitle: thread.title,
+          expectedVersion: thread.titleState?.version ?? null,
           ...generationInput,
         }).pipe(Effect.forkScoped);
       }
@@ -1752,8 +1805,13 @@ const make = Effect.gen(function* () {
         ? { promptSuggestion: event.payload.promptSuggestion }
         : {}),
       createdAt: event.payload.createdAt,
+      // Later turns must not reuse the current title as titleSeed. Only the
+      // first prompt seed should suppress a not-yet-renamed session title.
+      ...(!hasOtherUserMessages && event.payload.titleSeed !== undefined
+        ? { titleSeed: event.payload.titleSeed }
+        : {}),
     }).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
     );
 
@@ -2117,7 +2175,14 @@ const make = Effect.gen(function* () {
     });
     switch (event.type) {
       case "thread.meta-updated":
-        yield* threadTitleRegenerationWorker.enqueue(event);
+        if (event.payload.regenerateTitle === true)
+          yield* threadTitleRegenerationWorker.enqueue(event);
+        else if (event.payload.titleState?.needsRefinement)
+          yield* maybeRefineThreadTitle(event.payload.threadId);
+        return;
+      case "thread.session-set":
+        if (event.payload.session.status === "ready")
+          yield* maybeRefineThreadTitle(event.payload.threadId);
         return;
       case "thread.runtime-mode-set": {
         const thread = yield* resolveThreadShell(event.payload.threadId);
@@ -2149,11 +2214,14 @@ const make = Effect.gen(function* () {
         return;
       case "thread.settled": {
         const thread = yield* projectionSnapshotQuery.getThreadShellById(event.payload.threadId);
-        if (
-          Option.isNone(thread) ||
-          thread.value.session == null ||
-          thread.value.session.status === "stopped"
-        ) {
+        // A thread re-engaged before this event ran keeps its shells and session.
+        if (Option.isNone(thread) || thread.value.settledOverride !== "settled") {
+          return;
+        }
+        // Idle shells close so they stop holding the worktree. A terminal that
+        // runs a command (a dev server, an editor) stays for the user to close.
+        yield* terminalManager.closeIdle({ threadId: event.payload.threadId });
+        if (thread.value.session == null || thread.value.session.status === "stopped") {
           return;
         }
         yield* orchestrationEngine.dispatch({
@@ -2209,20 +2277,22 @@ const make = Effect.gen(function* () {
         mutationCoordinator.cancelProviderMutation(threadId),
       ).pipe(Effect.asVoid),
     );
-    const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(
+    const pendingTitles = yield* findPendingThreadTitles().pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
           return Effect.interrupt;
         }
-        return Effect.logWarning(
-          "provider command reactor failed to find interrupted title regenerations",
-          { cause: Cause.pretty(cause) },
-        ).pipe(Effect.as([]));
+        return Effect.logWarning("provider command reactor failed to find pending thread titles", {
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as({ interruptedRegenerations: [], refinementThreadIds: [] }));
       }),
     );
     const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
       if (
-        (event.type === "thread.meta-updated" && event.payload.regenerateTitle === true) ||
+        (event.type === "thread.meta-updated" &&
+          (event.payload.regenerateTitle === true ||
+            event.payload.titleState?.needsRefinement === true)) ||
+        (event.type === "thread.session-set" && event.payload.session.status === "ready") ||
         event.type === "thread.runtime-mode-set" ||
         event.type === "thread.turn-start-requested" ||
         event.type === "thread.turn-interrupt-requested" ||
@@ -2239,12 +2309,16 @@ const make = Effect.gen(function* () {
     const domainEvents = yield* orchestrationEngine.subscribeDomainEvents;
     yield* forkParked(Stream.runForEach(domainEvents, processEvent));
 
-    // The domain event stream is hot, so work pending before this reactor
-    // starts cannot be resumed. Correlated completions only clear the request
-    // captured here, leaving any newer request untouched.
+    // Clear interrupted requests by their captured IDs, then schedule persisted
+    // refinements after subscribing to their events.
     const clearInterrupted = clearInterruptedThreadTitleRegenerations(
-      interruptedTitleRegenerations,
+      pendingTitles.interruptedRegenerations,
     ).pipe(
+      Effect.andThen(
+        Effect.forEach(pendingTitles.refinementThreadIds, maybeRefineThreadTitle, {
+          discard: true,
+        }),
+      ),
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
           return Effect.interrupt;

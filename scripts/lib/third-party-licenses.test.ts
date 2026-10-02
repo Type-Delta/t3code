@@ -299,7 +299,7 @@ describe("third-party license generation", () => {
     });
 
     expect(manifest.entries.find((entry) => entry.name === "demo-dependency")?.noticeText).toBe(
-      "dist/third-party/NOTICE.txt\n\nNested notice\n\n---\n\nLICENSE\n\nDemo MIT license text",
+      `${NodePath.join("dist", "third-party", "NOTICE.txt")}\n\nNested notice\n\n---\n\nLICENSE\n\nDemo MIT license text`,
     );
   });
 

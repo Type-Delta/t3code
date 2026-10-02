@@ -199,7 +199,7 @@ function KeyRow({
       </div>
       <div className="mt-3 grid min-w-0 gap-2 text-xs text-muted-foreground sm:grid-cols-2">
         <div className="min-w-0">
-          <span className="block text-[11px] uppercase tracking-wide text-muted-foreground/70">
+          <span className="block text-2xs uppercase tracking-wide text-muted-foreground/70">
             Access
           </span>
           <span className="break-words text-foreground/85">
@@ -207,7 +207,7 @@ function KeyRow({
           </span>
         </div>
         <div className="min-w-0">
-          <span className="block text-[11px] uppercase tracking-wide text-muted-foreground/70">
+          <span className="block text-2xs uppercase tracking-wide text-muted-foreground/70">
             Activity
           </span>
           <span className="break-words text-foreground/85">
@@ -287,116 +287,121 @@ function CreateManagementApiKeyDialog({
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit}>
-          <DialogPanel className="space-y-5">
-            <div className="space-y-2">
-              <Label htmlFor="management-api-key-name">Name</Label>
-              <Input
-                id="management-api-key-name"
-                value={name}
-                onValueChange={setName}
-                placeholder="My MCP client"
-                autoFocus
-                required
-              />
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="min-w-0 space-y-2">
-                <Label htmlFor="management-api-key-expiration">Expiration</Label>
-                <Select
-                  value={expiration}
-                  onValueChange={(value) => {
-                    if (value && EXPIRATION_OPTIONS.some((option) => option.value === value)) {
-                      setExpiration(value as ManagementApiKeyExpiration);
-                    }
-                  }}
-                >
-                  <SelectTrigger id="management-api-key-expiration" className="w-full">
-                    <SelectValue>
-                      {EXPIRATION_OPTIONS.find((option) => option.value === expiration)?.label}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {EXPIRATION_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
+          <DialogPanel>
+            <div className="space-y-5">
+              <div className="space-y-2">
+                <Label htmlFor="management-api-key-name">Name</Label>
+                <Input
+                  id="management-api-key-name"
+                  value={name}
+                  onValueChange={setName}
+                  placeholder="My MCP client"
+                  autoFocus
+                  required
+                />
               </div>
-              <div className="min-w-0 space-y-2">
-                <Label htmlFor="management-api-key-preset">Access preset</Label>
-                <Select
-                  value={preset}
-                  onValueChange={(value) => {
-                    if (
-                      !value ||
-                      !MANAGEMENT_API_KEY_PRESETS.some((option) => option.value === value)
-                    )
-                      return;
-                    const nextPreset = value as ManagementApiKeyPreset;
-                    setPreset(nextPreset);
-                    if (nextPreset !== "custom") {
-                      setCustomScopes(scopesForManagementApiKeyPreset(nextPreset));
-                    }
-                  }}
-                >
-                  <SelectTrigger id="management-api-key-preset" className="w-full">
-                    <SelectValue>
-                      {MANAGEMENT_API_KEY_PRESETS.find((option) => option.value === preset)?.label}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {MANAGEMENT_API_KEY_PRESETS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        <span className="flex flex-col gap-0.5">
-                          <span>{option.label}</span>
-                          <span className="text-xs text-muted-foreground">
-                            {option.description}
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="min-w-0 space-y-2">
+                  <Label htmlFor="management-api-key-expiration">Expiration</Label>
+                  <Select
+                    value={expiration}
+                    onValueChange={(value) => {
+                      if (value && EXPIRATION_OPTIONS.some((option) => option.value === value)) {
+                        setExpiration(value as ManagementApiKeyExpiration);
+                      }
+                    }}
+                  >
+                    <SelectTrigger id="management-api-key-expiration" className="w-full">
+                      <SelectValue>
+                        {EXPIRATION_OPTIONS.find((option) => option.value === expiration)?.label}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {EXPIRATION_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </div>
+                <div className="min-w-0 space-y-2">
+                  <Label htmlFor="management-api-key-preset">Access preset</Label>
+                  <Select
+                    value={preset}
+                    onValueChange={(value) => {
+                      if (
+                        !value ||
+                        !MANAGEMENT_API_KEY_PRESETS.some((option) => option.value === value)
+                      )
+                        return;
+                      const nextPreset = value as ManagementApiKeyPreset;
+                      setPreset(nextPreset);
+                      if (nextPreset !== "custom") {
+                        setCustomScopes(scopesForManagementApiKeyPreset(nextPreset));
+                      }
+                    }}
+                  >
+                    <SelectTrigger id="management-api-key-preset" className="w-full">
+                      <SelectValue>
+                        {
+                          MANAGEMENT_API_KEY_PRESETS.find((option) => option.value === preset)
+                            ?.label
+                        }
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {MANAGEMENT_API_KEY_PRESETS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          <span className="flex flex-col gap-0.5">
+                            <span>{option.label}</span>
+                            <span className="text-xs text-muted-foreground">
+                              {option.description}
+                            </span>
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </div>
+              </div>
+
+              {preset === "custom" ? (
+                <fieldset className="space-y-2">
+                  <legend className="text-sm font-medium text-foreground">Custom scopes</legend>
+                  <div className="grid gap-1 rounded-lg border border-border/60 p-2 sm:grid-cols-2">
+                    {MANAGEMENT_API_KEY_SCOPE_DETAILS.map((detail) => (
+                      <label
+                        key={detail.scope}
+                        className="flex min-w-0 items-start gap-2 rounded-md px-2 py-2 hover:bg-muted/40"
+                      >
+                        <Checkbox
+                          checked={customScopes.includes(detail.scope)}
+                          onCheckedChange={(checked) => toggleScope(detail.scope, Boolean(checked))}
+                          aria-label={detail.label}
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-sm text-foreground">{detail.label}</span>
+                          <span className="block text-xs leading-relaxed text-muted-foreground">
+                            {detail.description}
                           </span>
                         </span>
-                      </SelectItem>
+                      </label>
                     ))}
-                  </SelectPopup>
-                </Select>
-              </div>
+                  </div>
+                  {selectedScopes.length === 0 ? (
+                    <p className="text-xs text-destructive">Choose at least one scope.</p>
+                  ) : null}
+                </fieldset>
+              ) : null}
+
+              {error ? (
+                <p className="text-sm text-destructive" role="alert">
+                  {error}
+                </p>
+              ) : null}
             </div>
-
-            {preset === "custom" ? (
-              <fieldset className="space-y-2">
-                <legend className="text-sm font-medium text-foreground">Custom scopes</legend>
-                <div className="grid gap-1 rounded-lg border border-border/60 p-2 sm:grid-cols-2">
-                  {MANAGEMENT_API_KEY_SCOPE_DETAILS.map((detail) => (
-                    <label
-                      key={detail.scope}
-                      className="flex min-w-0 items-start gap-2 rounded-md px-2 py-2 hover:bg-muted/40"
-                    >
-                      <Checkbox
-                        checked={customScopes.includes(detail.scope)}
-                        onCheckedChange={(checked) => toggleScope(detail.scope, Boolean(checked))}
-                        aria-label={detail.label}
-                      />
-                      <span className="min-w-0">
-                        <span className="block text-sm text-foreground">{detail.label}</span>
-                        <span className="block text-xs leading-relaxed text-muted-foreground">
-                          {detail.description}
-                        </span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-                {selectedScopes.length === 0 ? (
-                  <p className="text-xs text-destructive">Choose at least one scope.</p>
-                ) : null}
-              </fieldset>
-            ) : null}
-
-            {error ? (
-              <p className="text-sm text-destructive" role="alert">
-                {error}
-              </p>
-            ) : null}
           </DialogPanel>
           <DialogFooter variant="bare">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
@@ -457,69 +462,72 @@ function SecretRevealDialog({
             the page.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-5">
-          <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm">
-            Environment:{" "}
-            <span className="font-medium text-foreground">{result.environmentLabel}</span>
-          </div>
-          <div className="rounded-lg border border-warning/40 bg-warning/8 p-3 text-sm text-warning-foreground">
-            <div className="flex items-start gap-2">
-              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
-              <p>
-                Anyone with this secret can use the scopes granted to “{result.key.name}”. Store it
-                in a password manager or environment variable.
+        <DialogPanel>
+          <div className="space-y-5">
+            <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm">
+              Environment:{" "}
+              <span className="font-medium text-foreground">{result.environmentLabel}</span>
+            </div>
+            <div className="rounded-lg border border-warning/40 bg-warning/8 p-3 text-sm text-warning-foreground">
+              <div className="flex items-start gap-2">
+                <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
+                <p>
+                  Anyone with this secret can use the scopes granted to “{result.key.name}”. Store
+                  it in a password manager or environment variable.
+                </p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="management-api-key-secret">One-time secret</Label>
+              <Textarea
+                id="management-api-key-secret"
+                readOnly
+                value={result.secret}
+                rows={3}
+                variant="code"
+                className="break-all"
+                onFocus={(event) => event.currentTarget.select()}
+                onClick={(event) => event.currentTarget.select()}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => copyToClipboard(result.secret, { value: result.secret })}
+              >
+                {isCopied ? <CheckIcon aria-hidden /> : <ClipboardIcon aria-hidden />}
+                {isCopied ? "Copied" : "Copy secret"}
+              </Button>
+            </div>
+            <div className="space-y-2">
+              <Label>MCP endpoint</Label>
+              <code className="block max-w-full break-all rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-foreground">
+                {result.mcpEndpoint}
+              </code>
+            </div>
+            <div className="space-y-2">
+              <Label>Generic JSON HTTP MCP</Label>
+              <Textarea
+                readOnly
+                value={jsonExample}
+                rows={10}
+                variant="code"
+                onFocus={(event) => event.currentTarget.select()}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Codex</Label>
+              <Textarea
+                readOnly
+                value={codexExample}
+                rows={4}
+                variant="code"
+                onFocus={(event) => event.currentTarget.select()}
+              />
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Set <code>T3_MANAGEMENT_API_KEY</code> in the environment where Codex runs before
+                starting it.
               </p>
             </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="management-api-key-secret">One-time secret</Label>
-            <Textarea
-              id="management-api-key-secret"
-              readOnly
-              value={result.secret}
-              rows={3}
-              className="break-all font-mono text-xs leading-relaxed"
-              onFocus={(event) => event.currentTarget.select()}
-              onClick={(event) => event.currentTarget.select()}
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => copyToClipboard(result.secret, { value: result.secret })}
-            >
-              {isCopied ? <CheckIcon aria-hidden /> : <ClipboardIcon aria-hidden />}
-              {isCopied ? "Copied" : "Copy secret"}
-            </Button>
-          </div>
-          <div className="space-y-2">
-            <Label>MCP endpoint</Label>
-            <code className="block max-w-full break-all rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-foreground">
-              {result.mcpEndpoint}
-            </code>
-          </div>
-          <div className="space-y-2">
-            <Label>Generic JSON HTTP MCP</Label>
-            <Textarea
-              readOnly
-              value={jsonExample}
-              rows={10}
-              className="font-mono text-xs leading-relaxed"
-              onFocus={(event) => event.currentTarget.select()}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Codex</Label>
-            <Textarea
-              readOnly
-              value={codexExample}
-              rows={4}
-              className="font-mono text-xs leading-relaxed"
-              onFocus={(event) => event.currentTarget.select()}
-            />
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Set <code>T3_MANAGEMENT_API_KEY</code> in the environment where Codex runs before
-              starting it.
-            </p>
           </div>
         </DialogPanel>
         <DialogFooter variant="bare">

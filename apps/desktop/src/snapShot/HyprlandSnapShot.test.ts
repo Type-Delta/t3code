@@ -85,7 +85,10 @@ it("discovery neither installs a helper nor requests a screenshot", async () => 
 });
 it("installs offline at a stable executable path and probes only capabilities", async () => {
   await setup.perform("install-hyprland-helper");
-  expect((await NodeFSP.stat(hyprlandCaptureExecutable(paths))).mode & 0o777).toBe(0o755);
+  // NTFS does not store POSIX execute bits.
+  if (NodePath.sep !== "\\") {
+    expect((await NodeFSP.stat(hyprlandCaptureExecutable(paths))).mode & 0o777).toBe(0o755);
+  }
   expect(await setup.state()).toMatchObject({ status: "ready", feedbackAvailable: true });
   expect(execute.mock.calls.map(([file, args]) => [file, args])).toEqual([
     [hyprlandCaptureExecutable(paths), ["check"]],

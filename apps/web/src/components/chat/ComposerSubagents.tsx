@@ -2,7 +2,7 @@ import { BotIcon, ChevronDownIcon } from "lucide-react";
 
 import type { SubagentRunSummary } from "../../session-logic";
 import { resolveSubagentAggregateStatus } from "../BranchToolbar.logic";
-import { Button } from "../ui/button";
+import { ComposerControl } from "./ComposerControl";
 import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { useComposerMenuProps } from "./composerEventScope";
 import { composerSubagentLabel } from "./composerSubagentUtils";
@@ -68,8 +68,8 @@ export function ComposerSubagents({ runs, onOpen, visible }: ComposerSubagentsPr
   return (
     <Menu open={open} onOpenChange={setOpen}>
       <MenuTrigger
-        render={<Button variant="ghost" size="xs" />}
-        className={`min-w-0 shrink-0 justify-start ${triggerClass[aggregateStatus]}`}
+        render={<ComposerControl size="xs" />}
+        className={`min-w-0 shrink-0 justify-start font-medium ${triggerClass[aggregateStatus]}`}
         data-composer-context-control
         aria-label={`${runs.length} ${runs.length === 1 ? "subagent" : "subagents"}, ${aggregateStatusLabel}`}
       >
@@ -79,7 +79,7 @@ export function ComposerSubagents({ runs, onOpen, visible }: ComposerSubagentsPr
         >
           <span
             data-composer-label-motion
-            className="block w-full truncate transition-opacity duration-180 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
+            className="block w-full truncate transition-opacity duration-180 ease-drawer group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
           >
             {composerSubagentLabel(runs.length)}
           </span>
@@ -96,7 +96,12 @@ export function ComposerSubagents({ runs, onOpen, visible }: ComposerSubagentsPr
         <MenuGroup>
           <MenuGroupLabel>Subagents</MenuGroupLabel>
           {runs.map((run) => (
-            <MenuItem key={run.id} className="h-auto min-w-0 py-2" onClick={() => onOpen([run.id])}>
+            <MenuItem
+              key={run.id}
+              density="comfortable"
+              className="h-auto min-w-0"
+              onClick={() => onOpen([run.id])}
+            >
               <BotIcon className={`size-3.5 shrink-0 ${iconClass[run.status]}`} aria-hidden />
               <span className="sr-only">{statusLabel[run.status]}</span>
               <span className="grid min-w-0 flex-1 gap-0.5">

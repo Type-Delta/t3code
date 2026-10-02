@@ -48,7 +48,7 @@ const run = Effect.fn("test.run")(function* (
 const makeFakeArchives = Effect.fn("test.makeFakeArchives")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-npm-packages-test-" });
+  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3 npm packages test-" });
   const archivesDir = path.join(root, "archives");
   yield* fs.makeDirectory(archivesDir);
   for (const key of KEYS) {
@@ -72,14 +72,54 @@ const makeFakeArchives = Effect.fn("test.makeFakeArchives")(function* () {
       '{ "name": "@ff-labs/fff-node", "version": "0.9.4" }\n',
     );
     yield* fs.writeFileString(path.join(contentDir, "client/index.html"), "<html></html>\n");
+    const helper = path.join(contentDir, "node_modules/node-pty/helper");
+    yield* fs.writeFileString(helper, "native helper\n");
+    yield* fs.writeFileString(
+      path.join(contentDir, "client", "Vendor terms #1.txt"),
+      "license text\n",
+    );
+    yield* fs.chmod(helper, 0o750);
+    yield* fs.symlink("package.json", path.join(contentDir, "node_modules/node-pty/current"));
     yield* fs.writeFileString(
       path.join(contentDir, "t3"),
       `#!/bin/sh\necho "stub ${key} $*"\nexit 7\n`,
     );
     yield* fs.chmod(path.join(contentDir, "t3"), 0o755);
-    const exit = yield* run("tar", ["-czf", path.join(archivesDir, `${stem}.tar.gz`), stem], {
-      cwd: stage,
-    });
+    let archiveInput = stem;
+    if ((yield* HostProcessPlatform) === "win32") {
+      // Give the source archive a POSIX helper mode that NTFS cannot retain.
+      const metadata = path.join(stage, "source.mtree");
+      const described = yield* run("tar", ["--format=mtree", "-cf", metadata, stem], {
+        cwd: stage,
+      });
+      assert.equal(described.exitCode, 0, described.stderr);
+      yield* fs.writeFileString(
+        metadata,
+        (yield* fs.readFileString(metadata))
+          .split(/\r?\n/u)
+          .filter((line) => !line.startsWith(`./${stem}/node_modules/node-pty/current `))
+          .map((line) => {
+            const mode = line.startsWith(`./${stem}/node_modules/node-pty/helper `) ? "750" : "755";
+            return line.replace(/^\.\//u, "").replace(/mode=\d+/u, `mode=${mode}`);
+          })
+          .join("\n"),
+      );
+      const sourceTar = path.join(stage, "source.tar");
+      const files = yield* run("tar", ["-cf", sourceTar, `@${metadata}`], { cwd: stage });
+      assert.equal(files.exitCode, 0, files.stderr);
+      const link = yield* run("tar", ["-rf", sourceTar, `${stem}/node_modules/node-pty/current`], {
+        cwd: stage,
+      });
+      assert.equal(link.exitCode, 0, link.stderr);
+      archiveInput = `@${sourceTar}`;
+    }
+    const exit = yield* run(
+      "tar",
+      ["-czf", path.join(archivesDir, `${stem}.tar.gz`), archiveInput],
+      {
+        cwd: stage,
+      },
+    );
     assert.equal(exit.exitCode, 0, exit.stderr);
   }
   yield* fs.writeFileString(path.join(archivesDir, "SHA256SUMS"), "");
@@ -155,7 +195,10 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
         "# @t3code/t3-linux-x64",
       );
       assert.isTrue(yield* fs.exists(path.join(linuxDir, "node_modules/node-pty")));
-      assert.equal(Number((yield* fs.stat(path.join(linuxDir, "t3"))).mode) & 0o111, 0o111);
+      // NTFS cannot expose POSIX execute bits; verify the published archive below.
+      if ((yield* HostProcessPlatform) !== "win32") {
+        assert.equal(Number((yield* fs.stat(path.join(linuxDir, "t3"))).mode) & 0o111, 0o111);
+      }
 
       const darwinManifest = yield* decodeManifest(
         yield* fs.readFileString(
@@ -193,13 +236,54 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
         { cwd: fixture.outputDir },
       );
       assert.equal(listing.exitCode, 0, listing.stderr);
-      const lines = listing.stdout.split("\n");
+      const lines = listing.stdout.split(/\r?\n/u);
       assert.isTrue(lines.some((line) => line.endsWith(" package/node_modules/node-pty/")));
       assert.isTrue(lines.some((line) => line.endsWith(" package/package.json")));
       assert.isTrue(
         lines.some((line) => /^-rwxr-xr-x .* package\/t3$/.test(line)),
         listing.stdout,
       );
+
+      assert.isTrue(
+        lines.some((line) => /^-rwxr-x--- .* package\/node_modules\/node-pty\/helper$/.test(line)),
+        listing.stdout,
+      );
+      assert.isTrue(
+        lines.some((line) =>
+          line.endsWith(" package/node_modules/node-pty/current -> package.json"),
+        ),
+        listing.stdout,
+      );
+
+      const helperContent = yield* run(
+        "tar",
+        [
+          "-xOzf",
+          path.join(fixture.outputDir, "@t3code/t3-linux-x64.tgz"),
+          "package/node_modules/node-pty/helper",
+        ],
+        { cwd: fixture.outputDir },
+      );
+      assert.equal(helperContent.exitCode, 0, helperContent.stderr);
+      assert.equal(helperContent.stdout, "native helper\n");
+      const noticeContent = yield* run(
+        "tar",
+        [
+          "-xOzf",
+          path.join(fixture.outputDir, "@t3code/t3-linux-x64.tgz"),
+          "package/client/Vendor terms #1.txt",
+        ],
+        { cwd: fixture.outputDir },
+      );
+      assert.equal(noticeContent.exitCode, 0, noticeContent.stderr);
+      assert.equal(noticeContent.stdout, "license text\n");
+      const packedManifest = yield* run(
+        "tar",
+        ["-xOzf", path.join(fixture.outputDir, "@t3code/t3-linux-x64.tgz"), "package/package.json"],
+        { cwd: fixture.outputDir },
+      );
+      assert.equal(packedManifest.exitCode, 0, packedManifest.stderr);
+      assert.deepStrictEqual(yield* decodeManifest(packedManifest.stdout), linuxManifest);
 
       // NODE_PATH stands in for node_modules: require.resolve finds the
       // platform package there exactly as it would after `npm install`.

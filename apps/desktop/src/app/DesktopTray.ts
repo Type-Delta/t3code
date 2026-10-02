@@ -92,6 +92,9 @@ export const layer = Layer.effect(
     const loadCount = Effect.fn("desktop.tray.loadCount")(function* (
       instance: DesktopBackendPool.DesktopBackendInstance,
     ) {
+      // Config precedes listener readiness. An early tray exchange would hold
+      // the renderer's shared auth lock until the request times out.
+      if (!(yield* instance.snapshot).ready) return Option.none<number>();
       const config = yield* instance.currentConfig;
       if (Option.isNone(config)) return Option.none<number>();
 

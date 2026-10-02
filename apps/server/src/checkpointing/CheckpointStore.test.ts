@@ -1132,6 +1132,156 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
         }),
     );
 
+    it.effect("restores sidecar text using project line endings instead of global Git config", () =>
+      Effect.gen(function* () {
+        const root = yield* makeTmpDir("checkpoint-sidecar-line-endings-");
+        const workspace = NodePath.join(root, "workspace");
+        const globalConfig = NodePath.join(root, "global.gitconfig");
+        const fileSystem = yield* FileSystem.FileSystem;
+        yield* fileSystem.makeDirectory(workspace, { recursive: true });
+        yield* initRepoWithCommit(workspace);
+        yield* git(workspace, ["config", "core.autocrlf", "false"]);
+        yield* git(workspace, ["config", "core.eol", "lf"]);
+        const realProcess = yield* VcsProcess.VcsProcess;
+        const sidecars = yield* SidecarCheckpointRepository.make.pipe(
+          Effect.provideService(
+            VcsProcess.VcsProcess,
+            VcsProcess.VcsProcess.of({
+              run: (input) =>
+                realProcess.run({
+                  ...input,
+                  env: { ...input.env, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: "1" },
+                }),
+            }),
+          ),
+        );
+
+        for (const setting of ["autocrlf", "eol"]) {
+          yield* writeTextFile(
+            globalConfig,
+            `[core]\n\tautocrlf = ${setting === "autocrlf" ? "true" : "false"}\n\teol = crlf\n`,
+          );
+          // Mark text without choosing its checkout encoding in the attributes.
+          if (setting === "eol") {
+            yield* writeTextFile(NodePath.join(workspace, ".gitattributes"), "README.md text\n");
+          }
+          yield* writeTextFile(NodePath.join(workspace, "README.md"), "saved\n");
+          const checkpointRef = yield* makeSidecarRef(workspace, `line-endings-${setting}`);
+          yield* sidecars.capture({ cwd: workspace, checkpointRef });
+          yield* writeTextFile(NodePath.join(workspace, "README.md"), "later\n");
+
+          expect(yield* sidecars.restore({ cwd: workspace, checkpointRef })).toBe(true);
+          expect(yield* fileSystem.readFileString(NodePath.join(workspace, "README.md"))).toBe(
+            "saved\n",
+          );
+        }
+      }),
+    );
+
+    it.effect(
+      "uses included Git settings after the last local line-ending override is removed",
+      () =>
+        Effect.gen(function* () {
+          const root = yield* makeTmpDir("checkpoint-sidecar-included-config-");
+          const workspace = NodePath.join(root, "workspace");
+          const globalConfig = NodePath.join(root, "global.gitconfig");
+          const includedConfig = NodePath.join(root, "included.gitconfig");
+          const fileSystem = yield* FileSystem.FileSystem;
+          yield* fileSystem.makeDirectory(workspace, { recursive: true });
+          yield* initRepoWithCommit(workspace);
+          yield* writeTextFile(NodePath.join(workspace, ".gitattributes"), "README.md text\n");
+          yield* writeTextFile(includedConfig, "[core]\n\teol = crlf\n\teol = lf\n");
+          yield* writeTextFile(
+            globalConfig,
+            `[core]\n\tautocrlf = false\n\teol = crlf\n[includeIf "gitdir/i:${workspace.replaceAll("\\", "/")}/.git"]\n\tpath = ${includedConfig.replaceAll("\\", "/")}\n`,
+          );
+          yield* git(workspace, ["config", "--add", "core.eol", "lf"]);
+          yield* git(workspace, ["config", "--add", "core.eol", "crlf"]);
+          const realProcess = yield* VcsProcess.VcsProcess;
+          const sidecars = yield* SidecarCheckpointRepository.make.pipe(
+            Effect.provideService(
+              VcsProcess.VcsProcess,
+              VcsProcess.VcsProcess.of({
+                run: (input) =>
+                  realProcess.run({
+                    ...input,
+                    env: {
+                      ...input.env,
+                      GIT_CONFIG_GLOBAL: globalConfig,
+                      GIT_CONFIG_NOSYSTEM: "1",
+                    },
+                  }),
+              }),
+            ),
+          );
+          for (const localOverride of [true, false]) {
+            if (!localOverride) yield* git(workspace, ["config", "--unset-all", "core.eol"]);
+            yield* writeTextFile(NodePath.join(workspace, "README.md"), "saved\n");
+            const checkpointRef = yield* makeSidecarRef(
+              workspace,
+              `included-config-${localOverride}`,
+            );
+            yield* sidecars.capture({ cwd: workspace, checkpointRef });
+            yield* writeTextFile(NodePath.join(workspace, "README.md"), "later\n");
+            expect(yield* sidecars.restore({ cwd: workspace, checkpointRef })).toBe(true);
+            expect(yield* fileSystem.readFileString(NodePath.join(workspace, "README.md"))).toBe(
+              localOverride ? "saved\r\n" : "saved\n",
+            );
+          }
+        }),
+    );
+
+    it.effect("clears inherited sidecar line endings after project settings are removed", () =>
+      Effect.gen(function* () {
+        const root = yield* makeTmpDir("checkpoint-sidecar-unset-line-endings-");
+        const workspace = NodePath.join(root, "workspace");
+        const globalConfig = NodePath.join(root, "global.gitconfig");
+        const fileSystem = yield* FileSystem.FileSystem;
+        yield* fileSystem.makeDirectory(workspace, { recursive: true });
+        yield* initRepoWithCommit(workspace);
+        yield* writeTextFile(globalConfig, "");
+        const realProcess = yield* VcsProcess.VcsProcess;
+        const sidecars = yield* SidecarCheckpointRepository.make.pipe(
+          Effect.provideService(
+            VcsProcess.VcsProcess,
+            VcsProcess.VcsProcess.of({
+              run: (input) =>
+                realProcess.run({
+                  ...input,
+                  env: { ...input.env, GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: "1" },
+                }),
+            }),
+          ),
+        );
+        const windowsHost = HostProcessPlatform.defaultValue() === "win32";
+        for (const setting of ["autocrlf", "eol"]) {
+          yield* git(workspace, [
+            "config",
+            "core.autocrlf",
+            setting === "autocrlf" ? "true" : "false",
+          ]);
+          yield* git(workspace, ["config", "core.eol", windowsHost ? "lf" : "crlf"]);
+          if (setting === "eol") {
+            yield* writeTextFile(NodePath.join(workspace, ".gitattributes"), "README.md text\n");
+          }
+          const initialRef = yield* makeSidecarRef(workspace, `before-unset-${setting}`);
+          yield* sidecars.capture({ cwd: workspace, checkpointRef: initialRef });
+
+          yield* git(workspace, ["config", "--unset-all", "core.autocrlf"]);
+          yield* git(workspace, ["config", "--unset-all", "core.eol"]);
+          yield* writeTextFile(NodePath.join(workspace, "README.md"), "saved\n");
+          const checkpointRef = yield* makeSidecarRef(workspace, `after-unset-${setting}`);
+          yield* sidecars.capture({ cwd: workspace, checkpointRef });
+          yield* writeTextFile(NodePath.join(workspace, "README.md"), "later\n");
+
+          expect(yield* sidecars.restore({ cwd: workspace, checkpointRef })).toBe(true);
+          expect(yield* fileSystem.readFileString(NodePath.join(workspace, "README.md"))).toBe(
+            setting === "eol" && windowsHost ? "saved\r\n" : "saved\n",
+          );
+        }
+      }),
+    );
+
     it.effect("rejects an escaping symlink before deleting current workspace files", () =>
       Effect.gen(function* () {
         const root = yield* makeTmpDir("checkpoint-sidecar-symlink-");

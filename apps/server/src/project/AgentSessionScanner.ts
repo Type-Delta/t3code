@@ -662,7 +662,7 @@ export const make = Effect.gen(function* () {
     fileSystem.readDirectory(directory).pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
 
   const statOption = (target: string) =>
-    fileSystem.stat(target).pipe(Effect.map(Option.some), Effect.orElseSucceed(Option.none));
+    fileSystem.stat(target).pipe(Effect.asSome, Effect.orElseSucceed(Option.none));
 
   /** Match directory aliases without assuming the host volume is case-insensitive. */
   const directoryIdentity = Effect.fn("AgentSessionScanner.directoryIdentity")(function* (
@@ -1376,9 +1376,14 @@ export const make = Effect.gen(function* () {
       (source) => `${source.providerInstanceId}\0${source.filePath}`,
     );
     const importedSessions = new Set<string>();
-    let bytesRemaining = MAX_IMPORT_BYTES;
-    let transcriptsRemaining = MAX_IMPORT_TRANSCRIPTS;
-    let recordsRemaining = MAX_IMPORT_RECORDS;
+    const importBudget = {
+      bytesRemaining: MAX_IMPORT_BYTES,
+      transcriptsRemaining: MAX_IMPORT_TRANSCRIPTS,
+      recordsRemaining: MAX_IMPORT_RECORDS,
+    };
+    // Unreliable file IDs require snapshot validation on retries. Bound that
+    // work separately so completed histories cannot consume the next batch.
+    const completedValidationBudget = { ...importBudget };
     return Stream.fromIteratorSucceed(eligibleTranscripts.values(), 1).pipe(
       Stream.mapEffect(({ candidate, transcript }) =>
         Effect.gen(function* () {
@@ -1387,7 +1392,9 @@ export const make = Effect.gen(function* () {
           );
           if (
             completed === undefined &&
-            (transcriptsRemaining === 0 || bytesRemaining === 0 || recordsRemaining === 0)
+            (importBudget.transcriptsRemaining === 0 ||
+              importBudget.bytesRemaining === 0 ||
+              importBudget.recordsRemaining === 0)
           ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
@@ -1400,7 +1407,14 @@ export const make = Effect.gen(function* () {
             (source) =>
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
           );
-          if (completedSource !== undefined) {
+          // NTFS file IDs can be absent or exceed Number precision. Replacement
+          // files can share a tunneled birthtime, so read their provider session
+          // identity before treating history with an unreliable inode as imported.
+          if (
+            completedSource !== undefined &&
+            identity.inode !== null &&
+            Number.isSafeInteger(identity.inode)
+          ) {
             const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
             if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
             importedSessions.add(sessionKey);
@@ -1409,27 +1423,28 @@ export const make = Effect.gen(function* () {
               source: completedSource,
             });
           }
+          const budget = completedSource === undefined ? importBudget : completedValidationBudget;
           if (
-            transcriptsRemaining === 0 ||
-            recordsRemaining === 0 ||
+            budget.transcriptsRemaining === 0 ||
+            budget.recordsRemaining === 0 ||
             identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES ||
-            identity.size > bytesRemaining
+            identity.size > budget.bytesRemaining
           ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
           // Reserve the whole file even if its read or parse fails.
-          transcriptsRemaining -= 1;
-          bytesRemaining -= identity.size;
+          budget.transcriptsRemaining -= 1;
+          budget.bytesRemaining -= identity.size;
           const snapshot = yield* readTranscript(
             transcript.filePath,
             identity,
-            recordsRemaining,
+            budget.recordsRemaining,
             candidate.source,
           );
           if (snapshot === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-          recordsRemaining -= snapshot.recordCount;
+          budget.recordsRemaining -= snapshot.recordCount;
 
           // A stable replacement file can belong to a different project than the cached candidate.
           let snapshotCwd: string | null = null;
@@ -1468,10 +1483,30 @@ export const make = Effect.gen(function* () {
             providerSessionId: parsedThread.providerSessionId,
           };
           const sessionKey = `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
+          const alreadyImported =
+            completedSource?.providerSessionId === parsedThread.providerSessionId;
+          // A replacement discovered during validation is new history too.
+          if (completedSource !== undefined && !alreadyImported) {
+            if (
+              importBudget.transcriptsRemaining === 0 ||
+              identity.size > importBudget.bytesRemaining ||
+              snapshot.recordCount > importBudget.recordsRemaining
+            ) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            importBudget.transcriptsRemaining -= 1;
+            importBudget.bytesRemaining -= identity.size;
+            importBudget.recordsRemaining -= snapshot.recordCount;
+          }
           if (importedSessions.has(sessionKey)) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
+            return alreadyImported
+              ? Option.none<AgentSessionRecentThread>()
+              : Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
           }
           importedSessions.add(sessionKey);
+          if (alreadyImported) {
+            return Option.some<AgentSessionRecentThread>({ _tag: "AlreadyImported", source });
+          }
           return Option.some<AgentSessionRecentThread>({
             _tag: "Importable",
             thread: parsedThread,

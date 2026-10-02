@@ -1,11 +1,10 @@
 import {
   ApprovalRequestId,
-  type AssistantDeliveryMode,
+  type ResponseStreamingMode,
+  type ProjectId,
   CommandId,
   MessageId,
   type OrchestrationEvent,
-  type OrchestrationMessage,
-  type OrchestrationProposedPlan,
   OrchestrationProposedPlanId,
   CheckpointRef,
   classifyTaskAgentKind,
@@ -22,6 +21,7 @@ import {
   RuntimeRequestId,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
+import * as Clock from "effect/Clock";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -119,6 +119,7 @@ interface ReasoningSegmentState {
   createdAt: string;
   partIndex: number | undefined;
   projected: boolean;
+  lastDeliveredAt?: number;
 }
 
 const TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY = 10_000;
@@ -190,61 +191,6 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   return left === right;
 }
 
-function hasAssistantMessageForTurn(
-  messages: ReadonlyArray<OrchestrationMessage>,
-  turnId: TurnId,
-  options?: { readonly streamingOnly?: boolean; readonly subagentId?: string },
-): boolean {
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (!message) {
-      continue;
-    }
-    if (
-      message.role !== "assistant" ||
-      message.turnId !== turnId ||
-      message.subagentId !== options?.subagentId
-    ) {
-      continue;
-    }
-    if (options?.streamingOnly === true && !message.streaming) {
-      continue;
-    }
-    return true;
-  }
-  return false;
-}
-
-function findMessageById(
-  messages: ReadonlyArray<OrchestrationMessage>,
-  messageId: MessageId,
-): OrchestrationMessage | undefined {
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message?.id === messageId) {
-      return message;
-    }
-  }
-  return undefined;
-}
-
-function findProposedPlanById(
-  proposedPlans: ReadonlyArray<
-    Pick<OrchestrationProposedPlan, "id" | "createdAt" | "implementedAt" | "implementationThreadId">
-  >,
-  planId: string,
-):
-  | Pick<OrchestrationProposedPlan, "id" | "createdAt" | "implementedAt" | "implementationThreadId">
-  | undefined {
-  for (let index = 0; index < proposedPlans.length; index += 1) {
-    const proposedPlan = proposedPlans[index];
-    if (proposedPlan?.id === planId) {
-      return proposedPlan;
-    }
-  }
-  return undefined;
-}
-
 function hasCheckpointForTurn(
   checkpoints: ReadonlyArray<OrchestrationCheckpointSummary>,
   turnId: TurnId,
@@ -284,6 +230,93 @@ function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string
 
 function hasRenderableAssistantText(text: string | undefined): boolean {
   return (text?.trim().length ?? 0) > 0;
+}
+
+// An opening fence may sit at any indentation, since fences inside list
+// items are indented past the marker. A closing fence may be indented at most
+// three spaces more than its opener. Deeper lines are content in the block.
+const MARKDOWN_FENCE_PATTERN = /^( *)(`{3,}|~{3,})/;
+// CommonMark blank lines hold only spaces and tabs. Other whitespace, such as
+// a no-break space, is paragraph content.
+const BLANK_LINE_PATTERN = /^[ \t]*$/;
+// A bullet or ordered marker followed by whitespace, at any indentation so
+// nested items count. The trailing space is required, so a partial `-` or
+// `1.` never matches before the model finishes the marker.
+const LIST_ITEM_START_PATTERN = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
+// A section title: an ATX heading, or a line of only bold text, which models
+// often use as a heading.
+const SECTION_TITLE_PATTERN = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|\*\*(?:[^*]|\*(?!\*))+\*\*:?$)/;
+// An unindented ATX heading ends the paragraph or list above it, even with no
+// blank line between them. A bold line would continue the paragraph instead.
+const TOP_LEVEL_HEADING_PATTERN = /^#{1,6}(?:[ \t]|$)/;
+
+/**
+ * Splits buffered assistant text at the last blank line, closing code fence,
+ * or list item start that is not inside an open fenced code block. `ready` is
+ * safe to deliver now because the markdown before it will not change shape as
+ * more text arrives. `rest` stays buffered until the next boundary or
+ * completion. Only fully terminated lines count, so a trailing partial line
+ * never leaks; a list item start is the one lookahead that may sit on the
+ * partial line, since tight lists have no blank lines between items and would
+ * otherwise land all at once.
+ *
+ * A section title holds the boundary until a content line follows it, so a
+ * title never lands alone and waits above a block that is still streaming.
+ */
+export function splitBufferedAssistantText(text: string): { ready: string; rest: string } {
+  let openFence: { marker: string; indent: number } | null = null;
+  let boundary = -1;
+  let lineStart = 0;
+  let titleAwaitingContent = false;
+  for (;;) {
+    const newline = text.indexOf("\n", lineStart);
+    const line = text
+      .slice(lineStart, newline === -1 ? text.length : newline)
+      .replace(/[ \t\r]+$/, "");
+    if (
+      openFence === null &&
+      lineStart > 0 &&
+      !titleAwaitingContent &&
+      LIST_ITEM_START_PATTERN.test(line)
+    ) {
+      boundary = lineStart;
+    }
+    if (newline === -1) {
+      break;
+    }
+    const fenceMatch = MARKDOWN_FENCE_PATTERN.exec(line);
+    if (fenceMatch) {
+      const indent = fenceMatch[1]!.length;
+      const marker = fenceMatch[2]!;
+      if (openFence === null) {
+        openFence = { marker, indent };
+        titleAwaitingContent = false;
+      } else if (
+        marker[0] === openFence.marker[0] &&
+        marker.length >= openFence.marker.length &&
+        indent <= openFence.indent + 3 &&
+        line.length === indent + marker.length
+      ) {
+        // CommonMark: a closing fence carries no info string.
+        openFence = null;
+        boundary = newline + 1;
+      }
+    } else if (openFence === null && BLANK_LINE_PATTERN.test(line) && lineStart > 0) {
+      if (!titleAwaitingContent) {
+        boundary = newline + 1;
+      }
+    } else if (openFence === null) {
+      if (lineStart > 0 && !titleAwaitingContent && TOP_LEVEL_HEADING_PATTERN.test(line)) {
+        boundary = lineStart;
+      }
+      titleAwaitingContent = SECTION_TITLE_PATTERN.test(line);
+    }
+    lineStart = newline + 1;
+  }
+  if (boundary === -1) {
+    return { ready: "", rest: text };
+  }
+  return { ready: text.slice(0, boundary), rest: text.slice(boundary) };
 }
 
 function proposedPlanIdForTurn(threadId: ThreadId, turnId: TurnId): string {
@@ -536,6 +569,7 @@ export function runtimeEventToActivities(
           summary: "Runtime error",
           payload: {
             message: truncateDetail(event.payload.message),
+            ...(event.payload.code ? { code: event.payload.code } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -1040,6 +1074,11 @@ const make = Effect.gen(function* () {
     timeToLive: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL,
     lookup: () => Effect.succeed(""),
   });
+  const lastAssistantDeliveryAtByMessageId = yield* Cache.make<MessageId, number>({
+    capacity: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY,
+    timeToLive: BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL,
+    lookup: () => Effect.succeed(0),
+  });
 
   const assistantSegmentStateByTurnKey = yield* Cache.make<string, AssistantSegmentState>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -1339,6 +1378,7 @@ const make = Effect.gen(function* () {
     event: Extract<ProviderRuntimeEvent, { type: "content.delta" }>;
     threadId: ThreadId;
     turnId: TurnId;
+    mode: ResponseStreamingMode;
   }) {
     const { event } = input;
     const streamKind = event.payload.streamKind;
@@ -1373,6 +1413,33 @@ const make = Effect.gen(function* () {
         ? "\n\n"
         : "";
     const text = `${state.text}${separator}${event.payload.delta}`;
+    // Thinking is delivered in complete paragraphs even in token mode.
+    const { ready, rest } =
+      input.mode === "turn" ? { ready: "", rest: text } : splitBufferedAssistantText(text);
+    const atMillis = Date.parse(event.createdAt);
+    if (
+      state.messageId !== null &&
+      (state.lastDeliveredAt === undefined || atMillis - state.lastDeliveredAt >= 400) &&
+      hasRenderableAssistantText(ready) &&
+      rest.length <= MAX_BUFFERED_ASSISTANT_CHARS
+    ) {
+      yield* emitReasoningDelta({
+        event,
+        threadId: input.threadId,
+        turnId: input.turnId,
+        messageId: state.messageId,
+        text: ready,
+        createdAt: state.createdAt,
+      });
+      yield* Cache.set(reasoningSegmentStateByTurnKey, key, {
+        ...state,
+        text: rest,
+        partIndex,
+        projected: true,
+        lastDeliveredAt: atMillis,
+      });
+      return;
+    }
     if (text.length > MAX_BUFFERED_ASSISTANT_CHARS && state.messageId !== null) {
       yield* emitReasoningDelta({
         event,
@@ -1393,23 +1460,54 @@ const make = Effect.gen(function* () {
     yield* Cache.set(reasoningSegmentStateByTurnKey, key, { ...state, text, partIndex });
   });
 
-  const appendBufferedAssistantText = (messageId: MessageId, delta: string, streaming = false) =>
+  const resolveResponseStreamingMode = (projectId: ProjectId) =>
+    Effect.map(
+      serverSettingsService.getSettings,
+      (settings) => resolveProjectSettings(settings, projectId).settings.responseStreamingMode,
+    );
+
+  const appendBufferedAssistantText = (
+    messageId: MessageId,
+    delta: string,
+    mode: ResponseStreamingMode,
+    atMillis: number,
+  ) =>
     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
       Effect.flatMap((existingText) =>
         Effect.gen(function* () {
           const nextText = Option.match(existingText, {
             onNone: () => delta,
-            onSome: (text) => `${text}${delta}`,
+            onSome: (text) => text + delta,
           });
-          if (!streaming && nextText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
+          const holdback = promptSuggestionHoldbackLength(nextText);
+          const visibleText = nextText.slice(0, nextText.length - holdback);
+          const hiddenText = nextText.slice(nextText.length - holdback);
+          const { ready, rest } =
+            mode === "paragraph"
+              ? splitBufferedAssistantText(visibleText)
+              : mode === "token"
+                ? { ready: visibleText, rest: "" }
+                : { ready: "", rest: visibleText };
+          const lastDeliveredAt = Option.getOrUndefined(
+            yield* Cache.getOption(lastAssistantDeliveryAtByMessageId, messageId),
+          );
+          const paced =
+            mode === "token" || lastDeliveredAt === undefined || atMillis - lastDeliveredAt >= 400;
+          if (
+            paced &&
+            hasRenderableAssistantText(ready) &&
+            rest.length <= MAX_BUFFERED_ASSISTANT_CHARS
+          ) {
+            yield* Cache.set(bufferedAssistantTextByMessageId, messageId, rest + hiddenText);
+            yield* Cache.set(lastAssistantDeliveryAtByMessageId, messageId, atMillis);
+            return ready;
+          }
+          if (visibleText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
             yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText);
             return "";
           }
-
-          const holdback = promptSuggestionHoldbackLength(nextText);
-          const split = nextText.length - holdback;
-          yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText.slice(split));
-          return nextText.slice(0, split);
+          yield* Cache.set(bufferedAssistantTextByMessageId, messageId, hiddenText);
+          return visibleText;
         }),
       ),
     );
@@ -1424,7 +1522,9 @@ const make = Effect.gen(function* () {
     );
 
   const clearBufferedAssistantText = (messageId: MessageId) =>
-    Cache.invalidate(bufferedAssistantTextByMessageId, messageId);
+    Cache.invalidate(bufferedAssistantTextByMessageId, messageId).pipe(
+      Effect.andThen(Cache.invalidate(lastAssistantDeliveryAtByMessageId, messageId)),
+    );
 
   const appendBufferedProposedPlan = (planId: string, delta: string, createdAt: string) =>
     Cache.getOption(bufferedProposedPlanById, planId).pipe(
@@ -1453,7 +1553,12 @@ const make = Effect.gen(function* () {
     commandTag: string;
   }) =>
     Effect.gen(function* () {
-      const bufferedText = yield* appendBufferedAssistantText(input.messageId, "", true);
+      const bufferedText = yield* appendBufferedAssistantText(
+        input.messageId,
+        "",
+        "token",
+        yield* Clock.currentTimeMillis,
+      );
       if (!hasRenderableAssistantText(bufferedText)) {
         return false;
       }
@@ -2006,7 +2111,12 @@ const make = Effect.gen(function* () {
         event.payload.delta.length > 0 &&
         eventTurnId
       ) {
-        yield* appendReasoningDelta({ event, threadId: thread.id, turnId: eventTurnId });
+        yield* appendReasoningDelta({
+          event,
+          threadId: thread.id,
+          turnId: eventTurnId,
+          mode: yield* resolveResponseStreamingMode(thread.projectId),
+        });
       }
 
       if (assistantDelta && assistantDelta.length > 0) {
@@ -2028,27 +2138,19 @@ const make = Effect.gen(function* () {
           );
         }
 
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) =>
-            resolveProjectSettings(settings, thread.projectId).settings.responseStreamingMode ===
-            "token"
-              ? "streaming"
-              : "buffered",
-        );
+        const streamingMode = yield* resolveResponseStreamingMode(thread.projectId);
         const spillChunk = yield* appendBufferedAssistantText(
           assistantMessageId,
           assistantDelta,
-          assistantDeliveryMode === "streaming",
+          streamingMode,
+          yield* Clock.currentTimeMillis,
         );
         if (spillChunk.length > 0) {
           yield* orchestrationEngine.dispatch({
             type: "thread.message.assistant.delta",
             commandId: yield* providerCommandId(
               event,
-              assistantDeliveryMode === "buffered"
-                ? "assistant-delta-buffer-spill"
-                : "assistant-delta",
+              streamingMode !== "token" ? "assistant-delta-buffer-spill" : "assistant-delta",
             ),
             threadId: thread.id,
             messageId: assistantMessageId,
@@ -2076,16 +2178,9 @@ const make = Effect.gen(function* () {
           turnId: pauseForUserTurnId,
           streamingOnly: true,
         });
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) =>
-            resolveProjectSettings(settings, thread.projectId).settings.responseStreamingMode ===
-            "token"
-              ? "streaming"
-              : "buffered",
-        );
+        const streamingMode = yield* resolveResponseStreamingMode(thread.projectId);
         const flushedMessageIds =
-          assistantDeliveryMode === "buffered"
+          streamingMode !== "token"
             ? yield* flushBufferedAssistantMessagesForTurn({
                 event,
                 threadId: thread.id,
@@ -2643,22 +2738,25 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const processInputSafely = (input: RuntimeIngestionInput) =>
-    processInput(input).pipe(
-      Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
-        }
-        return Effect.logWarning("provider runtime ingestion failed to process event", {
-          source: input.source,
-          eventId: input.event.eventId,
-          eventType: input.event.type,
-          cause: Cause.pretty(cause),
-        });
-      }),
-    );
+  const logIngestionFailure =
+    (source: string, event: { readonly eventId: string; readonly type: string }) =>
+    <E, R>(effect: Effect.Effect<void, E, R>) =>
+      effect.pipe(
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) =>
+            Effect.logWarning("provider runtime ingestion failed to process event", {
+              source,
+              eventId: event.eventId,
+              eventType: event.type,
+              cause: Cause.pretty(cause),
+            }),
+        ),
+      );
 
-  const worker = yield* makeDrainableWorker(processInputSafely);
+  const worker = yield* makeDrainableWorker((input: RuntimeIngestionInput) =>
+    processInput(input).pipe(logIngestionFailure(input.source, input.event)),
+  );
   const detectProviderDiffRepository = Effect.fn("detectProviderDiffRepository")(function* (
     event: ProviderDiffEvent,
   ) {

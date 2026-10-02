@@ -239,7 +239,6 @@ function GatewayTextField(props: {
       ) : (
         <Input
           id={props.id}
-          className="bg-background"
           value={props.value}
           onChange={(event) => props.onChange(event.target.value)}
           placeholder={props.placeholder}
@@ -248,11 +247,11 @@ function GatewayTextField(props: {
           aria-describedby={props.error ? `${descriptionId} ${errorId}` : descriptionId}
         />
       )}
-      <span id={descriptionId} className="text-[11px] text-muted-foreground">
+      <span id={descriptionId} className="text-2xs text-muted-foreground">
         {props.description}
       </span>
       {props.error ? (
-        <span id={errorId} role="alert" className="text-[11px] text-destructive">
+        <span id={errorId} role="alert" className="text-2xs text-destructive">
           {props.error}
         </span>
       ) : null}
@@ -326,7 +325,7 @@ export function CompatibleApiGatewaySection({
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-xs font-medium text-foreground">Compatible API gateway</div>
-          <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+          <p className="mt-0.5 text-2xs leading-snug text-muted-foreground">
             Let T3 discover models and relay their metadata to this provider.
           </p>
         </div>
@@ -427,7 +426,7 @@ export function CompatibleApiGatewaySection({
               ) : (
                 <Input
                   id={`${idPrefix}-gateway-api-key`}
-                  className="min-w-0 flex-1 bg-background"
+                  className="min-w-0 flex-1"
                   value={apiKey}
                   onChange={(event) => commitApiKey(event.target.value)}
                   type="password"
@@ -439,9 +438,9 @@ export function CompatibleApiGatewaySection({
               {hasStoredApiKey ? (
                 <Button
                   type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-8 shrink-0 px-2 text-xs text-muted-foreground hover:text-destructive"
+                  variant="ghost-destructive"
+                  size="compact"
+                  className="h-8 shrink-0"
                   onClick={removeApiKey}
                   aria-label="Remove stored API key"
                 >
@@ -449,7 +448,7 @@ export function CompatibleApiGatewaySection({
                 </Button>
               ) : null}
             </div>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-2xs text-muted-foreground">
               {hasStoredApiKey
                 ? "Stored as a sensitive value. Enter a new key to replace it."
                 : "Stored as a sensitive value for this provider instance. Leave empty for no authentication."}

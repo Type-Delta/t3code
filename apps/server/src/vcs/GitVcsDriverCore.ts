@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off - Node realpath canonicalizes Windows 8.3 aliases for cache keys.
-import * as Arr from "effect/Array";
 import * as Cache from "effect/Cache";
 import * as Data from "effect/Data";
 import * as Crypto from "effect/Crypto";
@@ -23,6 +22,7 @@ import * as NodeFSP from "node:fs/promises";
 
 import {
   GitCommandError,
+  T3_PROJECT_FILE_NAME,
   type ReviewDiffFileContentsInput,
   type ReviewDiffFileStat,
   type ReviewDiffPreviewInput,
@@ -31,8 +31,11 @@ import {
   type VcsWorktree,
 } from "@t3tools/contracts";
 import { dedupeRemoteBranchesWithLocalMatches, normalizeGitRemoteUrl } from "@t3tools/shared/git";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { compactTraceAttributes } from "@t3tools/shared/observability";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
+import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
+import { resolveProjectFileBackedSetting } from "@t3tools/shared/projectSettings";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
 import {
@@ -56,13 +59,11 @@ const RANGE_DIFF_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
 const RANGE_DIFF_PATCH_MAX_OUTPUT_BYTES = 59_000;
 const REVIEW_DIFF_PATCH_MAX_OUTPUT_BYTES = 120_000;
 const REVIEW_METADATA_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-const REVIEW_UNTRACKED_DIFF_MAX_OUTPUT_BYTES = 80_000;
 const REVIEW_DIFF_FILE_MAX_OUTPUT_BYTES = 1024 * 1024;
 // Patches the clients render are parsed against git's default a/ and b/ path
 // prefixes. A repository or global diff.noprefix or diff.mnemonicPrefix would
 // otherwise leak into the patch and leave every parsed file unnamed.
 export const PATCH_RENDER_PREFIX_ARGS = ["--src-prefix=a/", "--dst-prefix=b/"] as const;
-const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 120_000;
 const STATUS_UPSTREAM_REFRESH_INTERVAL = Duration.seconds(15);
 const STATUS_UPSTREAM_REFRESH_TIMEOUT = Duration.seconds(5);
 
@@ -546,7 +547,9 @@ function trace2ChildKey(record: Record<string, unknown>): string | null {
 const Trace2Record = Schema.Record(Schema.String, Schema.Unknown);
 const decodeTrace2Record = decodeJsonResult(Trace2Record);
 
-const createTrace2Monitor = Effect.fn("createTrace2Monitor")(function* (
+// Untraced because it runs on every git spawn and returns at once without hook
+// callbacks. Its errors fail the runGitCommand span.
+const createTrace2Monitor = Effect.fnUntraced(function* (
   input: Pick<GitVcsDriver.ExecuteGitInput, "operation" | "cwd" | "args">,
   progress: GitVcsDriver.ExecuteGitProgress | undefined,
 ): Effect.fn.Return<
@@ -705,32 +708,43 @@ const createTrace2Monitor = Effect.fn("createTrace2Monitor")(function* (
   };
 });
 
+const OUTPUT_LINE_SEPARATOR = /\r\n|\r|\n/;
+
 const collectOutput = Effect.fnUntraced(function* (
   input: Pick<GitVcsDriver.ExecuteGitInput, "operation" | "cwd" | "args">,
   stream: Stream.Stream<Uint8Array, PlatformError.PlatformError>,
   maxOutputBytes: number,
   appendTruncationMarker: boolean,
   onLine: ((line: string) => Effect.Effect<void, never>) | undefined,
+  keepLineCallbacksAfterTruncation = false,
 ): Effect.fn.Return<{ readonly text: string; readonly truncated: boolean }, GitCommandError> {
   const decoder = new TextDecoder();
+  // With callbacks continuing past the cap, lines are decoded by their own
+  // decoder from the first byte so no character is ever split at the cap.
+  const lineDecoder = keepLineCallbacksAfterTruncation && onLine ? new TextDecoder() : null;
   let bytes = 0;
   let text = "";
   let lineBuffer = "";
   let truncated = false;
+  // A separator-free stream past the cap must not grow the line buffer
+  // without bound; a line longer than this is not one the callbacks want.
+  const maxPendingLineBytes = 64 * 1024;
 
+  // Git redraws progress with a bare `\r` between updates and only ends the
+  // line once the step is done, so `\r` has to count as a line break here.
   const emitCompleteLines = Effect.fnUntraced(function* (flush: boolean) {
-    let newlineIndex = lineBuffer.indexOf("\n");
-    while (newlineIndex >= 0) {
-      const line = lineBuffer.slice(0, newlineIndex).replace(/\r$/, "");
-      lineBuffer = lineBuffer.slice(newlineIndex + 1);
+    let separator = OUTPUT_LINE_SEPARATOR.exec(lineBuffer);
+    while (separator) {
+      const line = lineBuffer.slice(0, separator.index);
+      lineBuffer = lineBuffer.slice(separator.index + separator[0].length);
       if (line.length > 0 && onLine) {
         yield* onLine(line);
       }
-      newlineIndex = lineBuffer.indexOf("\n");
+      separator = OUTPUT_LINE_SEPARATOR.exec(lineBuffer);
     }
 
     if (flush) {
-      const trailing = lineBuffer.replace(/\r$/, "");
+      const trailing = lineBuffer;
       lineBuffer = "";
       if (trailing.length > 0 && onLine) {
         yield* onLine(trailing);
@@ -740,6 +754,11 @@ const collectOutput = Effect.fnUntraced(function* (
 
   const processChunk = Effect.fnUntraced(function* (chunk: Uint8Array) {
     if (appendTruncationMarker && truncated) {
+      if (lineDecoder) {
+        lineBuffer += lineDecoder.decode(chunk, { stream: true });
+        yield* emitCompleteLines(false);
+        if (lineBuffer.length > maxPendingLineBytes) lineBuffer = "";
+      }
       return;
     }
     const nextBytes = bytes + chunk.byteLength;
@@ -760,7 +779,7 @@ const collectOutput = Effect.fnUntraced(function* (
 
     const decoded = decoder.decode(chunkToDecode, { stream: !truncated });
     text += decoded;
-    lineBuffer += decoded;
+    lineBuffer += lineDecoder ? lineDecoder.decode(chunk, { stream: true }) : decoded;
     yield* emitCompleteLines(false);
   });
 
@@ -778,6 +797,7 @@ const collectOutput = Effect.fnUntraced(function* (
   const remainder = truncated ? "" : decoder.decode();
   text += remainder;
   lineBuffer += remainder;
+  if (lineDecoder) lineBuffer += lineDecoder.decode();
   yield* emitCompleteLines(true);
   return {
     text,
@@ -845,6 +865,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               maxOutputBytes,
               appendTruncationMarker,
               input.progress?.onStdoutLine,
+              input.keepLineCallbacksAfterTruncation,
             ),
             collectOutput(
               commandInput,
@@ -852,6 +873,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               maxOutputBytes,
               appendTruncationMarker,
               input.progress?.onStderrLine,
+              input.keepLineCallbacksAfterTruncation,
             ),
             child.exitCode.pipe(
               Effect.mapError(
@@ -907,16 +929,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return yield* execution.pipe(
         Effect.timeoutOption(timeoutMs),
         Effect.flatMap((result) =>
-          Option.match(result, {
-            onNone: () =>
-              Effect.fail(
-                new GitCommandError({
-                  ...gitCommandContext(commandInput),
-                  detail: "Git command timed out.",
-                }),
-              ),
-            onSome: Effect.succeed,
-          }),
+          Effect.fromOption(
+            result,
+            () =>
+              new GitCommandError({
+                ...gitCommandContext(commandInput),
+                detail: "Git command timed out.",
+              }),
+          ),
         ),
       );
     },
@@ -961,11 +981,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         : {}),
       ...(options.progress ? { progress: options.progress } : {}),
     }).pipe(
-      Effect.flatMap((result) => {
-        if (options.allowNonZeroExit || result.exitCode === 0) {
-          return Effect.succeed(result);
-        }
-        return Effect.fail(
+      Effect.filterOrFail(
+        (result) => options.allowNonZeroExit || result.exitCode === 0,
+        (result) =>
           new GitCommandError({
             ...gitCommandContext({ operation, cwd, args }),
             detail: options.fallbackErrorDetail ?? "Git command exited with a non-zero status.",
@@ -973,8 +991,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
             stdoutLength: result.stdout.length,
             stderrLength: result.stderr.length,
           }),
-        );
-      }),
+      ),
     );
 
   const executeGitWithStableDiagnostics = (
@@ -1087,10 +1104,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   ): Effect.Effect<void, GitCommandError> => {
     const fetchCwd =
       path.basename(gitCommonDir) === ".git" ? path.dirname(gitCommonDir) : gitCommonDir;
+    // `--no-auto-gc` (a synonym of `--no-auto-maintenance` that older Git also knows) keeps
+    // this poll from starting `git gc --auto`. When that gc fails, for example on a repository
+    // with missing objects, Git retries it on every fetch and leaves a full-size `tmp_pack_*`
+    // behind each time, so a background poll could fill the disk.
     return executeGit(
       "GitVcsDriver.fetchRemoteForStatus",
       fetchCwd,
-      ["--git-dir", gitCommonDir, "fetch", "--quiet", "--no-tags", remoteName],
+      ["--git-dir", gitCommonDir, "fetch", "--quiet", "--no-tags", "--no-auto-gc", remoteName],
       {
         env: STATUS_UPSTREAM_REFRESH_ENV,
         fallbackErrorDetail: "Background Git fetch exited with a non-zero status.",
@@ -2240,13 +2261,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const readRangeContext: GitVcsDriver.GitVcsDriver["Service"]["readRangeContext"] = Effect.fn(
     "readRangeContext",
   )(function* (cwd, baseRef) {
-    const range = `${baseRef}..HEAD`;
+    const commitRange = `${baseRef}..HEAD`;
+    // PR diffs start at the common ancestor when the base branch has advanced.
+    const diffRange = `${baseRef}...HEAD`;
     const [commitSummary, diffSummary, diffPatch] = yield* Effect.all(
       [
         runGitStdoutWithOptions(
           "GitVcsDriver.readRangeContext.log",
           cwd,
-          ["log", "--oneline", range],
+          ["log", "--oneline", commitRange],
           {
             maxOutputBytes: RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES,
             appendTruncationMarker: true,
@@ -2255,7 +2278,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         runGitStdoutWithOptions(
           "GitVcsDriver.readRangeContext.diffStat",
           cwd,
-          ["diff", "--stat", range],
+          ["diff", "--stat", diffRange],
           {
             maxOutputBytes: RANGE_DIFF_SUMMARY_MAX_OUTPUT_BYTES,
             appendTruncationMarker: true,
@@ -2264,7 +2287,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         runGitStdoutWithOptions(
           "GitVcsDriver.readRangeContext.diffPatch",
           cwd,
-          ["diff", "--no-ext-diff", "--patch", "--minimal", range],
+          ["diff", "--no-ext-diff", "--patch", "--minimal", diffRange],
           {
             maxOutputBytes: RANGE_DIFF_PATCH_MAX_OUTPUT_BYTES,
             appendTruncationMarker: true,
@@ -2281,134 +2304,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     };
   });
 
-  const readUntrackedReviewDiffs = Effect.fn("readUntrackedReviewDiffs")(function* (cwd: string) {
-    const untrackedResult = yield* executeGit(
-      "GitVcsDriver.readUntrackedReviewDiffs.list",
-      cwd,
-      ["ls-files", "--others", "--exclude-standard", "-z"],
-      {
-        maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
-        appendTruncationMarker: true,
-      },
-    );
-    const untrackedPaths = splitNullSeparatedGitStdoutPaths(untrackedResult);
-    if (untrackedPaths.length === 0) {
-      return { diff: "", truncated: untrackedResult.stdoutTruncated };
-    }
-
-    const diffs = yield* Effect.forEach(
-      untrackedPaths,
-      (relativePath) =>
-        executeGit(
-          "GitVcsDriver.readUntrackedReviewDiffs.diff",
-          cwd,
-          [
-            "diff",
-            "--no-index",
-            "--patch",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--minimal",
-            ...PATCH_RENDER_PREFIX_ARGS,
-            "--",
-            "/dev/null",
-            relativePath,
-          ],
-          {
-            allowNonZeroExit: true,
-            maxOutputBytes: REVIEW_UNTRACKED_DIFF_MAX_OUTPUT_BYTES,
-            appendTruncationMarker: true,
-          },
-        ),
-      { concurrency: 4 },
-    );
-
-    return {
-      diff: Arr.filterMap(diffs, (result) =>
-        result.stdout.trim().length > 0 ? Result.succeed(result.stdout) : Result.failVoid,
-      ).join("\n"),
-      truncated: untrackedResult.stdoutTruncated || diffs.some((result) => result.stdoutTruncated),
-    };
-  });
-
-  const readTrackedReviewDiff = Effect.fn("readTrackedReviewDiff")(function* (
-    cwd: string,
-    ignoreWhitespace: boolean | undefined,
-    headRef: string,
-  ) {
-    const args = [
-      "diff",
-      "--no-ext-diff",
-      "--no-textconv",
-      "--minimal",
-      "--find-renames",
-      ...(ignoreWhitespace ? ["--ignore-all-space"] : []),
-      headRef,
-      "--",
-    ];
-    const [result, files] = yield* Effect.all([
-      executeGit(
-        "GitVcsDriver.readTrackedReviewDiff",
-        cwd,
-        [
-          "diff",
-          "--patch",
-          "--no-color",
-          "--no-ext-diff",
-          "--no-textconv",
-          "--minimal",
-          ...PATCH_RENDER_PREFIX_ARGS,
-          "--find-renames",
-          ...(ignoreWhitespace ? ["--ignore-all-space"] : []),
-          headRef,
-          "--",
-        ],
-        {
-          maxOutputBytes: REVIEW_DIFF_PATCH_MAX_OUTPUT_BYTES,
-          appendTruncationMarker: true,
-        },
-      ),
-      readReviewDiffFiles(cwd, args),
-    ]);
-    return { diff: result.stdout, truncated: result.stdoutTruncated, files };
-  });
-
-  const readReviewDiffFiles = (cwd: string, args: readonly string[], env?: NodeJS.ProcessEnv) =>
-    executeGit(
-      "GitVcsDriver.readReviewDiffFiles",
-      cwd,
-      [...args.slice(0, -2), "--numstat", "-z", ...args.slice(-2)],
-      {
-        ...(env ? { env } : {}),
-        maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES,
-        appendTruncationMarker: true,
-      },
-    ).pipe(
-      Effect.map((result) =>
-        result.stdoutTruncated ? undefined : parseReviewNumstat(result.stdout),
-      ),
-      Effect.orElseSucceed(() => undefined),
-    );
-
-  const readUnifiedWorkingTreeReviewDiff = Effect.fn("readUnifiedWorkingTreeReviewDiff")(function* (
+  const prepareReviewIndex = Effect.fn("prepareReviewIndex")(function* (
     cwd: string,
     untrackedPaths: ReadonlyArray<string>,
-    pathsTruncated: boolean,
-    ignoreWhitespace: boolean | undefined,
-    headRef: string,
   ) {
     const [stagedDeletionsStdout, indexValue] = yield* Effect.all(
       [
-        runGitStdout("GitVcsDriver.readUnifiedWorkingTreeReviewDiff.stagedDeletions", cwd, [
-          "diff",
-          "--cached",
-          "--name-only",
-          "--diff-filter=D",
-          "-z",
-          headRef,
-          "--",
-        ]),
+        runGitStdoutWithOptions(
+          "GitVcsDriver.readUnifiedWorkingTreeReviewDiff.stagedDeletions",
+          cwd,
+          ["diff", "--cached", "--name-only", "--diff-filter=D", "-z", "HEAD", "--"],
+          { allowNonZeroExit: true, maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES },
+        ),
         runGitStdout("GitVcsDriver.readUnifiedWorkingTreeReviewDiff.indexPath", cwd, [
           "rev-parse",
           "--git-path",
@@ -2419,10 +2326,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     );
     const stagedDeletions = new Set(stagedDeletionsStdout.split("\0").filter(Boolean));
     const pathsToAdd = untrackedPaths.filter((relativePath) => !stagedDeletions.has(relativePath));
-    if (pathsToAdd.length === 0) {
-      const tracked = yield* readTrackedReviewDiff(cwd, ignoreWhitespace, headRef);
-      return { ...tracked, truncated: pathsTruncated || tracked.truncated };
-    }
+    if (pathsToAdd.length === 0) return undefined;
 
     const indexPath = path.isAbsolute(indexValue.trim())
       ? indexValue.trim()
@@ -2430,11 +2334,16 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const tempIndexPath = yield* fileSystem.makeTempFileScoped({
       prefix: `t3code-review-index-${process.pid}-`,
     });
-    if (yield* fileSystem.exists(indexPath)) {
+    const indexExists = yield* fileSystem.exists(indexPath);
+    if (indexExists) {
+      const { mtime } = yield* fileSystem.stat(indexPath);
       yield* fileSystem.copyFile(indexPath, tempIndexPath);
-    } else {
-      // An unborn repository can have no index yet. Git creates it on add.
-      yield* fileSystem.remove(tempIndexPath);
+      // Node FileSystem.stat truncates bigint timestamps to milliseconds before creating its Date.
+      // Flooring preserves the source second without making preceding-second files racy.
+      const indexTime = Option.isSome(mtime)
+        ? Math.max(0, Math.floor(mtime.value.getTime() / 1000))
+        : 0;
+      yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
     }
     const env = { GIT_INDEX_FILE: tempIndexPath } satisfies NodeJS.ProcessEnv;
     const tempIndexConfig = [
@@ -2443,6 +2352,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       "-c",
       "splitIndex.sharedIndexExpire=never",
     ];
+    if (!indexExists) {
+      yield* executeGit("GitVcsDriver.review.emptyIndex", cwd, ["read-tree", "--empty"], { env });
+    }
     yield* executeGit(
       "GitVcsDriver.readUnifiedWorkingTreeReviewDiff.expandSplitIndex",
       cwd,
@@ -2462,107 +2374,27 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ],
       { env, stdin: `${pathsToAdd.join("\0")}\0` },
     );
-    const args = [
-      ...tempIndexConfig,
-      "diff",
-      "--no-ext-diff",
-      "--no-textconv",
-      "--minimal",
-      "--find-renames",
-      ...(ignoreWhitespace ? ["--ignore-all-space"] : []),
-      headRef,
-      "--",
-    ];
-    const [result, files] = yield* Effect.all([
-      executeGit(
-        "GitVcsDriver.readUnifiedWorkingTreeReviewDiff.diff",
-        cwd,
-        [
-          ...tempIndexConfig,
-          "diff",
-          "--patch",
-          "--no-color",
-          "--no-ext-diff",
-          "--no-textconv",
-          "--minimal",
-          ...PATCH_RENDER_PREFIX_ARGS,
-          "--find-renames",
-          ...(ignoreWhitespace ? ["--ignore-all-space"] : []),
-          headRef,
-          "--",
-        ],
-        {
-          env,
-          maxOutputBytes: REVIEW_DIFF_PATCH_MAX_OUTPUT_BYTES,
-          appendTruncationMarker: true,
-        },
-      ),
-      readReviewDiffFiles(cwd, args, env),
-    ]);
-    return {
-      diff: result.stdout,
-      truncated: pathsTruncated || result.stdoutTruncated,
-      files: pathsTruncated ? undefined : files,
-    };
-  });
-
-  const readWorkingTreeReviewDiff = Effect.fn("readWorkingTreeReviewDiff")(function* (
-    cwd: string,
-    ignoreWhitespace: boolean | undefined,
-    headRef: string,
-  ) {
-    const untrackedResult = yield* executeGit(
-      "GitVcsDriver.readWorkingTreeReviewDiff.listUntracked",
-      cwd,
-      ["ls-files", "--others", "--exclude-standard", "-z"],
-      {
-        maxOutputBytes: WORKSPACE_FILES_MAX_OUTPUT_BYTES,
-        appendTruncationMarker: true,
-      },
-    ).pipe(Effect.option);
-    if (untrackedResult._tag === "None") {
-      return yield* readTrackedReviewDiff(cwd, ignoreWhitespace, headRef);
-    }
-    const untrackedPaths = splitNullSeparatedGitStdoutPaths(untrackedResult.value);
-    if (untrackedPaths.length === 0) {
-      const tracked = yield* readTrackedReviewDiff(cwd, ignoreWhitespace, headRef);
-      return { ...tracked, truncated: untrackedResult.value.stdoutTruncated || tracked.truncated };
-    }
-
-    return yield* readUnifiedWorkingTreeReviewDiff(
-      cwd,
-      untrackedPaths,
-      untrackedResult.value.stdoutTruncated,
-      ignoreWhitespace,
-      headRef,
-    ).pipe(
-      Effect.scoped,
-      Effect.catch(() =>
-        Effect.all([
-          readTrackedReviewDiff(cwd, ignoreWhitespace, headRef).pipe(
-            Effect.orElseSucceed(() => ({ diff: "", truncated: false, files: undefined })),
-          ),
-          readUntrackedReviewDiffs(cwd).pipe(
-            Effect.orElseSucceed(() => ({ diff: "", truncated: false })),
-          ),
-        ]).pipe(
-          Effect.map(([tracked, untracked]) => ({
-            diff: [tracked.diff.trimEnd(), untracked.diff.trimEnd()]
-              .filter((diff) => diff.length > 0)
-              .join("\n"),
-            truncated: tracked.truncated || untracked.truncated,
-            files: undefined,
-          })),
-        ),
-      ),
-    );
+    return env;
   });
 
   const getReviewDiffPreview = Effect.fn("getReviewDiffPreview")(function* (
     input: ReviewDiffPreviewInput,
   ) {
-    const details = yield* statusDetailsLocal(input.cwd);
-    if (!details.isRepo) {
+    const pathArgs = input.file
+      ? [input.file.path, ...(input.file.previousPath ? [input.file.previousPath] : [])].map(
+          (path) => `:(top,literal)${path}`,
+        )
+      : [];
+    const patchLimit = input.file
+      ? REVIEW_DIFF_FILE_MAX_OUTPUT_BYTES
+      : REVIEW_DIFF_PATCH_MAX_OUTPUT_BYTES;
+    const repository = yield* resolveRepositoryPathsUncached(input.cwd).pipe(
+      Effect.catchTags({
+        GitCommandError: (error) =>
+          isMissingGitCwdError(error) ? Effect.succeed(null) : Effect.fail(error),
+      }),
+    );
+    if (!repository?.worktreeRoot) {
       return {
         cwd: input.cwd,
         generatedAt: yield* DateTime.now,
@@ -2570,105 +2402,143 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       };
     }
 
-    const branch = details.branch;
+    const cwd = repository.worktreeRoot;
+    const branch = repository.currentBranch;
     const baseRef =
       input.baseRef ??
       (branch
-        ? yield* resolveBaseBranchForNoUpstream(input.cwd, branch).pipe(
-            Effect.orElseSucceed(() => null),
-          )
+        ? yield* resolveBaseBranchForNoUpstream(cwd, branch).pipe(Effect.orElseSucceed(() => null))
         : null);
 
-    const headResult = yield* executeGit(
-      "GitVcsDriver.getReviewDiffPreview.head",
-      input.cwd,
-      ["rev-parse", "--verify", "HEAD"],
-      { allowNonZeroExit: true },
+    const diffArgs = [
+      "diff",
+      "--find-renames",
+      "--no-color",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--minimal",
+      ...PATCH_RENDER_PREFIX_ARGS,
+      ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
+    ];
+    const readStats = Effect.fn("GitVcsDriver.getReviewDiffPreview.stat")(function* (
+      ref: string,
+      env?: NodeJS.ProcessEnv,
+    ) {
+      const args = [...diffArgs, "--numstat", "-z"];
+      const result = yield* executeGit(
+        "GitVcsDriver.getReviewDiffPreview.stat",
+        cwd,
+        [...args, ref, "--", ...pathArgs],
+        { allowNonZeroExit: true, maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES, env },
+      );
+      if (result.exitCode === 0) return { ref, files: parseReviewNumstat(result.stdout) };
+      if (ref === "HEAD" && isUnbornHeadStderr(result.stderr)) {
+        const emptyTree = (yield* runGitStdout("GitVcsDriver.getReviewDiffPreview.emptyTree", cwd, [
+          "hash-object",
+          "-t",
+          "tree",
+          (yield* HostProcessPlatform) === "win32" ? "NUL" : "/dev/null",
+        ])).trim();
+        const stdout = yield* runGitStdoutWithOptions(
+          "GitVcsDriver.getReviewDiffPreview.unbornStat",
+          cwd,
+          [...args, emptyTree, "--", ...pathArgs],
+          { maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES, env },
+        );
+        return { ref: emptyTree, files: parseReviewNumstat(stdout) };
+      }
+      return yield* new GitCommandError({
+        operation: "GitVcsDriver.getReviewDiffPreview.stat",
+        cwd,
+        command: "git diff --numstat",
+        detail: "Could not read complete diff statistics.",
+        exitCode: result.exitCode,
+      });
+    });
+    const readTrackedDiff = Effect.fn("GitVcsDriver.getReviewDiffPreview.tracked")(function* (
+      ref: string | null,
+      env?: NodeJS.ProcessEnv,
+    ) {
+      if (ref === null) return { stdout: "", stdoutTruncated: false, files: [] };
+      const stat = yield* readStats(ref, env);
+      if (stat.files.length === 0) return { stdout: "", stdoutTruncated: false, files: [] };
+      const patch = yield* executeGit(
+        "GitVcsDriver.getReviewDiffPreview.patch",
+        cwd,
+        [...diffArgs, "--patch", stat.ref, "--", ...pathArgs],
+        { maxOutputBytes: patchLimit, appendTruncationMarker: true, env },
+      );
+      return { ...patch, files: stat.files };
+    });
+    const readDirty = Effect.gen(function* () {
+      if (input.file?.sourceKind === "branch-range") return yield* readTrackedDiff(null);
+      const untracked = yield* executeGit(
+        "GitVcsDriver.review.listUntracked",
+        cwd,
+        ["ls-files", "--others", "--exclude-standard", "-z", "--", ...pathArgs],
+        { maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES },
+      ).pipe(
+        Effect.catchIf(
+          (error) => error.outputLength === undefined,
+          () => Effect.succeed(null),
+        ),
+      );
+      if (untracked === null) {
+        const tracked = yield* readTrackedDiff("HEAD");
+        return { ...tracked, files: undefined, stdoutTruncated: true };
+      }
+      const paths = splitNullSeparatedGitStdoutPaths(untracked).filter(
+        (candidate) => !input.file || candidate === input.file.path,
+      );
+      if (paths.length === 0) return yield* readTrackedDiff("HEAD");
+      const env = yield* prepareReviewIndex(cwd, paths).pipe(
+        Effect.catchTags({
+          PlatformError: (cause) =>
+            Effect.fail(
+              new GitCommandError({
+                operation: "GitVcsDriver.prepareReviewIndex",
+                cwd,
+                command: "git diff",
+                detail: "Could not prepare the review index.",
+                cause,
+              }),
+            ),
+        }),
+      );
+      return yield* readTrackedDiff("HEAD", env);
+    }).pipe(Effect.scoped);
+    const [dirtyTrackedResult, baseResult] = yield* Effect.all(
+      [
+        readDirty,
+        readTrackedDiff(
+          baseRef && branch && input.file?.sourceKind !== "working-tree"
+            ? `${baseRef}...HEAD`
+            : null,
+        ),
+      ],
+      { concurrency: 2 },
     );
-    const headRef =
-      headResult.exitCode === 0
-        ? "HEAD"
-        : (yield* executeGit(
-            "GitVcsDriver.getReviewDiffPreview.emptyTree",
-            input.cwd,
-            ["hash-object", "-t", "tree", "--stdin"],
-            { stdin: "" },
-          )).stdout.trim();
-    const dirtyResult = yield* readWorkingTreeReviewDiff(
-      input.cwd,
-      input.ignoreWhitespace,
-      headRef,
-    ).pipe(
-      Effect.orElseSucceed(() => ({
-        diff: "",
-        truncated: false,
-        files: undefined,
-      })),
-    );
-    const dirtyDiff = dirtyResult.diff;
-
-    const baseResult =
-      baseRef && branch
-        ? yield* executeGit(
-            "GitVcsDriver.getReviewDiffPreview.base",
-            input.cwd,
-            [
-              "diff",
-              "--patch",
-              "--no-color",
-              "--no-ext-diff",
-              "--no-textconv",
-              "--minimal",
-              ...PATCH_RENDER_PREFIX_ARGS,
-              "--find-renames",
-              ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
-              `${baseRef}...HEAD`,
-            ],
-            {
-              maxOutputBytes: REVIEW_DIFF_PATCH_MAX_OUTPUT_BYTES,
-              appendTruncationMarker: true,
-            },
-          ).pipe(
-            Effect.orElseSucceed(() => ({
-              exitCode: 0,
-              stdout: "",
-              stderr: "",
-              stdoutTruncated: false,
-              stderrTruncated: false,
-            })),
-          )
-        : null;
-    const baseDiff = baseResult?.stdout ?? "";
-    const baseFiles =
-      baseRef && branch
-        ? yield* readReviewDiffFiles(input.cwd, [
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--minimal",
-            "--find-renames",
-            ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
-            `${baseRef}...HEAD`,
-            "--",
-          ])
-        : [];
-    const hashDiff = (diff: string) =>
-      crypto.digest("SHA-256", new TextEncoder().encode(diff)).pipe(
+    const dirtyFiles = dirtyTrackedResult.files;
+    const baseFiles = baseResult.files;
+    const dirtyDiff = dirtyTrackedResult.stdout;
+    const baseDiff = baseResult.stdout;
+    const hashDiff = (diff: string, files: ReadonlyArray<ReviewDiffFileStat>) =>
+      crypto.digest("SHA-256", new TextEncoder().encode(JSON.stringify([diff, files]))).pipe(
         Effect.map(Encoding.encodeHex),
         Effect.mapError(
           (cause) =>
             new GitCommandError({
               operation: "GitVcsDriver.getReviewDiffPreview.hash",
               command: "crypto.digest SHA-256",
-              cwd: input.cwd,
+              cwd,
               detail: "Failed to hash review diff.",
               cause,
             }),
         ),
       );
     const [dirtyDiffHash, baseDiffHash] = yield* Effect.all([
-      hashDiff(dirtyDiff),
-      hashDiff(baseDiff),
+      hashDiff(dirtyDiff, dirtyFiles ?? []),
+      hashDiff(baseDiff, baseFiles),
     ]);
 
     const sources: ReviewDiffPreviewSource[] = [
@@ -2679,9 +2549,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         baseRef: "HEAD",
         headRef: null,
         diff: dirtyDiff,
+        ...(dirtyFiles === undefined ? {} : { files: dirtyFiles }),
         diffHash: dirtyDiffHash,
-        truncated: dirtyResult.truncated,
-        ...(dirtyResult.files ? { files: dirtyResult.files } : {}),
+        truncated: dirtyTrackedResult.stdoutTruncated,
       },
       {
         id: "branch-range",
@@ -2690,9 +2560,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         baseRef,
         headRef: branch ?? "HEAD",
         diff: baseDiff,
+        files: baseFiles,
         diffHash: baseDiffHash,
-        truncated: baseResult?.stdoutTruncated ?? false,
-        ...(baseFiles ? { files: baseFiles } : {}),
+        truncated: baseResult.stdoutTruncated,
       },
     ];
 
@@ -3240,17 +3110,47 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // skills, tooling or source in one gets a worktree that is quietly missing
     // them. Best-effort: the objects are usually already in the parent's
     // `.git/modules`, but a first-ever clone needs the network, and failing to
-    // populate a submodule must not roll back the caller's thread.
+    // populate a submodule must not roll back the caller's thread. Repos with
+    // hundreds of nested submodules opt out or stop at the top level; the
+    // caller resolves that from settings, or the checkout's t3.json decides.
     const hasSubmodules = yield* fileSystem
       .exists(path.join(worktreePath, ".gitmodules"))
       .pipe(Effect.orElseSucceed(() => false));
-    if (hasSubmodules) {
-      if (progress?.onSubmodulesStarted) yield* progress.onSubmodulesStarted();
+    const submoduleMode = !hasSubmodules
+      ? { value: "none" as const, source: "environment" as const }
+      : resolveProjectFileBackedSetting(
+          "worktreeSubmodules",
+          options?.submodules ?? null,
+          options?.submodules != null
+            ? null
+            : yield* fileSystem.readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME)).pipe(
+                Effect.flatMap((contents) => {
+                  const file = parseT3ProjectFile(contents);
+                  return file === null
+                    ? Effect.logWarning("t3.json is invalid; initializing submodules recursively", {
+                        worktreePath,
+                      }).pipe(Effect.as(null))
+                    : Effect.succeed(file);
+                }),
+                Effect.orElseSucceed(() => null),
+              ),
+        );
+    if (hasSubmodules && submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
+      yield* progress.onSubmodulesDisabled({
+        source: submoduleMode.source === "t3.json" ? "t3.json" : "settings",
+      });
+    }
+    if (submoduleMode.value !== "none") {
+      if (progress?.onSubmodulesStarted) {
+        yield* progress.onSubmodulesStarted();
+      }
       const onSubmoduleLine = progress?.onSubmoduleLine;
       yield* runGit(
         "GitVcsDriver.createWorktree.updateSubmodules",
         worktreePath,
-        ["submodule", "update", "--init", "--recursive"],
+        submoduleMode.value === "recursive"
+          ? ["submodule", "update", "--init", "--recursive"]
+          : ["submodule", "update", "--init"],
         onSubmoduleLine
           ? {
               env: { LC_ALL: "C" },

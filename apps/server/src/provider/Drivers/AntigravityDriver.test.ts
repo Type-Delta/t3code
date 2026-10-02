@@ -32,8 +32,7 @@ import {
 } from "../AntigravityInstallation.ts";
 import {
   ANTIGRAVITY_AUTH_STDOUT_PREFIX,
-  resolveAntigravityProfileDirectory,
-  resolveAntigravityRuntimeTempDirectory,
+  resolveAntigravityInstanceDirectories,
 } from "../antigravityAuthSupport.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import * as ModelManifest from "../ModelManifest.ts";
@@ -75,7 +74,8 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
   );
   const requestLog = path.join(root, "requests.jsonl");
-  const profileDirectory = resolveAntigravityProfileDirectory(config.stateDir, instanceId);
+  const directories = yield* resolveAntigravityInstanceDirectories(config.stateDir, instanceId);
+  const profileDirectory = directories.profile;
   const instancePath = `${path.join(root, "instance-bin")}:${baseEnv.PATH ?? ""}`;
 
   const makeExecutable = Effect.fn("AntigravityDriverTest.makeExecutable")(function* (
@@ -254,6 +254,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     fs,
     path,
     profileDirectory,
+    directories,
     instancePath,
     first,
     second,
@@ -536,7 +537,7 @@ it.layer(testLayer)("AntigravityDriver", (it) => {
     () =>
       Effect.gen(function* () {
         const h = yield* makeHarness();
-        const tempRoot = resolveAntigravityRuntimeTempDirectory(h.profileDirectory);
+        const tempRoot = h.directories.runtimeTemp;
         yield* h.refresh();
         yield* h.refresh();
         const directories = h.launches.flatMap((launch) =>
@@ -559,12 +560,17 @@ it.layer(testLayer)("AntigravityDriver", (it) => {
         const path = yield* Path.Path;
         const config = yield* ServerConfig;
         const instanceId = ProviderInstanceId.make("antigravity-orphan-sweep");
-        const tempRoot = resolveAntigravityRuntimeTempDirectory(
-          resolveAntigravityProfileDirectory(config.stateDir, instanceId),
+        const directories = yield* resolveAntigravityInstanceDirectories(
+          config.stateDir,
+          instanceId,
         );
-        const orphan = path.join(tempRoot, "run-orphan", "_MEI123", "google3");
-        yield* fs.makeDirectory(orphan, { recursive: true });
-        yield* fs.writeFileString(path.join(orphan, "payload.bin"), "stale");
+        // Older builds unpacked inside the profile.
+        const legacyRoot = path.join(directories.profile, "antigravity-acp", "tmp");
+        for (const root of [directories.runtimeTemp, legacyRoot]) {
+          const orphan = path.join(root, "run-orphan", "_MEI123", "google3");
+          yield* fs.makeDirectory(orphan, { recursive: true });
+          yield* fs.writeFileString(path.join(orphan, "payload.bin"), "stale");
+        }
         yield* AntigravityDriver.create({
           instanceId,
           displayName: "Sweep",
@@ -580,7 +586,8 @@ it.layer(testLayer)("AntigravityDriver", (it) => {
             }),
           ),
         );
-        expect(yield* fs.exists(tempRoot)).toBe(false);
+        expect(yield* fs.exists(directories.runtimeTemp)).toBe(false);
+        expect(yield* fs.exists(legacyRoot)).toBe(false);
       }).pipe(Effect.scoped),
   );
 

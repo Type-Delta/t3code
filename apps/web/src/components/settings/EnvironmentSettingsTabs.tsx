@@ -37,7 +37,12 @@ export function EnvironmentSettingsTabs({
   if (onlyPrimaryDevice || environments.length === 0) return null;
 
   return (
-    <ScrollArea hideScrollbars scrollFade className="mx-3 h-11 min-w-0 flex-1 rounded-none sm:mx-4">
+    <ScrollArea
+      radius="none"
+      hideScrollbars
+      scrollFade
+      className="mx-3 h-11 min-w-0 flex-1 sm:mx-4"
+    >
       <ToggleGroup
         aria-label="Devices"
         variant="segmented"
@@ -56,7 +61,7 @@ export function EnvironmentSettingsTabs({
             <Tooltip key={environment.environmentId}>
               <TooltipTrigger
                 render={
-                  <Toggle value={environment.environmentId} className="gap-2 text-left">
+                  <Toggle value={environment.environmentId} className="text-left">
                     <EnvironmentMachineIcon
                       kind={resolveEnvironmentMachineKind(environment.serverConfig)}
                       className="size-3.5 shrink-0"

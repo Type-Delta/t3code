@@ -66,7 +66,7 @@ function assertCarriesNoSecret(error: object, secret: string): void {
 }
 const tailscaleStatusJson = `{"Self":{"DNSName":"desktop.tail.ts.net.","TailscaleIPs":["100.100.100.100","fd7a:115c:a1e0::1","192.168.1.20"]}}`;
 const tailscaleStatusWithSingleIpJson = `{"Self":{"DNSName":"desktop.tail.ts.net.","TailscaleIPs":["100.90.1.2"]}}`;
-const tailscaleCommand = process.env.OS === "Windows_NT" ? "tailscale.exe" : "tailscale";
+const tailscaleCommand = "tailscale";
 
 function mockHandle(result: { stdout?: string; stderr?: string; code?: number }) {
   return ChildProcessSpawner.makeHandle({

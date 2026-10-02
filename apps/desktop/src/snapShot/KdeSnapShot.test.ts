@@ -90,9 +90,15 @@ it("installs offline at a stable path and verifies permissions using the install
   await setup.perform("install-kde-helper");
   const { executable, desktop } = kdeCapturePaths(paths);
   expect(await NodeFSP.readFile(executable, "utf8")).toBe("bundled executable");
-  expect((await NodeFSP.stat(executable)).mode & 0o777).toBe(0o755);
+  // NTFS does not store POSIX execute bits; the installed bytes and identity
+  // are still verified on every host.
+  if (NodePath.sep !== "\\") {
+    expect((await NodeFSP.stat(executable)).mode & 0o777).toBe(0o755);
+  }
   expect(await NodeFSP.readFile(desktop, "utf8")).toBe(kdeCaptureDesktopEntry(executable));
-  expect(kdeCaptureDesktopEntry(executable)).toContain(`Exec="${executable}" check`);
+  expect(kdeCaptureDesktopEntry(executable)).toContain(
+    `Exec="${executable.replaceAll("\\", "\\\\\\\\")}" check`,
+  );
   expect((await setup.state()).status).toBe("ready");
   expect((await setup.state()).feedbackAvailable).toBe(true);
   expect(execute.mock.calls.map(([file, args]) => [file, args])).toEqual([

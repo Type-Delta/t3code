@@ -57,7 +57,10 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
-import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
+import {
+  ProviderRuntimeIngestionLive,
+  splitBufferedAssistantText,
+} from "./ProviderRuntimeIngestion.ts";
 import { AutoResumeReactor } from "../Services/AutoResumeReactor.ts";
 import { DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -2799,7 +2802,9 @@ describe("ProviderRuntimeIngestion", () => {
   ])(
     "strips suggestions with streaming=$streaming, tagged=$tagged, subagent=$subagentId",
     async ({ streaming, text, tagged, subagentId }) => {
-      const harness = await createHarness();
+      const harness = await createHarness({
+        serverSettings: { responseStreamingMode: streaming ? "token" : "turn" },
+      });
       const common = {
         provider: ProviderDriverKind.make("codex"),
         createdAt: "2026-01-01T00:00:00.000Z",
@@ -2844,6 +2849,108 @@ describe("ProviderRuntimeIngestion", () => {
       expect(snapshot.threads[0]?.messages.at(-1)?.text).toBe(text);
     },
   );
+
+  it.each(["token", "paragraph", "turn"] as const)(
+    "delivers thinking paragraphs with pacing in %s mode",
+    async (mode) => {
+      const harness = await createHarness({ serverSettings: { responseStreamingMode: mode } });
+      const common = {
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("reasoning-paragraph-turn"),
+        itemId: asItemId("reasoning-paragraph-item"),
+      };
+      await harness.emitAndDrain([
+        {
+          ...common,
+          type: "content.delta",
+          eventId: asEventId("reasoning-paragraph-first"),
+          payload: { streamKind: "reasoning_text", delta: "First.\n\nSecond" },
+        },
+      ]);
+      let messages = (await harness.readModel()).threads[0]!.messages;
+      expect(
+        messages.filter((message) => message.role === "reasoning").map((message) => message.text),
+      ).toEqual(mode === "turn" ? [] : ["First.\n\n"]);
+      await harness.emitAndDrain([
+        {
+          ...common,
+          type: "content.delta",
+          eventId: asEventId("reasoning-paragraph-paced"),
+          payload: { streamKind: "reasoning_text", delta: ".\n\nThird" },
+        },
+      ]);
+      messages = (await harness.readModel()).threads[0]!.messages;
+      expect(
+        messages.filter((message) => message.role === "reasoning").map((message) => message.text),
+      ).toEqual(mode === "turn" ? [] : ["First.\n\n"]);
+      await harness.emitAndDrain([
+        {
+          ...common,
+          type: "item.completed",
+          eventId: asEventId("reasoning-paragraph-complete"),
+          payload: { itemType: "reasoning", status: "completed" },
+        },
+      ]);
+      expect(
+        (await harness.readModel()).threads[0]!.messages.find(
+          (message) => message.role === "reasoning",
+        ),
+      ).toMatchObject({ text: "First.\n\nSecond.\n\nThird", streaming: false });
+    },
+  );
+
+  it("delivers paragraphs early while keeping suggestion markup buffered", async () => {
+    const harness = await createHarness({ serverSettings: { responseStreamingMode: "paragraph" } });
+    const common = {
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("paragraph-suggestion-turn"),
+      itemId: asItemId("paragraph-suggestion-item"),
+    };
+    await harness.emitAndDrain([
+      {
+        ...common,
+        type: "content.delta",
+        eventId: asEventId("paragraph-start"),
+        payload: {
+          streamKind: "assistant_text",
+          delta: "First paragraph.\n\nSecond<t3_prompt_sug",
+        },
+      },
+    ]);
+    let thread = (await harness.readModel()).threads[0]!;
+    expect(thread.messages.at(-1)?.text).toBe("First paragraph.\n\n");
+    await harness.emitAndDrain([
+      {
+        ...common,
+        type: "content.delta",
+        eventId: asEventId("paragraph-suggestion"),
+        payload: {
+          streamKind: "assistant_text",
+          delta: "gestion>Run tests</t3_prompt_suggestion>",
+        },
+      },
+      {
+        ...common,
+        type: "item.completed",
+        eventId: asEventId("paragraph-completed"),
+        payload: { itemType: "assistant_message", status: "completed" },
+      },
+    ]);
+    thread = (await harness.readModel()).threads[0]!;
+    expect(thread.messages.at(-1)).toMatchObject({
+      text: "First paragraph.\n\nSecond",
+      suggestion: "Run tests",
+      streaming: false,
+    });
+    const events = await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0)));
+    for (const event of events)
+      if (event.type === "thread.message-sent")
+        expect(event.payload.text).not.toContain("t3_prompt_");
+  });
 
   it("buffers assistant deltas with one lifecycle query per event until completion", async () => {
     const harness = await createHarness();
@@ -3991,6 +4098,7 @@ describe("ProviderRuntimeIngestion", () => {
       turnId: asTurnId("turn-runtime-error-activity"),
       payload: {
         message: "runtime activity exploded",
+        code: "subscription_sharing_usage_limit_exceeded",
       },
     });
 
@@ -4007,6 +4115,7 @@ describe("ProviderRuntimeIngestion", () => {
 
     expect(activity?.kind).toBe("runtime.error");
     expect(activityPayload?.message).toBe("runtime activity exploded");
+    expect(activityPayload?.code).toBe("subscription_sharing_usage_limit_exceeded");
   });
 
   it("keeps the session running when a runtime.warning arrives during an active turn", async () => {
@@ -5141,5 +5250,151 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("runtime still processed");
+  });
+});
+
+describe("splitBufferedAssistantText", () => {
+  it("keeps a partial trailing line buffered", () => {
+    expect(splitBufferedAssistantText("one\n\ntwo")).toEqual({ ready: "one\n\n", rest: "two" });
+    expect(splitBufferedAssistantText("one\ntwo")).toEqual({ ready: "", rest: "one\ntwo" });
+  });
+
+  it("does not split inside an open fence and delivers the block at its closing fence", () => {
+    const open = "intro\n\n```\ncode\n\nmore\n";
+    expect(splitBufferedAssistantText(open)).toEqual({
+      ready: "intro\n\n",
+      rest: "```\ncode\n\nmore\n",
+    });
+    expect(splitBufferedAssistantText(`${open}\`\`\`\nafter`)).toEqual({
+      ready: `${open}\`\`\`\n`,
+      rest: "after",
+    });
+  });
+
+  it("does not treat a fence with an info string as a closing fence", () => {
+    const text = "```\n```javascript\nstill code\n\nmore\n";
+    expect(splitBufferedAssistantText(text)).toEqual({ ready: "", rest: text });
+  });
+
+  it("treats a fence indented four or more spaces as code, not a closing fence", () => {
+    const text = "```\n    ```\n\nstill code\n";
+    expect(splitBufferedAssistantText(text)).toEqual({ ready: "", rest: text });
+    expect(splitBufferedAssistantText("```\n   ```\nafter")).toEqual({
+      ready: "```\n   ```\n",
+      rest: "after",
+    });
+  });
+
+  it("keeps a fence nested under a list item open across its blank lines", () => {
+    const text = "- step\n\n    ```ts\n    a\n\n    b\n    ```\n\nafter\n";
+    expect(splitBufferedAssistantText(text)).toEqual({
+      ready: "- step\n\n    ```ts\n    a\n\n    b\n    ```\n\n",
+      rest: "after\n",
+    });
+  });
+
+  it("does not treat a no-break-space line as blank", () => {
+    expect(splitBufferedAssistantText("para\n\u00a0\ncont\n\nnext")).toEqual({
+      ready: "para\n\u00a0\ncont\n\n",
+      rest: "next",
+    });
+  });
+
+  it("treats CRLF blank lines as boundaries", () => {
+    expect(splitBufferedAssistantText("one\r\n\r\ntwo")).toEqual({
+      ready: "one\r\n\r\n",
+      rest: "two",
+    });
+  });
+
+  it("only closes a fence with the same marker of equal or greater length", () => {
+    const text = "````\n```\nstill code\n\n````\n\nout\n";
+    expect(splitBufferedAssistantText(text)).toEqual({
+      ready: "````\n```\nstill code\n\n````\n\n",
+      rest: "out\n",
+    });
+    expect(splitBufferedAssistantText("~~~\n```\n\nx\n")).toEqual({
+      ready: "",
+      rest: "~~~\n```\n\nx\n",
+    });
+  });
+
+  it("delivers tight list items one at a time", () => {
+    expect(splitBufferedAssistantText("## Steps\n\n- one\n- two\n- thr")).toEqual({
+      ready: "## Steps\n\n- one\n- two\n",
+      rest: "- thr",
+    });
+    expect(splitBufferedAssistantText("1. one\n2. two\n   more\n3. t")).toEqual({
+      ready: "1. one\n2. two\n   more\n",
+      rest: "3. t",
+    });
+  });
+
+  it("keeps a partial list marker and list-like code buffered", () => {
+    expect(splitBufferedAssistantText("intro\n-")).toEqual({ ready: "", rest: "intro\n-" });
+    expect(splitBufferedAssistantText("intro\n1.")).toEqual({ ready: "", rest: "intro\n1." });
+    // `intro\n- \n` would parse as a setext heading, so a bare marker with only
+    // trailing whitespace is not a boundary on the partial line either.
+    expect(splitBufferedAssistantText("intro\n- ")).toEqual({ ready: "", rest: "intro\n- " });
+    expect(splitBufferedAssistantText("- one\n")).toEqual({ ready: "", rest: "- one\n" });
+    expect(splitBufferedAssistantText("```\n- one\n- two\n")).toEqual({
+      ready: "",
+      rest: "```\n- one\n- two\n",
+    });
+  });
+
+  it("holds a heading until the block under it is done", () => {
+    expect(splitBufferedAssistantText("intro\n\n## Setup\n\nInstall it")).toEqual({
+      ready: "intro\n\n",
+      rest: "## Setup\n\nInstall it",
+    });
+    expect(
+      splitBufferedAssistantText("intro\n\n# Plan\n\n## Setup\n\nInstall it.\n\nNext"),
+    ).toEqual({
+      ready: "intro\n\n# Plan\n\n## Setup\n\nInstall it.\n\n",
+      rest: "Next",
+    });
+  });
+
+  it("delivers the paragraph above a heading with no blank line between them", () => {
+    expect(splitBufferedAssistantText("para\n## Setup\n\nInstall")).toEqual({
+      ready: "para\n",
+      rest: "## Setup\n\nInstall",
+    });
+    // A bold line there continues the paragraph, so both stay buffered.
+    expect(splitBufferedAssistantText("para\n**Setup**\n\nInstall")).toEqual({
+      ready: "",
+      rest: "para\n**Setup**\n\nInstall",
+    });
+  });
+
+  it("holds a line of only bold text like a heading", () => {
+    expect(splitBufferedAssistantText("**Risk by area:**\n\n| a |\n|---|\n")).toEqual({
+      ready: "",
+      rest: "**Risk by area:**\n\n| a |\n|---|\n",
+    });
+    expect(splitBufferedAssistantText("**Use *npm* now**\n\nInstall it")).toEqual({
+      ready: "",
+      rest: "**Use *npm* now**\n\nInstall it",
+    });
+    expect(splitBufferedAssistantText("**Note:** read this.\n\nNext")).toEqual({
+      ready: "**Note:** read this.\n\n",
+      rest: "Next",
+    });
+  });
+
+  it("delivers a held heading with its first list item or its whole code block", () => {
+    expect(splitBufferedAssistantText("## Steps\n\n- one\n- tw")).toEqual({
+      ready: "## Steps\n\n- one\n",
+      rest: "- tw",
+    });
+    expect(splitBufferedAssistantText("## Code\n\n```ts\na\n\nb\n")).toEqual({
+      ready: "",
+      rest: "## Code\n\n```ts\na\n\nb\n",
+    });
+    expect(splitBufferedAssistantText("## Code\n\n```ts\na\n```\nafter")).toEqual({
+      ready: "## Code\n\n```ts\na\n```\n",
+      rest: "after",
+    });
   });
 });

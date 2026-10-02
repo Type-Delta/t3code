@@ -273,7 +273,7 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   return (
     <SidebarInset
       data-thread-route-workspace
-      className="relative h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh"
+      className="relative h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
       onDragLeave={handleNativeDragLeave}
       onDragOver={handleNativeDragOver}
       onDrop={handleNativeDrop}
