@@ -31,7 +31,7 @@ If you are tasked with syncing this fork with the upstream T3 Code repository, p
 - If some feature conflicts in a way that it is best to choose either theirs or ours, pause and ask me.
 - If you are unsure about how to proceed, please ask me for guidance.
 - This is not a "fix merge conflicts" task, you have to make sure that all features are behaving as expected and that those features make sense together both functionally, aesthetically and user experience. An app that works isn't necessarily a good app.
-- After merging, please run the full test suite and unsure that no regressions have been introduced. Then smoke test the app to make sure that all main features are working as expected. If auth is already setup, test with the live models and make sure the models are working as expected.
+- After merging, please run the full test suite and ensure that no regressions or addition test failures have been introduced. Then smoke test the app to make sure that all main upstream features and fork-introduced features are working as expected. If auth is already setup, test it E2E with the live models. Also test database migration, desktop builds and installer builds.
 - After all the code related changes are done (merged, fixed, verified, finalized/cleanup), do the following:
   - Update "Divergence Log" and "Merge History" sections in FORK.md with the latest changes.
   - Commit merge changes in a single commit with a clear message describing the merge decisions made.
