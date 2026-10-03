@@ -28,6 +28,7 @@ import * as DesktopBackendPool from "./DesktopBackendPool.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 const decodeDesktopBackendBootstrap = Schema.decodeEffect(
   Schema.fromJsonString(DesktopBackendBootstrap),
@@ -75,6 +76,8 @@ function makeProcess(options?: {
   readonly exitCode?: Effect.Effect<ChildProcessSpawner.ExitCode, PlatformError.PlatformError>;
   readonly kill?: ChildProcessSpawner.ChildProcessHandle["kill"];
   readonly getOutputFd?: ChildProcessSpawner.ChildProcessHandle["getOutputFd"];
+  readonly stdin?: ChildProcessSpawner.ChildProcessHandle["stdin"];
+  readonly isRunning?: ChildProcessSpawner.ChildProcessHandle["isRunning"];
 }): ChildProcessSpawner.ChildProcessHandle {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(123),
@@ -82,9 +85,9 @@ function makeProcess(options?: {
     stderr: options?.stderr ?? Stream.empty,
     all: Stream.merge(options?.stdout ?? Stream.empty, options?.stderr ?? Stream.empty),
     exitCode: options?.exitCode ?? Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-    isRunning: Effect.succeed(false),
+    isRunning: options?.isRunning ?? Effect.succeed(false),
     kill: options?.kill ?? (() => Effect.void),
-    stdin: Sink.drain,
+    stdin: options?.stdin ?? Sink.drain,
     getInputFd: () => Sink.drain,
     getOutputFd: options?.getOutputFd ?? (() => Stream.empty),
     unref: Effect.succeed(Effect.void),
@@ -191,6 +194,90 @@ function makeTestInstance(input: MakeInstanceInput) {
 }
 
 describe("DesktopBackendManager", () => {
+  it.effect("forces an unresponsive Windows backend after the stdin shutdown deadline", () =>
+    Effect.gen(function* () {
+      const ready = yield* Deferred.make<void>();
+      const inputClosed = yield* Deferred.make<void>();
+      const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      let forced = false;
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() =>
+          Effect.gen(function* () {
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                forced = true;
+              }).pipe(
+                Effect.andThen(Deferred.succeed(exited, ChildProcessSpawner.ExitCode(1))),
+                Effect.asVoid,
+              ),
+            );
+            return makeProcess({
+              isRunning: Effect.succeed(true),
+              stdin: Sink.fromEffect(Deferred.succeed(inputClosed, undefined).pipe(Effect.asVoid)),
+              exitCode: Deferred.await(exited),
+            });
+          }),
+        ),
+      );
+      const instance = yield* makeTestInstance({
+        spawnerLayer,
+        onReady: Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+      }).pipe(Effect.provideService(HostProcessPlatform, "win32"));
+      yield* instance.start;
+      yield* Deferred.await(ready);
+      const stopped = yield* instance.stop().pipe(Effect.forkChild);
+      yield* Deferred.await(inputClosed);
+      yield* TestClock.adjust("3999 millis");
+      assert.isFalse(forced);
+      yield* TestClock.adjust("1 millis");
+      yield* Fiber.join(stopped);
+      assert.isTrue(forced);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("closes Windows backend stdin before the spawner's termination finalizer", () =>
+    Effect.gen(function* () {
+      const ready = yield* Deferred.make<void>();
+      const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+      let cleanupFinished = false;
+      let forced = false;
+      const spawnerLayer = Layer.succeed(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() =>
+          Effect.gen(function* () {
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                forced = !cleanupFinished;
+              }),
+            );
+            return makeProcess({
+              isRunning: Effect.sync(() => !cleanupFinished),
+              stdin: Sink.fromEffect(
+                Effect.sync(() => {
+                  cleanupFinished = true;
+                }).pipe(
+                  Effect.andThen(Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0))),
+                  Effect.asVoid,
+                ),
+              ),
+              exitCode: Deferred.await(exited),
+            });
+          }),
+        ),
+      );
+      const instance = yield* makeTestInstance({
+        spawnerLayer,
+        onReady: Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+      }).pipe(Effect.provideService(HostProcessPlatform, "win32"));
+      yield* instance.start;
+      yield* Deferred.await(ready);
+      yield* instance.stop();
+      assert.isTrue(cleanupFinished);
+      assert.isFalse(forced);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("spawns the backend with fd3 bootstrap and fd4 telemetry", () =>
     Effect.scoped(
       Effect.gen(function* () {

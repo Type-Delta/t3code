@@ -49,6 +49,7 @@ import {
   type DesktopTelemetryControlMessage as DesktopTelemetryControlMessageValue,
 } from "@t3tools/contracts";
 import { waitForHttpReady as waitForHttpReadyShared } from "@t3tools/shared/httpReadiness";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
@@ -441,6 +442,8 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   options: RunBackendProcessOptions,
 ): Effect.fn.Return<BackendProcessExit, BackendProcessError, BackendProcessRunRequirements> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const platform = yield* HostProcessPlatform;
+  const shutdownViaStdin = platform === "win32" && options.bootstrapDelivery === "fd3";
   const bootstrapJson = yield* encodeBootstrapJson(options.bootstrap).pipe(
     Effect.mapError(
       (cause) =>
@@ -479,7 +482,12 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     extendEnv: options.extendEnv,
     // In Electron main, process.execPath points to the Electron binary.
     // Run the child in Node mode so this backend process does not become a GUI app instance.
-    stdin: options.bootstrapDelivery === "stdin" ? bootstrapStream : "ignore",
+    stdin:
+      options.bootstrapDelivery === "stdin"
+        ? bootstrapStream
+        : shutdownViaStdin
+          ? "pipe"
+          : "ignore",
     stdout: options.captureOutput ? "pipe" : "inherit",
     stderr: options.captureOutput ? "pipe" : "inherit",
     killSignal: "SIGTERM",
@@ -594,6 +602,23 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   );
 
   yield* probeReadiness().pipe(Effect.repeat({ while: (ready) => !ready }), Effect.forkScoped);
+
+  if (shutdownViaStdin) {
+    // Keep output readers alive during cleanup. Leave one second of the
+    // desktop's five-second stop budget for the spawner's forced tree kill.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        if (!(yield* handle.isRunning.pipe(Effect.orElseSucceed(() => true)))) return;
+        yield* Stream.empty.pipe(
+          Stream.run(handle.stdin),
+          Effect.ignore,
+          Effect.andThen(handle.exitCode),
+          Effect.timeoutOption("4 seconds"),
+          Effect.ignore,
+        );
+      }),
+    );
+  }
 
   const exit = yield* handle.exitCode.pipe(
     Effect.mapError(

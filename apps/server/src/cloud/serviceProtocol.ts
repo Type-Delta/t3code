@@ -5,7 +5,7 @@ import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 export const SERVICE_LAUNCHER_PROTOCOL = 3 as const;
 export const SERVICE_LAUNCHER_CONTEXT_ENV = "T3_SERVICE_LAUNCHER_CONTEXT";
 export const SERVICE_STATE_FILE = "service-state.json";
-/** Written by the launcher just before an explicit stop kills its child, so
+/** Written by the launcher just before an explicit stop shuts down its child, so
     the child can tell "the service is going away" from "the launcher is about
     to start my replacement" while a pending update is recorded. */
 export const SERVICE_STOP_MARKER_FILE = ".service-stopping";
@@ -50,6 +50,7 @@ export type ServiceLauncherChildMessage =
     };
 
 export type ServiceLauncherParentMessage =
+  | { readonly type: "shutdown" }
   | {
       readonly type: "update-accepted";
       readonly updateId: string;
@@ -256,6 +257,7 @@ export function decodeServiceLauncherParentMessage(
   value: unknown,
 ): ServiceLauncherParentMessage | undefined {
   if (!isRecord(value)) return undefined;
+  if (value.type === "shutdown") return { type: "shutdown" };
   if (value.type === "update-rejected" && typeof value.reason === "string") {
     return { type: value.type, reason: value.reason };
   }

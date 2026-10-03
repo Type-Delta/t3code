@@ -280,9 +280,32 @@ export async function terminateChild(
   signal: NodeJS.Signals = "SIGTERM",
 ): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  if (NodePath.sep === "\\" && (await terminateWindowsProcessTree(child))) {
-    await waitForExit(child);
-    return;
+  if (NodePath.sep === "\\") {
+    if (child.connected && child.send !== undefined) {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const exited = waitForExit(child);
+        const stopped = await Promise.race([
+          sendMessage(child, { type: "shutdown" })
+            .then(() => exited)
+            .then(
+              () => true,
+              () => false,
+            ),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), TERMINATE_GRACE_MS);
+          }),
+        ]);
+        if (stopped) return;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (await terminateWindowsProcessTree(child)) {
+      await waitForExit(child);
+      return;
+    }
   }
   child.kill(signal);
   const force = setTimeout(() => child.kill("SIGKILL"), TERMINATE_GRACE_MS);

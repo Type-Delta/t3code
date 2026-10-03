@@ -89,6 +89,7 @@ const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(func
   stdio: Stdio.Stdio,
   options: CodexAppServerClientOptions = {},
   terminationError?: Effect.Effect<CodexError.CodexAppServerError>,
+  shutdown?: (closeInput: Effect.Effect<void>) => Effect.Effect<void>,
 ): Effect.fn.Return<CodexAppServerClient["Service"], never, Scope.Scope> {
   const requestHandlers = new Map<string, ServerRequestHandler>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
@@ -193,6 +194,7 @@ const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(func
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,
   });
+  if (shutdown) yield* Effect.addFinalizer(() => shutdown(transport.closeInput));
 
   const request = <M extends CodexRpc.ClientRequestMethod>(
     method: M,
@@ -256,9 +258,30 @@ export const layerChildProcess = (
 ): Layer.Layer<CodexAppServerClient> =>
   Layer.effect(CodexAppServerClient, makeChildProcessClient(handle, options));
 
+/** Close app-server input before forcing termination of an unresponsive peer. */
+export const shutdownChildProcess = Effect.fnUntraced(function* (
+  handle: ChildProcessSpawner.ChildProcessHandle,
+  closeInput: Effect.Effect<void> = Stream.empty.pipe(Stream.run(handle.stdin), Effect.ignore),
+) {
+  if (!(yield* handle.isRunning.pipe(Effect.orElseSucceed(() => true)))) return;
+  yield* closeInput.pipe(
+    Effect.ignore,
+    Effect.andThen(handle.exitCode),
+    Effect.timeoutOption("3 seconds"),
+    Effect.ignore,
+  );
+  if (yield* handle.isRunning.pipe(Effect.orElseSucceed(() => true))) {
+    yield* handle.kill({ killSignal: "SIGKILL", forceKillAfter: "2 seconds" }).pipe(Effect.ignore);
+  }
+});
+
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
   yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  // End the writer while stdout/stderr are still drained, before the spawner
+  // finalizer can force-kill the process.
+  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle), (closeInput) =>
+    shutdownChildProcess(handle, closeInput),
+  );
 });

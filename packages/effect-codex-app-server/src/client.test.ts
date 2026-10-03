@@ -3,6 +3,12 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
+import * as FileSystem from "effect/FileSystem";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -10,6 +16,41 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+
+it.effect("forces an app-server that ignores EOF only after three seconds", () =>
+  Effect.gen(function* () {
+    const inputClosed = yield* Deferred.make<void>();
+    const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+    let running = true;
+    let kills = 0;
+    const handle = ChildProcessSpawner.makeHandle({
+      pid: ChildProcessSpawner.ProcessId(123),
+      stdin: Sink.fromEffect(Deferred.succeed(inputClosed, undefined).pipe(Effect.asVoid)),
+      stdout: Stream.empty,
+      stderr: Stream.empty,
+      all: Stream.empty,
+      exitCode: Deferred.await(exited),
+      isRunning: Effect.sync(() => running),
+      kill: (options) =>
+        Effect.gen(function* () {
+          assert.equal(options?.killSignal, "SIGKILL");
+          kills += 1;
+          running = false;
+          yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(1));
+        }),
+      getInputFd: () => Sink.drain,
+      getOutputFd: () => Stream.empty,
+      unref: Effect.succeed(Effect.void),
+    });
+    const shutdown = yield* CodexClient.shutdownChildProcess(handle).pipe(Effect.forkChild);
+    yield* Deferred.await(inputClosed);
+    yield* TestClock.adjust("2999 millis");
+    assert.equal(kills, 0);
+    yield* TestClock.adjust("1 millis");
+    yield* Fiber.join(shutdown);
+    assert.equal(kills, 1);
+  }),
+);
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -28,6 +69,47 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       });
       return yield* spawner.spawn(command);
     });
+
+  it.effect("lets the child finish stdin cleanup before closing its process scope", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "codex-stdin-shutdown-" });
+      const marker = path.join(root, "closed");
+      const scope = yield* Scope.make("sequential");
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const handle = yield* spawner
+        .spawn(
+          ChildProcess.make(process.execPath, [
+            "-e",
+            `
+          const fs = require("node:fs");
+          const readline = require("node:readline");
+          const input = readline.createInterface({ input: process.stdin });
+          input.on("line", line => {
+            const request = JSON.parse(line);
+            process.stdout.write(JSON.stringify({ id: request.id, result: {} }) + "\\n");
+          });
+          input.on("close", () => {
+            process.stderr.write("x".repeat(512 * 1024), () => {
+              fs.writeFileSync(process.argv[1], "closed");
+              process.exit(0);
+            });
+          });
+        `,
+            marker,
+          ]),
+        )
+        .pipe(Effect.provideService(Scope.Scope, scope));
+      const context = yield* Layer.buildWithScope(CodexClient.layerChildProcess(handle), scope);
+      yield* Effect.gen(function* () {
+        const client = yield* CodexClient.CodexAppServerClient;
+        yield* client.raw.request("initialize", {});
+      }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));
+      assert.equal(yield* fs.readFileString(marker), "closed");
+      assert.equal(yield* handle.exitCode, 0);
+    }),
+  );
 
   it.effect("initializes, handles typed server requests, and reads account and skills data", () =>
     Effect.gen(function* () {

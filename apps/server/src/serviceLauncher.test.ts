@@ -89,6 +89,40 @@ it.skipIf(NodePath.sep !== "\\")(
       await terminateChild(parent);
     }
   },
+  15_000,
+);
+
+it.skipIf(NodePath.sep !== "\\")(
+  "lets a Windows service child clean up before exiting",
+  async () => {
+    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-service-shutdown-"));
+    const marker = NodePath.join(root, "closed");
+    const parent = NodeChildProcess.spawn(
+      process.execPath,
+      [
+        "-e",
+        `
+    process.on("message", message => {
+      if (message.type !== "shutdown") return;
+      require("node:fs").writeFileSync(process.argv[1], "closed");
+      process.exit(0);
+    });
+    process.send({ ready: true });
+  `,
+        marker,
+      ],
+      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
+    );
+    try {
+      await new Promise<void>((resolve) => parent.once("message", () => resolve()));
+      await terminateChild(parent);
+      assert.equal(parent.exitCode, 0);
+      assert.equal(await NodeFSP.readFile(marker, "utf8"), "closed");
+    } finally {
+      await terminateChild(parent);
+      await NodeFSP.rm(root, { recursive: true, force: true });
+    }
+  },
 );
 
 it.skipIf(NodePath.sep !== "\\")("durably replaces service state on Windows", async () => {

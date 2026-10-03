@@ -370,8 +370,8 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
 
 /**
  * Spawns a short-lived `codex app-server`, runs the initialize handshake, and
- * hands the caller a connected client. Scoped: the process is killed when
- * the caller's scope closes. Shared by the status probe, the skills probe,
+ * hands the caller a connected client. Closing the caller's scope ends stdin
+ * before forcing an unresponsive process. Shared by the status probe, the skills probe,
  * and account-level requests such as reset-credit redemption.
  */
 export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(function* (input: {

@@ -34,6 +34,7 @@ import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
 import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
+import * as ParentProcessShutdown from "./process/ParentProcessShutdown.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
@@ -1133,4 +1134,7 @@ const makeServerLayer = Layer.unwrap(
 );
 
 // The CLI supplies configuration.
-export const runServer = Layer.launch(makeServerLayer);
+export const runServer = Effect.gen(function* () {
+  const shutdown = yield* ParentProcessShutdown.ParentProcessShutdown;
+  yield* Layer.launch(makeServerLayer).pipe(Effect.raceFirst(shutdown.awaitRequest));
+}).pipe(Effect.provide(ParentProcessShutdown.layer));

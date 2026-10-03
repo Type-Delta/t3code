@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -50,6 +51,7 @@ export interface CodexAppServerPatchedProtocolOptions {
 }
 
 export interface CodexAppServerPatchedProtocol {
+  readonly closeInput: Effect.Effect<void>;
   readonly incomingNotifications: Stream.Stream<CodexAppServerIncomingNotification>;
   readonly incomingRequests: Stream.Stream<CodexAppServerIncomingRequest>;
   readonly request: (
@@ -452,7 +454,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       Effect.forkScoped,
     );
 
-    yield* Stream.fromQueue(outgoing).pipe(
+    const writer = yield* Stream.fromQueue(outgoing).pipe(
       Stream.run(options.stdio.stdout()),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
@@ -491,6 +493,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       });
 
     return {
+      closeInput: Queue.end(outgoing).pipe(Effect.andThen(Fiber.join(writer)), Effect.asVoid),
       incomingNotifications: Stream.fromQueue(incomingNotifications),
       incomingRequests: Stream.fromQueue(incomingRequests),
       request,

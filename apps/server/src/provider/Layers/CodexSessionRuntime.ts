@@ -1588,7 +1588,7 @@ export const makeCodexSessionRuntime = (
       );
       // The peer may still be working after its pipe failed. End only the
       // process this runtime owns; a later message can resume its durable thread.
-      yield* child.kill().pipe(Effect.ignore, Effect.forkIn(runtimeScope));
+      yield* CodexClient.shutdownChildProcess(child).pipe(Effect.forkIn(runtimeScope));
     });
 
     const clientContext = yield* CodexClient.layerChildProcess(child, {

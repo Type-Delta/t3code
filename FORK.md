@@ -6,6 +6,20 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
+### DL039 — Graceful Codex shutdown before Windows tree termination
+
+Codex app-server sessions and probes drain their protocol writer and close stdin before waiting up to three seconds for exit. Output readers stay open during cleanup; an unresponsive app-server still receives a forced termination. Transport failures use the same stdin-first shutdown.
+
+On Windows, the service launcher requests shutdown over its existing IPC channel and allows five seconds for server cleanup before `taskkill /T /F`. Native desktop backends use stdin EOF to request server shutdown and allow four seconds before the process spawner forces termination, within the existing five-second desktop stop budget. Linux, macOS, and WSL retain their signal-based server shutdown. Older servers that do not recognize these requests still reach the forced fallback.
+
+This is an experiment to reduce abrupt termination. It does not establish or fix the cause of the intermittent zero-handle Codex processes stuck in Windows termination.
+
+**Implementation evidence:** `packages/effect-codex-app-server/src/{client,protocol}.ts`, `apps/server/src/{serviceLauncher,server}.ts`, `apps/server/src/process/ParentProcessShutdown.ts`, `apps/server/src/provider/Layers/CodexSessionRuntime.ts`, and `apps/desktop/src/backend/DesktopBackendManager.ts`.
+
+**Recorded validation:** Focused client, protocol, launcher, parent shutdown, Codex runtime/probe, and desktop lifecycle tests passed. Three isolated installed-Codex initialization/EOF cycles exited with code 0. One full server shutdown through launcher IPC and two through desktop stdin EOF exited with code 0 in 2.7–2.8 seconds. `vp check` and `vp run typecheck` passed.
+
+**Last updated:** 2026-10-02
+
 ### DL038 — Precise transcript identity checks on Windows
 
 Session scanning skips parsing completed history from matching file metadata only when the inode is present and a safe JavaScript integer. Windows can omit inode values or round NTFS file IDs, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts, 4 GiB, and 100,000 records per scan. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
