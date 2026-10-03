@@ -101,8 +101,9 @@ function makeDesktopWindowLayer(
 }
 
 describe("DesktopLifecycle", () => {
-  for (const platform of ["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>) {
-    it.effect(`keeps UI restarts available and lets updates quit on ${platform}`, () => {
+  it.effect.each(["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>)(
+    "keeps UI restarts available and lets updates quit on %s",
+    (platform) => {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
       let quitCount = 0;
       let activateCount = 0;
@@ -177,8 +178,8 @@ describe("DesktopLifecycle", () => {
           assert.isTrue(yield* Ref.get(state.quitting));
         }),
       ).pipe(Effect.provide(layer));
-    });
-  }
+    },
+  );
 
   it.effect("destroys windows before waiting for backend shutdown", () =>
     Effect.gen(function* () {

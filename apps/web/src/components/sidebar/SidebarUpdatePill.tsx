@@ -125,6 +125,8 @@ function SidebarUpdateControl() {
 
   useEffect(() => {
     if (prefersReducedMotion) {
+      // The latch tracks an animation edge and must reset when motion settings change.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsCheckAnimationLatched(false);
     } else if (state?.status === "checking") {
       setIsCheckAnimationLatched(true);

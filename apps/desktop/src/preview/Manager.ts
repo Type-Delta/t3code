@@ -137,7 +137,6 @@ const MAX_INTERACTIVE_ELEMENTS = 200;
  * snapshot's element list into 60 KB of repeated page text. Names are labels,
  * not content, so cap them where they are read.
  */
-const MAX_INTERACTIVE_ELEMENT_NAME_LENGTH = 200;
 const MAX_SCREENSHOT_WIDTH = 1280;
 /** How long an armed tab keeps the exclusive display-media slot before another tab may take it. */
 const RECORDING_ARM_GRACE_MS = 10_000;
@@ -1339,6 +1338,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         if (existing && !existing.isDetached()) {
           return Effect.succeed([existing, sessions] as const);
         }
+        // A guest can be destroyed while it waits for this lock, and its native
+        // methods throw once it is.
+        if (wc.isDestroyed()) {
+          return Effect.fail(
+            new PreviewOperationError({
+              operation: "ensureControlSession",
+              webContentsId: wc.id,
+              cause: new Error("WebContents was destroyed"),
+            }),
+          );
+        }
         if (wc.isDevToolsOpened()) {
           return Effect.fail(
             new PreviewAutomationDevToolsOpenError({
@@ -1459,6 +1469,21 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               wcDebugger.attach("1.3");
             });
             const enableDebugger = Effect.gen(function* () {
+              // Electron gives `<webview>` guests a transparent base background, and
+              // Chromium only paints a dark canvas for dark color-scheme pages over an
+              // opaque base. Without this, dark-scheme pages with no background of
+              // their own (text/plain, e.g. .md files) render white text on white.
+              // White matches the webview's existing white backing, so light pages look
+              // the same; Chromium still swaps in its dark canvas for dark-scheme pages.
+              // Sent first because a document that paints before it arrives keeps the
+              // transparent base until its next load.
+              yield* attemptPromise(
+                { operation: "initializeDebugger.defaultBackground", webContentsId: wc.id },
+                () =>
+                  wcDebugger.sendCommand("Emulation.setDefaultBackgroundColorOverride", {
+                    color: { r: 255, g: 255, b: 255, a: 1 },
+                  }),
+              );
               yield* Effect.forEach(
                 ["Runtime.enable", "Accessibility.enable", "Network.enable", "Log.enable"],
                 (method) =>
@@ -2572,6 +2597,30 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     return yield* withTabLifecycleLock(
       tabId,
       registerWebviewUnlocked(tabId, webContentsId, expectedGeneration),
+    );
+  });
+
+  // Called when a guest attaches to the window, before its first document
+  // paints. A tab opened straight to a URL often paints before the renderer
+  // gets to registerWebview, which would leave that page on the transparent
+  // base. registerWebview reuses the session opened here.
+  const prepareWebview = Effect.fn("PreviewManager.prepareWebview")(function* (
+    wc: Electron.WebContents,
+  ) {
+    const webContentsId = wc.id;
+    // A guest destroyed before any tab claims it has no other cleanup path.
+    wc.once("destroyed", () => {
+      runFork(detachControlSession(webContentsId));
+    });
+    // Runs detached from the attach event, so nothing may escape. registerWebview
+    // opens the session again if this one did not.
+    yield* ensureControlSession(wc).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logDebug("Preview webview control session was not opened on attach.", {
+          webContentsId,
+          cause,
+        }),
+      ),
     );
   });
 
@@ -4965,6 +5014,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     openPictureInPicture,
     openDevTools,
     pickElement,
+    prepareWebview,
     reapplyZoom,
     refresh,
     registerWebview,
@@ -5301,6 +5351,7 @@ export class PreviewManager extends Context.Service<
       tabId: string,
       webContentsId: number,
     ) => Effect.Effect<void, PreviewManagerError>;
+    readonly prepareWebview: (webContents: Electron.WebContents) => Effect.Effect<void>;
     readonly navigate: (
       tabId: string,
       url: string,
@@ -5431,6 +5482,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     createTab: operations.createTab,
     closeTab: operations.closeTab,
     registerWebview: operations.registerWebview,
+    prepareWebview: operations.prepareWebview,
     navigate: operations.navigate,
     goBack: operations.goBack,
     goForward: operations.goForward,

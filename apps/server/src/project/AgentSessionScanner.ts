@@ -48,7 +48,7 @@ import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hos
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 
 import * as ServerConfig from "../config.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -182,6 +182,19 @@ export type AgentSessionRecentThread =
 export class AgentSessionScanner extends Context.Service<
   AgentSessionScanner,
   {
+    /** Validate a saved provider conversation before adopting its native binding. */
+    readonly validateNativeConversation: (input: {
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly driver: "codex" | "claudeAgent";
+      readonly nativeThreadId: string;
+      readonly cwd: string;
+    }) => Effect.Effect<
+      | { readonly status: "valid"; readonly nativeThreadId: string; readonly cwd: string }
+      | {
+          readonly status: "missing" | "ambiguous" | "invalid" | "unavailable";
+          readonly reason: string;
+        }
+    >;
     /**
      * Discover every directory the configured Claude and Codex homes have run
      * a session in. Candidates are returned newest-first; the client decides
@@ -624,7 +637,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
-  const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const projectStore = yield* ProjectStore.ProjectStoreV2;
   const baseDir = path.resolve(serverConfig.baseDir);
   const worktreesDir = path.resolve(serverConfig.worktreesDir);
   // Windows filesystems are case-insensitive, so path prefix checks there
@@ -921,6 +934,34 @@ export const make = Effect.gen(function* () {
     return path.join(NodeOS.homedir(), ".claude");
   };
 
+  const resolveInstanceHome = Effect.fn("AgentSessionScanner.resolveInstanceHome")(function* (
+    source: "claudeAgent" | "codex",
+    instance: ProviderInstanceConfig,
+  ) {
+    const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+    const environmentHome =
+      instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
+      hostEnvironment[homeVariable];
+    if (source === "claudeAgent") {
+      const config = decodeClaudeSettings(instance.config ?? {});
+      return Option.isNone(config)
+        ? null
+        : resolveClaudeConfigDir(config.value.homePath, environmentHome);
+    }
+    const config = decodeCodexSettings(instance.config ?? {});
+    if (Option.isNone(config)) return null;
+    const codexSettings =
+      config.value.homePath.trim().length === 0 &&
+      config.value.shadowHomePath.trim().length === 0 &&
+      environmentHome?.trim()
+        ? { ...config.value, homePath: environmentHome }
+        : config.value;
+    const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
+      Effect.provideService(Path.Path, path),
+    );
+    return layout.sharedHomePath;
+  });
+
   const discoverClaudeTranscripts = Effect.fn("AgentSessionScanner.discoverClaudeTranscripts")(
     function* (homePath: string, providerInstanceId: ProviderInstanceId, operationBudget: number) {
       const projectsDir = path.join(homePath, "projects");
@@ -1125,30 +1166,8 @@ export const make = Effect.gen(function* () {
       const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
       const seenHomes = new Set<string>();
       for (const { instanceId, config: instance } of instances) {
-        const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-        const environmentHome =
-          instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
-          hostEnvironment[homeVariable];
-
-        let homePath: string;
-        if (source === "claudeAgent") {
-          const config = decodeClaudeSettings(instance.config ?? {});
-          if (Option.isNone(config)) continue;
-          homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
-        } else {
-          const config = decodeCodexSettings(instance.config ?? {});
-          if (Option.isNone(config)) continue;
-          const codexSettings =
-            config.value.homePath.trim().length === 0 &&
-            config.value.shadowHomePath.trim().length === 0 &&
-            environmentHome?.trim()
-              ? { ...config.value, homePath: environmentHome }
-              : config.value;
-          const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
-            Effect.provideService(Path.Path, path),
-          );
-          homePath = layout.sharedHomePath;
-        }
+        const homePath = yield* resolveInstanceHome(source, instance);
+        if (homePath === null) continue;
 
         const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
         if (seenHomes.has(homeKey)) continue;
@@ -1273,15 +1292,15 @@ export const make = Effect.gen(function* () {
 
     // Resolve persisted roots too. A project and a transcript can name
     // different symlinks to the same directory.
-    const shellSnapshot = yield* projectionSnapshotQuery
-      .getShellSnapshot()
+    const importedProjects = yield* projectStore
+      .listShells()
       .pipe(
         Effect.mapError(
           (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
         ),
       );
-    const importedProjectsByRoot = new Map<string, (typeof shellSnapshot.projects)[number]>();
-    for (const project of shellSnapshot.projects) {
+    const importedProjectsByRoot = new Map<string, (typeof importedProjects)[number]>();
+    for (const project of importedProjects) {
       const projectRoot = path.resolve(expandHomePath(project.workspaceRoot));
       importedProjectsByRoot.set(normalizeProjectPathForComparison(projectRoot), project);
       importedProjectsByRoot.set(yield* directoryIdentity(projectRoot), project);
@@ -1524,7 +1543,200 @@ export const make = Effect.gen(function* () {
     completedSources = [],
   ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
 
-  return AgentSessionScanner.of({ scan, recentThreads });
+  const validateNativeConversation: AgentSessionScanner["Service"]["validateNativeConversation"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      if (!/^[a-zA-Z0-9_-]+$/.test(input.nativeThreadId)) {
+        return {
+          status: "invalid",
+          reason: "Native conversation ID is not a safe transcript identifier",
+        } as const;
+      }
+      const settings = yield* serverSettings.getSettings;
+      const instance =
+        settings.providerInstances[input.providerInstanceId] ??
+        (input.providerInstanceId === input.driver
+          ? {
+              driver: ProviderDriverKind.make(input.driver),
+              config: settings.providers[input.driver],
+            }
+          : undefined);
+      if (instance === undefined || instance.driver !== input.driver) {
+        return {
+          status: "invalid",
+          reason: "Native conversation provider instance does not match its driver",
+        } as const;
+      }
+      const home = yield* resolveInstanceHome(input.driver, instance);
+      if (home === null)
+        return { status: "invalid", reason: "Provider home configuration is invalid" } as const;
+      const workspace = yield* fileSystem.stat(input.cwd);
+      if (workspace.type !== "Directory") {
+        return {
+          status: "invalid",
+          reason: "Native conversation workspace is not a directory",
+        } as const;
+      }
+      const expectedCwd = yield* directoryIdentity(input.cwd, workspace);
+      const candidates: string[] = [];
+      // Exact lookup has no discovery-age or newest-first budget. An old saved
+      // conversation must remain resumable even in a large provider home.
+      if (input.driver === "claudeAgent") {
+        const projects = path.join(home, "projects");
+        if (yield* fileSystem.exists(projects)) {
+          for (const entry of yield* fileSystem.readDirectory(projects)) {
+            const directory = path.join(projects, entry);
+            if ((yield* fileSystem.stat(directory)).type !== "Directory") continue;
+            const candidate = path.join(directory, `${input.nativeThreadId}.jsonl`);
+            if (yield* fileSystem.exists(candidate)) candidates.push(candidate);
+          }
+        }
+      } else {
+        const directories = [path.join(home, "sessions"), path.join(home, "archived_sessions")];
+        const visited = new Set<string>();
+        while (directories.length > 0) {
+          const directory = directories.pop()!;
+          if (!(yield* fileSystem.exists(directory))) continue;
+          const identity = yield* fileSystem.realPath(directory);
+          if (visited.has(identity)) continue;
+          visited.add(identity);
+          for (const entry of yield* fileSystem.readDirectory(directory)) {
+            const candidate = path.join(directory, entry);
+            const stats = yield* fileSystem.stat(candidate);
+            if (stats.type === "Directory") directories.push(candidate);
+            else if (
+              stats.type === "File" &&
+              (entry === `${input.nativeThreadId}.jsonl` ||
+                entry.endsWith(`-${input.nativeThreadId}.jsonl`))
+            )
+              candidates.push(candidate);
+          }
+        }
+      }
+      if (candidates.length === 0)
+        return {
+          status: "missing",
+          reason: "Native conversation transcript was not found in the configured provider home",
+        } as const;
+
+      const metadataSchema = Schema.Struct({
+        type: Schema.optional(Schema.String),
+        sessionId: Schema.optional(Schema.String),
+        cwd: Schema.optional(Schema.String),
+        payload: Schema.optional(
+          Schema.Struct({
+            id: Schema.optional(Schema.String),
+            cwd: Schema.optional(Schema.String),
+          }),
+        ),
+      });
+      const select = createTranscriptJsonSelector(metadataSchema);
+      const decode = Schema.decodeUnknownOption(metadataSchema);
+      let validCount = 0;
+      for (const candidate of candidates) {
+        const metadata = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const file = yield* fileSystem.open(candidate, { flag: "r" });
+            const before = transcriptIdentity(candidate, yield* file.stat);
+            let selectedBytes = 0;
+            const reserve = (bytes: number) => {
+              selectedBytes += bytes;
+              if (selectedBytes > MAX_TRANSCRIPT_SCAN_BYTES)
+                throw new TranscriptJsonLimitError("Native metadata exceeds memory limit");
+            };
+            let reader = createTranscriptJsonReader(reserve, select);
+            let decoder = new TextDecoder();
+            let bytesRead = 0;
+            let found: { id: string; cwd: string } | undefined;
+            const finish = () => {
+              reader.write(decoder.decode());
+              const record = decode(reader.finish());
+              if (Option.isSome(record)) {
+                const value = record.value;
+                const id =
+                  input.driver === "codex"
+                    ? value.type === "session_meta"
+                      ? value.payload?.id
+                      : undefined
+                    : value.sessionId;
+                const cwd = input.driver === "codex" ? value.payload?.cwd : value.cwd;
+                if (id !== undefined && cwd !== undefined) found = { id, cwd };
+              }
+              reader = createTranscriptJsonReader(reserve, select);
+              decoder = new TextDecoder();
+            };
+            while (
+              bytesRead < Math.min(before.size, MAX_TRANSCRIPT_SCAN_BYTES) &&
+              found === undefined
+            ) {
+              const chunk = yield* file.readAlloc(
+                Math.min(
+                  METADATA_READ_BYTES,
+                  before.size - bytesRead,
+                  MAX_TRANSCRIPT_SCAN_BYTES - bytesRead,
+                ),
+              );
+              if (Option.isNone(chunk)) break;
+              bytesRead += chunk.value.byteLength;
+              yield* Effect.try(() => {
+                let start = 0;
+                while (start < chunk.value.byteLength && found === undefined) {
+                  const newline = chunk.value.indexOf(10, start);
+                  const end = newline === -1 ? chunk.value.byteLength : newline;
+                  reader.write(decoder.decode(chunk.value.subarray(start, end), { stream: true }));
+                  if (newline === -1) break;
+                  finish();
+                  start = newline + 1;
+                }
+              });
+            }
+            if (found === undefined && bytesRead === before.size && before.size > 0)
+              yield* Effect.try(finish);
+            if (!sameTranscriptIdentity(before, transcriptIdentity(candidate, yield* file.stat))) {
+              return {
+                status: "unavailable",
+                reason: "Native conversation transcript changed during validation",
+              } as const;
+            }
+            if (found === undefined)
+              return {
+                status: "unavailable",
+                reason:
+                  "Native conversation metadata is missing, malformed, or exceeds the validation limit",
+              } as const;
+            return { status: "metadata", ...found } as const;
+          }),
+        );
+        if (metadata.status !== "metadata") return metadata;
+        if (
+          metadata.id !== input.nativeThreadId ||
+          (yield* directoryIdentity(metadata.cwd)) !== expectedCwd
+        ) {
+          return {
+            status: "invalid",
+            reason:
+              "Native conversation transcript ID or workspace does not match the saved binding",
+          } as const;
+        }
+        validCount += 1;
+      }
+      return validCount === 1
+        ? ({ status: "valid", nativeThreadId: input.nativeThreadId, cwd: input.cwd } as const)
+        : ({
+            status: "ambiguous",
+            reason: "Multiple transcripts match the saved native conversation",
+          } as const);
+    }).pipe(
+      Effect.catch(() =>
+        Effect.succeed({
+          status: "unavailable" as const,
+          reason: "Native conversation transcript or provider home could not be read safely",
+        }),
+      ),
+    );
+
+  return AgentSessionScanner.of({ scan, recentThreads, validateNativeConversation });
 });
 
 export const layer = Layer.effect(AgentSessionScanner, make);

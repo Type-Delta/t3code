@@ -12,7 +12,14 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "preview" | "device" | "pull-requests" | "threads";
+const ALL_MCP_CAPABILITIES = [
+  "preview",
+  "orchestration",
+  "worktree",
+  "device",
+  "pull-requests",
+] as const;
+export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
 /** The credential identity carried by one MCP invocation. */
 export type McpPrincipal =
@@ -31,13 +38,15 @@ export type McpPrincipal =
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
-  /** Present for fork management-key authorization; provider sessions use the native identity. */
+  /** Management keys have no owning provider thread or provider run. */
   readonly principal?: McpPrincipal;
-  /** Legacy callers may provide these directly; principals are preferred. */
+  /** Legacy provider callers may provide these directly; principals are preferred. */
   readonly threadId?: ThreadId;
   readonly providerSessionId?: string;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly capabilities?: ReadonlySet<McpCapability>;
+  /** Project-local callers are restricted to their project unless set to global. */
+  readonly mcpToolScope?: "global" | "project";
   readonly issuedAt: number;
 }
 
@@ -57,6 +66,53 @@ export const managementScopeByThreadOperation = {
   wait: "threads:wait",
 } as const satisfies Record<McpThreadToolOperation, ManagementApiKeyScope>;
 
+const managementToolScopes: Readonly<Record<string, ManagementApiKeyScope>> = {
+  orchestrator_capabilities: "models:read",
+  t3_project_list: "threads:list",
+  t3_project_read: "threads:read",
+  t3_project_create: "threads:create",
+  t3_project_update: "threads:create",
+  t3_project_delete: "threads:create",
+  t3_project_clone: "threads:create",
+  t3_thread_launch: "threads:create",
+  t3_thread_list: "threads:list",
+  t3_thread_search: "threads:list",
+  t3_thread_read: "threads:read",
+  t3_thread_transfers: "threads:read",
+  t3_thread_configuration: "threads:read",
+  t3_thread_wait: "threads:wait",
+  t3_thread_send: "threads:message",
+  t3_thread_interrupt: "threads:message",
+  t3_thread_update: "threads:message",
+  t3_thread_organize: "threads:message",
+  t3_thread_configure: "threads:message",
+  t3_thread_fork: "threads:message",
+  t3_thread_merge_back: "threads:message",
+};
+
+export const managementMcpToolScope = (toolName: string): ManagementApiKeyScope | undefined => {
+  if (
+    toolName !== "orchestrator_capabilities" &&
+    !toolName.startsWith("t3_thread_") &&
+    !toolName.startsWith("t3_project_")
+  )
+    return undefined;
+  // Unknown tools fail closed until their management-key scope is reviewed.
+  return managementToolScopes[toolName];
+};
+
+export const isManagementMcpToolAllowed = (toolName: string): boolean =>
+  managementMcpToolScope(toolName) !== undefined;
+
+export const managementKeyCanUseTool = (
+  invocation: McpInvocationScope,
+  toolName: string,
+): boolean => {
+  if (!isManagementKeyPrincipal(invocation.principal)) return false;
+  const requiredScope = managementMcpToolScope(toolName);
+  return requiredScope !== undefined && invocation.principal.scopes.has(requiredScope);
+};
+
 export const isProviderSessionPrincipal = (
   principal: McpPrincipal | undefined,
 ): principal is Extract<McpPrincipal, { readonly type: "provider-session" }> =>
@@ -74,26 +130,26 @@ export const getProviderSessionPrincipal = (
     ? invocation.principal
     : undefined;
 
-const managementFallbackThreadId = ThreadId.make("mcp-management-key");
-const managementFallbackProviderInstanceId = ProviderInstanceId.make("mcp-management-key");
+/** Resolve provider identity without inventing one for management-key callers. */
+export const getInvocationThreadId = (invocation: McpInvocationScope): ThreadId | undefined =>
+  invocation.threadId ?? getProviderSessionPrincipal(invocation)?.threadId;
 
-/** Resolve legacy direct fields and the newer provider principal to one context. */
-export const getInvocationThreadId = (invocation: McpInvocationScope): ThreadId =>
-  invocation.threadId ??
-  getProviderSessionPrincipal(invocation)?.threadId ??
-  managementFallbackThreadId;
-
-export const getInvocationProviderSessionId = (invocation: McpInvocationScope): string =>
-  invocation.providerSessionId ??
-  getProviderSessionPrincipal(invocation)?.providerSessionId ??
-  "mcp-management-key";
+export const getInvocationProviderSessionId = (
+  invocation: McpInvocationScope,
+): string | undefined =>
+  invocation.providerSessionId ?? getProviderSessionPrincipal(invocation)?.providerSessionId;
 
 export const getInvocationProviderInstanceId = (
   invocation: McpInvocationScope,
-): ProviderInstanceId =>
-  invocation.providerInstanceId ??
-  getProviderSessionPrincipal(invocation)?.providerInstanceId ??
-  managementFallbackProviderInstanceId;
+): ProviderInstanceId | undefined =>
+  invocation.providerInstanceId ?? getProviderSessionPrincipal(invocation)?.providerInstanceId;
+
+/** Stable credential identity for request keys and command ids. */
+export const getInvocationCredentialId = (invocation: McpInvocationScope): string | undefined =>
+  getInvocationProviderSessionId(invocation) ??
+  (isManagementKeyPrincipal(invocation.principal)
+    ? `management-key:${invocation.principal.keyId}`
+    : undefined);
 
 export const getManagementOrigin = (
   invocation: McpInvocationScope,
@@ -121,9 +177,15 @@ const missingCapability = (
   const fields = {
     capability,
     environmentId: invocation.environmentId,
-    threadId: getInvocationThreadId(invocation),
-    providerSessionId: getInvocationProviderSessionId(invocation),
-    providerInstanceId: getInvocationProviderInstanceId(invocation),
+    ...(getInvocationThreadId(invocation) === undefined
+      ? {}
+      : { threadId: getInvocationThreadId(invocation)! }),
+    ...(getInvocationProviderSessionId(invocation) === undefined
+      ? {}
+      : { providerSessionId: getInvocationProviderSessionId(invocation)! }),
+    ...(getInvocationProviderInstanceId(invocation) === undefined
+      ? {}
+      : { providerInstanceId: getInvocationProviderInstanceId(invocation)! }),
   };
   if (capability === "preview")
     return new PreviewAutomationUnavailableError({ ...fields, capability });
@@ -134,6 +196,7 @@ export const requireMcpCapability = <const C extends McpCapability>(
   capability: C,
 ): Effect.Effect<McpInvocationScope, McpCapabilityError<C>, McpInvocationContext> =>
   Effect.flatMap(McpInvocationContext, (invocation) =>
+    !isManagementKeyPrincipal(invocation.principal) &&
     invocation.capabilities?.has(capability) === true
       ? Effect.succeed(invocation)
       : Effect.fail(missingCapability(invocation, capability) as McpCapabilityError<C>),

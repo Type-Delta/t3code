@@ -656,9 +656,9 @@ export type PreviewAutomationResponse = typeof PreviewAutomationResponse.Type;
 
 const McpCapabilityErrorFields = {
   environmentId: EnvironmentId,
-  threadId: ThreadId,
-  providerSessionId: TrimmedNonEmptyString,
-  providerInstanceId: ProviderInstanceId,
+  threadId: Schema.optionalKey(ThreadId),
+  providerSessionId: Schema.optionalKey(TrimmedNonEmptyString),
+  providerInstanceId: Schema.optionalKey(ProviderInstanceId),
 };
 
 /** Agents read this message, so it names the next step and not only the failure. */

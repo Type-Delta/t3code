@@ -131,12 +131,6 @@ interface BrokerState {
 
 const HOST_TIMEOUT_QUARANTINE_MS = 30_000;
 
-const providerPreviewFallback = {
-  threadId: ThreadId.make("mcp-management-key"),
-  providerSessionId: "mcp-management-key",
-  providerInstanceId: ProviderInstanceId.make("mcp-management-key"),
-} as const;
-
 const removeConnectionFromState = (
   current: BrokerState,
   clientId: string,
@@ -198,7 +192,7 @@ const providerPreviewContext = (scope: McpInvocationContext.McpInvocationScope) 
           providerSessionId: scope.providerSessionId,
           providerInstanceId: scope.providerInstanceId,
         }
-      : providerPreviewFallback;
+      : undefined;
 
 const isPreviewTabId = Schema.is(PreviewTabId);
 
@@ -645,9 +639,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         return yield* new PreviewAutomationUnavailableError({
           capability: "preview",
           environmentId: input.scope.environmentId,
-          // This branch is defensive: normal preview MCP handlers reject
-          // management principals before entering the broker.
-          ...providerPreviewFallback,
         });
       }
       return yield* new PreviewAutomationNoAvailableHostError({
@@ -679,7 +670,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
           supportsRequestAcknowledgement: true,
           request: {
             requestId,
-            threadId: providerPreviewContext(input.scope)!.threadId,
+            threadId: requestContext.threadId,
             tabId: requestContext.tabId,
             tabIdExplicit: input.tabId !== undefined,
             operation: input.operation,

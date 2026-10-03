@@ -35,55 +35,6 @@ function shortcutEvent(
   };
 }
 
-describe("RightPanelTabs", () => {
-  it("attributes tabs to their source thread without changing visible titles", () => {
-    const markup = renderToStaticMarkup(
-      <RightPanelTabs
-        mode="inline"
-        sourceThread={{ key: "environment-1:thread-1", title: "Implement source attribution" }}
-        surfaces={[{ id: "diff", kind: "diff" }]}
-        environmentId={null}
-        activeSurfaceId="diff"
-        pendingSurfaceIds={new Set()}
-        previewSessions={{}}
-        desktopByTabId={{}}
-        terminalLabelsById={new Map()}
-        onActivate={() => {}}
-        onCloseSurface={() => {}}
-        onCloseOtherSurfaces={() => {}}
-        onCloseSurfacesToRight={() => {}}
-        onCloseAllSurfaces={() => {}}
-        onCopyFilePath={() => {}}
-        onAddBrowser={() => {}}
-        onAddBrowserInProfile={() => {}}
-        onAddTerminal={() => {}}
-        onAddDiff={() => {}}
-        onAddFiles={() => {}}
-        onAddPullRequest={() => {}}
-        onAddPullRequests={() => {}}
-        onAddAgents={() => {}}
-        onAddDevice={() => {}}
-        browserAvailable
-        terminalAvailable
-        diffAvailable
-        filesAvailable
-        pullRequestAvailable
-        pullRequestsAvailable={false}
-        agentsAvailable
-        deviceAvailable={false}
-        liveAgentCount={0}
-      >
-        <div />
-      </RightPanelTabs>,
-    );
-
-    expect(markup).toContain('data-source-thread-key="environment-1:thread-1"');
-    expect(markup).toContain('aria-label="Diff. Thread: Implement source attribution"');
-    expect(markup).toContain("Thread: Implement source attribution");
-    expect(markup).toContain('<span class="truncate">Diff</span>');
-  });
-});
-
 const previewSurface = {
   id: "browser:tab-1" as const,
   kind: "preview" as const,
@@ -147,7 +98,6 @@ function renderTabs(
   return renderToStaticMarkup(
     <RightPanelTabs
       mode="inline"
-      sourceThread={{ key: "environment-1:thread-1", title: "Preview thread" }}
       surfaces={second ? [previewSurface, secondSurface] : [previewSurface]}
       environmentId={null}
       activeSurfaceId={previewSurface.id}
@@ -172,16 +122,13 @@ function renderTabs(
       onAddPullRequests={() => undefined}
       onAddDiff={() => undefined}
       onAddFiles={() => undefined}
-      onAddAgents={() => undefined}
       onAddDevice={() => undefined}
-      liveAgentCount={0}
       browserAvailable
       terminalAvailable={false}
       diffAvailable={false}
       filesAvailable={false}
       pullRequestAvailable={false}
       pullRequestsAvailable={false}
-      agentsAvailable={false}
       deviceAvailable={false}
     >
       <div>content</div>

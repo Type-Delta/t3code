@@ -1,3 +1,4 @@
+// @effect-diagnostics preferSchemaOverJson:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
 import { describe, expect, it } from "@effect/vitest";
@@ -20,7 +21,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 
@@ -34,39 +35,12 @@ const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => (
   updatedAt: "2026-01-01T00:00:00.000Z",
 });
 
-/** Only `getShellSnapshot` is exercised; the rest must not be called. */
-const makeProjectionSnapshotQueryLayer = (importedWorkspaceRoots: ReadonlyArray<string>) =>
-  Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
-    getCommandReadModel: () => Effect.die("unused"),
-    getUserInputActivity: () => Effect.die("unused"),
-    listActivitiesByKind: () => Effect.die("unused"),
-    getSnapshot: () => Effect.die("unused"),
-    getShellSnapshot: () =>
-      Effect.succeed({
-        snapshotSequence: 0,
-        projects: importedWorkspaceRoots.map((workspaceRoot) => makeProjectShell(workspaceRoot)),
-        threads: [],
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      }),
-    getDeletedWorktreeThreads: () => Effect.die("unused"),
-    listThreadsWithPullRequests: () => Effect.die("unused"),
-    getArchivedShellSnapshot: () => Effect.die("unused"),
-    getSnapshotSequence: () => Effect.die("unused"),
-    getCounts: () => Effect.die("unused"),
-    getEventReplayStats: () => Effect.die("unused"),
-    getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
-    getProjectShells: () => Effect.die("unused"),
-    getProjectShellById: () => Effect.die("unused"),
-    getImportedAgentSessionSources: () => Effect.succeed([]),
-    getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
-    getThreadCheckpointContext: () => Effect.die("unused"),
-    getFullThreadDiffContext: () => Effect.die("unused"),
-    getThreadShellById: () => Effect.die("unused"),
-    getThreadRuntimeContext: () => Effect.die("unused"),
-    getTurnStartMessage: () => Effect.die("unused"),
-    getThreadDetailById: () => Effect.die("unused"),
-    getThreadDetailSnapshot: () => Effect.die("unused"),
-    searchThreads: () => Effect.die("unused"),
+const makeProjectStoreLayer = (importedWorkspaceRoots: ReadonlyArray<string>) =>
+  Layer.mock(ProjectStore.ProjectStoreV2)({
+    listShells: () =>
+      Effect.succeed(
+        importedWorkspaceRoots.map((workspaceRoot) => makeProjectShell(workspaceRoot)),
+      ),
   });
 
 /**
@@ -99,7 +73,7 @@ const makeScannerTestLayer = (input: ScannerTestInput) =>
           input.claudeHomePath,
           input.configBaseDir ?? { prefix: "t3code-scanner-config-" },
         ),
-        makeProjectionSnapshotQueryLayer(input.importedWorkspaceRoots ?? []),
+        makeProjectStoreLayer(input.importedWorkspaceRoots ?? []),
       ),
     ),
   );
@@ -182,6 +156,101 @@ function makeRecordLimitTranscript(cwd: string, overflow: boolean): string {
 }
 
 it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
+  it.effect.each([
+    { driver: "codex", location: "archived_sessions/deep", status: "valid" },
+    { driver: "codex", location: "sessions/2001/01/01", status: "valid" },
+    { driver: "claudeAgent", location: "projects/unrelated-encoded-directory", status: "valid" },
+    { driver: "codex", location: "archived_sessions", status: "missing" },
+    { driver: "claudeAgent", location: "projects/one", status: "ambiguous" },
+    { driver: "codex", location: "sessions/2001", status: "invalid" },
+    { driver: "claudeAgent", location: "projects/one", status: "invalid" },
+    { driver: "codex", location: "archived_sessions", status: "unavailable" },
+  ] as const)("validates exact native $driver conversation: $location/$status", (test) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* makeTempDir("t3-native-validation-");
+      const cwd = path.join(home, "workspace");
+      yield* fs.makeDirectory(cwd);
+      const id = "native-session-1";
+      const record =
+        test.driver === "codex"
+          ? {
+              type: "session_meta",
+              payload: { id: test.status === "invalid" ? "other-id" : id, cwd },
+            }
+          : { type: "user", sessionId: id, cwd: test.status === "invalid" ? home : cwd };
+      const contents = test.status === "unavailable" ? "{broken}\n" : `${JSON.stringify(record)}\n`;
+      const filename = test.driver === "codex" ? `rollout-2001-${id}.jsonl` : `${id}.jsonl`;
+      if (test.status !== "missing")
+        yield* writeTranscript({
+          filePath: path.join(home, test.location, filename),
+          contents,
+          mtimeMs: 1,
+        });
+      if (test.status === "ambiguous")
+        yield* writeTranscript({
+          filePath: path.join(home, "projects/two", filename),
+          contents,
+          mtimeMs: 1,
+        });
+      const outcome = yield* Effect.gen(function* () {
+        const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+        return yield* scanner.validateNativeConversation({
+          providerInstanceId: ProviderInstanceId.make(test.driver),
+          driver: test.driver,
+          nativeThreadId: id,
+          cwd,
+        });
+      }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath: home, codexHomePath: home })));
+      expect(outcome.status).toBe(test.status);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("validates custom instance environment homes and rejects traversal", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* makeTempDir("t3-native-custom-home-");
+      const cwd = path.join(home, "workspace");
+      yield* fs.makeDirectory(cwd);
+      yield* writeTranscript({
+        filePath: path.join(home, "archived_sessions/rollout-old-custom-id.jsonl"),
+        contents: `${JSON.stringify({ type: "session_meta", payload: { id: "custom-id", cwd } })}\n`,
+        mtimeMs: 1,
+      });
+      yield* Effect.gen(function* () {
+        const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+        const input = {
+          providerInstanceId: ProviderInstanceId.make("custom"),
+          driver: "codex" as const,
+          cwd,
+        };
+        expect(
+          (yield* scanner.validateNativeConversation({ ...input, nativeThreadId: "custom-id" }))
+            .status,
+        ).toBe("valid");
+        expect(
+          (yield* scanner.validateNativeConversation({ ...input, nativeThreadId: "../custom-id" }))
+            .status,
+        ).toBe("invalid");
+      }).pipe(
+        Effect.provide(
+          makeScannerTestLayer({
+            claudeHomePath: home,
+            codexHomePath: home,
+            providerInstances: {
+              custom: {
+                driver: ProviderDriverKind.make("codex"),
+                config: {},
+                environment: [{ name: "CODEX_HOME", value: home }],
+              },
+            } as ContractServerSettings["providerInstances"],
+          }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
   describe("scan", () => {
     it.effect("reads Claude project cwds from transcripts, newest first", () =>
       Effect.gen(function* () {

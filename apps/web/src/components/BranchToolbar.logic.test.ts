@@ -14,6 +14,7 @@ import {
   resolveBranchToolbarValue,
   resolveLockedWorkspaceLabel,
   resolveLockedWorktreeDisplay,
+  resolveWorkspaceDisplayName,
   resolveLocalCheckoutBranchMismatch,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
@@ -677,9 +678,28 @@ describe("shouldShowEnvironmentIndicator", () => {
 });
 
 describe("shouldShowComposerContextStrip", () => {
+  it.each([false, true])(
+    "honors the active-thread preference with resting controls %s",
+    (hostsRestingComposerControls) => {
+      const input = {
+        isDraftHeroState: false,
+        hasActiveProject: true,
+        isGitRepo: true,
+        showEnvironmentIndicator: true,
+        hostsRestingComposerControls,
+      };
+      expect(shouldShowComposerContextStrip({ ...input, persistInActiveThreads: false })).toBe(
+        false,
+      );
+      expect(shouldShowComposerContextStrip({ ...input, persistInActiveThreads: true })).toBe(true);
+    },
+  );
+
   it("keeps the environment indicator visible for a non-Git project", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: true,
@@ -691,6 +711,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("hides the strip when a non-Git project has nothing to show", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: false,
@@ -702,6 +724,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("keeps the strip for visible resting composer controls in a non-Git thread", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: false,
@@ -713,6 +737,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("shows Git controls without requiring an environment indicator", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: true,
         showEnvironmentIndicator: false,
@@ -724,6 +750,8 @@ describe("shouldShowComposerContextStrip", () => {
   it("keeps subagent controls visible in a non-Git thread", () => {
     expect(
       shouldShowComposerContextStrip({
+        isDraftHeroState: true,
+        persistInActiveThreads: false,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: false,
@@ -804,6 +832,18 @@ describe("resolveLockedWorkspaceLabel", () => {
 
   it("describes a worktree that is still being created as a new worktree", () => {
     expect(resolveLockedWorkspaceLabel(null, "worktree")).toBe("New worktree");
+  });
+});
+
+describe("resolveWorkspaceDisplayName", () => {
+  it("returns the final folder for POSIX and Windows paths", () => {
+    expect(resolveWorkspaceDisplayName("/repo/.t3/worktrees/feature-a")).toBe("feature-a");
+    expect(resolveWorkspaceDisplayName("C:\\code\\project\\feature-b\\")).toBe("feature-b");
+  });
+
+  it("handles missing and root paths", () => {
+    expect(resolveWorkspaceDisplayName(null)).toBeNull();
+    expect(resolveWorkspaceDisplayName("/")).toBe("/");
   });
 });
 

@@ -4,13 +4,14 @@ import {
   type DeviceId,
   type DevicePlatform,
   type DeviceSummary,
+  type ThreadId,
   DeviceToolUnavailableError,
   LOCAL_DEVICE_HOST_ID,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { ServerConfig } from "../../../config.ts";
+import * as ServerConfig from "../../../config.ts";
 import { ensureAgentDeviceShim } from "../../../device/AgentDeviceShim.ts";
 import { nodeRuntimeUnavailableMessage } from "@t3tools/shared/nodeRuntime";
 
@@ -118,6 +119,19 @@ const pickDevice = (
 
 const toolError = (error: DeviceError | DeviceToolUnavailableError) => error;
 
+const requireInvocationThreadId = (
+  scope: McpInvocationContext.McpInvocationScope,
+): Effect.Effect<ThreadId, DeviceToolUnavailableError> => {
+  const threadId = McpInvocationContext.getInvocationThreadId(scope);
+  return threadId === undefined
+    ? Effect.fail(
+        new DeviceToolUnavailableError({
+          reason: "Device tools require an owning provider thread.",
+        }),
+      )
+    : Effect.succeed(threadId);
+};
+
 const handlers = {
   device_list: (input) =>
     Effect.gen(function* () {
@@ -149,7 +163,7 @@ const handlers = {
   device_open: (input) =>
     Effect.gen(function* () {
       const scope = yield* requireDeviceAccess;
-      const threadId = McpInvocationContext.getInvocationThreadId(scope);
+      const threadId = yield* requireInvocationThreadId(scope);
       const devices = yield* DeviceService.DeviceService;
       const state = yield* devices.list;
       if (state.hostStatus === "disabled") {
@@ -177,7 +191,7 @@ const handlers = {
           (candidate) => candidate.hostId === session.hostId && candidate.id === session.deviceId,
         ) ?? target;
       const targetArgs = [...agentDeviceTargetArgs(device), ...agentArgs];
-      const config = yield* ServerConfig;
+      const config = yield* ServerConfig.ServerConfig;
       const path = yield* Path.Path;
       const platform = yield* HostProcessPlatform;
       const shimDir = yield* ensureAgentDeviceShim({
@@ -208,7 +222,7 @@ const handlers = {
   device_screenshot: (input) =>
     Effect.gen(function* () {
       const scope = yield* requireDeviceAccess;
-      const threadId = McpInvocationContext.getInvocationThreadId(scope);
+      const threadId = yield* requireInvocationThreadId(scope);
       const devices = yield* DeviceService.DeviceService;
       const sessions = yield* devices.sessionsForThread(threadId);
       const target =
@@ -235,7 +249,7 @@ const handlers = {
   device_close: (input) =>
     Effect.gen(function* () {
       const scope = yield* requireDeviceAccess;
-      const threadId = McpInvocationContext.getInvocationThreadId(scope);
+      const threadId = yield* requireInvocationThreadId(scope);
       const devices = yield* DeviceService.DeviceService;
       yield* devices.close({
         threadId,

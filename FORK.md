@@ -156,13 +156,13 @@ Server-router and HTTP MCP fixtures use native HTTP clients with OS-assigned loo
 
 Checkpoint capture and navigation are durable server services. Private bare-Git sidecars hold opaque `t3-sidecar:v1:` snapshots without modifying the project repository; capture, import, restore, retention, and cleanup are serialized and cover linked worktrees, binaries, symlinks, Windows paths, and non-Git workspaces safely.
 
-SQLite persists capture jobs, immutable checkpoint entries, timeline generations and cursors, provider bindings, retention data, and restart-recoverable navigation journals. Undo, redo, and rewind share a compensating navigation saga; providers without a verified non-destructive branch capability are explicitly limited, and filesystem-only rollback requires confirmation without moving the provider conversation cursor.
+SQLite persists capture jobs, immutable checkpoint entries, timeline generations and cursors, provider bindings, retention data, and restart-recoverable navigation journals. Undo, redo, and file-state recovery use the V2 checkpoint service; provider conversation rollback/fork and direct active steering are intentionally not part of the fork's retained checkpoint surface.
 
 Fork migrations `036`–`038` establish durable checkpoint state. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
 
-Migration `053_ReconcileUpstream47History` repairs a database carrying upstream history through `047`, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at `050`–`052`. Incoming upstream behavior then runs as `054`–`061`, with fork prompt suggestions at `062`, and the latest upstream title-state and pull-request-file tables at `063`–`064`. Migration `065_ReconcileBranchPullRequestHistory` repairs the known deployed-ID-58 collision idempotently before startup. Schema checks keep these changes safe for both fork and upstream database histories.
+Migration 053_ReconcileUpstream47History repairs a database carrying upstream history through 047, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at 050-052. Incoming upstream behavior then runs as 054-061, with fork prompt suggestions at 062, and the latest upstream title-state, pull-request-file, auto-settle, and V2 cutover migrations at 063-067. Migration 065_ReconcileBranchPullRequestHistory repairs the known deployed-ID-58 collision idempotently before startup. Migration 067_CoreV2Cutover imports legacy V1 thread shells and messages into V2 projections and removes obsolete V1 runtime state. Schema checks keep these changes safe for both fork and upstream database histories.
 
-Upstream's per-thread auto-settle migration runs at `066`, preserving the deployed fork ledger. The isolated migration helper accepts documented historical ledger names only after it verifies their reconciliation markers and repaired schema. Codex checkpoint navigation uses the current native `thread/revert` protocol and retains the fork's conversation cursor safeguards.
+Upstream's per-thread auto-settle migration runs at 066, followed by the V2 cutover at 067, preserving the deployed fork ledger. The isolated migration helper accepts documented historical ledger names only after it verifies their reconciliation markers and repaired schema. Codex checkpoint navigation uses the current native thread/revert protocol and retains the fork's conversation cursor safeguards.
 
 Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
@@ -268,80 +268,46 @@ The new-thread Workspace controls expose a neighboring Worktree selector in Curr
 
 **Last updated:** 2026-07-31
 
-### DL018 — Read-only subagent transcripts in the right panel
+### DL018 – Child-thread navigation and retained composer metadata
 
-Codex collaboration-agent output and Claude Task output are correlated with their native child or
-parent tool-use identifiers, persisted separately from the parent assistant stream, and omitted
-from the main transcript. Unmatched historical correlations fall back to the main transcript so a
-provider routing defect cannot hide a parent response. The spawn remains visible as one native
-task lifecycle row; selecting that row or its authoritative Agents-panel entry opens a normal chat
-transcript without a composer in the right panel. The provider item remains persisted only for
-transcript correlation and does not create a duplicate spawn row. When the provider reports it,
-the complete, unchanged spawn prompt is synthesized as the transcript's first user message.
+Orchestrator V2 models provider-native subagents as real child threads with durable lineage. The
+parent projection records each child thread, parent/root identifiers, relationship, status, model,
+reasoning effort, and result. Child activity remains isolated from the parent's message stream and
+checkpoint state. Selecting a child uses the normal thread route; a child route exposes lineage
+controls that return to its parent or open related children. The old Agents panel and right-panel
+transcript view are removed.
 
-Current Codex multi-agent v2 events can omit the spawn prompt and inline model or reasoning effort.
-After child activity registers the thread, the runtime makes one bounded metadata-only
-`thread/resume` request with turn history excluded and propagates any returned model and effort
-through the native lifecycle. Newer child settings and reroutes remain authoritative over that
-snapshot. When a value is still missing, the transcript does not invent it and labels absent model
-metadata unavailable. Claude and legacy rich Codex collaboration events retain the complete
-metadata. Child plan activity cannot replace the parent plan, and child assistant messages cannot
-become the parent turn's checkpoint message. Spawn rows show the reported subagent model and
-reasoning effort, while a count-labeled Subagents dropdown between the composer Worktree and branch
-controls lists every run and opens its transcript directly. Its label contracts from `N Subagents`
-to `N Sub` with the available composer width. Each row shows the subagent's model, reasoning
-effort, and status. The composer context strip keeps the same left-aligned workspace group and
-right-aligned subagent/branch group at every viewport width. Native lifecycle-only agents are
-merged into the same dropdown, and native tool rows
-attributed through `agentId` render inside their subagent transcript while remaining hidden from
-the parent timeline. Claude output without a parent Task identifier remains in the main transcript.
+The fork retains the composer Subagents dropdown and its status, provider/model, reasoning, and
+branch metadata. The dropdown and timeline links both navigate to the same child-thread routes, so
+the child transcript is a normal conversation without a second panel or composer. Provider-native
+child lifecycle events remain authoritative, while T3-owned child threads keep the V2 persistence,
+notification, and recovery behavior.
 
-Projection migration `040_ProjectionSubagentIds` adds durable correlation columns for messages and
-activities. Upstream native `task.*` events remain the sole Codex lifecycle and Agents-panel status
-authority; child message deltas use the same native agent/thread identity only to populate the
-separate transcript. Child thread, turn, name, token, and plan chatter cannot mutate the parent.
-Codex app-server builds that report a spawned or resumed child only through the completed
-`collabAgentToolCall.receiverThreadIds` provisionally register each non-sender receiver, emit the
-native child lifecycle, and scope its subsequent tool and assistant items to that child. Each child
-tool keeps its native started/completed rows and complete output alongside task progress. Resume
-reactivates an existing child, while later thread-start or subagent-activity metadata enriches the
-identity without restarting a settled task. Only root-owned routing items can provision children,
-so nested child activity and child-to-root input cannot suppress or pollute the root transcript.
-Upstream `sourceActivityKind` semantics and normal-tool collapsing apply to ordinary work-log rows. Fork-owned subagent lifecycle rows remain visible and clickable instead of collapsing away, preserving transcript navigation and native child attribution.
+Implementation evidence: orchestrationV2 contracts and server layers; ChatView, Sidebar,
+ThreadRelationshipsControl, ComposerSubagents, V2LifecycleRow, V2ItemInspector, rightPanelStore,
+and session-logic.
 
-The main timeline names started, messaged, resumed, waited, stopped,
-interrupted, failed, and finished subagent operations instead of grouping them under a generic
-task label. Only spawn/resume events can establish child routing, so a child message sent back to
-the parent cannot capture the parent thread or suppress its final completion. The stale-session
-reaper also settles an old active turn when no live provider session owns it, while preserving
-genuinely live long-running turns. Fork transcript correlation supports Codex and Claude. Antigravity retains upstream's task and batch presentation.
+Recorded validation: focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
+and composer tests; vp check; vp run typecheck; and an isolated paired web-app smoke test that
+loaded a V2 thread route, confirmed the Agents/right-transcript surface is absent, and confirmed the
+composer rendered. The preview client's accessibility snapshot and click calls failed after the app
+loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
+smoke evidence used DOM evaluation and server responses.
 
-**Implementation evidence:** `packages/contracts/src/{provider,providerRuntime,orchestration}.ts`,
-`apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter,ClaudeAdapter,ProviderSessionReaper}.ts`,
-`apps/server/src/provider/Layers/CodexCollabRuntime.integration.test.ts`,
-`apps/server/src/orchestration/`, `apps/server/src/persistence/Migrations/040_ProjectionSubagentIds.ts`,
-and `apps/web/src/components/{BranchToolbar,ChatView,RightPanelTabs}.tsx`,
-`apps/web/src/components/BranchToolbar.logic.ts`,
-`apps/web/src/components/chat/{MessagesTimeline,SubagentPanel}.tsx`, `apps/web/src/session-logic.ts`,
-and `apps/web/src/rightPanelStore.ts`.
+Last updated: 2026-10-04
 
-**Recorded validation:** focused Codex and Claude adapter tests, provider-runtime ingestion and
-projection migration tests, web session/timeline/right-panel and aggregate subagent-status tests,
-package typechecks, `vp check`, `vp run typecheck`, and an isolated paired web-app verification at
-narrow panel width. A real Codex 0.146.0 turn also spawned and completed a v2 child through T3,
-confirming the canonical spawn activity, child-correlated output, and working-to-completed status
-transition. The spawn row, complete prompt where supplied, separate child transcript, completed
-status,
-status-aware dropdown, invariant context-strip grouping across the former mobile breakpoint, and
-absent composer were confirmed in the live client.
-The receiver-only Codex v2 path is covered by a focused runtime integration replay that verifies
-the synthesized spawn/resume lifecycle, late metadata ordering, parent-route isolation, and
-child-scoped tool and assistant items. Adapter and ingestion regressions preserve each child tool's
-full native lifecycle and terminal output through projection. The 2026-09-01 integration added
-coverage for the single bounded metadata lookup, newer child settings and reroutes, and model and
-effort propagation through every task event.
+### DL036 – Native conversation adoption during V2 cutover
 
-**Last updated:** 2026-09-24
+V2 imports valid saved Codex and Claude native conversation cursors into a durable provider-thread
+projection. Legacy threads with a matching provider runtime cursor now retain a strong native thread
+reference, so the first V2 turn resumes the provider conversation instead of sending the migrated
+transcript as a new conversation. Unknown providers, malformed cursors, and instance mismatches keep
+the safe context-handoff path.
+
+Implementation evidence: LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
+projection, Codex and Claude V2 adapters, and the legacy importer/cutover tests.
+
+Last updated: 2026-10-04
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
@@ -405,45 +371,33 @@ An active zrok endpoint is merged into the advertised endpoint list and is the a
 
 **Last updated:** 2026-08-16
 
-### DL023 — Environment-scoped agent thread tools
+### DL023 – Scoped V2 MCP thread and project tools
 
-Codex, Claude Code, Cursor, Grok, and OpenCode agents can create, list, read, message, and wait
-on durable T3 threads in their current environment. These threads are user-visible conversations,
-distinct from the providers' internal subagents. New work can stay in the current checkout or use
-a new Git worktree. The caller's permission mode applies to a new thread, while a message sent to
-an existing thread keeps that thread's mode.
+The upstream singular V2 MCP toolkit remains authoritative. Provider callers resolve to project or
+global scope per project setting: Git-backed projects default to project scope, non-Git projects
+default to global scope, and every project can override the default. Project-scoped callers can
+operate only inside their project; global callers may read, launch, send, and wait across projects,
+with the upstream user-attached cross-project read exception preserved.
 
-Agents can also list the model choices exposed by currently selectable provider instances,
-optionally filtered by driver kind. Results keep provider-instance identity separate from the
-driver that runs it and include the current, legacy, and custom models shown in the product model
-picker. User-created instances that share a driver remain distinct, and runtime provider changes
-are reflected in later calls. The MCP selection schema exposes only the canonical `instanceId`,
-model, and options fields. Tool descriptions direct agents to copy an exact instance and model pair
-from `list_models`, and create or message calls reject unknown, unavailable, or mismatched pairs
-before dispatching a provider turn.
+t3_thread_wait accepts up to eight targets and applies the upstream one-hour cap. t3_thread_send can
+select a provider instance and model, and rejects a provider caller that targets its own thread.
+create_threads remains a project-scoped provider tool and is not available to management-key callers.
+Management-key discovery and invocation is limited to the reviewed orchestrator_capabilities,
+t3_thread__, and t3_project__ allowlist (with create_threads excluded); all other MCP toolkits retain
+upstream discovery and capability rules.
 
-The tools share the server-owned provider MCP credential. They cannot access another environment,
-and a thread cannot message itself. Lists default to 50 threads and cap at 200. Reads default to
-10 turns, hide output, and cap at 50 turns and 20,000 characters per item. Wait targets are
-limited to eight threads and five minutes. A failed worktree bootstrap closes its setup terminal,
-deletes the durable thread, removes the worktree when safe, and then removes its generated branch.
-Worktree bootstrap uses upstream progress and cancellation tracking, scoped origin fetches, submodule setup, and guarded failure cleanup. Synchronous callers wait for setup before dispatching; asynchronous callers continue through the same shared dispatcher after setup completes.
-Every successful `thread.create`, including bootstrap creation, now drains deletion cleanup through
-the create event's sequence before setup or later dispatch continues. The shared
-`ThreadCommandDispatcher` owns this fence, so web, mobile, RPC, and agent-tool creation cannot race
-an older deletion reactor that is still removing the reused thread or worktree.
+Implementation evidence: McpInvocationContext, McpHttpServer, McpToolScope, threadAccess, the
+orchestrator/project/thread toolkits, orchestratorMcp and managementApiKeys contracts, and
+ProjectMcpToolScopeSettings.
 
-**Implementation evidence:** `packages/contracts/src/threadTools.ts`,
-`apps/server/src/mcp/{McpHttpServer,McpSessionRegistry,toolkits/threads}/`,
-`apps/server/src/orchestration/{ThreadCommandDispatcher,Layers/ThreadDeletionReactor,Services/ThreadDeletionReactor}.ts`,
-and the existing product MCP provider integration.
+Recorded validation: focused MCP scope, management-key filtering, provider self-send, cross-project
+authorization, model/provider selection, wait-target, and toolkit registration tests; 129 focused
+native-session/MCP/checkpoint tests; vp check; and vp run typecheck.
 
-**Recorded validation:** focused thread-tool contract, MCP, model-listing, dispatcher, and Codex
-developer instruction tests, plus `vp check` and `vp run typecheck`. Dispatcher coverage verifies
-the deletion drain for direct and bootstrapped creation and preserves cleanup order on failed
-setup.
+Project-scoped search applies its project predicate before ranking and limiting results, so a recent
+thread from another project cannot hide a matching local result.
 
-**Last updated:** 2026-10-02
+Last updated: 2026-10-04
 
 ### DL026 — Per-instance API gateway model catalogs
 
@@ -635,35 +589,29 @@ keys. Repository-wide `vp check` and `vp run typecheck` passed.
 
 **Last updated:** 2026-09-05
 
-### DL032 — Automatic resume after native provider usage limits
+### DL032 – Automatic resume after native provider usage limits
 
-Auto-resume is enabled by default for all threads and can be turned off under **Settings →
-General → Auto-resume after usage limits**. When native Claude Code or Codex reports an exact
-future reset time for a failed turn, the server stores one durable resume job for that thread and
-sends scoped automatic-resume instructions three seconds after the reset. Before dispatch, the
-server checks the durable message projection for the stable resume message ID. Stable schedule,
-command, and message identifiers make the job safe to recover after a server restart without
-sending the continuation twice. A newer turn, message, provider selection, active request, archive,
-deletion, or explicit settle makes the saved job stale instead. Transient dispatch failures retry
-after another three seconds.
+Auto-resume remains enabled by default for all threads and can be turned off under Settings ->
+General -> Auto-resume after usage limits. V2 persists the failed run's exact provider reset time
+and recovery identity. A shared five-second scheduler checks durable failed-thread candidates; it
+does not wait for a provider-specific timer. A candidate is dispatched only when its reset time has
+passed, the thread is still eligible, and its persisted run/message identity is unchanged. The
+scheduler's tick therefore adds at most five seconds of timing slack, while the provider reset time
+controls the earliest continuation.
 
-Claude uses the rejected native `rate_limit_event` reset. Codex confirms native
-`usageLimitExceeded` errors through `account/rateLimits/read`. Generic `429` responses from
-compatible API gateways do not expose an authoritative reset through either CLI, so gateway usage
-limits are intentionally unsupported.
+The fork retains its explicit continuation prompt, which asks the provider to resume only incomplete
+work, inspect the current workspace and subagent state, repair partial operations, and avoid
+repeating completed work or expanding scope. Restart, archive, settle, a newer turn, or a changed
+provider selection invalidates the saved recovery. The one-hour wait and scheduler behavior are
+upstream V2 behavior; the default and prompt are the fork's surviving differences.
 
-**Implementation evidence:** `packages/contracts/src/{orchestration,providerRuntime,settings}.ts`,
-`apps/server/src/provider/Layers/{ClaudeAdapter,CodexAdapter,CodexSessionRuntime}.ts`,
-`apps/server/src/orchestration/Layers/{AutoResumeReactor,ProviderRuntimeIngestion}.ts`,
-`apps/server/src/persistence/{Layers,Services}/AutoResumeJobs.ts`,
-`apps/server/src/persistence/Migrations/051_AutoResumeJobs.ts`, and
-`apps/web/src/components/settings/{SettingsPanels,settingsSearch}.ts*`.
+Implementation evidence: UsageLimitRecoveryWorker, Orchestrator, Scheduler, orchestrationV2/settings
+contracts, serverSettings, and SettingsPanels.
 
-**Recorded validation:** focused native Claude and Codex reset parsing, provider-runtime,
-settings-contract, and server-settings tests. The 2026-09-16 merge reran the provider-runtime
-ingestion suite (78 passing) with the repository-backed latest-user-message lookup.
+Recorded validation: focused usage-limit parsing, scheduler, recovery-worker, V2 runtime, and
+server-settings tests; vp check; vp run typecheck; and the isolated migration/startup smoke.
 
-**Last updated:** 2026-09-16
+Last updated: 2026-10-04
 
 ### DL033 — Model search within the selected group
 
@@ -922,3 +870,27 @@ The merge reconciled the following textual conflict surfaces and made these sema
 - **Root helpers:** retained both sets of root helper configuration instead of treating either as a replacement.
 - **Cross-platform test coverage:** merged `/userdata` and Windows portability coverage so desktop, server, and shared tests use platform-correct paths and fixtures.
 - **QA reconciliation:** merged command, schema, and test-fixture changes and fixed Claude/Codex cleanup issues discovered during post-merge validation.
+
+### 2026-10-04 — Orchestrator V2 sync
+
+- Adopted upstream Orchestrator V2 as the runtime and cut over legacy V1 execution, while retaining the
+  legacy importer needed to hydrate existing thread shells and messages. The migration smoke imported
+  331 thread shells and 619 messages and reached a listening server.
+- Preserved exact native Codex and Claude conversation identities when transcript and workspace checks
+  succeed, including legacy V1 threads with a valid saved provider cursor. Preserved the fork's sidecar checkpoint capture/restore and non-Git handling, while leaving
+  provider conversation rollback/fork and direct active steering to V2's upstream behavior.
+- Adopted child-thread routes and lineage controls, removed the Agents/right-transcript panel, and
+  retained the composer subagent dropdown and metadata.
+- Adopted the V2 usage-limit scheduler and Cursor SDK. Auto-resume stays enabled by default globally,
+  with the fork continuation prompt.
+- Combined MCP behavior with the project/global scope policy, management-key allowlist, cross-project
+  restrictions, eight-target wait, one-hour cap, provider/model send selection, and self-send guard.
+- Restored upstream Git command gating and sanitized remote failure classification, and made ACP
+  process-tree cleanup one-shot after successful explicit termination while retaining finalizer retry
+  after failure. Project-scoped thread search now filters before SQL LIMIT.
+- Validation: vp check, vp run typecheck, vp run lint:mobile, focused MCP/native-session/checkpoint,
+  ACP, VCS, search, and migration suites, web tests, desktop smoke, and a Windows x64 NSIS artifact
+  build. The preview accessibility snapshot and click endpoints failed after the app loaded, so live
+  browser evidence used DOM evaluation. Device tools were disabled, so native mobile verification
+  could not run. The unrestricted full suite was stopped after unrelated long-running Windows VCS and
+  provider tests; the affected VCS file passed all 120 runnable tests.

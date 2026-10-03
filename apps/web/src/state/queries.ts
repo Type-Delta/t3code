@@ -11,7 +11,7 @@ import {
 import { type VcsRefTarget } from "@t3tools/client-runtime/state/vcs";
 import type {
   EnvironmentId,
-  OrchestrationThread,
+  OrchestrationV2ThreadProjection,
   ProjectContentMatch,
   ProjectEntryKind,
   ThreadId,
@@ -55,14 +55,6 @@ const threadSearchResultsAtom = createThreadSearchResultsAtomFamily({
   labelPrefix: "web:thread-search",
 });
 
-export interface ThreadDetailView {
-  readonly data: OrchestrationThread | null;
-  readonly error: string | null;
-  readonly isPending: boolean;
-  readonly isDeleted: boolean;
-}
-
-/** Shared with the pull requests page, which debounces its search the same way. */
 export function useDebouncedValue<A>(value: A, delayMs: number): A {
   const [debounced, setDebounced] = useState(value);
 
@@ -106,7 +98,12 @@ export function useThreadSearch(
 export function useThreadDetail(
   environmentId: EnvironmentId | null,
   threadId: ThreadId | null,
-): ThreadDetailView {
+): {
+  readonly data: OrchestrationV2ThreadProjection | null;
+  readonly error: string | null;
+  readonly isPending: boolean;
+  readonly isDeleted: boolean;
+} {
   const state = useEnvironmentThread(environmentId, threadId);
   return {
     data: Option.getOrNull(state.data),

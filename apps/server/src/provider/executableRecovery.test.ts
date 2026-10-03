@@ -1,3 +1,4 @@
+// oxlint-disable t3code/no-test-in-loop -- These cases intentionally exercise independent provider/process variants.
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";

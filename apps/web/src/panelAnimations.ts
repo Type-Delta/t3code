@@ -8,29 +8,6 @@ const PanelAnimationSuppressionContext = createContext(false);
 
 export const PanelAnimationSuppressionProvider = PanelAnimationSuppressionContext.Provider;
 
-/**
- * Suppresses panel motion for the first painted frame of an initial route or navigation.
- * State restored by a route must be visible immediately; later user actions can animate.
- */
-export function usePanelNavigationSuppression(navigationKey: string): boolean {
-  const [paintedNavigationKey, setPaintedNavigationKey] = useState<string | null>(null);
-  const suppressed = paintedNavigationKey !== navigationKey;
-
-  useEffect(() => {
-    if (!suppressed) return;
-    let releaseFrame = 0;
-    const paintFrame = window.requestAnimationFrame(() => {
-      releaseFrame = window.requestAnimationFrame(() => setPaintedNavigationKey(navigationKey));
-    });
-    return () => {
-      window.cancelAnimationFrame(paintFrame);
-      window.cancelAnimationFrame(releaseFrame);
-    };
-  }, [navigationKey, suppressed]);
-
-  return suppressed;
-}
-
 export function observeResponsiveBreakpointFade(options: {
   target: HTMLElement;
   container: HTMLElement;
@@ -66,6 +43,29 @@ export function observeResponsiveBreakpointFade(options: {
     observer.disconnect();
     animation?.cancel();
   };
+}
+
+/**
+ * Suppresses panel motion for the first painted frame of an initial route or navigation.
+ * State restored by a route must be visible immediately; later user actions can animate.
+ */
+export function usePanelNavigationSuppression(navigationKey: string): boolean {
+  const [paintedNavigationKey, setPaintedNavigationKey] = useState<string | null>(null);
+  const suppressed = paintedNavigationKey !== navigationKey;
+
+  useEffect(() => {
+    if (!suppressed) return;
+    let releaseFrame = 0;
+    const paintFrame = window.requestAnimationFrame(() => {
+      releaseFrame = window.requestAnimationFrame(() => setPaintedNavigationKey(navigationKey));
+    });
+    return () => {
+      window.cancelAnimationFrame(paintFrame);
+      window.cancelAnimationFrame(releaseFrame);
+    };
+  }, [navigationKey, suppressed]);
+
+  return suppressed;
 }
 
 export function usePanelAnimationSettings(): {

@@ -15,7 +15,13 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
-  readonly capabilities: ReadonlySet<McpInvocationContext.McpCapability>;
+  /**
+   * When false, the credential is minted without the "preview" capability so
+   * the user's choice to withhold agent browser access holds everywhere the
+   * token is honored (#7083). Defaults to full access.
+   */
+  readonly browserToolsAvailable?: boolean;
+  readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
 }
 
 export interface McpIssuedCredential {
@@ -122,6 +128,13 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const tokenHash = yield* hashToken(rawToken);
       const threadId = ThreadId.make(request.threadId);
       const providerInstanceId = ProviderInstanceId.make(request.providerInstanceId);
+      const browserToolsAvailable = request.browserToolsAvailable ?? true;
+      const capabilities = new Set<McpInvocationContext.McpCapability>([
+        "orchestration",
+        "worktree",
+        "pull-requests",
+        ...(request.capabilities ?? (browserToolsAvailable ? (["preview"] as const) : [])),
+      ]);
       const scope: McpInvocationContext.McpInvocationScope = {
         environmentId,
         principal: {
@@ -133,10 +146,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId,
         providerSessionId,
         providerInstanceId,
-        capabilities: new Set<McpInvocationContext.McpCapability>([
-          "pull-requests",
-          ...request.capabilities,
-        ]),
+        capabilities,
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {
@@ -152,7 +162,8 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerInstanceId,
           endpoint,
           authorizationHeader: `Bearer ${rawToken}`,
-          capabilities: scope.capabilities ?? new Set(),
+          browserToolsAvailable: capabilities.has("preview"),
+          capabilities,
         },
       };
     },
@@ -258,10 +269,10 @@ export const issueActiveMcpCredential = (
 export const touchActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.touch(threadId) : Effect.void;
 
-export const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
+const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;
 
-export const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
+const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;
 
 /** Exposed for tests. */

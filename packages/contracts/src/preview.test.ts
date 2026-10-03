@@ -63,7 +63,7 @@ describe("preview automation acknowledgement compatibility", () => {
       ok: true,
       result: { available: true },
     };
-    expect(Schema.decodeUnknownSync(PreviewAutomationResponse)(completed)).toEqual(completed);
+    expect(Schema.decodeSync(PreviewAutomationResponse)(completed)).toEqual(completed);
   });
 });
 

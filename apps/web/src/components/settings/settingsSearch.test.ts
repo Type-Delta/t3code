@@ -95,7 +95,7 @@ describe("searchSettings", () => {
     expect(searchSettings("git security keys")[0]?.id).toBe("git-fetch-interval");
     expect(searchSettings("push notifications")[0]?.id).toBe("publish-agent-activity");
     expect(searchSettings("battery saver")[0]?.id).toBe("background-activity");
-    expect(searchSettings("usage limit")[0]?.id).toBe("auto-resume-usage-limits");
+    expect(searchSettings("usage limit")[0]?.id).toBe("auto-resume-limited-threads");
     expect(searchSettings("binary path")[0]?.id).toBe("providers");
     expect(searchSettings("Antigravity")[0]?.id).toBe("providers");
     expect(searchSettings("Google sign in")[0]?.id).toBe("providers");
@@ -283,6 +283,10 @@ describe("searchSettings", () => {
     });
     expect(searchSettings("word wrap")[0]).toMatchObject({
       id: "word-wrap",
+      to: "/settings/appearance",
+    });
+    expect(searchSettings("composer context")[0]).toMatchObject({
+      id: "composer-context",
       to: "/settings/appearance",
     });
     expect(searchSettings("environment identification")[0]).toMatchObject({

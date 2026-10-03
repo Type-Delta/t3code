@@ -1,3 +1,4 @@
+import type { OrchestrationV2ProviderFailureClass } from "@t3tools/contracts";
 import { memo } from "react";
 import { Alert, AlertAction, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -40,18 +41,21 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   onDismiss,
   onRetry,
   retrying = false,
+  errorClass,
   chatGptUsageLimit = false,
 }: {
   error: string | null;
+  errorClass?: OrchestrationV2ProviderFailureClass | null;
   onDismiss?: () => void;
   onRetry?: () => void;
   retrying?: boolean;
   chatGptUsageLimit?: boolean;
 }) {
   if (!error) return null;
+  const variant = errorClass === "usage_limit" ? "warning" : "error";
   return (
     <div className="pointer-events-auto mx-auto w-fit max-w-[min(48rem,calc(100%-2rem))] pt-3">
-      <Alert variant="error" surface="glass" controlAlignment="first-line">
+      <Alert variant={variant} surface="glass" controlAlignment="first-line" data-variant={variant}>
         {chatGptUsageLimit ? (
           <OpenAI className="size-4 text-foreground!" aria-hidden="true" />
         ) : (

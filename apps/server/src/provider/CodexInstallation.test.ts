@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { BUNDLED_MODEL_MANIFEST, ModelManifest, type ModelManifestData } from "./ModelManifest.ts";
+import * as ModelManifest from "./ModelManifest.ts";
 import { expect, it } from "@effect/vitest";
 import {
   HostProcessArchitecture,
@@ -16,12 +16,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as NodeCrypto from "node:crypto";
-import {
-  makeCodexInstallation,
-  type CodexInstallation,
-  type CodexInstallationOptions,
-  resolveCodexReleaseAsset,
-} from "./CodexInstallation.ts";
+import * as CodexInstallation from "./CodexInstallation.ts";
 
 const hostPlatform = HostProcessPlatform.defaultValue() === "win32" ? "win32" : "darwin";
 const archive = Buffer.from(
@@ -39,8 +34,8 @@ const asset = {
 };
 const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
   input: {
-    options?: Partial<CodexInstallationOptions>;
-    manifestCurrent?: Effect.Effect<ModelManifestData>;
+    options?: Partial<CodexInstallation.CodexInstallationOptions>;
+    manifestCurrent?: Effect.Effect<ModelManifest.ModelManifestData>;
     body?: Stream.Stream<Uint8Array>;
     baseDir?: string;
     local?: { version: string; appServerFails?: boolean; versionFails?: boolean };
@@ -67,16 +62,16 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
     );
   }
   let downloads = 0;
-  const installation = yield* makeCodexInstallation({
+  const installation = yield* CodexInstallation.makeCodexInstallation({
     baseDir,
     releaseAsset: asset,
     validate: () => Effect.void,
     ...input.options,
   }).pipe(
-    Effect.provideService(ModelManifest, {
-      current: input.manifestCurrent ?? Effect.succeed(BUNDLED_MODEL_MANIFEST),
-      refresh: Effect.succeed(BUNDLED_MODEL_MANIFEST),
-      forceRefresh: Effect.succeed(BUNDLED_MODEL_MANIFEST),
+    Effect.provideService(ModelManifest.ModelManifest, {
+      current: input.manifestCurrent ?? Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
+      refresh: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
+      forceRefresh: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
       refreshInBackground: Effect.void,
     }),
     Effect.provideService(HostProcessPlatform, hostPlatform),
@@ -100,15 +95,16 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
   );
   return { installation, fs, baseDir, localBinaryPath, probeLog, downloads: () => downloads };
 });
-const terminalState = (installation: CodexInstallation["Service"]) =>
+const terminalState = (installation: CodexInstallation.CodexInstallation["Service"]) =>
   installation.changes.pipe(
     Stream.filter((state) => ["succeeded", "failed", "cancelled"].includes(state.phase)),
     Stream.runHead,
     Effect.map(Option.getOrThrow),
   );
 
-for (const version of ["0.156.0", "0.156.1", "0.156.2", "0.157.0"]) {
-  it.effect(`reuses installed Codex ${version} without downloading or taking ownership of it`, () =>
+it.effect.each(["0.156.0", "0.156.1", "0.156.2", "0.157.0"])(
+  "reuses installed Codex %s without downloading or taking ownership of it",
+  (version) =>
     Effect.gen(function* () {
       const h = yield* makeHarness({ local: { version } });
       expect(yield* h.installation.start).toMatchObject({
@@ -135,9 +131,8 @@ for (const version of ["0.156.0", "0.156.1", "0.156.2", "0.157.0"]) {
       expect(yield* h.fs.exists(h.localBinaryPath)).toBe(true);
       expect((yield* h.installation.state).source).toBe("local");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-}
-for (const local of [
+);
+it.effect.each([
   { version: "0.128.9" },
   { version: "0.145.0" },
   { version: "0.155.1" },
@@ -146,24 +141,20 @@ for (const local of [
   { version: "unknown" },
   { version: "0.156.1", appServerFails: true },
   { version: "0.156.1", versionFails: true },
-]) {
-  it.effect(
-    `downloads the pinned release when the local CLI is unsupported or broken: ${JSON.stringify(local)}`,
-    () =>
-      Effect.gen(function* () {
-        const h = yield* makeHarness({ local });
-        expect((yield* h.installation.state).installedVersion).toBeNull();
-        yield* h.installation.start;
-        const installed = yield* terminalState(h.installation);
-        expect(installed.phase).toBe("succeeded");
-        const executable = yield* h.installation.resolve();
-        expect(executable.source).toBe("managed");
-        expect(installed.executablePath).toBe(executable.executablePath);
-        expect(h.downloads()).toBe(1);
-        expect(yield* h.fs.exists(h.localBinaryPath)).toBe(true);
-      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-}
+])("downloads the pinned release when the local CLI is unsupported or broken: %j", (local) =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness({ local });
+    expect((yield* h.installation.state).installedVersion).toBeNull();
+    yield* h.installation.start;
+    const installed = yield* terminalState(h.installation);
+    expect(installed.phase).toBe("succeeded");
+    const executable = yield* h.installation.resolve();
+    expect(executable.source).toBe("managed");
+    expect(installed.executablePath).toBe(executable.executablePath);
+    expect(h.downloads()).toBe(1);
+    expect(yield* h.fs.exists(h.localBinaryPath)).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 it.effect("falls back to a managed download when the reused local executable disappears", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness({ local: { version: "0.156.1" } });
@@ -199,7 +190,7 @@ it.effect("rechecks compatibility after the local executable is replaced", () =>
 
 it.effect("rechecks a cached local executable when the shared manifest policy changes", () =>
   Effect.gen(function* () {
-    let manifest = BUNDLED_MODEL_MANIFEST;
+    let manifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
     const h = yield* makeHarness({
       local: { version: "0.156.0" },
       manifestCurrent: Effect.sync(() => manifest),
@@ -233,7 +224,10 @@ it.effect("uses bundled Codex compatibility when the remote manifest omits its p
   Effect.gen(function* () {
     const h = yield* makeHarness({
       local: { version: "0.156.0" },
-      manifestCurrent: Effect.succeed({ ...BUNDLED_MODEL_MANIFEST, compatibility: [] }),
+      manifestCurrent: Effect.succeed({
+        ...ModelManifest.BUNDLED_MODEL_MANIFEST,
+        compatibility: [],
+      }),
     });
     expect((yield* h.installation.start).source).toBe("local");
     expect(h.downloads()).toBe(0);
@@ -393,6 +387,8 @@ it.effect("keeps an activated runtime when a later update fails verification", (
 it("publishes complete packages for all supported platforms", () => {
   for (const platform of ["darwin", "linux", "win32"] as const)
     for (const arch of ["x64", "arm64"])
-      expect(resolveCodexReleaseAsset(platform, arch)?.url).toContain("codex-package-");
-  expect(resolveCodexReleaseAsset("linux", "riscv64")).toBeNull();
+      expect(CodexInstallation.resolveCodexReleaseAsset(platform, arch)?.url).toContain(
+        "codex-package-",
+      );
+  expect(CodexInstallation.resolveCodexReleaseAsset("linux", "riscv64")).toBeNull();
 });

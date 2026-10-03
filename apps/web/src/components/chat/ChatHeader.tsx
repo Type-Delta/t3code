@@ -222,16 +222,30 @@ export const ChatHeader = memo(function ChatHeader({
   // Inline rename, keyed by thread: navigating away drops an in-progress
   // rename instead of committing stale text. Cleared on thread change (not
   // just hidden) so returning to the thread doesn't revive the old draft.
-  const [renaming, setRenaming] = useState<{ threadId: ThreadId; title: string } | null>(null);
-  if (renaming !== null && renaming.threadId !== activeThreadId) {
+  const [renaming, setRenaming] = useState<{
+    threadId: ThreadId;
+    environmentId: EnvironmentId;
+    title: string;
+  } | null>(null);
+  if (
+    renaming !== null &&
+    (renaming.threadId !== activeThreadId || renaming.environmentId !== activeThreadEnvironmentId)
+  ) {
     setRenaming(null);
   }
-  const renamingTitle = renaming?.threadId === activeThreadId ? renaming.title : null;
+  const renamingTitle =
+    renaming?.threadId === activeThreadId && renaming.environmentId === activeThreadEnvironmentId
+      ? renaming.title
+      : null;
   const renameCommittedRef = useRef(false);
   const startRename = useCallback(() => {
     renameCommittedRef.current = false;
-    setRenaming({ threadId: activeThreadId, title: activeThreadTitle });
-  }, [activeThreadId, activeThreadTitle]);
+    setRenaming({
+      threadId: activeThreadId,
+      environmentId: activeThreadEnvironmentId,
+      title: activeThreadTitle,
+    });
+  }, [activeThreadEnvironmentId, activeThreadId, activeThreadTitle]);
   const commitRename = useCallback(
     (title: string) => {
       setRenaming(null);
@@ -275,7 +289,7 @@ export const ChatHeader = memo(function ChatHeader({
     () => () => {
       cancelPendingTitleMenu();
     },
-    [activeThreadId, cancelPendingTitleMenu],
+    [activeThreadEnvironmentId, activeThreadId, cancelPendingTitleMenu],
   );
   const openTitleMenuNow = useCallback(() => {
     cancelPendingTitleMenu();

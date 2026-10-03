@@ -76,18 +76,7 @@ import {
   PreviewAutomationTypeInput,
   PreviewAutomationWaitForInput,
 } from "./previewAutomation.ts";
-import type {
-  ClientOrchestrationCommand,
-  OrchestrationGetFullThreadDiffInput,
-  OrchestrationGetFullThreadDiffResult,
-  OrchestrationGetTurnDiffInput,
-  OrchestrationGetTurnDiffResult,
-  OrchestrationShellSnapshot,
-  OrchestrationShellStreamItem,
-  OrchestrationSubscribeThreadInput,
-  OrchestrationThreadStreamItem,
-} from "./orchestration.ts";
-import { SnapShotSource } from "./orchestration.ts";
+import { SnapShotSource } from "./chatAttachment.ts";
 import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { BrowserProfileId } from "./browserProfile.ts";
 import type {
@@ -1596,27 +1585,6 @@ export interface EnvironmentApi {
     getDiffFileContents: (
       input: ReviewDiffFileContentsInput,
     ) => Promise<ReviewDiffFileContentsResult>;
-  };
-  orchestration: {
-    dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;
-    getTurnDiff: (input: OrchestrationGetTurnDiffInput) => Promise<OrchestrationGetTurnDiffResult>;
-    getFullThreadDiff: (
-      input: OrchestrationGetFullThreadDiffInput,
-    ) => Promise<OrchestrationGetFullThreadDiffResult>;
-    getArchivedShellSnapshot: () => Promise<OrchestrationShellSnapshot>;
-    subscribeShell: (
-      callback: (event: OrchestrationShellStreamItem) => void,
-      options?: {
-        onResubscribe?: () => void;
-      },
-    ) => () => void;
-    subscribeThread: (
-      input: OrchestrationSubscribeThreadInput,
-      callback: (event: OrchestrationThreadStreamItem) => void,
-      options?: {
-        onResubscribe?: () => void;
-      },
-    ) => () => void;
   };
   preview: {
     open: (input: typeof PreviewOpenInput.Encoded) => Promise<PreviewSessionSnapshot>;

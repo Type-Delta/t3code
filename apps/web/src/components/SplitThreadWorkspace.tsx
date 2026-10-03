@@ -46,13 +46,13 @@ import { browserMiniPlayerSource, usePreviewMiniPlayerStore } from "../previewMi
 import {
   useAllEnvironmentProjectSnapshotsReady,
   useProject,
-  useThread,
+  useThreadProjection,
   useThreadRefs,
   useThreadShell,
   useThreadStatus,
 } from "../state/entities";
 import ChatView from "./ChatView";
-import { threadHasStarted } from "./ChatView.logic";
+import { threadShellHasStarted } from "./ChatView.logic";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { SplitPaneDropHint } from "./SplitPaneDropHint";
 import { Button } from "./ui/button";
@@ -198,7 +198,7 @@ function SplitThreadPane(props: {
     threadRef,
   } = props;
   const navigate = useNavigate();
-  const serverThread = useThread(threadRef);
+  const serverThread = useThreadProjection(threadRef);
   const serverThreadShell = useThreadShell(threadRef);
   const serverThreadStatus = useThreadStatus(threadRef);
   const threadSyncPhase = resolveThreadSyncPhase({
@@ -207,11 +207,11 @@ function SplitThreadPane(props: {
     status: serverThreadStatus,
   });
   const projectRef = useMemo(() => {
-    const projectId = serverThread?.projectId ?? draftPane?.projectId;
+    const projectId = serverThreadShell?.projectId ?? draftPane?.projectId;
     return projectId ? scopeProjectRef(threadRef.environmentId, projectId) : null;
-  }, [draftPane?.projectId, serverThread?.projectId, threadRef.environmentId]);
+  }, [draftPane?.projectId, serverThreadShell?.projectId, threadRef.environmentId]);
   const project = useProject(projectRef);
-  const serverThreadStarted = threadHasStarted(serverThread);
+  const serverThreadStarted = threadShellHasStarted(serverThreadShell);
   const threadKey = scopedThreadKey(threadRef);
 
   useEffect(() => {
@@ -313,11 +313,11 @@ function SplitThreadPane(props: {
     ],
   );
 
-  if (!serverThread && !draftPane) {
+  if (!serverThreadShell && !draftPane) {
     return null;
   }
 
-  const threadTitle = serverThread?.title ?? "New thread";
+  const threadTitle = serverThreadShell?.title ?? "New thread";
   const projectName = project?.title ?? "Project unavailable";
   return (
     <div

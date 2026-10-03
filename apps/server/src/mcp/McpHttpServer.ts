@@ -7,22 +7,39 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
 import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
-import { PreviewAutomationError, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { PreviewAutomationError } from "@t3tools/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ManagementApiKeyService from "../auth/ManagementApiKeyService.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as McpToolScope from "./McpToolScope.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
+import { PreviewControlsHandlersLive } from "./toolkits/previewControls/handlers.ts";
+import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
+import { EnvironmentHandlersLive } from "./toolkits/environment/handlers.ts";
+import { ProjectToolkit } from "./toolkits/project/tools.ts";
+import { ProjectHandlersLive } from "./toolkits/project/handlers.ts";
+import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
+import { AttachmentHandlersLive } from "./toolkits/attachment/handlers.ts";
+import { ThreadToolkit } from "./toolkits/thread/tools.ts";
+import { ThreadToolkitHandlersLive } from "./toolkits/thread/handlers.ts";
+import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { OrchestratorToolkitHandlersLive } from "./toolkits/orchestrator/handlers.ts";
+import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -32,8 +49,9 @@ import {
   PreviewSnapshotToolkit,
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
-import { ThreadToolkitHandlersLive } from "./toolkits/threads/handlers.ts";
-import { ThreadToolkit } from "./toolkits/threads/tools.ts";
+import { WorktreeToolkitHandlersLive } from "./toolkits/worktree/handlers.ts";
+import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
+import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 import { PullRequestsToolkitHandlersLive } from "./toolkits/pullRequests/handlers.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
 import {
@@ -92,11 +110,77 @@ const managementTokenShape = /^t3mgmt_[A-Za-z0-9_-]+_[A-Za-z0-9_-]+$/;
 const hasManagementTokenShape = (token: string): boolean =>
   token.length <= MANAGEMENT_TOKEN_MAX_LENGTH && managementTokenShape.test(token);
 
+const asJsonRpcRequests = (body: unknown): ReadonlyArray<Record<PropertyKey, unknown>> => {
+  const candidates = Array.isArray(body) ? body : [body];
+  return candidates.filter(Predicate.isObject);
+};
+
+const deniedManagementToolResponse = (request: Record<PropertyKey, unknown>, message: string) => {
+  const id = request.id;
+  return HttpServerResponse.jsonUnsafe({
+    jsonrpc: "2.0",
+    id: typeof id === "string" || typeof id === "number" || id === null ? id : null,
+    error: { code: -32003, message },
+  });
+};
+
+const filterManagementToolListResponse = (
+  response: HttpServerResponse.HttpServerResponse,
+  invocation: McpInvocationContext.McpInvocationScope,
+): HttpServerResponse.HttpServerResponse => {
+  if (response.body._tag !== "Uint8Array" || !response.body.contentType?.includes("json"))
+    return response;
+  const body = response.body.text ?? new TextDecoder().decode(response.body.body);
+  try {
+    const parsed: unknown = JSON.parse(body);
+    const filterResponse = (value: unknown): unknown => {
+      if (
+        !Predicate.isObject(value) ||
+        !Predicate.isObject(value.result) ||
+        !Array.isArray(value.result.tools)
+      )
+        return value;
+      return {
+        ...value,
+        result: {
+          ...value.result,
+          tools: value.result.tools.filter(
+            (tool) =>
+              Predicate.isObject(tool) &&
+              typeof tool.name === "string" &&
+              McpInvocationContext.managementKeyCanUseTool(invocation, tool.name),
+          ),
+        },
+      };
+    };
+    const filtered = Array.isArray(parsed) ? parsed.map(filterResponse) : filterResponse(parsed);
+    return HttpServerResponse.setBody(response, HttpServerResponse.jsonUnsafe(filtered).body);
+  } catch {
+    return response;
+  }
+};
+
 const makeMcpAuthMiddleware = Effect.gen(function* () {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const managementKeys = yield* ManagementApiKeyService.ManagementApiKeyService;
   const environment = yield* ServerEnvironment.ServerEnvironment;
+  const threads = yield* ThreadManagementService.ThreadManagementService;
   const environmentId = yield* environment.getEnvironmentId;
+
+  const resolveToolScope = (invocation: McpInvocationContext.McpInvocationScope) =>
+    Effect.gen(function* () {
+      if (McpInvocationContext.isManagementKeyPrincipal(invocation.principal)) {
+        return { ...invocation, mcpToolScope: "global" as const };
+      }
+      const threadId = McpInvocationContext.getInvocationThreadId(invocation);
+      if (threadId === undefined) return { ...invocation, mcpToolScope: "project" as const };
+      const caller = yield* threads
+        .getThreadShell(threadId)
+        .pipe(Effect.catch(() => Effect.succeed(null)));
+      if (caller === null) return { ...invocation, mcpToolScope: "project" as const };
+      const mcpToolScope = yield* McpToolScope.resolveProjectMcpToolScope(caller.projectId);
+      return { ...invocation, mcpToolScope };
+    });
 
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (
     httpEffect: AuthenticatedHttpEffect,
@@ -115,7 +199,7 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
     // Provider credentials remain the first lookup so the existing ephemeral
     // session path (including liveness refresh) is unchanged.
     const providerInvocation = yield* registry.resolve(token);
-    let invocation = providerInvocation;
+    let invocation: McpInvocationContext.McpInvocationScope | undefined = providerInvocation;
     if (!invocation && hasManagementTokenShape(token)) {
       const managementPrincipal = yield* managementKeys.resolveToken(token).pipe(
         Effect.catchTags({
@@ -130,10 +214,6 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         invocation = {
           environmentId,
           principal: managementPrincipal.value,
-          threadId: ThreadId.make("mcp-management-key"),
-          providerSessionId: "mcp-management-key",
-          providerInstanceId: ProviderInstanceId.make("mcp-management-key"),
-          capabilities: new Set<McpInvocationContext.McpCapability>(),
           issuedAt: yield* Clock.currentTimeMillis,
         };
       }
@@ -153,13 +233,44 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
       });
       return unauthorized;
     }
+    const resolvedInvocation = yield* resolveToolScope(invocation);
+    const isManagementKey = McpInvocationContext.isManagementKeyPrincipal(
+      resolvedInvocation.principal,
+    );
+    const requestBody = isManagementKey
+      ? yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))
+      : undefined;
+    const requests = asJsonRpcRequests(requestBody);
+    const rejectedToolCall = requests.find((message) => {
+      if (message.method !== "tools/call" || !Predicate.isObject(message.params)) return false;
+      const name = message.params.name;
+      return (
+        typeof name !== "string" ||
+        !McpInvocationContext.managementKeyCanUseTool(resolvedInvocation, name)
+      );
+    });
+    if (rejectedToolCall !== undefined) {
+      const params = rejectedToolCall.params;
+      const name = Predicate.isObject(params) && typeof params.name === "string" ? params.name : "";
+      const reason = McpInvocationContext.isManagementMcpToolAllowed(name)
+        ? "The management API key does not grant the required scope for this tool."
+        : "Management API keys cannot use this tool.";
+      return deniedManagementToolResponse(rejectedToolCall, reason);
+    }
     return yield* httpEffect.pipe(
-      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, resolvedInvocation),
+      Effect.flatMap((response) =>
+        Effect.succeed(
+          isManagementKey && requests.some((message) => message.method === "tools/list")
+            ? filterManagementToolListResponse(response, resolvedInvocation)
+            : response,
+        ),
+      ),
       Effect.map(normalizeMcpHttpResponse),
     );
   });
 }).pipe(
-  Effect.map((middleware): McpAuthMiddleware => middleware),
+  Effect.map((middleware) => middleware),
   Effect.withSpan("McpHttpServer.makeAuthMiddleware"),
 );
 
@@ -696,8 +807,35 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+export const OrchestratorToolkitRegistrationLive = McpServer.toolkit(OrchestratorToolkit).pipe(
+  Layer.provide(OrchestratorToolkitHandlersLive),
+  Layer.provide(OrchestratorMcpService.layer),
+  Layer.provide(ThreadMetadataMcpService.layer),
+);
+
 export const ThreadToolkitRegistrationLive = McpServer.toolkit(ThreadToolkit).pipe(
   Layer.provide(ThreadToolkitHandlersLive),
+);
+
+const WorktreeToolkitRegistrationLive = McpServer.toolkit(WorktreeToolkit).pipe(
+  Layer.provide(WorktreeToolkitHandlersLive),
+  Layer.provide(WorktreeMcpService.layer),
+);
+
+const PreviewControlsRegistrationLive = McpServer.toolkit(PreviewControlsToolkit).pipe(
+  Layer.provide(PreviewControlsHandlersLive),
+);
+
+const EnvironmentRegistrationLive = McpServer.toolkit(EnvironmentToolkit).pipe(
+  Layer.provide(EnvironmentHandlersLive),
+);
+
+const ProjectRegistrationLive = McpServer.toolkit(ProjectToolkit).pipe(
+  Layer.provide(ProjectHandlersLive),
+);
+
+const AttachmentRegistrationLive = McpServer.toolkit(AttachmentToolkit).pipe(
+  Layer.provide(AttachmentHandlersLive),
 );
 
 export const PullRequestsToolkitRegistrationLive = McpServer.toolkit(PullRequestsToolkit).pipe(
@@ -719,7 +857,13 @@ export const DeviceToolkitRegistrationLive = Layer.mergeAll(
 
 export const McpToolkitRegistrationLive = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
+  OrchestratorToolkitRegistrationLive,
   ThreadToolkitRegistrationLive,
+  AttachmentRegistrationLive,
+  ProjectRegistrationLive,
+  EnvironmentRegistrationLive,
+  PreviewControlsRegistrationLive,
+  WorktreeToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,
 );

@@ -7,6 +7,7 @@ import {
   PreviewAutomationRecordingTransferError,
   PreviewAutomationRecordingDesktopUpdateRequiredError,
   PreviewAutomationRecordingArtifact,
+  PreviewAutomationUnavailableError,
   type ToolActivityIcon,
   type ThreadId,
   type PreviewAutomationOperation,
@@ -235,10 +236,24 @@ const handlers = {
         PREVIEW_RECORDING_STOP_TIMEOUT_MS,
         tabId,
       );
-      const artifact = yield* claimPreviewRecording(
-        McpInvocationContext.getInvocationThreadId(scope),
-        response.result,
-      );
+      const threadId = McpInvocationContext.getInvocationThreadId(scope);
+      if (threadId === undefined) {
+        return yield* new PreviewAutomationUnavailableError({
+          capability: "preview",
+          environmentId: scope.environmentId,
+          ...(McpInvocationContext.getInvocationProviderSessionId(scope) === undefined
+            ? {}
+            : {
+                providerSessionId: McpInvocationContext.getInvocationProviderSessionId(scope)!,
+              }),
+          ...(McpInvocationContext.getInvocationProviderInstanceId(scope) === undefined
+            ? {}
+            : {
+                providerInstanceId: McpInvocationContext.getInvocationProviderInstanceId(scope)!,
+              }),
+        });
+      }
+      const artifact = yield* claimPreviewRecording(threadId, response.result);
       return { ...artifact, ...(response.toolIcon ? { toolIcon: response.toolIcon } : {}) };
     }),
 } satisfies Parameters<typeof PreviewToolkit.toLayer>[0];
