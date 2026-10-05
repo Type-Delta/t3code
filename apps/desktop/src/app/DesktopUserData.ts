@@ -60,10 +60,12 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     if (input.platform !== "win32") return destinationPath;
     const destinationState = path.join(destinationPath, "Local State");
     if (yield* inspect(destinationState)) return destinationPath;
-    const legacyState = path.join(legacyPath, "Local State");
-    const sourceState = (yield* inspect(legacyState))
-      ? legacyState
-      : path.join(input.appDataDirectory, "t3code", "Local State");
+    // V1 switched userData only after Electron had loaded the default `t3code` profile's key,
+    // so that key encrypted existing desktop secrets even when `T3 Code (Alpha)` also exists.
+    const defaultState = path.join(input.appDataDirectory, "t3code", "Local State");
+    const sourceState = (yield* inspect(defaultState))
+      ? defaultState
+      : path.join(legacyPath, "Local State");
     if (!(yield* inspect(sourceState))) return destinationPath;
     // Windows safeStorage keys live here. Copy only these preferences, never locked databases.
     const state = yield* fs

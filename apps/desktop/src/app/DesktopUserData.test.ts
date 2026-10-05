@@ -38,6 +38,30 @@ it.effect("identifies a failed source read and preserves its cause", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("prefers the default t3code key when both V1 profiles have one", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-v2-profile-" });
+    for (const [name, key] of [
+      ["t3code", "key-that-encrypted-v1-secrets"],
+      ["T3 Code (Alpha)", "unused-alpha-key"],
+    ] as const) {
+      yield* fs.makeDirectory(path.join(directory, name), { recursive: true });
+      yield* fs.writeFileString(path.join(directory, name, "Local State"), key);
+    }
+    yield* resolveUserDataPath({
+      appDataDirectory: directory,
+      isDevelopment: false,
+      platform: "win32",
+    });
+    assert.equal(
+      yield* fs.readFileString(path.join(directory, "t3code-v2", "Local State")),
+      "key-that-encrypted-v1-secrets",
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect.each(["t3code", "T3 Code (Alpha)"])(
   "preserves Windows credential keys from %s without copying browser databases",
   (sourceName) =>

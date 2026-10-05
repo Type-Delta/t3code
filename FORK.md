@@ -383,7 +383,7 @@ t3_thread_wait accepts up to eight targets and applies the upstream one-hour cap
 select a provider instance and model, and rejects a provider caller that targets its own thread.
 create_threads remains a project-scoped provider tool and is not available to management-key callers.
 Management-key discovery and invocation is limited to the reviewed orchestrator_capabilities,
-t3_thread__, and t3_project__ allowlist (with create_threads excluded); all other MCP toolkits retain
+t3_thread**, and t3_project** allowlist (with create_threads excluded); all other MCP toolkits retain
 upstream discovery and capability rules.
 
 Implementation evidence: McpInvocationContext, McpHttpServer, McpToolScope, threadAccess, the
@@ -873,6 +873,9 @@ The merge reconciled the following textual conflict surfaces and made these sema
 
 ### 2026-10-04 — Orchestrator V2 sync
 
+**Merge commit:** `8f5699626c824140598278078461819e6a17152d`
+**Parents:** `579b37a9f7b5f9b8ad3cd6056c3ce9ab675cdbf8` (fork) and `fed41fa88bb27cb4325cb208d571393850bc63c2` (upstream/main)
+
 - Adopted upstream Orchestrator V2 as the runtime and cut over legacy V1 execution, while retaining the
   legacy importer needed to hydrate existing thread shells and messages. The migration smoke imported
   331 thread shells and 619 messages and reached a listening server.
@@ -888,9 +891,11 @@ The merge reconciled the following textual conflict surfaces and made these sema
 - Restored upstream Git command gating and sanitized remote failure classification, and made ACP
   process-tree cleanup one-shot after successful explicit termination while retaining finalizer retry
   after failure. Project-scoped thread search now filters before SQL LIMIT.
-- Validation: vp check, vp run typecheck, vp run lint:mobile, focused MCP/native-session/checkpoint,
-  ACP, VCS, search, and migration suites, web tests, desktop smoke, and a Windows x64 NSIS artifact
-  build. The preview accessibility snapshot and click endpoints failed after the app loaded, so live
-  browser evidence used DOM evaluation. Device tools were disabled, so native mobile verification
-  could not run. The unrestricted full suite was stopped after unrelated long-running Windows VCS and
-  provider tests; the affected VCS file passed all 120 runnable tests.
+- On Windows, the first V2 desktop launch seeds `%APPDATA%\t3code-v2\Local State` from the default `t3code` profile before falling back to `T3 Code (Alpha)`. Upstream prefers `T3 Code (Alpha)`. In the fork, Electron loaded the safe-storage key from `t3code` before switching `userData`, so desktop secrets such as `connection-catalog.json` were encrypted with that key. On machines with both profiles, the upstream order copied an unused key. The renderer then could not decrypt its connection catalog and never connected to the local backend, which showed as no threads and a disconnected settings page.
+
+**Validation**: vp check, vp run typecheck, vp run lint:mobile, focused MCP/native-session/checkpoint,
+ACP, VCS, search, and migration suites, web tests, desktop smoke, and a Windows x64 NSIS artifact
+build. The preview accessibility snapshot and click endpoints failed after the app loaded, so live
+browser evidence used DOM evaluation. Device tools were disabled, so native mobile verification
+could not run. The unrestricted full suite was stopped after unrelated long-running Windows VCS and
+provider tests; the affected VCS file passed all 120 runnable tests.
