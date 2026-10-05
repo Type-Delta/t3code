@@ -6,74 +6,6 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 ## Divergence Log
 
-### DL039 — Graceful Codex shutdown before Windows tree termination
-
-Codex app-server sessions and probes drain their protocol writer and close stdin before waiting up to three seconds for exit. Output readers stay open during cleanup; an unresponsive app-server still receives a forced termination. Transport failures use the same stdin-first shutdown.
-
-On Windows, the service launcher requests shutdown over its existing IPC channel and allows five seconds for server cleanup before `taskkill /T /F`. Native desktop backends use stdin EOF to request server shutdown and allow four seconds before the process spawner forces termination, within the existing five-second desktop stop budget. Linux, macOS, and WSL retain their signal-based server shutdown. Older servers that do not recognize these requests still reach the forced fallback.
-
-This is an experiment to reduce abrupt termination. It does not establish or fix the cause of the intermittent zero-handle Codex processes stuck in Windows termination.
-
-**Implementation evidence:** `packages/effect-codex-app-server/src/{client,protocol}.ts`, `apps/server/src/{serviceLauncher,server}.ts`, `apps/server/src/process/ParentProcessShutdown.ts`, `apps/server/src/provider/Layers/CodexSessionRuntime.ts`, and `apps/desktop/src/backend/DesktopBackendManager.ts`.
-
-**Recorded validation:** Focused client, protocol, launcher, parent shutdown, Codex runtime/probe, and desktop lifecycle tests passed. Three isolated installed-Codex initialization/EOF cycles exited with code 0. One full server shutdown through launcher IPC and two through desktop stdin EOF exited with code 0 in 2.7–2.8 seconds. `vp check` and `vp run typecheck` passed.
-
-**Last updated:** 2026-10-02
-
-### DL038 — Precise transcript identity checks on Windows
-
-Session scanning skips parsing completed history from matching file metadata only when the inode is present and a safe JavaScript integer. Windows can omit inode values or round NTFS file IDs, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts, 4 GiB, and 100,000 records per scan. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
-
-**Implementation evidence:** `apps/server/src/project/AgentSessionScanner.ts`, its replacement identity tests, and bounded retry tests in `AgentSessionImporter.test.ts`.
-
-**Recorded validation:** 100 scanner/importer tests, including 201-history imports across three attempts with missing or unsafe inodes. Server typecheck, scoped lint, and formatting passed.
-
-**Last updated:** 2026-10-02
-
-### DL037 — Forgiving CLIProxyAPI usage and redemption
-
-Hub requests pause after management HTTP 401/403 until the URL or management key changes. Optional malformed quota fields and array entries no longer discard usable windows; Codex plan fallback accepts both field names and relative reset times. Credit redemption sends only a stable `redeem_request_id`, preserves known outcomes, and reports unfamiliar successful responses as accepted before refreshing usage. T3 leaves cooldown clearing to CPA instead of resetting the entire account. Web, desktop, and mobile display the accepted result.
-
-**Implementation evidence:** `apps/server/src/usage/cliproxyApi.ts`, its focused tests, `packages/contracts/src/providerUsageLimits.ts`, and the web/mobile usage components.
-
-**Recorded validation:** 26 focused adapter and source-refresh tests, `vp check`, `vp run typecheck`, and `vp run lint:mobile`. Integrated web verification is blocked by `PreviewAutomationNoAvailableHostError`; native mobile verification is blocked by disabled device access.
-
-**Last updated:** 2026-09-30
-
-### DL036 — Ignore route tests during web route generation
-
-The web router ignores `.test.ts` files in the routes directory so route tests do not produce missing-Route warnings during builds.
-
-**Implementation evidence:** `apps/web/vite.config.ts`.
-
-**Recorded validation:** web build, `vp check`, and `vp run typecheck`.
-
-**Last updated:** 2026-09-28
-
-### DL016 — Repository identity for partial clones
-
-Git may append a filter annotation to `git remote -v` fetch lines for partial clones. The repository identity resolver accepts those lines so projects using the same remote can group across environments.
-
-**Implementation evidence:** `apps/server/src/project/RepositoryIdentityResolver.ts` and its focused test.
-
-**Recorded validation:** resolver regression test, `vp check`, and `vp run typecheck`.
-
-**Last updated:** 2026-09-24
-
-### DL015 — Case-safe composer subagent utility filename
-
-The composer subagent utility module uses a distinct basename from the `ComposerSubagents.tsx` component so Windows case-insensitive resolution cannot merge the two modules during typecheck.
-
-**Implementation evidence:** `apps/web/src/components/chat/composerSubagentUtils.ts`, `apps/web/src/components/chat/ComposerSubagents.tsx`, and `apps/web/src/components/chat/composerSubagents.test.ts`.
-
-**Recorded validation:** mobile typecheck and repository typecheck on Windows.
-
-**Last updated:** 2026-09-24
-
-This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (updated by the latest sync merge). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
-
-Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
-
 ### DL001 — Claude Windows resolver and artifact safeguards
 
 Windows Claude commands are resolved before the Agent SDK starts a session. The resolver follows npm launcher shims to the installed native executable or JavaScript entry point and preserves explicit executable paths. Provider snapshots and DevTools expose sanitized resolver diagnostics; startup provenance identifies installed web artifacts without exposing command output or environment values.
@@ -238,27 +170,29 @@ Diff queries use the active checkpoint timeline generation and the stable pre-tu
 
 **Last updated:** 2026-09-05
 
-### DL015 — Live project-scoped working tree diffs
+### DL015 — Case-safe composer subagent utility filename
 
-Diff previews for an active project are authorized against that registered project root, including projects outside the server startup directory. The web client no longer substitutes the environment startup repository when the selected project is outside that directory.
+The composer subagent utility module uses a distinct basename from the `ComposerSubagents.tsx` component so Windows case-insensitive resolution cannot merge the two modules during typecheck.
 
-While DiffPanel is open, working-tree and branch previews refresh once per second. The panel's Git-status-based scope selection is upstream behavior.
+**Implementation evidence:** `apps/web/src/components/chat/composerSubagentUtils.ts`, `apps/web/src/components/chat/ComposerSubagents.tsx`, and `apps/web/src/components/chat/composerSubagents.test.ts`.
 
-**Implementation evidence:** `apps/server/src/review/ReviewService.ts`, `apps/server/src/ws.ts`, and `packages/client-runtime/src/state/review.ts`.
+**Recorded validation:** mobile typecheck and repository typecheck on Windows.
 
-**Recorded validation:** focused review-service authorization and DiffPanel store tests; controlled-browser reproduction and verification with an external registered project, including a file modification made while the panel remained open; `vp check`; and `vp run typecheck`.
+**Last updated:** 2026-09-24
 
-**Last updated:** 2026-09-05
+This is a current-state record only. Each entry describes a surviving difference between `HEAD` and the latest shared base, determined with `git merge-base HEAD upstream/main` (updated by the latest sync merge). A feature adopted from upstream is not a divergence merely because it was involved in a merge.
 
-### DL016 — Project-selecting local thread shortcut
+Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
-The configured Chat: New Local shortcut opens the command palette's "New thread in..." project picker instead of immediately creating a draft in the active project. The same shortcut enters that picker when the command palette already has focus, while the active-project quick-create remains available as a separate palette action.
+### DL016 — Repository identity for partial clones
 
-**Implementation evidence:** `apps/web/src/routes/_chat.tsx`, `apps/web/src/components/CommandPalette.tsx`, `apps/web/src/components/CommandPalette.logic.ts`, and `apps/web/src/commandPaletteBus.ts`.
+Git may append a filter annotation to `git remote -v` fetch lines for partial clones. The repository identity resolver accepts those lines so projects using the same remote can group across environments.
 
-**Recorded validation:** focused command-palette and keybinding tests; controlled-browser verification from the main app and an already-focused palette; `vp check`; `vp run typecheck`; and `git diff --check`.
+**Implementation evidence:** `apps/server/src/project/RepositoryIdentityResolver.ts` and its focused test.
 
-**Last updated:** 2026-07-29
+**Recorded validation:** resolver regression test, `vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-09-24
 
 ### DL017 — Existing-worktree selection for new threads
 
@@ -295,19 +229,6 @@ loaded a V2 thread route, confirmed the Agents/right-transcript surface is absen
 composer rendered. The preview client's accessibility snapshot and click calls failed after the app
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
-
-Last updated: 2026-10-04
-
-### DL036 – Native conversation adoption during V2 cutover
-
-V2 imports valid saved Codex and Claude native conversation cursors into a durable provider-thread
-projection. Legacy threads with a matching provider runtime cursor now retain a strong native thread
-reference, so the first V2 turn resumes the provider conversation instead of sending the migrated
-transcript as a new conversation. Unknown providers, malformed cursors, and instance mismatches keep
-the safe context-handoff path.
-
-Implementation evidence: LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
-projection, Codex and Claude V2 adapters, and the legacy importer/cutover tests.
 
 Last updated: 2026-10-04
 
@@ -672,11 +593,119 @@ The fork's release workflow runs only through an explicit `workflow_dispatch` re
 
 **Last updated:** 2026-09-24
 
+### DL036 — Ignore route tests during web route generation
+
+The web router ignores `.test.ts` files in the routes directory so route tests do not produce missing-Route warnings during builds.
+
+**Implementation evidence:** `apps/web/vite.config.ts`.
+
+**Recorded validation:** web build, `vp check`, and `vp run typecheck`.
+
+**Last updated:** 2026-09-28
+
+### DL037 — Forgiving CLIProxyAPI usage and redemption
+
+Hub requests pause after management HTTP 401/403 until the URL or management key changes. Optional malformed quota fields and array entries no longer discard usable windows; Codex plan fallback accepts both field names and relative reset times. Credit redemption sends only a stable `redeem_request_id`, preserves known outcomes, and reports unfamiliar successful responses as accepted before refreshing usage. T3 leaves cooldown clearing to CPA instead of resetting the entire account. Web, desktop, and mobile display the accepted result.
+
+**Implementation evidence:** `apps/server/src/usage/cliproxyApi.ts`, its focused tests, `packages/contracts/src/providerUsageLimits.ts`, and the web/mobile usage components.
+
+**Recorded validation:** 26 focused adapter and source-refresh tests, `vp check`, `vp run typecheck`, and `vp run lint:mobile`. Integrated web verification is blocked by `PreviewAutomationNoAvailableHostError`; native mobile verification is blocked by disabled device access.
+
+**Last updated:** 2026-09-30
+
+### DL038 — Precise transcript identity checks on Windows
+
+Session scanning skips parsing completed history from matching file metadata only when the inode is present and a safe JavaScript integer. Windows can omit inode values or round NTFS file IDs, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts, 4 GiB, and 100,000 records per scan. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
+
+**Implementation evidence:** `apps/server/src/project/AgentSessionScanner.ts`, its replacement identity tests, and bounded retry tests in `AgentSessionImporter.test.ts`.
+
+**Recorded validation:** 100 scanner/importer tests, including 201-history imports across three attempts with missing or unsafe inodes. Server typecheck, scoped lint, and formatting passed.
+
+**Last updated:** 2026-10-02
+
+### DL039 — Graceful Codex shutdown before Windows tree termination
+
+Codex app-server sessions and probes drain their protocol writer and close stdin before waiting up to three seconds for exit. Output readers stay open during cleanup; an unresponsive app-server still receives a forced termination. Transport failures use the same stdin-first shutdown.
+
+On Windows, the service launcher requests shutdown over its existing IPC channel and allows five seconds for server cleanup before `taskkill /T /F`. Native desktop backends use stdin EOF to request server shutdown and allow four seconds before the process spawner forces termination, within the existing five-second desktop stop budget. Linux, macOS, and WSL retain their signal-based server shutdown. Older servers that do not recognize these requests still reach the forced fallback.
+
+This is an experiment to reduce abrupt termination. It does not establish or fix the cause of the intermittent zero-handle Codex processes stuck in Windows termination.
+
+**Implementation evidence:** `packages/effect-codex-app-server/src/{client,protocol}.ts`, `apps/server/src/{serviceLauncher,server}.ts`, `apps/server/src/process/ParentProcessShutdown.ts`, `apps/server/src/provider/Layers/CodexSessionRuntime.ts`, and `apps/desktop/src/backend/DesktopBackendManager.ts`.
+
+**Recorded validation:** Focused client, protocol, launcher, parent shutdown, Codex runtime/probe, and desktop lifecycle tests passed. Three isolated installed-Codex initialization/EOF cycles exited with code 0. One full server shutdown through launcher IPC and two through desktop stdin EOF exited with code 0 in 2.7–2.8 seconds. `vp check` and `vp run typecheck` passed.
+
+**Last updated:** 2026-10-02
+
+### DL040 — Live project-scoped working tree diffs
+
+Diff previews for an active project are authorized against that registered project root, including projects outside the server startup directory. The web client no longer substitutes the environment startup repository when the selected project is outside that directory.
+
+While DiffPanel is open, working-tree and branch previews refresh once per second. The panel's Git-status-based scope selection is upstream behavior.
+
+**Implementation evidence:** `apps/server/src/review/ReviewService.ts`, `apps/server/src/ws.ts`, and `packages/client-runtime/src/state/review.ts`.
+
+**Recorded validation:** focused review-service authorization and DiffPanel store tests; controlled-browser reproduction and verification with an external registered project, including a file modification made while the panel remained open; `vp check`; and `vp run typecheck`.
+
+**Last updated:** 2026-09-05
+
+### DL041 — Project-selecting local thread shortcut
+
+The configured Chat: New Local shortcut opens the command palette's "New thread in..." project picker instead of immediately creating a draft in the active project. The same shortcut enters that picker when the command palette already has focus, while the active-project quick-create remains available as a separate palette action.
+
+**Implementation evidence:** `apps/web/src/routes/_chat.tsx`, `apps/web/src/components/CommandPalette.tsx`, `apps/web/src/components/CommandPalette.logic.ts`, and `apps/web/src/commandPaletteBus.ts`.
+
+**Recorded validation:** focused command-palette and keybinding tests; controlled-browser verification from the main app and an already-focused palette; `vp check`; `vp run typecheck`; and `git diff --check`.
+
+**Last updated:** 2026-07-29
+
+### DL042 – Native conversation adoption during V2 cutover
+
+V2 imports valid saved Codex and Claude native conversation cursors into a durable provider-thread
+projection. Legacy threads with a matching provider runtime cursor now retain a strong native thread
+reference, so the first V2 turn resumes the provider conversation instead of sending the migrated
+transcript as a new conversation. Unknown providers, malformed cursors, and instance mismatches keep
+the safe context-handoff path.
+
+Implementation evidence: LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
+projection, Codex and Claude V2 adapters, and the legacy importer/cutover tests.
+
+Last updated: 2026-10-04
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-10-04 — Orchestrator V2 sync
+
+**Merge commit:** `8f5699626c824140598278078461819e6a17152d`
+**Parents:** `579b37a9f7b5f9b8ad3cd6056c3ce9ab675cdbf8` (fork) and `fed41fa88bb27cb4325cb208d571393850bc63c2` (upstream/main)
+
+- Adopted upstream Orchestrator V2 as the runtime and cut over legacy V1 execution, while retaining the
+  legacy importer needed to hydrate existing thread shells and messages. The migration smoke imported
+  331 thread shells and 619 messages and reached a listening server.
+- Preserved exact native Codex and Claude conversation identities when transcript and workspace checks
+  succeed, including legacy V1 threads with a valid saved provider cursor. Preserved the fork's sidecar checkpoint capture/restore and non-Git handling, while leaving
+  provider conversation rollback/fork and direct active steering to V2's upstream behavior.
+- Adopted child-thread routes and lineage controls, removed the Agents/right-transcript panel, and
+  retained the composer subagent dropdown and metadata.
+- Adopted the V2 usage-limit scheduler and Cursor SDK. Auto-resume stays enabled by default globally,
+  with the fork continuation prompt.
+- Combined MCP behavior with the project/global scope policy, management-key allowlist, cross-project
+  restrictions, eight-target wait, one-hour cap, provider/model send selection, and self-send guard.
+- Restored upstream Git command gating and sanitized remote failure classification, and made ACP
+  process-tree cleanup one-shot after successful explicit termination while retaining finalizer retry
+  after failure. Project-scoped thread search now filters before SQL LIMIT.
+- On Windows, the first V2 desktop launch seeds `%APPDATA%\t3code-v2\Local State` from the default `t3code` profile before falling back to `T3 Code (Alpha)`. Upstream prefers `T3 Code (Alpha)`. In the fork, Electron loaded the safe-storage key from `t3code` before switching `userData`, so desktop secrets such as `connection-catalog.json` were encrypted with that key. On machines with both profiles, the upstream order copied an unused key. The renderer then could not decrypt its connection catalog and never connected to the local backend, which showed as no threads and a disconnected settings page.
+
+**Validation**: vp check, vp run typecheck, vp run lint:mobile, focused MCP/native-session/checkpoint,
+ACP, VCS, search, and migration suites, web tests, desktop smoke, and a Windows x64 NSIS artifact
+build. The preview accessibility snapshot and click endpoints failed after the app loaded, so live
+browser evidence used DOM evaluation. Device tools were disabled, so native mobile verification
+could not run. The unrestricted full suite was stopped after unrelated long-running Windows VCS and
+provider tests; the affected VCS file passed all 120 runnable tests.
 
 ### 2026-10-02 — Merge upstream/main into main
 
@@ -872,32 +901,3 @@ The merge reconciled the following textual conflict surfaces and made these sema
 - **Root helpers:** retained both sets of root helper configuration instead of treating either as a replacement.
 - **Cross-platform test coverage:** merged `/userdata` and Windows portability coverage so desktop, server, and shared tests use platform-correct paths and fixtures.
 - **QA reconciliation:** merged command, schema, and test-fixture changes and fixed Claude/Codex cleanup issues discovered during post-merge validation.
-
-### 2026-10-04 — Orchestrator V2 sync
-
-**Merge commit:** `8f5699626c824140598278078461819e6a17152d`
-**Parents:** `579b37a9f7b5f9b8ad3cd6056c3ce9ab675cdbf8` (fork) and `fed41fa88bb27cb4325cb208d571393850bc63c2` (upstream/main)
-
-- Adopted upstream Orchestrator V2 as the runtime and cut over legacy V1 execution, while retaining the
-  legacy importer needed to hydrate existing thread shells and messages. The migration smoke imported
-  331 thread shells and 619 messages and reached a listening server.
-- Preserved exact native Codex and Claude conversation identities when transcript and workspace checks
-  succeed, including legacy V1 threads with a valid saved provider cursor. Preserved the fork's sidecar checkpoint capture/restore and non-Git handling, while leaving
-  provider conversation rollback/fork and direct active steering to V2's upstream behavior.
-- Adopted child-thread routes and lineage controls, removed the Agents/right-transcript panel, and
-  retained the composer subagent dropdown and metadata.
-- Adopted the V2 usage-limit scheduler and Cursor SDK. Auto-resume stays enabled by default globally,
-  with the fork continuation prompt.
-- Combined MCP behavior with the project/global scope policy, management-key allowlist, cross-project
-  restrictions, eight-target wait, one-hour cap, provider/model send selection, and self-send guard.
-- Restored upstream Git command gating and sanitized remote failure classification, and made ACP
-  process-tree cleanup one-shot after successful explicit termination while retaining finalizer retry
-  after failure. Project-scoped thread search now filters before SQL LIMIT.
-- On Windows, the first V2 desktop launch seeds `%APPDATA%\t3code-v2\Local State` from the default `t3code` profile before falling back to `T3 Code (Alpha)`. Upstream prefers `T3 Code (Alpha)`. In the fork, Electron loaded the safe-storage key from `t3code` before switching `userData`, so desktop secrets such as `connection-catalog.json` were encrypted with that key. On machines with both profiles, the upstream order copied an unused key. The renderer then could not decrypt its connection catalog and never connected to the local backend, which showed as no threads and a disconnected settings page.
-
-**Validation**: vp check, vp run typecheck, vp run lint:mobile, focused MCP/native-session/checkpoint,
-ACP, VCS, search, and migration suites, web tests, desktop smoke, and a Windows x64 NSIS artifact
-build. The preview accessibility snapshot and click endpoints failed after the app loaded, so live
-browser evidence used DOM evaluation. Device tools were disabled, so native mobile verification
-could not run. The unrestricted full suite was stopped after unrelated long-running Windows VCS and
-provider tests; the affected VCS file passed all 120 runnable tests.
