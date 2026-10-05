@@ -51,9 +51,14 @@ const modelSelection = {
 } as const;
 
 it.layer(ProjectionStoreTestLayer)("CheckpointCaptureServiceV2", (it) => {
-  it.effect.each([false, true])(
-    "captures without decoding history or losing newer delegated completion, ref lookup fails=%s",
-    (refLookupFails) =>
+  it.effect.each([
+    [false, "waiting"],
+    [true, "waiting"],
+    [false, "completed"],
+    [true, "completed"],
+  ] as const)(
+    "captures without decoding history or losing newer delegated completion, ref lookup fails=%s, initial status=%s",
+    ([refLookupFails, initialStatus]) =>
       Effect.gen(function* () {
         const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
         const now = yield* DateTime.now;
@@ -83,10 +88,10 @@ it.layer(ProjectionStoreTestLayer)("CheckpointCaptureServiceV2", (it) => {
           userMessageId: MessageId.make("message:checkpoint-capture-user"),
           rootNodeId,
           activeAttemptId: null,
-          status: "waiting",
+          status: initialStatus,
           requestedAt: now,
           startedAt: now,
-          completedAt: null,
+          completedAt: initialStatus === "completed" ? now : null,
           checkpointId: null,
           contextHandoffId: null,
           // Snapshot taken before a concurrent cohort advanced during capture work.
@@ -99,7 +104,7 @@ it.layer(ProjectionStoreTestLayer)("CheckpointCaptureServiceV2", (it) => {
           parentNodeId: null,
           rootNodeId,
           kind: "root_turn" as const,
-          status: "waiting" as const,
+          status: initialStatus,
           countsForRun: true,
           providerThreadId,
           providerTurnId: null,
@@ -107,7 +112,7 @@ it.layer(ProjectionStoreTestLayer)("CheckpointCaptureServiceV2", (it) => {
           runtimeRequestId: null,
           checkpointScopeId: scopeId,
           startedAt: now,
-          completedAt: null,
+          completedAt: initialStatus === "completed" ? now : null,
         };
         const scope = {
           id: scopeId,
@@ -276,6 +281,8 @@ it.layer(ProjectionStoreTestLayer)("CheckpointCaptureServiceV2", (it) => {
                         IdAllocator.layer,
                         Layer.mock(CheckpointStore.CheckpointStore)({
                           isGitRepository: () => Effect.succeed(true),
+                          allocateCheckpointRef: ({ cwd, snapshotId }) =>
+                            Effect.succeed(CheckpointRef.make(`t3-sidecar:${cwd}:${snapshotId}`)),
                           captureCheckpoint: () => Effect.void,
                           hasCheckpointRef: () =>
                             Effect.fail(
@@ -319,7 +326,7 @@ it.layer(ProjectionStoreTestLayer)("CheckpointCaptureServiceV2", (it) => {
             .execute({ threadId, runId, scopeId: CheckpointScopeId.make("missing-scope") })
             .pipe(Effect.flip);
           assert.instanceOf(incomplete, CheckpointCaptureService.CheckpointCaptureExecutionError);
-          // Capture reads the waiting run while the projection still holds the stale cohort.
+          // Capture reads the provider-settled run while the projection still holds the stale cohort.
           yield* service.execute({ threadId, runId, scopeId });
 
           const events = yield* Ref.get(committed);
@@ -343,8 +350,8 @@ it.layer(ProjectionStoreTestLayer)("CheckpointCaptureServiceV2", (it) => {
             "checkpoint capture must omit delegatedCompletion so ProjectionStore can keep a newer cohort",
           );
 
-          // Race: a newer cohort lands on the projection after capture read the stale
-          // waiting run and before the capture command's run.updated is applied.
+          // Race: a newer cohort lands on the projection after capture read the
+          // stale run and before the capture command's run.updated is applied.
           yield* projectionStore.apply({
             id: EventId.make("event:checkpoint-capture:newer-cohort"),
             type: "run.updated",

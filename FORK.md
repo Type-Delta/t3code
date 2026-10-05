@@ -164,7 +164,7 @@ Migration 053_ReconcileUpstream47History repairs a database carrying upstream hi
 
 Upstream's per-thread auto-settle migration runs at 066, followed by the V2 cutover at 067, preserving the deployed fork ledger. The isolated migration helper accepts documented historical ledger names only after it verifies their reconciliation markers and repaired schema. Codex checkpoint navigation uses the current native thread/revert protocol and retains the fork's conversation cursor safeguards.
 
-Terminal provider events end the workspace mutation for their exact turn before local VCS status refresh, but the next provider turn remains behind a capture-finalization barrier until that full user/assistant/tool-call turn has been checkpointed and projected. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
+Terminal provider events end the workspace mutation for their exact turn and settle the run before local VCS status refresh or checkpoint capture. Checkpoint capture runs as a follow-up effect and records the checkpoint when it succeeds, so a slow or unavailable VCS backend cannot leave the conversation showing as active. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
 Durable completion retains the provider placeholder assistant-message identity, including interrupted turns. Workspace status refresh runs through a coalesced background worker after capture receipts, so slow Git inspection cannot delay turn completion.
 
@@ -182,7 +182,9 @@ Sidecar capture excludes deleted tracked paths from `git add`. Its private index
 
 The 2026-10-02 config repair passed all 28 checkpoint-store tests, including exact restored bytes, conditional includes, repeated values, and removed overrides. A single-file capture benchmark measured 3.2–3.4 seconds against 4.6–4.8 seconds for the original fork implementation.
 
-**Last updated:** 2026-10-02
+The 2026-10-05 completion split passed the focused RunExecutionService, CheckpointCaptureService, CheckpointService, runtime-layer, recovery, projection, `vp check`, and `vp run typecheck` checks. Settled provider turns now remain settled when follow-up checkpoint capture is slow or unavailable.
+
+**Last updated:** 2026-10-05
 
 ### DL008 — Persistent multi-thread split workspaces
 

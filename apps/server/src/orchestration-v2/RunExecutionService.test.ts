@@ -3158,10 +3158,7 @@ it.effect.each(["completed", "interrupted", "cancelled", "failed"] as const)(
         shouldFinalizeRun: () => Effect.succeed(true),
         events: (ids) => Stream.make(rootTerminalEvent(ids, status)),
       });
-      assert.deepEqual(observed, [
-        `run:${status === "completed" ? "waiting" : status}`,
-        "pull-requests-refreshed",
-      ]);
+      assert.deepEqual(observed, [`run:${status}`, "pull-requests-refreshed"]);
     }),
 );
 
@@ -3248,7 +3245,7 @@ it.effect("keeps completed runs completed when pull request refresh fails", () =
       events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
       refreshAfterTurn: Effect.die("refresh failed"),
     });
-    assert.deepEqual(observed, ["run:waiting", "pull-requests-refreshed"]);
+    assert.deepEqual(observed, ["run:completed", "pull-requests-refreshed"]);
   }),
 );
 

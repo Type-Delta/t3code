@@ -630,8 +630,10 @@ export const layer: Layer.Layer<
                 allocateEventId,
               })
             : [];
-        const persistedStatus =
-          input.terminal.status === "completed" ? "waiting" : input.terminal.status;
+        // The provider turn is terminal before checkpoint capture starts. Keep
+        // that lifecycle independent so a slow or unavailable checkpoint
+        // backend cannot leave the conversation showing as active.
+        const persistedStatus = input.terminal.status;
         // Completion cohorts are advanced by Orchestrator while a provider
         // turn is in flight. Do not replay the run snapshot captured at start
         // over a newer acknowledgement, successor, or Stop barrier.
@@ -640,12 +642,12 @@ export const layer: Layer.Layer<
         const finalizedRun: OrchestrationV2Run = {
           ...runWithoutDelegatedCompletion,
           status: persistedStatus,
-          completedAt: input.terminal.status === "completed" ? null : completedAt,
+          completedAt,
         };
         const finalizedRootNode: OrchestrationV2ExecutionNode = {
           ...input.rootNode,
           status: persistedStatus,
-          completedAt: input.terminal.status === "completed" ? null : completedAt,
+          completedAt,
           checkpointScopeId: input.checkpointScope.id,
         };
         const finalizedProviderThread: OrchestrationV2ProviderThread = {
