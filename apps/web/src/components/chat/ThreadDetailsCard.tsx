@@ -11,7 +11,7 @@ import {
   resolveThreadDetailsCardLayout,
 } from "./threadDetailsCardLayout";
 
-/** One card owns its placement and folds content only when that content cannot fit. */
+/** One card owns its placement and folds content only when less than half can fit. */
 export function ThreadDetailsCard({
   threadRef,
   anchor,

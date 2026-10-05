@@ -4,7 +4,13 @@ export function resolveThreadDetailsCardDensity(
   height: number,
   content: { full: number; compact: number },
 ) {
-  if (content.full === 0 || content.full <= height) return "full";
+  // Keep the complete panel available while at least half of its natural
+  // height fits. The card's outer ScrollArea can then reveal the rest without
+  // hiding actions such as the Previous agents drawer. Fold only when the
+  // available space drops below that threshold.
+  if (content.full === 0 || content.full <= height || height * 2 >= content.full) {
+    return "full";
+  }
   if (content.compact === 0 || content.compact <= height) return "compact";
   return "essential";
 }

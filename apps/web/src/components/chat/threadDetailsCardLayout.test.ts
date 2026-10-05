@@ -59,9 +59,9 @@ describe("card content fitting", () => {
     }
   });
   it("folds only after the preview cannot fit around the full card", () => {
-    const content = { full: 327, compact: 182 };
+    const content = { full: 327, compact: 150 };
     expect(resolveThreadDetailsCardDensity(place(351, 625, true)!.height, content)).toBe("full");
-    expect(resolveThreadDetailsCardDensity(place(350, 626, true)!.height, content)).toBe("compact");
+    expect(resolveThreadDetailsCardDensity(place(184, 792, true)!.height, content)).toBe("compact");
     expect(resolveThreadDetailsCardDensity(place(12)!.height, content)).toBe("full");
   });
   it("hides only when the available height cannot hold readable controls", () => {
@@ -77,12 +77,14 @@ describe("card content fitting", () => {
   it("folds only detail that cannot fit and restores it when space returns", () => {
     const content = { full: 570, compact: 180 };
     expect(resolveThreadDetailsCardDensity(600, content)).toBe("full");
-    expect(resolveThreadDetailsCardDensity(400, content)).toBe("compact");
+    expect(resolveThreadDetailsCardDensity(400, content)).toBe("full");
+    expect(resolveThreadDetailsCardDensity(285, content)).toBe("full");
+    expect(resolveThreadDetailsCardDensity(284, content)).toBe("compact");
     expect(resolveThreadDetailsCardDensity(170, content)).toBe("essential");
     expect(resolveThreadDetailsCardDensity(570, content)).toBe("full");
   });
   it("measures unseen content before deciding to fold it", () => {
     expect(resolveThreadDetailsCardDensity(300, { full: 0, compact: 0 })).toBe("full");
-    expect(resolveThreadDetailsCardDensity(300, { full: 570, compact: 0 })).toBe("compact");
+    expect(resolveThreadDetailsCardDensity(280, { full: 570, compact: 0 })).toBe("compact");
   });
 });
