@@ -8397,6 +8397,12 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const multipleModelSelections = sendCtx.multipleModelSelections;
+    const promptSuggestion = {
+      enabled: settings.enablePromptSuggestion,
+      ...(settings.promptSuggestionInstructions.length > 0
+        ? { instructions: settings.promptSuggestionInstructions }
+        : {}),
+    } as const;
     if (
       multipleModelSelections !== null &&
       serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true
@@ -9089,6 +9095,7 @@ export default function ChatView(props: ChatViewProps) {
                     ...(context && supportsInlineMessageContext ? { context } : {}),
                   },
                   modelSelection: target.selection,
+                  promptSuggestion,
                   titleSeed: title,
                   runtimeMode,
                   interactionMode: target.interactionMode,
@@ -9483,6 +9490,7 @@ export default function ChatView(props: ChatViewProps) {
             })(),
           },
           modelSelection: ctxSelectedModelSelection,
+          promptSuggestion,
           titleSeed: title,
           runtimeMode,
           interactionMode: sendInteractionMode,

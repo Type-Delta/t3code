@@ -18,6 +18,7 @@ import {
   type ProjectScript,
   type ProviderApprovalDecision,
   type ProviderInteractionMode,
+  type PromptSuggestionPreference,
   type ProviderUserInputAnswers,
   type RunId,
   type RuntimeMode,
@@ -173,6 +174,7 @@ export interface StartThreadTurnInput extends ThreadCommandInput {
   };
   readonly modelSelection?: ModelSelection;
   readonly titleSeed?: string;
+  readonly promptSuggestion?: PromptSuggestionPreference;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly bootstrap?: StartThreadBootstrap;
@@ -677,6 +679,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       modelSelection: input.modelSelection ?? thread.modelSelection,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
+      ...(input.promptSuggestion === undefined ? {} : { promptSuggestion: input.promptSuggestion }),
       workspaceStrategy,
       initialMessage: {
         messageId: input.message.messageId,
@@ -703,6 +706,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       ...(context ? { context } : {}),
       attachments,
       ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+      ...(input.promptSuggestion === undefined ? {} : { promptSuggestion: input.promptSuggestion }),
       ...(input.sourceProposedPlan === undefined
         ? {}
         : { sourcePlanRef: input.sourceProposedPlan }),
@@ -765,6 +769,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     attachments,
     ...(shouldSendTitleSeed ? { titleSeed: input.titleSeed } : {}),
     ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+    ...(input.promptSuggestion === undefined ? {} : { promptSuggestion: input.promptSuggestion }),
     ...(input.sourceProposedPlan === undefined ? {} : { sourcePlanRef: input.sourceProposedPlan }),
     ...(serverResolvesCommandContext && requestedMode !== "queue"
       ? { deliveryIntent: requestedMode }

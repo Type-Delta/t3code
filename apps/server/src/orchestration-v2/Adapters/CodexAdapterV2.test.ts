@@ -2564,11 +2564,78 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 },
               },
             },
-            ...(["item/started", "item/completed"] as const).map((method) => ({
-              type: "emit_inbound" as const,
-              label: method,
-              frame: { method, params: { threadId: nativeThreadId, turnId: nativeTurnId, item } },
-            })),
+            {
+              type: "emit_inbound",
+              label: "usage-before-compaction",
+              frame: {
+                method: "thread/tokenUsage/updated",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  tokenUsage: {
+                    last: {
+                      inputTokens: 90_000,
+                      cachedInputTokens: 0,
+                      outputTokens: 2_000,
+                      reasoningOutputTokens: 0,
+                      totalTokens: 92_000,
+                    },
+                    total: {
+                      inputTokens: 90_000,
+                      cachedInputTokens: 0,
+                      outputTokens: 2_000,
+                      reasoningOutputTokens: 0,
+                      totalTokens: 92_000,
+                    },
+                    modelContextWindow: 128_000,
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "item/started",
+              frame: {
+                method: "item/started",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId, item },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "usage-after-compaction",
+              frame: {
+                method: "thread/tokenUsage/updated",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  tokenUsage: {
+                    last: {
+                      inputTokens: 12_000,
+                      cachedInputTokens: 0,
+                      outputTokens: 500,
+                      reasoningOutputTokens: 0,
+                      totalTokens: 12_500,
+                    },
+                    total: {
+                      inputTokens: 102_000,
+                      cachedInputTokens: 0,
+                      outputTokens: 2_500,
+                      reasoningOutputTokens: 0,
+                      totalTokens: 104_500,
+                    },
+                    modelContextWindow: 128_000,
+                  },
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "item/completed",
+              frame: {
+                method: "item/completed",
+                params: { threadId: nativeThreadId, turnId: nativeTurnId, item },
+              },
+            },
             {
               type: "emit_inbound",
               label: "complete",
@@ -2604,6 +2671,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ["running", "completed"],
         );
         assert.equal(items[0]?.id, items[1]?.id);
+        assert.equal(items[0]?.beforeTokenCount, 92_000);
+        assert.equal(items[1]?.afterTokenCount, 12_500);
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),

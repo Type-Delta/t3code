@@ -1609,6 +1609,13 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         );
         const activeTurns = yield* Ref.make(new Map<string, ActiveCodexTurnContext>());
         const turnTokenUsageByThread = new Map<string, CodexTurnTokenUsageState>();
+        // Codex reports the live context window on token-usage notifications,
+        // while contextCompaction items carry no counts of their own.
+        const latestContextTokensByThread = new Map<string, number>();
+        const compactionContextTokensByItem = new Map<
+          string,
+          { readonly beforeTokenCount?: number; readonly afterTokenCount?: number }
+        >();
         const usageStateForThread = (nativeThreadId: string) => {
           let state = turnTokenUsageByThread.get(nativeThreadId);
           if (!state) {
@@ -3808,6 +3815,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
 
         yield* client.handleServerNotification("thread/tokenUsage/updated", (payload) =>
           Effect.gen(function* () {
+            latestContextTokensByThread.set(payload.threadId, payload.tokenUsage.last.totalTokens);
             accumulateCodexTurnTokenUsage(
               usageStateForThread(payload.threadId),
               payload.turnId,
@@ -4010,6 +4018,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               driver: CODEX_PROVIDER,
               status,
               title: status === "completed" ? "Context compacted" : "Compacting context",
+              ...compactionContextTokensByItem.get(nativeItemId),
               startedAt,
               completedAt: status === "completed" ? now : null,
               updatedAt: now,
@@ -4025,6 +4034,11 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             }
 
             if (payload.item.type === "contextCompaction") {
+              const beforeTokenCount = latestContextTokensByThread.get(payload.threadId);
+              compactionContextTokensByItem.set(
+                payload.item.id,
+                beforeTokenCount === undefined ? {} : { beforeTokenCount },
+              );
               yield* emitCompactionItem(
                 context,
                 payload.item.id,
@@ -4178,6 +4192,12 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             }
 
             if (payload.item.type === "contextCompaction") {
+              const current = compactionContextTokensByItem.get(payload.item.id) ?? {};
+              const afterTokenCount = latestContextTokensByThread.get(payload.threadId);
+              compactionContextTokensByItem.set(payload.item.id, {
+                ...current,
+                ...(afterTokenCount === undefined ? {} : { afterTokenCount }),
+              });
               yield* emitCompactionItem(context, payload.item.id, "completed");
               return;
             }

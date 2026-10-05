@@ -4139,6 +4139,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      // A follow-up sent to an app-owned child thread starts a new child run.
+      // The parent roster is otherwise only updated by provider lifecycle
+      // events, so refresh the parent card from the durable child dispatch.
+      const parentSubagent =
+        projection.thread.lineage.relationshipToParent === "subagent" &&
+        projection.thread.lineage.parentThreadId !== null &&
+        projection.thread.forkedFrom?.type === "node"
+          ? ((yield* projectionStore
+              .getThreadRecords(projection.thread.lineage.parentThreadId, ["subagents"])
+              .pipe(mapDispatchError(command))).subagents.find(
+              (task) => task.origin === "app_owned" && task.childThreadId === command.threadId,
+            ) ?? null)
+          : null;
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -4724,6 +4737,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: run,
         });
+        if (parentSubagent !== null) {
+          yield* emitEvent({
+            type: "subagent.updated",
+            threadId: projection.thread.lineage.parentThreadId!,
+            ...(parentSubagent.runId === null ? {} : { runId: parentSubagent.runId }),
+            nodeId: parentSubagent.id,
+            driver: parentSubagent.driver,
+            providerInstanceId: parentSubagent.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...parentSubagent,
+              status: "running",
+              startedAt: now,
+              completedAt: null,
+              result: null,
+              // A resumed child run needs a fresh parent wake. The previous
+              // run's delivered/acknowledged ownership must not suppress it.
+              completionDelivery: { state: "pending", observedByRunId: null },
+              updatedAt: now,
+            },
+          });
+        }
         yield* completeSourcePlan(now);
         yield* emitEvent({
           type: "run-attempt.created",
@@ -5130,6 +5165,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: run,
         });
+        if (parentSubagent !== null) {
+          yield* emitEvent({
+            type: "subagent.updated",
+            threadId: projection.thread.lineage.parentThreadId!,
+            ...(parentSubagent.runId === null ? {} : { runId: parentSubagent.runId }),
+            nodeId: parentSubagent.id,
+            driver: parentSubagent.driver,
+            providerInstanceId: parentSubagent.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...parentSubagent,
+              status: "running",
+              startedAt: now,
+              completedAt: null,
+              result: null,
+              // A resumed child run needs a fresh parent wake. The previous
+              // run's delivered/acknowledged ownership must not suppress it.
+              completionDelivery: { state: "pending", observedByRunId: null },
+              updatedAt: now,
+            },
+          });
+        }
         yield* completeSourcePlan(now);
         yield* emitEvent({
           type: "run-attempt.created",
@@ -8622,7 +8679,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (transfer) =>
           transfer.type === "subagent_result" &&
           transfer.sourceThreadId === childThreadId &&
-          transfer.targetThreadId === parentThreadId,
+          transfer.targetThreadId === parentThreadId &&
+          transfer.targetRunId === childRun.id,
       );
       if (existingResultTransfer !== undefined) {
         return;

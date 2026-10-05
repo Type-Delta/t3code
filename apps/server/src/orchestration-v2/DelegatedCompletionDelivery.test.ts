@@ -35,6 +35,7 @@ import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
+import { makeSubagentChildThread } from "./SubagentProjection.ts";
 import {
   OrchestrationV2EventSinkLayerLive,
   OrchestrationV2LayerLive,
@@ -149,6 +150,7 @@ const seedParentWithTerminalTask = (input: {
   readonly deliveryState: "delivered" | "claimed" | "acknowledged" | "disposed";
   readonly completionWake?: "always" | "settled_only";
   readonly deliveryTaskIds?: ReadonlyArray<NodeId>;
+  readonly childThreadId?: ThreadId;
   readonly now: DateTime.Utc;
 }) =>
   Effect.gen(function* () {
@@ -270,7 +272,7 @@ const seedParentWithTerminalTask = (input: {
             driver,
             providerInstanceId: modelSelection.instanceId,
             providerThreadId: null,
-            childThreadId: null,
+            childThreadId: input.childThreadId ?? null,
             nativeTaskRef: null,
             prompt: "Inspect the delivered ownership edge.",
             title: null,
@@ -432,6 +434,85 @@ it.layer(TestLayer)("delegated completion delivery repairs", (it) => {
       assert.include(message?.text ?? "", String(firstTaskId));
       assert.include(message?.text ?? "", String(secondTaskId));
       assert.include(message?.text ?? "", "task_status");
+    }),
+  );
+
+  it.effect("reopens parent completion delivery when a completed child is resumed", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:delegated-delivery-resume");
+      const childThreadId = ThreadId.make("thread:delegated-delivery-resume-child");
+      const projectId = ProjectId.make("project:delegated-delivery-resume");
+      const runId = RunId.make("run:delegated-delivery-resume");
+      const rootNodeId = NodeId.make("node:delegated-delivery-resume-root");
+      const taskId = NodeId.make("node:delegated-delivery-resume-task");
+
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId,
+        childThreadId,
+        deliveryState: "delivered",
+        completionWake: "always",
+        now,
+      });
+      const parent = yield* orchestrator.getThreadProjection(threadId);
+      const childThread = makeSubagentChildThread({
+        parentThread: parent.thread,
+        childThreadId,
+        parentNodeId: taskId,
+        activeProviderThreadId: null,
+        providerInstanceId: modelSelection.instanceId,
+        modelSelection,
+        title: "Resumed child",
+        now,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:delegated-delivery-resume-child"),
+            type: "thread.created",
+            threadId: childThreadId,
+            occurredAt: now,
+            payload: childThread,
+          },
+        ],
+      });
+
+      const result = yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("command:delegated-delivery-resume-child"),
+        threadId: childThreadId,
+        messageId: MessageId.make("message:delegated-delivery-resume-child"),
+        text: "Continue the completed child task.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+
+      const resumed = yield* orchestrator.getThreadProjection(threadId);
+      const task = resumed.subagents.find((candidate) => candidate.id === taskId);
+      assert.equal(task?.status, "running");
+      assert.deepEqual(task?.completionDelivery, {
+        state: "pending",
+        observedByRunId: null,
+      });
+      assert.isTrue(
+        result.storedEvents.some(
+          (stored) =>
+            stored.event.type === "subagent.updated" &&
+            stored.event.threadId === threadId &&
+            stored.event.payload.id === taskId &&
+            stored.event.payload.completionDelivery?.state === "pending",
+        ),
+      );
     }),
   );
 

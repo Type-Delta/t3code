@@ -672,6 +672,21 @@ projection, Codex and Claude V2 adapters, and the legacy importer/cutover tests.
 
 Last updated: 2026-10-04
 
+### DL043 — Codex compaction context usage restored
+
+Compaction timeline rows retain the Codex context-window counts by pairing the
+latest token-usage snapshots with the native compaction item, so the completed
+row shows the before and after token totals.
+
+**Implementation evidence:** `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`
+and its focused replay test.
+
+**Recorded validation:** focused Codex compaction replay. The full Codex adapter
+suite retains one unrelated pre-existing 180-second timeout in its
+background-command test.
+
+**Last updated:** 2026-10-05
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

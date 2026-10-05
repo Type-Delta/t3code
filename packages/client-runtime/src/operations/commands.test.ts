@@ -298,6 +298,7 @@ describe("V2 environment commands", () => {
         },
         runtimeMode: "full-access",
         interactionMode: "default",
+        promptSuggestion: { enabled: true, instructions: "Keep the next check focused." },
         titleSeed: "Implement the plan",
         sourceProposedPlan: {
           threadId: ThreadId.make("thread-plan"),
@@ -311,6 +312,7 @@ describe("V2 environment commands", () => {
         commandId: "implement-plan",
         threadId: v2ThreadId,
         titleSeed: "Implement the plan",
+        promptSuggestion: { enabled: true, instructions: "Keep the next check focused." },
         sourcePlanRef: { threadId: "thread-plan", planId: "plan-1" },
         deliveryIntent: "auto",
         dispatchMode: { type: "start_immediately" },
