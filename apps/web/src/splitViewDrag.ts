@@ -8,8 +8,6 @@ type SerializedThreadRef = {
   threadId: string;
 };
 
-let activeSplitThreadRef: ScopedThreadRef | null = null;
-
 function isSerializedThreadRef(value: unknown): value is SerializedThreadRef {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<SerializedThreadRef>;
@@ -18,7 +16,6 @@ function isSerializedThreadRef(value: unknown): value is SerializedThreadRef {
 
 /** Write the smallest cross-surface payload needed to identify a thread. */
 export function beginSplitThreadDrag(dataTransfer: DataTransfer, threadRef: ScopedThreadRef): void {
-  activeSplitThreadRef = threadRef;
   dataTransfer.effectAllowed = "move";
   dataTransfer.setData(
     SPLIT_THREAD_DRAG_MIME_TYPE,
@@ -35,16 +32,18 @@ export function hasSplitThreadDrag(dataTransfer: DataTransfer): boolean {
 
 export function readSplitThreadDrag(dataTransfer: DataTransfer): ScopedThreadRef | null {
   try {
-    const parsed: unknown = JSON.parse(dataTransfer.getData(SPLIT_THREAD_DRAG_MIME_TYPE));
-    if (!isSerializedThreadRef(parsed)) return activeSplitThreadRef;
+    const serialized = dataTransfer.getData(SPLIT_THREAD_DRAG_MIME_TYPE);
+    if (!serialized) return null;
+    const parsed: unknown = JSON.parse(serialized);
+    if (!isSerializedThreadRef(parsed)) return null;
     return scopeThreadRef(EnvironmentId.make(parsed.environmentId), ThreadId.make(parsed.threadId));
   } catch {
-    return activeSplitThreadRef;
+    return null;
   }
 }
 
 export function endSplitThreadDrag(): void {
-  activeSplitThreadRef = null;
+  // Keep a lifecycle hook for existing drag sources; the payload lives in DataTransfer.
 }
 
 export type SplitPaneDropPosition = "before" | "after" | "above" | "below";

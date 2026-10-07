@@ -159,7 +159,7 @@ describe("sidebar collision detection", () => {
         items,
         activationY: sourceSection === "pinned" ? 200 : 600,
       });
-      const at = (center: number) => {
+      const at = (center: number, x = 130) => {
         const collisionRect = {
           ...sourceRect,
           top: center - sourceRect.height / 2,
@@ -173,7 +173,7 @@ describe("sidebar collision detection", () => {
             rect: { current: { initial: sourceRect, translated: collisionRect } },
           },
           collisionRect,
-          pointerCoordinates: { x: 130, y: center },
+          pointerCoordinates: { x, y: center },
           droppableRects: new Map(
             items.map((item, index) => [sidebarListItemId(item), rects[index]!]),
           ),
@@ -207,6 +207,10 @@ describe("sidebar collision detection", () => {
       boundaryTop = 300;
       expect(at(400)).toBe("active");
       expect(at(317)).toBe("active");
+      expect(at(316)).toBe("pinned");
+      // Movement outside the divider must not change the crossing direction.
+      // Re-entering at the divider's lower edge is still the pinned side.
+      at(200, 500);
       expect(at(316)).toBe("pinned");
     },
   );

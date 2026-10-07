@@ -12,7 +12,7 @@ type Options = {
   distance: number;
   onAttach: (sensor: SidebarPointerSensor) => void;
   onFinish: (started: boolean) => void;
-  /** Return true to claim the move: the sort gesture then ignores this pointer position. */
+  /** Return true when the move is handled by an external drag destination. */
   onMove?: (point: { x: number; y: number }) => boolean;
   /** Report coordinates to split-view drop targets while the pointer is moving. */
   onSplitMove?: (active: string, point: { x: number; y: number }) => void;
@@ -38,14 +38,26 @@ export class SidebarPointerSensor {
   private readonly pointer: PointerEvent;
   private readonly document: Document;
   private readonly window: Window;
+  private readonly captureTarget: Element | null;
 
   constructor(private readonly props: SensorProps<Options>) {
     this.pointer = props.event as PointerEvent;
     this.document = getOwnerDocument(this.pointer.target);
     this.window = getWindow(this.pointer.target);
+    const target = this.pointer.target;
+    this.captureTarget =
+      target !== null && typeof (target as Element).setPointerCapture === "function"
+        ? (target as Element)
+        : null;
+    this.captureTarget?.setPointerCapture(this.pointer.pointerId);
     this.document.addEventListener("pointermove", this.move, { passive: false, capture: true });
     this.document.addEventListener("pointerup", this.end, { capture: true });
     this.document.addEventListener("pointercancel", this.pointerCancel, { capture: true });
+    // Pointer capture normally keeps these events on the initiating element,
+    // including when the pointer leaves the sidebar. Keep a window fallback
+    // for browsers and embedded documents that do not honor capture.
+    this.window.addEventListener("pointerup", this.end, { capture: true });
+    this.window.addEventListener("pointercancel", this.pointerCancel, { capture: true });
     this.document.addEventListener("keydown", this.keydown, { capture: true });
     this.document.addEventListener("visibilitychange", this.visibilityChange);
     this.window.addEventListener("blur", this.cancel);
@@ -101,9 +113,11 @@ export class SidebarPointerSensor {
     }
     if (this.phase === "dragging") {
       if (event.cancelable) event.preventDefault();
-      const claimed = this.props.options.onMove?.(coordinates) === true;
+      // External destinations use this callback to suspend sidebar sorting,
+      // but dnd-kit's move must still run so DragOverlay follows the pointer.
+      this.props.options.onMove?.(coordinates);
       this.props.options.onSplitMove?.(String(this.props.active), coordinates);
-      if (!claimed) this.props.onMove(coordinates);
+      this.props.onMove(coordinates);
     }
   };
 
@@ -114,6 +128,7 @@ export class SidebarPointerSensor {
       this.phase === "dragging" &&
       this.props.options.onDrop?.({ x: event.clientX, y: event.clientY }) === true;
     const splitDrop =
+      !contextDrop &&
       this.phase === "dragging" &&
       this.props.options.onRelease?.(String(this.props.active), point) === true;
     this.finish(contextDrop || splitDrop);
@@ -137,6 +152,8 @@ export class SidebarPointerSensor {
     this.document.removeEventListener("pointermove", this.move, { capture: true });
     this.document.removeEventListener("pointerup", this.end, { capture: true });
     this.document.removeEventListener("pointercancel", this.pointerCancel, { capture: true });
+    this.window.removeEventListener("pointerup", this.end, { capture: true });
+    this.window.removeEventListener("pointercancel", this.pointerCancel, { capture: true });
     this.document.removeEventListener("keydown", this.keydown, { capture: true });
     this.document.removeEventListener("visibilitychange", this.visibilityChange);
     this.window.removeEventListener("blur", this.cancel);
@@ -145,6 +162,13 @@ export class SidebarPointerSensor {
     this.document.removeEventListener("dragstart", this.preventDefault);
     this.document.removeEventListener("contextmenu", this.preventDefault);
     this.document.removeEventListener("selectionchange", this.clearSelection);
+    if (
+      this.captureTarget &&
+      typeof this.captureTarget.hasPointerCapture === "function" &&
+      this.captureTarget.hasPointerCapture(this.pointer.pointerId)
+    ) {
+      this.captureTarget.releasePointerCapture(this.pointer.pointerId);
+    }
     // Cancellation can precede release by an arbitrary amount of time. Consume
     // that release click, or let a fresh pointerdown end suppression if release
     // happened outside the document. Ordinary clicks never install this guard.

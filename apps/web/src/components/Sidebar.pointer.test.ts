@@ -110,6 +110,17 @@ describe("sidebar pointer lifecycle", () => {
     expect(drag.onEnd).toHaveBeenCalledOnce();
   });
 
+  it("finishes when release is delivered to the window after leaving the document", () => {
+    const drag = gesture();
+    document.dispatchEvent(pointer("pointermove", { clientX: 20 }));
+    window.dispatchEvent(pointer("pointerup", { buttons: 0, clientX: 400, clientY: 40 }));
+
+    expect(drag.onRelease).toHaveBeenCalledExactlyOnceWith("thread", { x: 400, y: 40 });
+    expect(drag.onEnd).toHaveBeenCalledOnce();
+    expect(drag.onFinish).toHaveBeenCalledOnce();
+    expect(drag.onFinish).toHaveBeenCalledWith(true);
+  });
+
   it("does not place a thread after Escape cancels its drag", () => {
     const drag = gesture();
     document.dispatchEvent(pointer("pointermove", { clientX: 20 }));
@@ -163,12 +174,14 @@ describe("sidebar pointer lifecycle", () => {
     const drag = gesture({ onMove, onDrop });
     document.dispatchEvent(pointer("pointermove", { clientY: 20 }));
     document.dispatchEvent(pointer("pointermove", { clientX: 30, clientY: 30 }));
-    expect(drag.onMove).toHaveBeenCalledExactlyOnceWith({ x: 30, y: 30 });
-    document.dispatchEvent(pointer("pointermove", { clientX: 90, clientY: 30 }));
-    // Outside the list the sort no longer sees the pointer.
     expect(drag.onMove).toHaveBeenCalledOnce();
+    document.dispatchEvent(pointer("pointermove", { clientX: 90, clientY: 30 }));
+    // dnd-kit still receives the move so its DragOverlay follows the pointer;
+    // the context callback separately suspends sidebar sorting.
+    expect(drag.onMove).toHaveBeenCalledTimes(2);
     document.dispatchEvent(pointer("pointerup", { buttons: 0, clientX: 90, clientY: 30 }));
     expect(onDrop).toHaveBeenCalledExactlyOnceWith({ x: 90, y: 30 });
+    expect(drag.onRelease).not.toHaveBeenCalled();
     expect(drag.onCancel).toHaveBeenCalledOnce();
     expect(drag.onEnd).not.toHaveBeenCalled();
     expect(drag.onFinish).toHaveBeenCalledExactlyOnceWith(true);
@@ -189,7 +202,9 @@ describe("sidebar pointer lifecycle", () => {
     document.dispatchEvent(pointer("pointermove", { clientX: 30, clientY: 30 }));
     document.dispatchEvent(pointer("pointermove", { clientX: 90, clientY: 100 }));
     document.dispatchEvent(pointer("pointermove", { clientX: 90, clientY: 200 }));
-    expect(drag.onMove).toHaveBeenCalledExactlyOnceWith({ x: 30, y: 30 });
+    // dnd-kit receives external moves so its DragOverlay keeps following the
+    // pointer while the context callback suspends sidebar sorting.
+    expect(drag.onMove).toHaveBeenCalledTimes(3);
 
     document.dispatchEvent(pointer("pointermove", { clientX: 30, clientY: 60 }));
     expect(drag.onMove).toHaveBeenLastCalledWith({ x: 30, y: 60 });

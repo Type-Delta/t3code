@@ -120,6 +120,8 @@ The 2026-10-05 completion split passed the focused RunExecutionService, Checkpoi
 
 ### DL008 — Persistent multi-thread split workspaces
 
+Sidebar pointer drags use the same thread-row component inside and outside the sidebar. The opaque overlay follows the pointer across panels while the hidden source row preserves its gap until release or cancellation. Split-pane drops suppress composer context-drop highlighting and dispatch, and pointer capture keeps release cleanup reliable across panel boundaries.
+
 Collapsed Working, snoozed, and settled shelves keep all displayed split panes visible in the sidebar.
 
 The fork supports up to ten visible thread panes in five columns and two rows. Panes fill columns at full height until a sixth pane opens the lower row. A full-height pane accepts a thread above or below it in its outer quarters; its middle half accepts left/right placement while fewer than five columns exist. A stacked column accepts only left/right placement while fewer than five columns exist. Left/right drop hints cover the full destination column, including both rows of a stacked column. Blocked drop areas show no hint. Split layouts retain focused-pane routing, a shared toolbar, one right panel, and controlled ownership of global keyboard, preview, and composer behavior. The right-panel toggle reflects the shared split layout and closes every open pane panel together, so changing focus cannot reopen a panel owned by another pane. Panes can be opened or detached from the sidebar, safely reconcile draft promotion/archive/deletion, and animate layout changes without leaving stale portals or listeners. Reconciliation never returns a deleted thread as the fallback when all panes disappear.
@@ -132,7 +134,9 @@ Split membership is persisted as multiple ordered local groups with active state
 
 **Recorded validation:** 248 focused tests across split state, navigation, native drag events, route history, sidebar logic, workspace, right-panel, notification, and citation behavior; `vp check`; `vp run typecheck`; and `git diff --check`. The 2026-09-28 isolated paired-browser pass confirmed that pointer hints switch between left and right and a left drop places the dragged thread before the original. The Browser panel then lost its automation host, so the remaining live flows and screenshot capture could not be completed. Native legacy drops and route restoration were verified by automated tests. An unrelated existing command-palette sorting test still fails in unchanged code. Earlier integrated checks cover composer shortcut ownership and shared right-panel closing. The 2026-09-29 5x2 extension passed 211 focused tests, `vp check`, `vp run typecheck`, and an isolated paired-browser pass at 2560x1440 showing five full-height columns and a sixth pane below the first. The drop-area correction passed 214 focused tests; an isolated paired-browser pass confirmed top and bottom native drops, and confirmed that a filled column at five columns accepts no drop or hint while an unstacked column still offers the top hint. The 2026-09-29 standalone vertical-drop and group-detach update passed 220 focused tests, including top/bottom native and pointer targets, active/inactive group dissolution, and both sidebar menu paths; the isolated browser pass confirmed the new menu item, top and bottom first-split hints, and the resulting stacked two-pane layout.
 
-**Last updated:** 2026-09-29
+The 2026-10-07 drag update passed 90 focused drag tests, `vp check`, `vp run typecheck`, and `git diff --check`. Remote user verification confirmed the full thread-row overlay follows the pointer and the source gap remains visible outside the sidebar.
+
+**Last updated:** 2026-10-07
 
 ### DL012 — Prompt preservation during draft promotion
 

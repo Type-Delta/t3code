@@ -57,9 +57,12 @@ export function createSidebarCollisionDetection(
       // Use the visible divider row, including its sortable translation.
       // Only pointer movement can change sections: opening the destination
       // moves this row, but must not toggle a stationary gesture back.
-      const previousY = previousPointerY ?? pointer.y;
-      previousPointerY = pointer.y;
       if (pointer.x >= boundary.left && pointer.x <= boundary.right) {
+        // Ignore excursions outside the sidebar when deciding which way the
+        // pointer crossed the divider. Otherwise a move out and back in can
+        // make a stationary pointer appear to cross the boundary twice.
+        const previousY = previousPointerY ?? pointer.y;
+        previousPointerY = pointer.y;
         if (pointer.y < previousY && pointer.y <= boundary.bottom) boundarySection = "pinned";
         else if (pointer.y > previousY && pointer.y >= boundary.top) boundarySection = "active";
         const nextHeader = (["working-header", "snoozed-header", "settled-header"] as const)

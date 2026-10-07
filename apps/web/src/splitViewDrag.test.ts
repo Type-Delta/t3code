@@ -59,6 +59,20 @@ describe("split view thread drag", () => {
     expect(readSplitThreadDrag(dataTransfer)).toBeNull();
   });
 
+  it("rejects empty or malformed custom payloads instead of using stale drag state", () => {
+    const threadRef = scopeThreadRef(
+      EnvironmentId.make("environment-a"),
+      ThreadId.make("thread-a"),
+    );
+    const dataTransfer = createDataTransfer();
+
+    beginSplitThreadDrag(dataTransfer, threadRef);
+    for (const payload of ["", "{", JSON.stringify({ threadId: "thread-b" })]) {
+      dataTransfer.setData(SPLIT_THREAD_DRAG_MIME_TYPE, payload);
+      expect(readSplitThreadDrag(dataTransfer)).toBeNull();
+    }
+  });
+
   it("resolves single-workspace and pane-edge targets from the actual pointer", () => {
     class HitElement {
       constructor(

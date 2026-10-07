@@ -1,11 +1,10 @@
 import { ThreadHoverCard, ThreadHoverCardPopup } from "./ThreadHoverCard";
 import { CollapsibleSectionHeader } from "./ui/collapsible-section-header";
 import { setThreadChangeRequestSnapshot } from "./ThreadStatusIndicators";
-import { ThreadContextDragGhost } from "./chat/ThreadContextDragGhost";
 import {
   dropThreadContext,
   endThreadContextDrag,
-  moveThreadContextDrag as moveThreadContextDragGhost,
+  moveThreadContextDrag as updateThreadContextDropTarget,
 } from "./chat/threadContextDrag";
 import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
@@ -695,9 +694,10 @@ function SortableThreadRow(props: {
       setNodeRef,
       transform: props.contextDrag ? null : transform,
       // The lifted row normally follows the pointer without a transition.
-      // When it becomes a context ghost, glide its sidebar copy back home.
+      // An external drag keeps the active slot hidden so the projected gap
+      // remains visible while the portal overlay travels across panels.
       transition: props.contextDrag && isDragging ? "transform 150ms ease-out" : transition,
-      isDragging: isDragging && !props.contextDrag,
+      isDragging,
     }),
     [listeners, setNodeRef, transform, transition, isDragging, props.contextDrag],
   );
@@ -3465,26 +3465,28 @@ export default function Sidebar() {
   const dragSensorRef = useRef<SidebarPointerSensor | null>(null);
   const contextDragKeyRef = useRef<string | null>(null);
   const pointerDropHandledRef = useRef(false);
-  const handlePointerDragMove = useCallback(
-    (_activeKey: string, point: { x: number; y: number }) => {
-      const target = resolvePointerSplitDropTarget(document, point, { draggedPaneKey: _activeKey });
-      if (!target) return setPointerSplitDropTarget(null);
-      const state = useSplitViewStore.getState();
-      const paneRefs = selectSplitPaneRefs(state);
+  const resolveSplitThreadDropTarget = useCallback(
+    (activeKey: string, point: { x: number; y: number }) => {
+      const target = resolvePointerSplitDropTarget(document, point, { draggedPaneKey: activeKey });
+      if (target === null) return null;
+      if (target.kind === "single") {
+        return routeThreadRefRef.current && scopedThreadKey(routeThreadRefRef.current) !== activeKey
+          ? target
+          : null;
+      }
+      const paneRefs = selectSplitPaneRefs(useSplitViewStore.getState());
       const canPlace =
         paneRefs.length < MAX_SPLIT_VIEW_PANES ||
-        paneRefs.some((ref) => scopedThreadKey(ref) === _activeKey);
-      setPointerSplitDropTarget(
-        target.kind === "single"
-          ? routeThreadRefRef.current && scopedThreadKey(routeThreadRefRef.current) !== _activeKey
-            ? target
-            : null
-          : canPlace
-            ? target
-            : null,
-      );
+        paneRefs.some((paneRef) => scopedThreadKey(paneRef) === activeKey);
+      return canPlace ? target : null;
     },
     [],
+  );
+  const handlePointerDragMove = useCallback(
+    (_activeKey: string, point: { x: number; y: number }) => {
+      setPointerSplitDropTarget(resolveSplitThreadDropTarget(_activeKey, point));
+    },
+    [resolveSplitThreadDropTarget],
   );
   const handlePointerDragRelease = useCallback(
     (activeKey: string, point: { x: number; y: number }): boolean => {
@@ -3574,6 +3576,25 @@ export default function Sidebar() {
   }, []);
   const moveThreadContextDrag = useCallback(
     (point: { x: number; y: number }) => {
+      const activeKey = contextDragKeyRef.current;
+      const splitTarget =
+        activeKey === null ? null : resolveSplitThreadDropTarget(activeKey, point);
+      const pointerElement = document.elementFromPoint(point.x, point.y);
+      const overContextTarget =
+        pointerElement instanceof Element &&
+        pointerElement.closest("[data-thread-context-drop]") !== null;
+      const splitOwnsPointer =
+        splitTarget?.kind === "split" || (splitTarget?.kind === "single" && !overContextTarget);
+      if (splitOwnsPointer) {
+        // A split pane owns this destination. Keep the sidebar copy hidden
+        // while the pointer is outside the list, while the full-row overlay
+        // remains visible over the pane.
+        setDragState((current) =>
+          current === null || current.contextDrag ? current : { ...current, contextDrag: true },
+        );
+        updateThreadContextDropTarget(point, { trackDropTarget: false });
+        return true;
+      }
       const contextDrag = pointerOutsideThreadList(point);
       setDragState((current) =>
         current === null || current.contextDrag === contextDrag
@@ -3584,22 +3605,34 @@ export default function Sidebar() {
         endThreadContextDrag();
         return false;
       }
-      const threads = contextDragThreads();
-      const title =
-        threadByKeyRef.current.get(contextDragKeyRef.current ?? "")?.title.trim() || "Thread";
-      moveThreadContextDragGhost(point, { title, count: threads.length });
+      updateThreadContextDropTarget(point);
       return true;
     },
-    [contextDragThreads, pointerOutsideThreadList],
+    [pointerOutsideThreadList, resolveSplitThreadDropTarget],
   );
   const dropThreadContextDrag = useCallback(
     (point: { x: number; y: number }) => {
+      const splitTarget = resolveSplitThreadDropTarget(contextDragKeyRef.current ?? "", point);
+      const pointerElement = document.elementFromPoint(point.x, point.y);
+      const overContextTarget =
+        pointerElement instanceof Element &&
+        pointerElement.closest("[data-thread-context-drop]") !== null;
+      const splitOwnsPointer =
+        splitTarget?.kind === "split" || (splitTarget?.kind === "single" && !overContextTarget);
+      if (splitOwnsPointer) {
+        // The split release handler owns placement; do not also hand the
+        // thread to a composer that happens to sit beneath the same pointer.
+        endThreadContextDrag();
+        // Let onRelease perform the split placement. Returning false keeps
+        // the context-drop path from consuming the release first.
+        return false;
+      }
       if (!pointerOutsideThreadList(point)) return false;
       dropThreadContext(point, contextDragThreads());
       // Releasing outside the list never reorders, whether or not a composer took the drop.
       return true;
     },
-    [contextDragThreads, pointerOutsideThreadList],
+    [contextDragThreads, pointerOutsideThreadList, resolveSplitThreadDropTarget],
   );
   const dndSensors = useSensors(
     useSensor(SidebarPointerSensor, {
@@ -4987,7 +5020,6 @@ export default function Sidebar() {
   );
   return (
     <>
-      <ThreadContextDragGhost />
       <SidebarChromeHeader isElectron={isElectron} />
       <SidebarContent
         className="relative min-h-full"
@@ -5564,7 +5596,7 @@ export default function Sidebar() {
                               <DragOverlay
                                 dropAnimation={null}
                                 wrapperElement="ul"
-                                className="pointer-events-none text-sidebar-foreground [&_*]:pointer-events-none!"
+                                className="pointer-events-none text-sidebar-foreground opacity-100 [&_*]:pointer-events-none!"
                               >
                                 {previewThread && previewSection
                                   ? renderThreadRowInner(
