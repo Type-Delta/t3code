@@ -10,8 +10,8 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import * as SqlSchema from "effect/unstable/sql/SqlSchema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlSchema from "effect/sql/SqlSchema";
 
 /** Carries no query text: search input is user content. */
 export class ThreadSearchError extends Schema.TaggedError<ThreadSearchError>()(
@@ -26,11 +26,7 @@ export class ThreadSearchError extends Schema.TaggedError<ThreadSearchError>()(
   }
 }
 
-const SearchRequest = Schema.Struct({
-  pattern: Schema.String,
-  limit: Schema.Int,
-  projectId: Schema.NullOr(ProjectId),
-});
+const SearchRequest = Schema.Struct({ pattern: Schema.String, limit: Schema.Int });
 const SearchRow = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -73,7 +69,7 @@ export class ThreadSearch extends Context.Service<
   ThreadSearch,
   {
     readonly search: (
-      input: OrchestrationSearchThreadsInput & { readonly projectId?: ProjectId },
+      input: OrchestrationSearchThreadsInput,
     ) => Effect.Effect<OrchestrationSearchThreadsResult, ThreadSearchError>;
   }
 >()("t3/orchestration-v2/ThreadSearch") {}
@@ -87,7 +83,7 @@ export const make = Effect.gen(function* () {
   const searchRows = SqlSchema.findAll({
     Request: SearchRequest,
     Result: SearchRow,
-    execute: ({ pattern, limit, projectId }) => sql`
+    execute: ({ pattern, limit }) => sql`
       WITH candidate AS (
         SELECT
           threads.thread_id,
@@ -103,7 +99,6 @@ export const make = Effect.gen(function* () {
         INNER JOIN projection_projects AS projects
           ON projects.project_id = threads.project_id
         WHERE threads.deleted_at IS NULL
-          AND (${projectId} IS NULL OR threads.project_id = ${projectId})
           AND threads.archived_at IS NULL
           AND projects.deleted_at IS NULL
           AND messages.streaming = 0
@@ -146,7 +141,6 @@ export const make = Effect.gen(function* () {
       const rows = yield* searchRows({
         pattern: `%${escapeLikePattern(input.query)}%`,
         limit: input.limit ?? 50,
-        projectId: input.projectId ?? null,
       }).pipe(
         Effect.mapError(
           (cause) =>

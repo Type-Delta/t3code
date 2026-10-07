@@ -1,4 +1,5 @@
 import {
+  AuthOrchestrationOperateScope,
   type EnvironmentId,
   type EditorId,
   type ProjectScript,
@@ -39,6 +40,8 @@ import { useT3ProjectFileScripts } from "~/hooks/useT3ProjectFileScripts";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
 import { readLocalApi } from "~/localApi";
 import { threadEnvironment } from "../../state/threads";
+import { useOrchestrationCommand } from "../../state/use-orchestration-command";
+import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { observeResponsiveBreakpointFade, usePanelAnimationSettings } from "../../panelAnimations";
 import { ProjectFavicon } from "../ProjectFavicon";
@@ -212,7 +215,11 @@ export const ChatHeader = memo(function ChatHeader({
     () => scopeThreadRef(activeThreadEnvironmentId, activeThreadId),
     [activeThreadEnvironmentId, activeThreadId],
   );
-  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+  const canOperateThread = useEnvironmentScope(
+    activeThreadEnvironmentId,
+    AuthOrchestrationOperateScope,
+  );
+  const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
   // Inline rename, keyed by thread: navigating away drops an in-progress
@@ -225,7 +232,9 @@ export const ChatHeader = memo(function ChatHeader({
   } | null>(null);
   if (
     renaming !== null &&
-    (renaming.threadId !== activeThreadId || renaming.environmentId !== activeThreadEnvironmentId)
+    (renaming.threadId !== activeThreadId ||
+      renaming.environmentId !== activeThreadEnvironmentId ||
+      !canOperateThread)
   ) {
     setRenaming(null);
   }
@@ -235,16 +244,22 @@ export const ChatHeader = memo(function ChatHeader({
       : null;
   const renameCommittedRef = useRef(false);
   const startRename = useCallback(() => {
+    if (
+      !isServerThread ||
+      !readEnvironmentScope(activeThreadEnvironmentId, AuthOrchestrationOperateScope)
+    )
+      return;
     renameCommittedRef.current = false;
     setRenaming({
-      threadId: activeThreadId,
       environmentId: activeThreadEnvironmentId,
+      threadId: activeThreadId,
       title: activeThreadTitle,
     });
-  }, [activeThreadEnvironmentId, activeThreadId, activeThreadTitle]);
+  }, [activeThreadEnvironmentId, activeThreadId, activeThreadTitle, isServerThread]);
   const commitRename = useCallback(
     (title: string) => {
       setRenaming(null);
+      if (!readEnvironmentScope(activeThreadEnvironmentId, AuthOrchestrationOperateScope)) return;
       const resolution = resolveRenameCommit({ title, originalTitle: activeThreadTitle });
       if (resolution.action === "reject-empty") {
         toastManager.add({ type: "warning", title: "Thread title cannot be empty" });
@@ -374,7 +389,7 @@ export const ChatHeader = memo(function ChatHeader({
             presentation={actionsCollapsed ? "menu" : "toolbar"}
             scripts={activeProjectScripts}
             fileScripts={fileScripts}
-            keybindings={keybindings}
+            environmentId={activeThreadEnvironmentId}
             preferredScriptId={preferredScriptId}
             onRunScript={onRunProjectScript}
             onAddScript={onAddProjectScript}
@@ -472,7 +487,7 @@ export const ChatHeader = memo(function ChatHeader({
                     aria-label={`Thread actions for ${activeThreadTitle}`}
                     aria-haspopup="menu"
                     onClick={openMenuFromTitle}
-                    onDoubleClick={handleTitleDoubleClick}
+                    onDoubleClick={canOperateThread ? handleTitleDoubleClick : undefined}
                     onBlur={cancelPendingTitleMenu}
                     className="group/thread-title inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                   />

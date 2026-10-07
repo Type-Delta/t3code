@@ -4,17 +4,12 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Sink from "effect/Sink";
 import * as Scope from "effect/Scope";
-import * as Stream from "effect/Stream";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import {
   capturePosixOwnershipLedger,
@@ -39,7 +34,6 @@ import {
   type AcpPosixProcessIdentity,
   type AcpPosixProcessTreeController,
 } from "./AcpSessionRuntime.ts";
-import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 const threadSpawnHelperSource = NodeURL.fileURLToPath(
   new URL("../../../scripts/acp-thread-spawn-helper.c", import.meta.url),
@@ -91,22 +85,6 @@ function makeController(input: {
 
 const server = () => identity(process.pid, 1, process.pid, process.pid, "server");
 
-function makeProcessHandle(exitCode = 0) {
-  return ChildProcessSpawner.makeHandle({
-    pid: ChildProcessSpawner.ProcessId(1234),
-    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
-    isRunning: Effect.succeed(true),
-    kill: () => Effect.void,
-    unref: Effect.succeed(Effect.void),
-    stdin: Sink.drain,
-    stdout: Stream.empty,
-    stderr: Stream.empty,
-    all: Stream.empty,
-    getInputFd: () => Sink.drain,
-    getOutputFd: () => Stream.empty,
-  });
-}
-
 function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -117,51 +95,6 @@ function processExists(pid: number): boolean {
 }
 
 describe("terminatePosixOwnedProcessTree", () => {
-  it.effect("suppresses only successful Windows finalizer retries", () =>
-    Effect.gen(function* () {
-      let taskkillCalls = 0;
-      let failNextTaskkill = false;
-      const spawner = ChildProcessSpawner.make((command) => {
-        if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
-          taskkillCalls += 1;
-          const exitCode = failNextTaskkill ? 1 : 0;
-          failNextTaskkill = false;
-          return Effect.succeed(makeProcessHandle(exitCode));
-        }
-        return Effect.succeed(makeProcessHandle());
-      });
-
-      const run = (explicitFailure: boolean) =>
-        Effect.scoped(
-          Effect.gen(function* () {
-            const runtime = yield* AcpSessionRuntime.make({
-              spawn: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
-              cwd: process.cwd(),
-              clientInfo: { name: "t3-test", version: "0.0.0" },
-              ownDetachedProcessGroup: true,
-              processGroupPlatform: "win32",
-            }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
-            const terminate = runtime.terminateProcessGroup;
-            expect(terminate).toBeDefined();
-            if (explicitFailure) {
-              yield* Effect.flip(terminate!);
-            } else {
-              yield* terminate!;
-            }
-          }),
-        );
-
-      yield* run(false);
-      expect(taskkillCalls).toBe(1);
-      failNextTaskkill = true;
-      yield* run(true);
-      expect(taskkillCalls).toBe(3);
-    }).pipe(
-      Effect.provide(NodeServices.layer),
-      Effect.provideService(HostProcessPlatform, "win32"),
-    ),
-  );
-
   it("parses unified cgroup paths and escaped cgroup2 mountinfo", () => {
     expect(parseUnifiedCgroupPath("0::/user.slice/app.scope\n")).toBe("/user.slice/app.scope");
     expect(parseUnifiedCgroupPath("0::/one\n0::/two\n")).toBeUndefined();

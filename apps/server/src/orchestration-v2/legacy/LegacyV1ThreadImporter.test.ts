@@ -4,9 +4,9 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Tracer from "effect/Tracer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import { listLinkedPullRequestThreads } from "../../pullRequest/linkedThreads.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
@@ -14,25 +14,29 @@ import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
 import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 
-const databaseLayer = SqlitePersistenceMemory;
-const eventStoreProvided = EventStore.layer.pipe(Layer.provideMerge(databaseLayer));
-const projectionStoreProvided = ProjectionStore.layer.pipe(Layer.provideMerge(databaseLayer));
-const storesProvided = Layer.mergeAll(databaseLayer, eventStoreProvided, projectionStoreProvided);
-const eventSinkProvided = EventSink.layer.pipe(Layer.provide(storesProvided));
-const importerProvided = LegacyV1ThreadImporter.layer.pipe(
-  Layer.provide(Layer.mergeAll(storesProvided, eventSinkProvided)),
+const layerDatabase = SqlitePersistence.layerMemory;
+const layerEventStoreProvided = EventStore.layer.pipe(Layer.provideMerge(layerDatabase));
+const layerProjectionStoreProvided = ProjectionStore.layer.pipe(Layer.provideMerge(layerDatabase));
+const layerStoresProvided = Layer.mergeAll(
+  layerDatabase,
+  layerEventStoreProvided,
+  layerProjectionStoreProvided,
 );
-const projectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
-  Layer.provide(storesProvided),
+const layerEventSinkProvided = EventSink.layer.pipe(Layer.provide(layerStoresProvided));
+const layerImporterProvided = LegacyV1ThreadImporter.layer.pipe(
+  Layer.provide(Layer.mergeAll(layerStoresProvided, layerEventSinkProvided)),
 );
-const TestLayer = Layer.mergeAll(
-  storesProvided,
-  eventSinkProvided,
-  importerProvided,
-  projectionMaintenanceProvided,
+const layerProjectionMaintenanceProvided = ProjectionMaintenance.layer.pipe(
+  Layer.provide(layerStoresProvided),
+);
+const layerTest = Layer.mergeAll(
+  layerStoresProvided,
+  layerEventSinkProvided,
+  layerImporterProvided,
+  layerProjectionMaintenanceProvided,
 );
 
-it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
+it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
   it.effect("uses the created-thread index for startup migration checks", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -159,7 +163,6 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
           turn_id,
           role,
           text,
-          suggestion,
           attachments_json,
           is_streaming,
           created_at,
@@ -171,7 +174,6 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
             NULL,
             'user',
             'First question',
-            NULL,
             '[]',
             0,
             '2026-01-01T01:00:00.000Z',
@@ -183,7 +185,6 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
             NULL,
             'assistant',
             'First answer',
-            'Try the focused tests',
             '[]',
             0,
             '2026-01-02T01:00:00.000Z',
@@ -195,7 +196,6 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
             NULL,
             'user',
             'Follow-up question',
-            NULL,
             '[]',
             0,
             '2026-01-03T01:00:00.000Z',
@@ -207,21 +207,10 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
             NULL,
             'assistant',
             'Partial answer',
-            NULL,
             '[]',
             1,
             '2026-01-04T01:00:00.000Z',
             '2026-01-04T01:00:00.000Z'
-        )
-      `;
-
-      yield* sql`
-        INSERT INTO provider_session_runtime (
-          thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode,
-          status, last_seen_at, resume_cursor_json, runtime_payload_json
-        ) VALUES (
-          ${threadId}, 'codex', 'codex', 'codex', 'full-access', 'stopped',
-          '2026-01-04T00:00:00.000Z', '{"threadId":"native-codex-thread"}', NULL
         )
       `;
 
@@ -252,14 +241,10 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
           AND aggregate_kind = 'thread'
           AND stream_id = ${threadId}
       `;
-      assert.equal(shellEventCount[0]?.count, 7);
+      assert.equal(shellEventCount[0]?.count, 6);
 
       assert.isTrue((yield* maintenance.verify).valid);
       const shellProjection = yield* projections.getThreadProjection(threadId);
-      assert.equal(
-        shellProjection.providerThreads[0]?.nativeThreadRef?.nativeId,
-        "native-codex-thread",
-      );
       assert.equal(shellProjection.thread.historyOrigin, "v1_import");
       assert.equal(shellProjection.thread.branch, "main");
       assert.equal(shellProjection.thread.worktreePath, "/tmp/legacy-project");
@@ -340,19 +325,6 @@ it.layer(TestLayer)("LegacyV1ThreadImporter", (it) => {
         projection.messages.map((message) => message.id),
         ["message:legacy:1", "message:legacy:2", "message:legacy:3", "message:legacy:4"],
       );
-      assert.equal(
-        projection.messages.find((message) => message.id === "message:legacy:2")?.suggestion,
-        "Try the focused tests",
-      );
-      const importedAssistantItem = projection.turnItems.find(
-        (
-          item,
-        ): item is Extract<
-          (typeof projection.turnItems)[number],
-          { readonly type: "assistant_message" }
-        > => item.type === "assistant_message" && item.messageId === "message:legacy:2",
-      );
-      assert.equal(importedAssistantItem?.suggestion, "Try the focused tests");
       assert.deepStrictEqual(
         projection.turnItems
           .filter(

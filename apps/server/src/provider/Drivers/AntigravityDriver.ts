@@ -15,7 +15,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type { AcpError } from "effect-acp/errors";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
@@ -52,8 +52,8 @@ import * as ProviderContinuationRequests from "../../orchestration-v2/ProviderCo
 import { makeAntigravityAdapterV2 } from "../../orchestration-v2/Adapters/AntigravityAdapterV2.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { makeAntigravityProvider } from "../Layers/AntigravityProvider.ts";
-import * as ProviderEventLoggers from "../Layers/ProviderEventLoggers.ts";
+import { makeAntigravityProvider } from "../AntigravityProvider.ts";
+import * as ProviderEventLoggers from "../ProviderEventLoggers.ts";
 import * as ModelManifest from "../ModelManifest.ts";
 import {
   defaultProviderContinuationIdentity,
@@ -62,7 +62,6 @@ import {
 } from "../ProviderDriver.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
-import { withExecutablePathRecovery } from "../executableRecovery.ts";
 import { discoverAntigravitySkills, resolveAntigravityUserHome } from "./AntigravitySkills.ts";
 
 const DRIVER = ProviderDriverKind.make("antigravity");
@@ -175,7 +174,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
             detail: authConfigIssue,
           });
         }
-        const acquireExecutable = installation
+        const executable = yield* installation
           .acquire(settings.binaryPath, processEnvironment)
           .pipe(
             Effect.mapError(
@@ -188,7 +187,6 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
                 }),
             ),
           );
-        let executable = yield* acquireExecutable;
         const profile = yield* prepareAntigravityProfile({
           profileDirectory,
           baseEnv: processEnvironment,
@@ -236,29 +234,19 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
                 ),
               ),
         );
-        const launchRuntime = () =>
-          makeAntigravityAcpRuntime({
-            ...input,
-            authMethod: auth.authMethod,
-            childProcessSpawner: spawner,
-            spawn: buildAntigravityAcpSpawnInput({
-              installation: executable,
-              profile,
-              cwd: input.cwd,
-              baseEnv: withAgentDeviceEnvironment(processEnvironment, input),
-              auth,
-              runtimeTempDirectory,
-            }),
-          }).pipe(Effect.provideService(Crypto.Crypto, crypto));
-        const runtime = yield* withExecutablePathRecovery(
-          executable.source === "path" ? "antigravity" : executable.executablePath,
-          launchRuntime(),
-          () =>
-            Effect.gen(function* () {
-              executable = yield* acquireExecutable;
-              return yield* launchRuntime();
-            }),
-        );
+        const runtime = yield* makeAntigravityAcpRuntime({
+          ...input,
+          authMethod: auth.authMethod,
+          childProcessSpawner: spawner,
+          spawn: buildAntigravityAcpSpawnInput({
+            installation: executable,
+            profile,
+            cwd: input.cwd,
+            baseEnv: withAgentDeviceEnvironment(processEnvironment, input),
+            auth,
+            runtimeTempDirectory,
+          }),
+        }).pipe(Effect.provideService(Crypto.Crypto, crypto));
         return {
           ...runtime,
           start: () =>

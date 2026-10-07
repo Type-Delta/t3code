@@ -1,18 +1,5 @@
 import * as Schema from "effect/Schema";
 
-/** Provider driver is known to the server but cannot perform this operation. */
-export class ProviderUnsupportedError extends Schema.TaggedError<ProviderUnsupportedError>()(
-  "ProviderUnsupportedError",
-  {
-    provider: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
-  override get message(): string {
-    return `Provider '${this.provider}' is not implemented`;
-  }
-}
-
 /**
  * ProviderInstanceNotFoundError - Lookup against the instance registry failed.
  *

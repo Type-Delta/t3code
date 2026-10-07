@@ -1,13 +1,12 @@
 import {
+  type AuthMcpClientAccess,
   type EnvironmentId,
   McpCapabilityUnavailableError,
-  type ManagementApiKeyId,
-  type ManagementApiKeyScope,
-  type OrchestrationClientOrigin,
+  OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
-  ProviderInstanceId,
-  ThreadId,
-  ThreadToolOperationFailureError,
+  type ProviderInstanceId,
+  type RuntimeMode,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -21,33 +20,44 @@ const ALL_MCP_CAPABILITIES = [
 ] as const;
 export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
-/** The credential identity carried by one MCP invocation. */
-export type McpPrincipal =
-  | {
-      readonly type: "provider-session";
-      readonly threadId: ThreadId;
-      readonly providerSessionId: string;
-      readonly providerInstanceId: ProviderInstanceId;
-    }
-  | {
-      readonly type: "management-key";
-      readonly keyId: ManagementApiKeyId;
-      readonly name: string;
-      readonly scopes: ReadonlySet<ManagementApiKeyScope>;
-    };
+/** A provider session T3 Code launched for one thread. */
+export interface McpThreadCaller {
+  readonly threadId: ThreadId;
+  readonly providerSessionId: string;
+  readonly providerInstanceId: ProviderInstanceId;
+}
 
+/** An agent T3 Code did not launch, signed in through MCP OAuth. */
+export interface McpClientCaller {
+  readonly sessionId: string;
+  readonly label: string;
+  /** Read only, or the most the threads it starts or changes may run with. */
+  readonly access: AuthMcpClientAccess;
+}
+
+/**
+ * The runtime mode a client caller's writes are capped at. A read-only client
+ * never reaches a write (`McpToolAccess` refuses it first), so it maps to the
+ * lowest mode rather than to nothing.
+ */
+export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): RuntimeMode =>
+  client === undefined || client.access === "read-only" ? "approval-required" : client.access;
+
+/**
+ * Who is calling and what they may do. Tool parameters choose the target
+ * (thread, project); the caller sets the limits. A thread caller's omitted
+ * target falls back to its own thread; a client caller has no own thread, so
+ * tools that act as the caller (delegate_task, preview, worktree handoff)
+ * need `thread`.
+ */
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
-  /** Management keys have no owning provider thread or provider run. */
-  readonly principal?: McpPrincipal;
-  /** Legacy provider callers may provide these directly; principals are preferred. */
-  readonly threadId?: ThreadId;
-  readonly providerSessionId?: string;
-  readonly providerInstanceId?: ProviderInstanceId;
-  readonly capabilities?: ReadonlySet<McpCapability>;
-  /** Project-local callers are restricted to their project unless set to global. */
-  readonly mcpToolScope?: "global" | "project";
+  readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
+  /** Namespaces idempotency keys so two callers reusing a clientRequestId cannot collide. */
+  readonly requestNamespace: string;
+  readonly thread: McpThreadCaller | undefined;
+  readonly client: McpClientCaller | undefined;
 }
 
 export class McpInvocationContext extends Context.Service<
@@ -55,117 +65,7 @@ export class McpInvocationContext extends Context.Service<
   McpInvocationScope
 >()("t3/mcp/McpInvocationContext") {}
 
-export type McpThreadToolOperation = "create" | "list" | "list_models" | "read" | "send" | "wait";
-
-export const managementScopeByThreadOperation = {
-  create: "threads:create",
-  list: "threads:list",
-  list_models: "models:read",
-  read: "threads:read",
-  send: "threads:message",
-  wait: "threads:wait",
-} as const satisfies Record<McpThreadToolOperation, ManagementApiKeyScope>;
-
-const managementToolScopes: Readonly<Record<string, ManagementApiKeyScope>> = {
-  orchestrator_capabilities: "models:read",
-  t3_project_list: "threads:list",
-  t3_project_read: "threads:read",
-  t3_project_create: "threads:create",
-  t3_project_update: "threads:create",
-  t3_project_delete: "threads:create",
-  t3_project_clone: "threads:create",
-  t3_thread_launch: "threads:create",
-  t3_thread_list: "threads:list",
-  t3_thread_search: "threads:list",
-  t3_thread_read: "threads:read",
-  t3_thread_transfers: "threads:read",
-  t3_thread_configuration: "threads:read",
-  t3_thread_wait: "threads:wait",
-  t3_thread_send: "threads:message",
-  t3_thread_interrupt: "threads:message",
-  t3_thread_update: "threads:message",
-  t3_thread_organize: "threads:message",
-  t3_thread_configure: "threads:message",
-  t3_thread_fork: "threads:message",
-  t3_thread_merge_back: "threads:message",
-};
-
-export const managementMcpToolScope = (toolName: string): ManagementApiKeyScope | undefined => {
-  if (
-    toolName !== "orchestrator_capabilities" &&
-    !toolName.startsWith("t3_thread_") &&
-    !toolName.startsWith("t3_project_")
-  )
-    return undefined;
-  // Unknown tools fail closed until their management-key scope is reviewed.
-  return managementToolScopes[toolName];
-};
-
-export const isManagementMcpToolAllowed = (toolName: string): boolean =>
-  managementMcpToolScope(toolName) !== undefined;
-
-export const managementKeyCanUseTool = (
-  invocation: McpInvocationScope,
-  toolName: string,
-): boolean => {
-  if (!isManagementKeyPrincipal(invocation.principal)) return false;
-  const requiredScope = managementMcpToolScope(toolName);
-  return requiredScope !== undefined && invocation.principal.scopes.has(requiredScope);
-};
-
-export const isProviderSessionPrincipal = (
-  principal: McpPrincipal | undefined,
-): principal is Extract<McpPrincipal, { readonly type: "provider-session" }> =>
-  principal?.type === "provider-session";
-
-export const isManagementKeyPrincipal = (
-  principal: McpPrincipal | undefined,
-): principal is Extract<McpPrincipal, { readonly type: "management-key" }> =>
-  principal?.type === "management-key";
-
-export const getProviderSessionPrincipal = (
-  invocation: McpInvocationScope,
-): Extract<McpPrincipal, { readonly type: "provider-session" }> | undefined =>
-  invocation.principal && isProviderSessionPrincipal(invocation.principal)
-    ? invocation.principal
-    : undefined;
-
-/** Resolve provider identity without inventing one for management-key callers. */
-export const getInvocationThreadId = (invocation: McpInvocationScope): ThreadId | undefined =>
-  invocation.threadId ?? getProviderSessionPrincipal(invocation)?.threadId;
-
-export const getInvocationProviderSessionId = (
-  invocation: McpInvocationScope,
-): string | undefined =>
-  invocation.providerSessionId ?? getProviderSessionPrincipal(invocation)?.providerSessionId;
-
-export const getInvocationProviderInstanceId = (
-  invocation: McpInvocationScope,
-): ProviderInstanceId | undefined =>
-  invocation.providerInstanceId ?? getProviderSessionPrincipal(invocation)?.providerInstanceId;
-
-/** Stable credential identity for request keys and command ids. */
-export const getInvocationCredentialId = (invocation: McpInvocationScope): string | undefined =>
-  getInvocationProviderSessionId(invocation) ??
-  (isManagementKeyPrincipal(invocation.principal)
-    ? `management-key:${invocation.principal.keyId}`
-    : undefined);
-
-export const getManagementOrigin = (
-  invocation: McpInvocationScope,
-): { readonly origin: OrchestrationClientOrigin } | undefined =>
-  invocation.principal && isManagementKeyPrincipal(invocation.principal)
-    ? {
-        origin: {
-          managementKey: {
-            id: invocation.principal.keyId,
-            name: invocation.principal.name,
-          },
-        },
-      }
-    : undefined;
-
-/** The error a missing capability surfaces as; preview keeps its broker-specific error. */
+/** The error a missing capability surfaces as; preview keeps its own so the broker can route it. */
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"
   ? PreviewAutomationUnavailableError
   : McpCapabilityUnavailableError;
@@ -175,44 +75,59 @@ const missingCapability = (
   capability: McpCapability,
 ): PreviewAutomationUnavailableError | McpCapabilityUnavailableError => {
   const fields = {
-    capability,
     environmentId: invocation.environmentId,
-    ...(getInvocationThreadId(invocation) === undefined
+    ...(invocation.thread === undefined
       ? {}
-      : { threadId: getInvocationThreadId(invocation)! }),
-    ...(getInvocationProviderSessionId(invocation) === undefined
-      ? {}
-      : { providerSessionId: getInvocationProviderSessionId(invocation)! }),
-    ...(getInvocationProviderInstanceId(invocation) === undefined
-      ? {}
-      : { providerInstanceId: getInvocationProviderInstanceId(invocation)! }),
+      : {
+          threadId: invocation.thread.threadId,
+          providerSessionId: invocation.thread.providerSessionId,
+          providerInstanceId: invocation.thread.providerInstanceId,
+        }),
   };
-  if (capability === "preview")
-    return new PreviewAutomationUnavailableError({ ...fields, capability });
-  return new McpCapabilityUnavailableError({ ...fields, capability });
+  return capability === "preview"
+    ? new PreviewAutomationUnavailableError({ capability, ...fields })
+    : new McpCapabilityUnavailableError({ capability, ...fields });
 };
 
 export const requireMcpCapability = <const C extends McpCapability>(
   capability: C,
 ): Effect.Effect<McpInvocationScope, McpCapabilityError<C>, McpInvocationContext> =>
-  Effect.flatMap(McpInvocationContext, (invocation) =>
-    !isManagementKeyPrincipal(invocation.principal) &&
-    invocation.capabilities?.has(capability) === true
-      ? Effect.succeed(invocation)
-      : Effect.fail(missingCapability(invocation, capability) as McpCapabilityError<C>),
-  ).pipe(Effect.withSpan("mcp.requireCapability"));
+  McpInvocationContext.pipe(
+    Effect.filterOrFail(
+      (invocation) => invocation.capabilities.has(capability),
+      // The conditional type narrows what the literal argument decided at runtime.
+      (invocation) => missingCapability(invocation, capability) as McpCapabilityError<C>,
+    ),
+    Effect.withSpan("mcp.requireCapability"),
+  );
 
-export const requireThreadMcpCapability = Effect.fn("mcp.requireThreadCapability")(function* (
-  operation: McpThreadToolOperation,
-) {
-  const invocation = yield* McpInvocationContext;
-  if (!invocation.principal || isProviderSessionPrincipal(invocation.principal)) return invocation;
-  const scope = managementScopeByThreadOperation[operation];
-  if (!invocation.principal.scopes.has(scope)) {
-    return yield* new ThreadToolOperationFailureError({
-      operation,
-      reason: `MCP management key does not grant the ${scope} scope.`,
-    });
-  }
-  return invocation;
-});
+/**
+ * Preview tabs and device sessions belong to the calling thread, so their
+ * capabilities are only ever granted to thread callers. A scope that carries
+ * one without a thread is refused the same way as a missing capability.
+ */
+export const requireThreadMcpCapability = <const C extends "preview" | "device">(
+  capability: C,
+): Effect.Effect<McpThreadInvocationScope, McpCapabilityError<C>, McpInvocationContext> =>
+  McpInvocationContext.pipe(
+    Effect.filterOrFail(
+      (invocation): invocation is McpThreadInvocationScope =>
+        invocation.capabilities.has(capability) && invocation.thread !== undefined,
+      (invocation) => missingCapability(invocation, capability) as McpCapabilityError<C>,
+    ),
+    Effect.withSpan("mcp.requireCapability"),
+  );
+
+const threadCallerRequired = (operation: string) =>
+  new OrchestratorMcpFailure({
+    code: "thread_credential_required",
+    message: `${operation} acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.`,
+  });
+
+/** A scope with a thread caller, for tools whose whole surface acts as the caller. */
+export type McpThreadInvocationScope = McpInvocationScope & { readonly thread: McpThreadCaller };
+
+export const requireThreadScope = (scope: McpInvocationScope, operation: string) =>
+  scope.thread === undefined
+    ? Effect.fail(threadCallerRequired(operation))
+    : Effect.succeed(scope as McpThreadInvocationScope);

@@ -247,17 +247,6 @@ rl.on("line", (line) => {
     write({ id, result: {} });
     return;
   }
-  if (method === "thread/compact/start" && script.malformedWireOnCompact) {
-    process.stdout.write("{malformed-wire\n");
-    write({
-      method: "turn/completed",
-      params: {
-        threadId: script.rootThreadId,
-        turn: { ...activeTurn, status: "completed" },
-      },
-    });
-    return;
-  }
   if (id !== undefined) {
     write({ id, result: {} });
   }

@@ -1,3 +1,4 @@
+// @effect-diagnostics missingEffectContext:off
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
@@ -492,7 +493,7 @@ export function makeCursorAgentSdkReplayRunner(
   };
 }
 
-function makeCursorAgentSdkReplayLayer(
+function layerCursorAgentSdkReplay(
   transcript: CursorAgentSdkReplayTranscript,
   options?: {
     readonly runner?: CursorAgentSdk.CursorAgentSdkRunnerShape;
@@ -531,17 +532,17 @@ function makeReplayServerConfig(
     const providerLogsDir = path.join(logsDir, "provider");
     const terminalLogsDir = path.join(logsDir, "terminals");
     const attachmentsDir = path.join(stateDir, "attachments");
+    const checkpointsDir = path.join(stateDir, "checkpoints");
     const environmentThemesDir = path.join(stateDir, "themes");
     const worktreesDir = path.join(baseDir, "worktrees");
     const providerStatusCacheDir = path.join(baseDir, "caches");
-    const checkpointsDir = path.join(stateDir, "checkpoints");
     for (const directory of [
       stateDir,
       logsDir,
       providerLogsDir,
       terminalLogsDir,
-      checkpointsDir,
       attachmentsDir,
+      checkpointsDir,
       environmentThemesDir,
       worktreesDir,
       providerStatusCacheDir,
@@ -584,6 +585,7 @@ function makeReplayServerConfig(
       providerStatusCacheDir,
       worktreesDir,
       attachmentsDir,
+      checkpointsDir,
       browserArtifactsDir: path.join(stateDir, "browser-artifacts"),
       environmentThemesDir,
       logsDir,
@@ -592,7 +594,6 @@ function makeReplayServerConfig(
       providerLogsDir,
       providerEventLogPath: path.join(providerLogsDir, "events.log"),
       terminalLogsDir,
-      checkpointsDir,
       anonymousIdPath: path.join(stateDir, "anonymous-id"),
       environmentIdPath: path.join(stateDir, "environment-id"),
       serverRuntimeStatePath: path.join(stateDir, "server-runtime.json"),
@@ -601,20 +602,20 @@ function makeReplayServerConfig(
   });
 }
 
-export function makeCursorProviderAdapterRegistryReplayLayer(
+export function layer(
   transcript: CursorAgentSdkReplayTranscript,
   options?: {
     readonly runner?: CursorAgentSdk.CursorAgentSdkRunnerShape;
     readonly assertCompleteOnFinalize?: boolean;
   },
 ) {
-  const serverConfigLayer = Layer.effect(
+  const layerServerConfig = Layer.effect(
     ServerConfig.ServerConfig,
     makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
   ).pipe(Layer.provide(NodeServices.layer));
   // Skill discovery also scans user roots under HOME; an empty HOME keeps
   // replays from picking up the host's own skills.
-  const hostEnvironmentLayer = Layer.effect(
+  const layerHostEnvironment = Layer.effect(
     HostProcessEnvironment,
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -622,7 +623,7 @@ export function makeCursorProviderAdapterRegistryReplayLayer(
       return { HOME: home };
     }).pipe(Effect.orDie),
   ).pipe(Layer.provide(NodeServices.layer));
-  return ProviderAdapterRegistry.makeDriverLayer({
+  return ProviderAdapterRegistry.layerFromDrivers({
     drivers: [CursorAdapterV2Driver],
     configMap: {
       [CURSOR_DEFAULT_INSTANCE_ID]: {
@@ -632,9 +633,9 @@ export function makeCursorProviderAdapterRegistryReplayLayer(
   }).pipe(
     Layer.provide(
       Layer.mergeAll(
-        makeCursorAgentSdkReplayLayer(transcript, options),
-        serverConfigLayer,
-        hostEnvironmentLayer,
+        layerCursorAgentSdkReplay(transcript, options),
+        layerServerConfig,
+        layerHostEnvironment,
         NodeServices.layer,
         IdAllocator.layer,
       ),
@@ -669,8 +670,7 @@ export const CursorOrchestratorReplayHarness: OrchestratorV2ProviderReplayHarnes
           }),
       ),
     ),
-  makeProviderAdapterRegistryLayer: (transcript) =>
-    makeCursorProviderAdapterRegistryReplayLayer(transcript),
+  makeProviderAdapterRegistryLayer: (transcript) => layer(transcript),
 };
 
 function sanitizeReplayText(

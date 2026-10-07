@@ -33,8 +33,6 @@ export type StartupPresentation = typeof StartupPresentation.Type;
  */
 export interface ServerDerivedPaths {
   readonly stateDir: string;
-  /** Private Git object stores used for workspace checkpoints. */
-  readonly checkpointsDir: string;
   readonly dbPath: string;
   readonly keybindingsConfigPath: string;
   readonly settingsPath: string;
@@ -43,6 +41,8 @@ export interface ServerDerivedPaths {
   readonly providerStatusCacheDir: string;
   readonly worktreesDir: string;
   readonly attachmentsDir: string;
+  /** Private bare-Git sidecars used for durable workspace checkpoints. */
+  readonly checkpointsDir: string;
   /** Screenshots the agent asks the collaborative browser to keep for the user. */
   readonly browserArtifactsDir: string;
   readonly logsDir: string;
@@ -96,8 +96,11 @@ export class ServerConfig extends Context.Service<
     readonly noBrowser: boolean;
     readonly startupPresentation: StartupPresentation;
     readonly desktopBootstrapToken: string | undefined;
+    readonly desktopBootstrapSecret?: string | undefined;
     readonly desktopTelemetryFd?: number | undefined;
     readonly desktopTelemetryControlFd?: number | undefined;
+    readonly desktopBrowserFd?: number | undefined;
+    readonly desktopBrowserControlFd?: number | undefined;
     readonly resourceMonitorPath?: string | undefined;
     readonly autoBootstrapProjectFromCwd: boolean;
     readonly logWebSocketEvents: boolean;
@@ -140,14 +143,13 @@ export const deriveServerPaths = Effect.fn(function* (
     devUrl !== undefined && !options.baseDirIsExplicit ? "dev" : "userdata",
   );
   const dbPath = join(stateDir, "statev2.sqlite");
-  const checkpointsDir = join(stateDir, "checkpoints");
   const attachmentsDir = join(stateDir, "attachments");
+  const checkpointsDir = join(stateDir, "checkpoints");
   const logsDir = join(stateDir, "logs");
   const providerLogsDir = join(logsDir, "provider");
   const providerStatusCacheDir = join(baseDir, "caches");
   return {
     stateDir,
-    checkpointsDir,
     dbPath,
     keybindingsConfigPath: join(stateDir, "keybindings.json"),
     settingsPath: join(stateDir, "settings.json"),
@@ -155,6 +157,7 @@ export const deriveServerPaths = Effect.fn(function* (
     providerStatusCacheDir,
     worktreesDir: join(baseDir, "worktrees"),
     attachmentsDir,
+    checkpointsDir,
     browserArtifactsDir: join(stateDir, "browser-artifacts"),
     logsDir,
     serverTracePath: join(logsDir, "server.trace.ndjson"),
@@ -175,11 +178,11 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
   yield* Effect.all(
     [
       fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
-      fs.makeDirectory(derivedPaths.checkpointsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.attachmentsDir, { recursive: true }),
+      fs.makeDirectory(derivedPaths.checkpointsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.worktreesDir, { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.keybindingsConfigPath), { recursive: true }),
       fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true }),
@@ -239,6 +242,8 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     desktopBootstrapToken: undefined,
     desktopTelemetryFd: undefined,
     desktopTelemetryControlFd: undefined,
+    desktopBrowserFd: undefined,
+    desktopBrowserControlFd: undefined,
     resourceMonitorPath: undefined,
     staticDir: undefined,
     devUrl,

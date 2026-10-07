@@ -24,25 +24,18 @@ import * as PubSub from "effect/PubSub";
 import * as References from "effect/References";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../../persistence/Migrations.ts";
-import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
-import Migration0041 from "../../persistence/Migrations/041_ProjectionThreadsPinned.ts";
-import Migration0042Schema from "../../persistence/Migrations/042_ProjectionTurnsKeysetIndex.ts";
-import Migration0043Schema from "../../persistence/Migrations/043_ProjectionThreadsPinOrderKey.ts";
-import Migration0044Schema from "../../persistence/Migrations/044_ProjectionProjectsDefaultThreadEnvMode.ts";
-import Migration0045Schema from "../../persistence/Migrations/045_ProjectionProjectFaviconPath.ts";
-import Migration0046Schema from "../../persistence/Migrations/046_ReconcileUpstream41History.ts";
-import Migration0047Schema from "../../persistence/Migrations/047_AuthSessionClientConnection.ts";
-import Migration0042 from "../../persistence/Migrations/048_ProjectionThreadLinkedPullRequest.ts";
-import Migration0043 from "../../persistence/Migrations/049_ProjectionThreadsUnsettledAt.ts";
-import Migration0044 from "../../persistence/Migrations/054_ClearAutomaticProjectModelDefaults.ts";
-import Migration0045 from "../../persistence/Migrations/055_ProjectionProjectsAutoPull.ts";
-import Migration0046 from "../../persistence/Migrations/056_RepairAutomaticSettlementTimestamps.ts";
-import Migration0047 from "../../persistence/Migrations/057_ProjectionProjectIcon.ts";
-import Migration0048 from "../../persistence/Migrations/058_ProjectionThreadBranchPullRequest.ts";
-import Migration0049 from "../../persistence/Migrations/059_ProjectionThreadsActiveOrderKey.ts";
+import * as SqlitePersistence from "../../persistence/Sqlite.ts";
+import Migration0042 from "../../persistence/Migrations/042_ProjectionThreadLinkedPullRequest.ts";
+import Migration0043 from "../../persistence/Migrations/043_ProjectionThreadsUnsettledAt.ts";
+import Migration0044 from "../../persistence/Migrations/044_ClearAutomaticProjectModelDefaults.ts";
+import Migration0045 from "../../persistence/Migrations/045_ProjectionProjectsAutoPull.ts";
+import Migration0046 from "../../persistence/Migrations/046_RepairAutomaticSettlementTimestamps.ts";
+import Migration0047 from "../../persistence/Migrations/047_ProjectionProjectIcon.ts";
+import Migration0048 from "../../persistence/Migrations/048_ProjectionThreadBranchPullRequest.ts";
+import Migration0049 from "../../persistence/Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import { CodexProviderCapabilitiesV2 } from "../Adapters/CodexAdapterV2.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EventSink from "../EventSink.ts";
@@ -57,7 +50,7 @@ import {
   type ProviderAdapterV2Shape,
 } from "../ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
-import { makeOrchestratorV2ReplayLayerWithRegistry } from "../testkit/ProviderReplayHarness.ts";
+import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "../testkit/ReplayFixtureWorkspace.ts";
 
 const PROJECT_ID = "project:cutover";
@@ -119,25 +112,15 @@ const seedV1Database = (fixturePath: string, workspace: string) =>
           payload_json TEXT NOT NULL
         )
       `;
-      // Migration 41 is represented by a site-local ledger row in this
-      // fixture, but its schema change still existed in the database.
-      yield* Migration0041;
-      // These schema changes likewise predate the site-local ledger tail.
-      yield* Migration0042Schema;
-      yield* Migration0043Schema;
-      yield* Migration0044Schema;
-      yield* Migration0045Schema;
-      yield* Migration0046Schema;
-      yield* Migration0047Schema;
       const tailMigrations = [
-        [42, "ProjectionTurnsKeysetIndex", Migration0042Schema],
-        [43, "ProjectionThreadsPinOrderKey", Migration0043Schema],
-        [44, "ProjectionProjectsDefaultThreadEnvMode", Migration0044Schema],
-        [45, "ProjectionProjectFaviconPath", Migration0045Schema],
-        [46, "ReconcileUpstream41History", Migration0046Schema],
-        [47, "AuthSessionClientConnection", Migration0047Schema],
-        [48, "ProjectionThreadLinkedPullRequest", Migration0042],
-        [49, "ProjectionThreadsUnsettledAt", Migration0043],
+        [42, "ProjectionThreadLinkedPullRequest", Migration0042],
+        [43, "ProjectionThreadsUnsettledAt", Migration0043],
+        [44, "ClearAutomaticProjectModelDefaults", Migration0044],
+        [45, "ProjectionProjectsAutoPull", Migration0045],
+        [46, "RepairAutomaticSettlementTimestamps", Migration0046],
+        [47, "ProjectionProjectIcon", Migration0047],
+        [48, "ProjectionThreadBranchPullRequest", Migration0048],
+        [49, "ProjectionThreadsActiveOrderKey", Migration0049],
       ] as const;
       for (const [id, name, migration] of tailMigrations) {
         yield* migration;
@@ -596,24 +579,32 @@ const waitForIdle = Effect.fn("LegacyV1Cutover.waitForIdle")(function* (threadId
   return yield* Effect.die(new Error("Cutover test timed out waiting for idle"));
 });
 
-const makeBootLayer = (input: {
+const layerBoot = (input: {
   readonly name: string;
   readonly dbPath: string;
   readonly workspace: string;
   readonly capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>;
 }) => {
-  const databaseLayer = makeSqlitePersistenceLive(input.dbPath).pipe(
+  const layerDatabase = SqlitePersistence.layerFromPath(input.dbPath).pipe(
     Layer.provide(NodeServices.layer),
   );
-  const eventStoreProvided = EventStore.layer.pipe(Layer.provideMerge(databaseLayer));
-  const projectionStoreProvided = ProjectionStore.layer.pipe(Layer.provideMerge(databaseLayer));
-  const storesProvided = Layer.mergeAll(databaseLayer, eventStoreProvided, projectionStoreProvided);
-  const eventSinkProvided = EventSink.layer.pipe(Layer.provide(storesProvided));
-  const importerProvided = LegacyV1ThreadImporter.layer.pipe(
-    Layer.provide(Layer.mergeAll(storesProvided, eventSinkProvided)),
+  const layerEventStoreProvided = EventStore.layer.pipe(Layer.provideMerge(layerDatabase));
+  const layerProjectionStoreProvided = ProjectionStore.layer.pipe(
+    Layer.provideMerge(layerDatabase),
   );
-  const maintenanceProvided = ProjectionMaintenance.layer.pipe(Layer.provide(storesProvided));
-  const orchestratorProvided = makeOrchestratorV2ReplayLayerWithRegistry(
+  const layerStoresProvided = Layer.mergeAll(
+    layerDatabase,
+    layerEventStoreProvided,
+    layerProjectionStoreProvided,
+  );
+  const layerEventSinkProvided = EventSink.layer.pipe(Layer.provide(layerStoresProvided));
+  const layerImporterProvided = LegacyV1ThreadImporter.layer.pipe(
+    Layer.provide(Layer.mergeAll(layerStoresProvided, layerEventSinkProvided)),
+  );
+  const layerMaintenanceProvided = ProjectionMaintenance.layer.pipe(
+    Layer.provide(layerStoresProvided),
+  );
+  const layerOrchestratorProvided = ProviderReplayHarness.layerWithRegistry(
     {
       name: input.name,
       runtimePolicyOverride: {
@@ -626,15 +617,15 @@ const makeBootLayer = (input: {
         },
       },
     },
-    ProviderAdapterRegistry.makeSingleLayer(makeCodexAdapter(input.capturedTurns)),
-    { databaseLayer },
+    ProviderAdapterRegistry.layerSingle(makeCodexAdapter(input.capturedTurns)),
+    { databaseLayer: layerDatabase },
   );
   return Layer.mergeAll(
-    storesProvided,
-    eventSinkProvided,
-    importerProvided,
-    maintenanceProvided,
-    orchestratorProvided,
+    layerStoresProvided,
+    layerEventSinkProvided,
+    layerImporterProvided,
+    layerMaintenanceProvided,
+    layerOrchestratorProvided,
   );
 };
 
@@ -926,7 +917,7 @@ describe("orchestration v2 legacy v1 cutover", () => {
               };
             }).pipe(
               Effect.provide(
-                makeBootLayer({
+                layerBoot({
                   name: "legacy-v1-cutover-first",
                   dbPath: copyPath,
                   workspace,
@@ -941,18 +932,20 @@ describe("orchestration v2 legacy v1 cutover", () => {
           );
 
           // The copied database recorded a site-local migration under id 41, so
-          // the migrator skipped this build's ProjectionThreadsPinned by
+          // the migrator skipped this build's AuthSessionClientConnection by
           // id. The divergence is surfaced at startup while the rest of the
           // cutover still runs.
           const divergenceLog = boot1Logs.find((log) =>
             String(log.message).includes("migration history diverges"),
           );
           assert.deepStrictEqual(divergenceLog?.annotations.divergent, [
-            "41:ThreadSummaryTimeline (this build: ProjectionThreadsPinned)",
+            "41:ThreadSummaryTimeline (this build: AuthSessionClientConnection)",
           ]);
           assert.equal(firstBoot.migration41Name, "ThreadSummaryTimeline");
-          assert.include(firstBoot.authSessionColumnNames, "client_surface");
-          assert.include(firstBoot.authSessionColumnNames, "client_app_version");
+          // The skipped migration's columns never landed; the schema gap is
+          // what the startup warning points at.
+          assert.notInclude(firstBoot.authSessionColumnNames, "client_surface");
+          assert.notInclude(firstBoot.authSessionColumnNames, "client_app_version");
 
           assert.equal(firstBoot.importRows.length, ALL_THREADS.length);
           const unhydratedRows = firstBoot.importRows.filter(
@@ -1035,7 +1028,7 @@ describe("orchestration v2 legacy v1 cutover", () => {
               );
             }).pipe(
               Effect.provide(
-                makeBootLayer({
+                layerBoot({
                   name: "legacy-v1-cutover-restart",
                   dbPath: copyPath,
                   workspace,

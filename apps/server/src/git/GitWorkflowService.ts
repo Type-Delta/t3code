@@ -1,6 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off - Git path helpers run at the process boundary.
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as NodePath from "node:path";
 
 import {
   GitManagerError,
@@ -101,9 +103,6 @@ export class GitWorkflowService extends Context.Service<
     >;
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
-    ) => Effect.Effect<void, GitCommandError>;
-    readonly deleteRef: (
-      input: GitVcsDriver.GitDeleteRefInput,
     ) => Effect.Effect<void, GitCommandError>;
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
@@ -360,12 +359,46 @@ export const make = Effect.gen(function* () {
     listWorktrees: (input) =>
       detectGitRepositoryForCommand("GitWorkflowService.listWorktrees", input.cwd).pipe(
         Effect.flatMap((isGitRepository) =>
-          isGitRepository ? git.listWorktrees(input) : Effect.succeed(nonRepositoryListWorktrees()),
+          isGitRepository
+            ? git
+                .execute({
+                  operation: "GitWorkflowService.listWorktrees",
+                  cwd: input.cwd,
+                  args: ["worktree", "list", "--porcelain", "-z"],
+                })
+                .pipe(
+                  Effect.map(({ stdout }) => ({
+                    isRepo: true,
+                    worktrees: stdout.split("\0\0").flatMap((record, index) => {
+                      const fields = record.split("\0");
+                      const worktree = fields.find((field) => field.startsWith("worktree "));
+                      const head = fields.find((field) => field.startsWith("HEAD "));
+                      if (
+                        worktree === undefined ||
+                        head === undefined ||
+                        fields.some((field) => field.startsWith("prunable"))
+                      ) {
+                        return [];
+                      }
+                      const branch =
+                        fields.find((field) => field.startsWith("branch "))?.slice(7) ?? null;
+                      return [
+                        {
+                          path: NodePath.resolve(input.cwd, worktree.slice(9)),
+                          head: head.slice(5),
+                          branch: branch?.startsWith("refs/heads/") ? branch.slice(11) : branch,
+                          isPrimary: index === 0,
+                        },
+                      ];
+                    }),
+                  })),
+                )
+            : Effect.succeed(nonRepositoryListWorktrees()),
         ),
       ),
     createWorktree: (input, options) =>
       ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
-        Effect.andThen(git.createWorktree(input, options)),
+        Effect.andThen(gitManager.createWorktree(input, options)),
       ),
     listLocalBranchNames: (cwd) =>
       ensureGitCommand("GitWorkflowService.listLocalBranchNames", cwd).pipe(
@@ -390,10 +423,6 @@ export const make = Effect.gen(function* () {
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
         Effect.andThen(git.removeWorktree(input)),
-      ),
-    deleteRef: (input) =>
-      ensureGitCommand("GitWorkflowService.deleteRef", input.cwd).pipe(
-        Effect.andThen(git.deleteRef(input)),
       ),
     pruneWorktrees: (input) =>
       ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(

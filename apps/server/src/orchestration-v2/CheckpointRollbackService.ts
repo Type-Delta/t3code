@@ -1,6 +1,7 @@
 import {
   CheckpointId,
   CheckpointScopeId,
+  latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   ProviderThreadId,
   ThreadId,
@@ -206,12 +207,8 @@ export const layer: Layer.Layer<
             run.status === "failed" ||
             run.status === "cancelled"),
       );
-      // Keep rolled-back turns available when the target itself is a forward
-      // checkpoint so the provider can reactivate that redo branch.
-      const targetRunForCursor =
-        targetOrdinal === 0
-          ? undefined
-          : projection.runs.find((run) => run.ordinal === targetOrdinal);
+      // Rolled-back turns stay in the audit history, but no longer exist in
+      // the provider conversation and must not be counted by a later rewind.
       const rolledBackRunIds = new Set(
         projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
       );
@@ -223,9 +220,7 @@ export const layer: Layer.Layer<
       const providerThreadTurns = projection.providerTurns.filter(
         (turn) =>
           turn.providerThreadId === providerThread.id &&
-          (targetRunForCursor?.status === "rolled_back" ||
-            turn.runAttemptId === null ||
-            !rolledBackAttemptIds.has(turn.runAttemptId)),
+          (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
       );
       const rollbackTarget: ProviderAdapterV2RollbackTarget =
         targetOrdinal === 0
@@ -239,11 +234,10 @@ export const layer: Layer.Layer<
               const targetAttempt = projection.attempts.find(
                 (attempt) => attempt.id === targetRun?.activeAttemptId,
               );
-              const targetTurn = projection.providerTurns.find(
-                (turn) =>
-                  turn.id === targetAttempt?.providerTurnId ||
-                  turn.runAttemptId === targetAttempt?.id,
-              );
+              // A goal run can span several native turns; roll back to its last.
+              const targetTurn =
+                latestProviderTurnForAttempt(projection.providerTurns, targetAttempt?.id) ??
+                projection.providerTurns.find((turn) => turn.id === targetAttempt?.providerTurnId);
               if (targetTurn === undefined || targetTurn.providerThreadId !== providerThread.id) {
                 return yield* new CheckpointRollbackExecutionError({
                   reason: "provider-turn-unavailable",
@@ -260,9 +254,8 @@ export const layer: Layer.Layer<
               };
             });
 
-      const currentOrdinal = providerThread.lastRunOrdinal ?? 0;
       const snapshot =
-        runsToRollback.length === 0 && currentOrdinal === targetOrdinal
+        runsToRollback.length === 0
           ? { providerThread }
           : yield* session.rollbackThread({
               providerThread,
@@ -270,6 +263,16 @@ export const layer: Layer.Layer<
               providerThreadTurns,
             });
       if (input.restoreFiles !== false) yield* checkpoints.restore({ scope, checkpoint });
+      const staleCheckpoints = projection.checkpoints.filter(
+        (candidate) =>
+          candidate.scopeId === scope.id &&
+          candidate.appRunOrdinal !== null &&
+          candidate.appRunOrdinal > targetOrdinal &&
+          candidate.status === "ready",
+      );
+      if (staleCheckpoints.length > 0) {
+        yield* checkpoints.deleteStaleRefs({ scope, checkpoints: staleCheckpoints });
+      }
 
       const now = yield* DateTime.now;
       const makeEvent = <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
@@ -296,6 +299,19 @@ export const layer: Layer.Layer<
           },
         }),
       );
+      for (const staleCheckpoint of staleCheckpoints) {
+        events.push(
+          yield* makeEvent({
+            type: "checkpoint.captured",
+            threadId: input.threadId,
+            ...(staleCheckpoint.runId === null ? {} : { runId: staleCheckpoint.runId }),
+            nodeId: staleCheckpoint.nodeId,
+            providerInstanceId: providerThread.providerInstanceId,
+            occurredAt: now,
+            payload: { ...staleCheckpoint, status: "stale" },
+          }),
+        );
+      }
       for (const run of runsToRollback) {
         const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
         events.push(

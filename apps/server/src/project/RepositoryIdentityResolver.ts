@@ -44,8 +44,7 @@ function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    // Partial clones may append details such as `(fetch) [blob:none]`.
-    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)(?:\s+\[.*\])?$/.exec(trimmed);
+    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(trimmed);
     if (!match) continue;
     const [, remoteName = "", remoteUrl = "", direction = ""] = match;
     if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
@@ -71,17 +70,34 @@ function pickPrimaryRemote(
   return remoteName && remoteUrl ? { remoteName, remoteUrl } : null;
 }
 
+function repositoryPathOf(canonicalKey: string): string {
+  return canonicalKey.split("/").slice(1).join("/");
+}
+
+function buildRepositoryOrigin(
+  originUrl: string | undefined,
+  canonicalKey: string,
+): RepositoryIdentity["origin"] {
+  if (!originUrl) return undefined;
+  const originKey = normalizeGitRemoteUrl(originUrl);
+  if (originKey === canonicalKey) return undefined;
+  const displayName = repositoryPathOf(originKey);
+  return { canonicalKey: originKey, ...(displayName ? { displayName } : {}) };
+}
+
 function buildRepositoryIdentity(input: {
   readonly remoteName: string;
   readonly remoteUrl: string;
+  readonly originUrl: string | undefined;
   readonly rootPath: string;
 }): RepositoryIdentity {
   const canonicalKey = normalizeGitRemoteUrl(input.remoteUrl);
   const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(input.remoteUrl);
-  const repositoryPath = canonicalKey.split("/").slice(1).join("/");
+  const repositoryPath = repositoryPathOf(canonicalKey);
   const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
   const [owner] = repositoryPathSegments;
   const repositoryName = repositoryPathSegments.at(-1);
+  const origin = buildRepositoryOrigin(input.originUrl, canonicalKey);
 
   return {
     canonicalKey,
@@ -95,6 +111,7 @@ function buildRepositoryIdentity(input: {
     ...(sourceControlProvider ? { provider: sourceControlProvider.kind } : {}),
     ...(owner ? { owner } : {}),
     ...(repositoryName ? { name: repositoryName } : {}),
+    ...(origin ? { origin } : {}),
   };
 }
 
@@ -137,8 +154,11 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
     return null;
   }
 
-  const remote = pickPrimaryRemote(parseRemoteFetchUrls(remoteResult.value.stdout));
-  return remote ? buildRepositoryIdentity({ ...remote, rootPath: cacheKey }) : null;
+  const remotes = parseRemoteFetchUrls(remoteResult.value.stdout);
+  const remote = pickPrimaryRemote(remotes);
+  return remote
+    ? buildRepositoryIdentity({ ...remote, originUrl: remotes.get("origin"), rootPath: cacheKey })
+    : null;
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (

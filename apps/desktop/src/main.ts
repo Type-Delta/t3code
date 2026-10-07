@@ -58,17 +58,25 @@ import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopSshEnvironment from "./ssh/DesktopSshEnvironment.ts";
 import * as DesktopSshPasswordPrompts from "./ssh/DesktopSshPasswordPrompts.ts";
 import * as DesktopState from "./app/DesktopState.ts";
+import * as DesktopLegacyLocalStorage from "./app/DesktopLegacyLocalStorage.ts";
 import * as DesktopTelemetryPublisher from "./telemetry/DesktopTelemetryPublisher.ts";
+import * as DesktopRendererHistory from "./telemetry/DesktopRendererHistory.ts";
 import * as DesktopTray from "./app/DesktopTray.ts";
 import * as DesktopUpdates from "./updates/DesktopUpdates.ts";
 import * as BrowserImport from "./preview/BrowserImport/BrowserImport.ts";
 import * as LinuxBrowserSecret from "./preview/BrowserImport/LinuxBrowserSecret.ts";
 import * as BrowserSession from "./preview/BrowserSession.ts";
+import * as DesktopBrowserHost from "./preview/DesktopBrowserHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "./wsl/DesktopWslServerTree.ts";
+
+if (process.argv.includes("--version")) {
+  process.stdout.write(`${Electron.app.getVersion()}\n`);
+  Electron.app.exit(0);
+}
 
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {
@@ -130,11 +138,13 @@ const desktopFoundationLayer = Layer.mergeAll(
   MacPermissions.layer,
   DesktopState.layer,
   DesktopShutdown.layer,
+  DesktopLegacyLocalStorage.layer,
   DesktopAppSettings.layer,
   DesktopClientSettings.layer,
   DesktopConnectionCatalogStore.layer.pipe(Layer.provideMerge(DesktopSavedEnvironments.layer)),
   DesktopAssets.layer,
   DesktopObservability.layer,
+  DesktopRendererHistory.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
 const desktopSshLayer = desktopSshEnvironmentLayer.pipe(
@@ -147,6 +157,7 @@ const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
 );
 
 const desktopPreviewLayer = PreviewManager.layer.pipe(
+  Layer.provideMerge(DesktopBrowserHost.layer),
   // Merged rather than provided so the IPC handlers can reach the import
   // service alongside the manager; both sit on the same BrowserSession.
   Layer.provideMerge(BrowserImport.layer.pipe(Layer.provide(LinuxBrowserSecret.layer))),

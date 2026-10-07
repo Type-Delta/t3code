@@ -80,7 +80,7 @@ SQLite persists capture jobs, immutable checkpoint entries, timeline generations
 
 Fork migrations `036`–`038` establish durable checkpoint state. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
 
-Migration 053_ReconcileUpstream47History repairs a database carrying upstream history through 047, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at 050-052. Incoming upstream behavior then runs as 054-061, with fork prompt suggestions at 062, and the latest upstream title-state, pull-request-file, auto-settle, and V2 cutover migrations at 063-067. Migration 065_ReconcileBranchPullRequestHistory repairs the known deployed-ID-58 collision idempotently before startup. Migration 067_CoreV2Cutover imports legacy V1 thread shells and messages into V2 projections and removes obsolete V1 runtime state. Schema checks keep these changes safe for both fork and upstream database histories.
+Migration 053_ReconcileUpstream47History repairs a database carrying upstream history through 047, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at 050-052. Incoming upstream behavior then runs as 054-061, with fork prompt suggestions at 062, and the latest upstream title-state, pull-request-file, auto-settle, and V2 cutover migrations at 063-067. The current sync assigns upstream webhook migrations to 068-069. Migration 065_ReconcileBranchPullRequestHistory repairs the known deployed-ID-58 collision idempotently before startup. Migration 067_CoreV2Cutover imports legacy V1 thread shells and messages into V2 projections and removes obsolete V1 runtime state. Schema checks keep these changes safe for both fork and upstream database histories.
 
 Upstream's per-thread auto-settle migration runs at 066, followed by the V2 cutover at 067, preserving the deployed fork ledger. The isolated migration helper accepts documented historical ledger names only after it verifies their reconciliation markers and repaired schema. Codex checkpoint navigation uses the current native thread/revert protocol and retains the fork's conversation cursor safeguards.
 
@@ -104,7 +104,7 @@ The 2026-10-02 config repair passed all 28 checkpoint-store tests, including exa
 
 The 2026-10-05 completion split passed the focused RunExecutionService, CheckpointCaptureService, CheckpointService, runtime-layer, recovery, projection, `vp check`, and `vp run typecheck` checks. Settled provider turns now remain settled when follow-up checkpoint capture is slow or unavailable.
 
-**Last updated:** 2026-10-05
+**Last updated:** 2026-10-07
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -670,6 +670,16 @@ background-command test.
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-10-07 — Merge upstream/main into main
+
+**Merge commit:** this merge commit
+**Parents:** `dba09c35aa` (fork) and `079e4bccdc` (upstream/main)
+
+- Used upstream's stable Effect 4 APIs, dependency catalog, service layout, WebSocket transport, VCS driver, provider registry, MCP authorization, and desktop/web client contracts as the integration base. Reapplied the fork's split workspaces, durable sidecar checkpoints, Windows path/process handling, desktop tray continuity, preview control safeguards, prompt preservation, and provider recovery behavior where the APIs still exist.
+- Preserved the deployed fork migration ledger through `067_CoreV2Cutover`. Incoming webhook migrations are assigned to `068_ScheduledTaskWebhooks` and `069_WebhookRelayDeliveries`; fork checkpoint migrations and reconciliation history remain authoritative. The duplicate upstream title-state migration is not loaded under its upstream number.
+- Removed stale fork-only copies of server modules that upstream deleted or refactored, while retaining fork-only checkpointing and migration files. Restored the running-thread-count and worktree-list RPC contracts and kept MCP wait/capability results compatible with the current schemas.
+- Validation: `vp run typecheck`, `vp check`, focused checkpoint/migration/timeline/desktop tests (191 passing), and a conflict-marker scan passed. The full unrestricted test suite and live client verification were not run as part of this synchronization pass.
 
 ### 2026-10-04 — Orchestrator V2 sync
 

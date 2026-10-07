@@ -86,7 +86,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       const bare = yield* resolveLauncherPath.pipe(
         Effect.provideService(HostProcessInvokedAs, "t3"),
         Effect.provideService(HostProcessEnvironment, {
-          PATH: `${path.join(root, "missing")}${path.sep === "\\" ? ";" : ":"}${path.join(root, "bin")}`,
+          PATH: `${path.join(root, "missing")}:${path.join(root, "bin")}`,
         }),
         Effect.provideService(HostProcessWorkingDirectory, root),
       );
@@ -104,9 +104,6 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       assert.equal(bare, launcher);
       assert.equal(relative, launcher);
       assert.equal(absent, undefined);
-    }).pipe(
-      Effect.scoped,
-      Effect.provideService(HostProcessPlatform, HostProcessPlatform.defaultValue()),
-    ),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
   );
 });

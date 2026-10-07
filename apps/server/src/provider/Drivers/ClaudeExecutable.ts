@@ -1,6 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
-import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -52,29 +51,6 @@ export const ClaudeExecutableFileCheck = Context.Reference<ExecutableFileCheck>(
 );
 
 /**
- * Resolves the optional native executable shipped by the Agent SDK. Electron
- * packages put optional dependencies in app.asar; the executable must instead
- * be launched from the matching unpacked location.
- */
-export function resolvePackagedClaudeSdkNativeExecutable(
-  platform: NodeJS.Platform,
-): string | undefined {
-  if (platform !== "win32") return undefined;
-  try {
-    const resolved = NodeModule.createRequire(import.meta.url).resolve(
-      "@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe",
-    );
-    return resolved.replace("\\app.asar\\", "\\app.asar.unpacked\\");
-  } catch {
-    return undefined;
-  }
-}
-
-function isElectronNodeRuntime(environment: NodeJS.ProcessEnv): boolean {
-  return process.versions.electron !== undefined || environment.ELECTRON_RUN_AS_NODE === "1";
-}
-
-/**
  * Resolves the configured Claude binary path into a value the Claude Agent
  * SDK can spawn directly via `pathToClaudeCodeExecutable`.
  *
@@ -101,13 +77,7 @@ export const resolveClaudeSdkExecutablePath = Effect.fn("resolveClaudeSdkExecuta
     const resolved = resolveExecutable(binaryPath, platform, environment) ?? binaryPath;
     const extension = NodePath.win32.extname(resolved).toLowerCase();
     if (!WINDOWS_SHIM_EXTENSIONS.has(extension)) {
-      // Keep the normal configured/PATH-resolved executable first. In an
-      // Electron package a bare command can be intentionally absent from PATH;
-      // only then fall back to the SDK's unpacked native executable.
-      if (extension === ".exe" || isFile(resolved) || !isElectronNodeRuntime(environment)) {
-        return resolved;
-      }
-      return resolvePackagedClaudeSdkNativeExecutable(platform) ?? resolved;
+      return resolved;
     }
 
     const shimDirectory = NodePath.win32.dirname(resolved);
@@ -122,8 +92,6 @@ export const resolveClaudeSdkExecutablePath = Effect.fn("resolveClaudeSdkExecuta
       "Claude launcher shim resolved but no known package entry was found next to it; the Claude Agent SDK cannot spawn launcher scripts directly.",
       { binaryPath, resolvedShimPath: resolved },
     );
-    return isElectronNodeRuntime(environment)
-      ? (resolvePackagedClaudeSdkNativeExecutable(platform) ?? binaryPath)
-      : binaryPath;
+    return binaryPath;
   },
 );

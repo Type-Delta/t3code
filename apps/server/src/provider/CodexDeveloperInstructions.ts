@@ -11,13 +11,6 @@ const T3_CODE_DEVICE_TOOL_INSTRUCTIONS = `## T3 Code devices
 
 The \`t3-code\` MCP server also exposes \`device_*\` tools for iOS Simulators and Android Emulators on this environment. For mobile verification, call \`device_list\`, then \`device_open\` so the user can watch the device in their Device panel; its result explains how to drive the device. Driving happens through the \`agent-device\` CLI, using the exact launcher path returned by \`device_open\`. Keep the host config and session flags returned by \`device_open\` on every command so concurrent devices stay independent: prefer \`agent-device snapshot -i\` refs over coordinates, and use \`device_screenshot\` when you need to see the screen. Prefer these tools and \`agent-device\` for opening and driving devices. Platform tools such as \`xcrun simctl\` and \`adb\` remain available for anything they do not cover, such as builds, logs, or port forwarding. If \`device_list\` reports a platform as unavailable, say so.`;
 
-const T3_CODE_THREAD_TOOL_INSTRUCTIONS = `
-
-## T3 Code threads
-
-When \`t3-code\` exposes thread tools, they create and manage durable, user-visible T3 threads. Use them for work the user should see or continue. Use native subagents for private, short-lived fan-out.
-`;
-
 export interface T3CodeToolAvailability {
   readonly browser: boolean;
   readonly device: boolean;
@@ -39,7 +32,6 @@ const toolInstructions = (availability: boolean | T3CodeToolAvailability): strin
   const tools = normalizeAvailability(availability);
   return [
     tools.browser ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "",
-    tools.browser ? T3_CODE_THREAD_TOOL_INSTRUCTIONS : "",
     tools.device ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS : "",
   ]
     .filter(Boolean)
@@ -219,7 +211,6 @@ export function buildCodexAdditionalContext(
    * setting, so the prompt cannot claim tools the turn doesn't have.
    */
   toolsAvailable: boolean | T3CodeToolAvailability = true,
-  promptSuggestionInstructions?: string,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
   const tools = toolInstructions(toolsAvailable);
   // Separate keys keep each value under Codex's per-entry token cap.
@@ -229,14 +220,6 @@ export function buildCodexAdditionalContext(
       kind: "application",
       value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
     },
-    ...(promptSuggestionInstructions
-      ? {
-          t3_code_suggestions: {
-            kind: "application" as const,
-            value: promptSuggestionInstructions,
-          },
-        }
-      : {}),
     ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
   };
 }

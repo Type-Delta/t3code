@@ -11,8 +11,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import { HttpClient } from "effect/unstable/http";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import { HttpClient } from "effect/http";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as BootService from "./bootService.ts";
@@ -184,7 +184,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
           input.args[0] === "--version"
             ? // The runtime under test reports the version of the directory it
               // was launched from, like the real executable.
-              `t3 v${/versions[\\/]([^\\/]+)[\\/]/.exec(input.command)?.[1] ?? "1.2.3"}\n`
+              `t3 v${/versions\/([^/]+)\//.exec(input.command)?.[1] ?? "1.2.3"}\n`
             : input.command === "loginctl" && input.args[0] === "show-user"
               ? `${control.linger}\n`
               : input.args[1] === "is-enabled"
@@ -353,13 +353,12 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       });
       expect(plan.program).toEqual([runtime.entryPath, "__service-launcher"]);
       expect(yield* fs.readFileString(plan.unitPath)).toContain(
-        `ExecStart=${runtime.entryPath.includes("\\") ? `"${runtime.entryPath.replaceAll("\\", "\\\\")}"` : runtime.entryPath} __service-launcher`,
+        `ExecStart=${runtime.entryPath} __service-launcher`,
       );
       expect(yield* service.status).toMatchObject({
         current: true,
         installedVersion: "1.2.3",
       });
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned test document.
       const pendingState = JSON.stringify({
         protocol: SERVICE_LAUNCHER_PROTOCOL,
         activeVersion: "1.2.3",
@@ -502,11 +501,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         protocol: SERVICE_LAUNCHER_PROTOCOL,
         activeVersion: "1.2.4",
       });
-      expect(yield* fs.readFileString(plan.unitPath)).toContain(
-        HostProcessPlatform.defaultValue() === "win32"
-          ? "versions\\\\1.2.4\\\\t3"
-          : "versions/1.2.4/t3",
-      );
+      expect(yield* fs.readFileString(plan.unitPath)).toContain("versions/1.2.4/t3");
       expect(
         commands.filter(
           (command) => command.startsWith("systemctl ") && !command.includes("show-environment"),
@@ -550,7 +545,6 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     Effect.gen(function* () {
       const { service, fs, statePath } = yield* makeHarness();
       yield* service.install();
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned test document.
       const pendingState = JSON.stringify({
         protocol: SERVICE_LAUNCHER_PROTOCOL,
         activeVersion: "1.2.3",
@@ -651,7 +645,6 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     Effect.gen(function* () {
       const { service, fs, statePath, commands } = yield* makeHarness();
       yield* service.install();
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned test document.
       const pendingState = JSON.stringify({
         protocol: SERVICE_LAUNCHER_PROTOCOL - 1,
         activeVersion: "1.2.3",
@@ -812,7 +805,6 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       const { service, fs, statePath, commands } = yield* makeHarness("darwin");
       yield* service.install();
       const plistPath = (yield* service.status).unitPath;
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - fixed launcher-owned test document.
       const pendingState = JSON.stringify({
         protocol: SERVICE_LAUNCHER_PROTOCOL - 1,
         activeVersion: "1.2.3",

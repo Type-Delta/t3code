@@ -67,10 +67,9 @@ export const layer: Layer.Layer<
     }) {
       const { run, rootNode, scope, providerThread, readyCheckpointOrdinals } =
         yield* projections.getCheckpointCaptureContext(input.threadId, input);
-      // A completed run may already be terminal while its checkpoint effect is
-      // still pending. Its checkpoint is persisted as a follow-up detail.
+      // A stopped run is already terminal. Its checkpoint is the rollback point
+      // for the message after it, so capture leaves its status alone.
       const stopped = run?.status === "interrupted" || run?.status === "cancelled";
-      const completed = run?.status === "completed";
 
       // The effect is at-least-once. A settled run with a checkpoint proves
       // that an earlier execution committed its result.
@@ -90,7 +89,7 @@ export const layer: Layer.Layer<
 
       if (
         run === undefined ||
-        (run.status !== "waiting" && !completed && !stopped) ||
+        (run.status !== "waiting" && !stopped) ||
         rootNode === undefined ||
         scope === undefined ||
         rootNode.checkpointScopeId !== scope.id ||
@@ -129,7 +128,7 @@ export const layer: Layer.Layer<
         appRunOrdinal: run.ordinal,
         capturedAt,
       });
-      // Match RunExecutionService: capture loaded the run before
+      // Match RunExecutionService: capture loaded the waiting run before
       // materializing baselines. Omit delegatedCompletion so a newer cohort
       // write during capture is not overwritten by this stale snapshot
       // (ProjectionStore preserves the field when absent from the payload).
@@ -212,7 +211,7 @@ export const layer: Layer.Layer<
               : {
                   ...runWithoutDelegatedCompletion,
                   status: "completed",
-                  completedAt: run.completedAt ?? capturedAt,
+                  completedAt: capturedAt,
                   checkpointId: checkpoint.id,
                 },
           },
@@ -230,7 +229,7 @@ export const layer: Layer.Layer<
                   payload: {
                     ...rootNode,
                     status: "completed" as const,
-                    completedAt: rootNode.completedAt ?? capturedAt,
+                    completedAt: capturedAt,
                     checkpointScopeId: scope.id,
                   },
                 },

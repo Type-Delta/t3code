@@ -24,7 +24,6 @@ export const PersistenceErrorCorrelation = Schema.Union([
   Schema.Struct({ sessionId: Schema.String }),
   Schema.Struct({ currentSessionId: Schema.String }),
   Schema.Struct({ pairingLinkId: Schema.String }),
-  Schema.Struct({ managementApiKeyId: Schema.String }),
   Schema.Struct({ threadId: Schema.String }),
 ]);
 export type PersistenceErrorCorrelation = typeof PersistenceErrorCorrelation.Type;
@@ -74,7 +73,7 @@ export class PersistenceDecodeError extends Schema.TaggedError<PersistenceDecode
 
 /**
  * Read a SQLite condition through SQL error wrappers.
- * Use Node's fixed description or Bun's numeric code, never the driver message.
+ * Use node:sqlite's fixed description, never the driver message.
  */
 function sqliteCondition(cause: unknown): string | undefined {
   let value = cause;
@@ -86,15 +85,6 @@ function sqliteCondition(cause: unknown): string | undefined {
       typeof value.errstr === "string"
     ) {
       return `SQLITE(${value.errcode}) ${value.errstr}`;
-    }
-    if (
-      "name" in value &&
-      value.name === "SQLiteError" &&
-      "errno" in value &&
-      typeof value.errno === "number" &&
-      Number.isInteger(value.errno)
-    ) {
-      return `SQLITE(${value.errno})`;
     }
     value = "cause" in value ? value.cause : undefined;
   }
@@ -129,9 +119,6 @@ export function toPersistenceDecodeError(operation: string) {
     PersistenceDecodeError.fromSchemaError(operation, cause);
 }
 
-export const isPersistenceError = (value: unknown) =>
-  Schema.is(PersistenceSqlError)(value) || Schema.is(PersistenceDecodeError)(value);
-
 export type OrchestrationEventStoreError = PersistenceSqlError | PersistenceDecodeError;
 
 export type OrchestrationCommandReceiptRepositoryError =
@@ -141,7 +128,6 @@ export type OrchestrationCommandReceiptRepositoryError =
 export type ProviderSessionRuntimeRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type AuthPairingLinkRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type AuthSessionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
-export type ManagementApiKeyRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type PullRequestFilesViewedRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
-export type PullRequestFilesViewedRepositoryError = PersistenceSqlError | PersistenceDecodeError;

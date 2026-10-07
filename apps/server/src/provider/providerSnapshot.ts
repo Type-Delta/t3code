@@ -5,7 +5,6 @@ import type {
   RuntimeMode,
   ServerProvider,
   ServerProviderAuth,
-  ServerProviderDiagnostics,
   ServerProviderSkill,
   ServerProviderSlashCommand,
   ServerProviderModel,
@@ -16,7 +15,7 @@ import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { readCustomModelEntries } from "@t3tools/shared/model";
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { createProviderVersionAdvisory } from "./providerMaintenance.ts";
@@ -58,7 +57,6 @@ export interface ProviderProbeResult {
   readonly version: string | null;
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProviderAuth;
-  readonly diagnostics?: ServerProviderDiagnostics;
   readonly message?: string;
   readonly usageLimits?: ServerProviderUsageLimits;
 }
@@ -241,7 +239,6 @@ export function buildServerProvider(input: {
     version: input.probe.version,
     status: input.enabled ? input.probe.status : "disabled",
     auth: input.probe.auth,
-    ...(input.probe.diagnostics ? { diagnostics: input.probe.diagnostics } : {}),
     checkedAt: input.checkedAt,
     ...(input.probe.message ? { message: input.probe.message } : {}),
     models: input.models,

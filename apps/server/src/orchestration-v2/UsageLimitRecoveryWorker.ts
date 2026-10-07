@@ -63,13 +63,7 @@ export function limitRecoveryCommand(
     ...(recovery.requestId === undefined
       ? {}
       : { usageLimitRecoveryRequestId: recovery.requestId }),
-    text: `[T3 Code automatic resume]
-
-The previous turn stopped because the provider usage limit was reached. The limit has now reset.
-
-Resume only the work already requested in this thread. Inspect current workspace, artifacts and any subagent status. Identify incomplete checklist items or interrupted operations, repair any partial state, and continue from where the turn stopped.
-
-Do not repeat completed work, start new work, or expand the user's requested scope. If the requested work is already complete, report completion and stop.`,
+    text: "Continue where you left off.",
     attachments: [],
     dispatchMode: { type: "start_immediately" },
     createdBy: "user",
@@ -112,7 +106,7 @@ const makeSweep = Effect.gen(function* () {
 
 // The shared scheduler derives due work from persisted failures and recovery
 // choices, so restarts need no timer restoration or connected client.
-export const workerLive = Layer.effectDiscard(
+export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const sweep = yield* makeSweep;
     const scheduler = yield* Scheduler.Scheduler;

@@ -1,23 +1,10 @@
-// @effect-diagnostics nodeBuiltinImport:off - integration test exercises the Windows process-tree boundary.
-import * as NodeChildProcess from "node:child_process";
-import * as NodeFSP from "node:fs/promises";
-import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
-
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import {
-  Launcher,
-  readServiceState,
-  terminateChild,
-  writeServiceState,
-} from "./serviceLauncher.ts";
+import { Launcher, readServiceState, writeServiceState } from "./serviceLauncher.ts";
 import {
   compareExactServiceVersions,
   decodeServiceState,
@@ -26,21 +13,6 @@ import {
   SERVICE_RESTART_PENDING_FILE,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
-
-// Windows cannot execute a shebang fixture. Keep real child IPC and lifecycle
-// behavior, routing only our fake runtime files through the host Node binary.
-vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
-  return {
-    ...actual,
-    spawn: (command: string, args: readonly string[], options: NodeChildProcess.SpawnOptions) => {
-      const source = `${command}.test-source.mjs`;
-      return NodePath.sep === "\\" && NodeFS.existsSync(source)
-        ? actual.spawn(process.execPath, [source, ...args], options)
-        : actual.spawn(command, args, options);
-    },
-  };
-});
 
 it("accepts only exact semantic versions", () => {
   for (const version of ["0.0.0", "1.2.3", "1.2.3-alpha.1", "1.2.3-0", "1.2.3+001"]) {
@@ -59,95 +31,6 @@ it("orders exact semantic versions without treating build metadata as precedence
   assert.equal(compareExactServiceVersions("2.0.0-alpha-beta", "2.0.0-alpha-alpha"), 1);
   assert.equal(compareExactServiceVersions("2.0.0", "2.0.0-rc.1"), 1);
   assert.equal(compareExactServiceVersions("2.0.0+one", "2.0.0+two"), 0);
-});
-
-it.skipIf(NodePath.sep !== "\\")(
-  "terminates the known server process tree on Windows",
-  async () => {
-    const parent = NodeChildProcess.spawn(
-      process.execPath,
-      [
-        "-e",
-        `
-          const { spawn } = require("node:child_process");
-          const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], {
-            stdio: "ignore",
-          });
-          process.send({ pid: child.pid });
-          setInterval(() => {}, 1_000);
-        `,
-      ],
-      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
-    );
-    try {
-      const message = await new Promise<{ readonly pid: number }>((resolve) => {
-        parent.once("message", (value) => resolve(value as { readonly pid: number }));
-      });
-      await terminateChild(parent);
-      assert.throws(() => process.kill(message.pid, 0));
-    } finally {
-      await terminateChild(parent);
-    }
-  },
-  15_000,
-);
-
-it.skipIf(NodePath.sep !== "\\")(
-  "lets a Windows service child clean up before exiting",
-  async () => {
-    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-service-shutdown-"));
-    const marker = NodePath.join(root, "closed");
-    const parent = NodeChildProcess.spawn(
-      process.execPath,
-      [
-        "-e",
-        `
-    process.on("message", message => {
-      if (message.type !== "shutdown") return;
-      require("node:fs").writeFileSync(process.argv[1], "closed");
-      process.exit(0);
-    });
-    process.send({ ready: true });
-  `,
-        marker,
-      ],
-      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
-    );
-    try {
-      await new Promise<void>((resolve) => parent.once("message", () => resolve()));
-      await terminateChild(parent);
-      assert.equal(parent.exitCode, 0);
-      assert.equal(await NodeFSP.readFile(marker, "utf8"), "closed");
-    } finally {
-      await terminateChild(parent);
-      await NodeFSP.rm(root, { recursive: true, force: true });
-    }
-  },
-);
-
-it.skipIf(NodePath.sep !== "\\")("durably replaces service state on Windows", async () => {
-  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-service-state-windows-"));
-  const directory = NodePath.join(root, "runtime");
-  const statePath = NodePath.join(directory, "service-state.json");
-  try {
-    await writeServiceState(statePath, {
-      protocol: SERVICE_LAUNCHER_PROTOCOL,
-      activeVersion: "1.0.0",
-    });
-    const replacement = {
-      protocol: SERVICE_LAUNCHER_PROTOCOL,
-      activeVersion: "1.1.0",
-    } as const;
-    await writeServiceState(statePath, replacement);
-
-    assert.deepEqual(await readServiceState(statePath), replacement);
-    assert.deepEqual(
-      (await NodeFSP.readdir(directory)).filter((entry) => entry.startsWith(".service-state")),
-      [],
-    );
-  } finally {
-    await NodeFSP.rm(root, { recursive: true, force: true });
-  }
 });
 
 it("rejects contradictory service state", () => {
@@ -203,11 +86,9 @@ const writeFakeRuntime = (
   childSource: string,
 ) =>
   Effect.gen(function* () {
-    const windows = path.sep === "\\";
-    const entryPath = path.join(versionDir, windows ? "t3.exe" : "t3");
+    const entryPath = path.join(versionDir, "t3");
     yield* fs.makeDirectory(versionDir, { recursive: true });
     yield* fs.writeFileString(entryPath, `#!${process.execPath}\n${childSource}`);
-    if (windows) yield* fs.writeFileString(`${entryPath}.test-source.mjs`, childSource);
     yield* fs.chmod(entryPath, 0o755);
     yield* fs.writeFileString(
       path.join(versionDir, ".install-complete"),
@@ -317,7 +198,6 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
       const databasePath = path.join(root, "userdata", "state.sqlite");
       yield* fs.makeDirectory(path.dirname(databasePath), { recursive: true });
       yield* fs.writeFileString(databasePath, "before trial");
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds a path in fake child source.
       const encodedDatabasePath = JSON.stringify(databasePath);
       const childSource = `
 const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
@@ -371,7 +251,6 @@ if (context.update?.status === "pending") {
       const databasePath = path.join(root, "userdata", "state.sqlite");
       yield* fs.makeDirectory(path.dirname(databasePath), { recursive: true });
       yield* fs.writeFileString(databasePath, "before trial");
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds a path in fake child source.
       const encodedDatabasePath = JSON.stringify(databasePath);
       const childSource = `
 const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
@@ -427,7 +306,6 @@ if (context.update?.status === "pending") {
       const original = "database before migration";
       yield* fs.makeDirectory(path.dirname(databasePath), { recursive: true });
       yield* fs.writeFileString(databasePath, original);
-      // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds a path in fake child source.
       const encodedDatabasePath = JSON.stringify(databasePath);
       const childSource = `
 import { writeFileSync } from "node:fs";

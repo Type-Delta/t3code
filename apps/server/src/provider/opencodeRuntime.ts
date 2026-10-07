@@ -28,7 +28,7 @@ import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { signalProcessGroup } from "../process/processGroup.ts";
 import { isWindowsCommandNotFound } from "../processRunner.ts";
@@ -37,7 +37,7 @@ import { collectStreamAsString } from "./providerSnapshot.ts";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
-import { spawnProviderProcess } from "./executableRecovery.ts";
+import { resolveSpawnCommand } from "@t3tools/shared/shell";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const OPENCODE_EMPTY_CONFIG_CONTENT = "{}";
 
@@ -593,14 +593,20 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
   const netService = yield* NetService.NetService;
   const hostPlatform = yield* HostProcessPlatform;
   const serverLedger = yield* OpenCodeServerLedger.OpenCodeServerLedger;
+  const resolveCommand = (command: string, args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv) =>
+    resolveSpawnCommand(command, args, env ? { env } : {});
 
   const runOpenCodeCommand: OpenCodeRuntimeShape["runOpenCodeCommand"] = (input) =>
     Effect.gen(function* () {
-      const child = yield* spawnProviderProcess(spawner, input.binaryPath, input.args, {
-        detached: hostPlatform !== "win32",
-        ...(input.cwd ? { cwd: input.cwd } : {}),
-        ...(input.environment ? { env: input.environment } : { extendEnv: true }),
-      });
+      const spawnCommand = yield* resolveCommand(input.binaryPath, input.args, input.environment);
+      const child = yield* spawner.spawn(
+        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+          detached: hostPlatform !== "win32",
+          shell: spawnCommand.shell,
+          ...(input.cwd ? { cwd: input.cwd } : {}),
+          ...(input.environment ? { env: input.environment } : { extendEnv: true }),
+        }),
+      );
       const terminateCommandGroup =
         hostPlatform === "win32"
           ? child.kill({ killSignal: "SIGKILL" }).pipe(Effect.asVoid)
@@ -681,6 +687,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         ));
       const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE_SERVER_TIMEOUT_MS;
       const args = ["serve", `--hostname=${hostname}`, `--port=${port}`];
+      const spawnCommand = yield* resolveCommand(input.binaryPath, args, input.environment);
       const serverPassword = resolveOpenCodeServerPassword({
         external: false,
         ...(input.serverPassword !== undefined ? { serverPassword: input.serverPassword } : {}),
@@ -690,32 +697,37 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       // Scopes close in reverse order. Forking this before the group kill is
       // registered forgets the ledger entry only once the group is stopped.
       const ledgerScope = yield* Scope.fork(runtimeScope);
-      const child = yield* spawnProviderProcess(spawner, input.binaryPath, args, {
-        detached: hostPlatform !== "win32",
-        env: {
-          ...input.environment,
-          ...(serverPassword !== undefined ? { OPENCODE_SERVER_PASSWORD: serverPassword } : {}),
-          // Respect an OPENCODE_CONFIG_CONTENT provided by the caller or
-          // the inherited process environment, only falling back to the
-          // empty config when neither is set. Setting it unconditionally
-          // previously clobbered the user's opencode config, hiding their
-          // providers/models. The value is set explicitly (rather than
-          // relying on inheritance) because `extendEnv` is false whenever
-          // `input.environment` is provided.
-          OPENCODE_CONFIG_CONTENT: resolveOpenCodeConfigContent(input.environment),
-        },
-        extendEnv: input.environment === undefined,
-      }).pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new OpenCodeRuntimeError({
-              operation: "startOpenCodeServerProcess",
-              detail: `Failed to spawn OpenCode server process: ${openCodeRuntimeErrorDetail(cause)}`,
-              cause,
-            }),
-        ),
-      );
+      const child = yield* spawner
+        .spawn(
+          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+            detached: hostPlatform !== "win32",
+            shell: spawnCommand.shell,
+            env: {
+              ...input.environment,
+              ...(serverPassword !== undefined ? { OPENCODE_SERVER_PASSWORD: serverPassword } : {}),
+              // Respect an OPENCODE_CONFIG_CONTENT provided by the caller or
+              // the inherited process environment, only falling back to the
+              // empty config when neither is set. Setting it unconditionally
+              // previously clobbered the user's opencode config, hiding their
+              // providers/models. The value is set explicitly (rather than
+              // relying on inheritance) because `extendEnv` is false whenever
+              // `input.environment` is provided.
+              OPENCODE_CONFIG_CONTENT: resolveOpenCodeConfigContent(input.environment),
+            },
+            extendEnv: input.environment === undefined,
+          }),
+        )
+        .pipe(
+          Effect.provideService(Scope.Scope, runtimeScope),
+          Effect.mapError(
+            (cause) =>
+              new OpenCodeRuntimeError({
+                operation: "startOpenCodeServerProcess",
+                detail: `Failed to spawn OpenCode server process: ${openCodeRuntimeErrorDetail(cause)}`,
+                cause,
+              }),
+          ),
+        );
 
       const killOpenCodeProcessGroup = (signal: NodeJS.Signals) =>
         hostPlatform === "win32"
@@ -1094,6 +1106,6 @@ export class OpenCodeRuntime extends Context.Service<OpenCodeRuntime, OpenCodeRu
   "t3/provider/opencodeRuntime",
 ) {}
 
-export const OpenCodeRuntimeLive = Layer.effect(OpenCodeRuntime, makeOpenCodeRuntime).pipe(
+export const layer = Layer.effect(OpenCodeRuntime, makeOpenCodeRuntime).pipe(
   Layer.provide(NetService.layer),
 );

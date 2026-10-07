@@ -30,12 +30,6 @@ it.effect("imports messages once and preserves the provider native resume bindin
   let imported = false;
   const scanner = AgentSessionScanner.AgentSessionScanner.of({
     scan: Effect.die("unused"),
-    validateNativeConversation: () =>
-      Effect.succeed({
-        status: "valid",
-        nativeThreadId: providerSessionId,
-        cwd: "/workspace/project",
-      }),
     recentThreads: () =>
       Stream.succeed({
         _tag: "Importable",
@@ -65,7 +59,7 @@ it.effect("imports messages once and preserves the provider native resume bindin
         },
       }),
   });
-  const testLayer = AgentSessionImporter.layer.pipe(
+  const layerTest = AgentSessionImporter.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(AgentSessionScanner.AgentSessionScanner, scanner),
@@ -149,5 +143,5 @@ it.effect("imports messages once and preserves the provider native resume bindin
       }),
     ]);
     expect(recorded).toHaveLength(2);
-  }).pipe(Effect.provide(testLayer));
+  }).pipe(Effect.provide(layerTest));
 });

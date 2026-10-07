@@ -2,7 +2,9 @@ import {
   PREVIEW_AUTOMATION_V1_OPERATIONS,
   PreviewAutomationClientDisconnectedError,
   PreviewAutomationControlInterruptedError,
+  PreviewAutomationControlReason,
   PreviewAutomationExecutionError,
+  SERVER_BROWSER_AUTOMATION_CLIENT_ID,
   PreviewAutomationInvalidSelectorError,
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
@@ -17,10 +19,7 @@ import {
   PreviewAutomationTargetNotEditableError,
   PreviewAutomationTimeoutError,
   PreviewAutomationUnsupportedClientError,
-  PreviewAutomationUnavailableError,
   PreviewTabId,
-  ProviderInstanceId,
-  ThreadId,
   type PreviewAutomationError,
   type PreviewAutomationOperation,
   type PreviewAutomationHost,
@@ -29,7 +28,6 @@ import {
   type PreviewAutomationStreamEvent,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Clock from "effect/Clock";
 import type * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -44,7 +42,8 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
 export interface PreviewAutomationInvokeInput {
-  readonly scope: McpInvocationContext.McpInvocationScope;
+  /** Preview tabs belong to a thread, so only thread callers reach the broker. */
+  readonly scope: McpInvocationContext.McpThreadInvocationScope;
   readonly operation: PreviewAutomationOperation;
   readonly input: unknown;
   readonly tabId?: PreviewTabId;
@@ -55,11 +54,21 @@ export interface PreviewAutomationInvokeInput {
   readonly onTargetTab?: (tabId: PreviewTabId | undefined) => void;
 }
 
+export interface PreviewAutomationConnectOptions {
+  /**
+   * New agent work goes to a preferred host before any desktop. The server's
+   * own headless browser registers this way so a standalone environment keeps
+   * browsing when every desktop disconnects.
+   */
+  readonly preferred?: boolean;
+}
+
 export class PreviewAutomationBroker extends Context.Service<
   PreviewAutomationBroker,
   {
     readonly connect: (
       host: PreviewAutomationHost,
+      options?: PreviewAutomationConnectOptions,
     ) => Effect.Effect<Stream.Stream<PreviewAutomationStreamEvent>>;
     readonly focusHost: (host: PreviewAutomationHostFocus) => Effect.Effect<void>;
     readonly respond: (
@@ -77,9 +86,9 @@ interface ClientConnection {
   readonly environmentId: PreviewAutomationHost["environmentId"];
   readonly supportedOperations: ReadonlySet<PreviewAutomationOperation>;
   readonly focused: boolean;
+  readonly preferred: boolean;
   readonly liveTabs: NonNullable<PreviewAutomationHostFocus["liveTabs"]>;
   readonly focusOrder: number;
-  readonly unhealthyUntil: number;
   readonly queue: Queue.Queue<PreviewAutomationStreamEvent, Cause.Done>;
 }
 
@@ -87,7 +96,6 @@ interface PendingRequest {
   readonly queue: ClientConnection["queue"];
   readonly deferred: Deferred.Deferred<unknown, PreviewAutomationError>;
   readonly context: PreviewAutomationRequestErrorContext;
-  readonly acknowledged: boolean;
 }
 
 /**
@@ -109,9 +117,9 @@ interface HostAssignment {
 interface PreviewAutomationRequestErrorContext {
   readonly operation: PreviewAutomationOperation;
   readonly environmentId: McpInvocationContext.McpInvocationScope["environmentId"];
-  readonly threadId: ThreadId;
+  readonly threadId: McpInvocationContext.McpThreadCaller["threadId"];
   readonly providerSessionId: string;
-  readonly providerInstanceId: ProviderInstanceId;
+  readonly providerInstanceId: McpInvocationContext.McpThreadCaller["providerInstanceId"];
   readonly clientId: string;
   readonly connectionId: ClientConnection["connectionId"];
   readonly requestId: string;
@@ -128,8 +136,6 @@ interface BrokerState {
   readonly requestSequence: number;
   readonly focusSequence: number;
 }
-
-const HOST_TIMEOUT_QUARANTINE_MS = 30_000;
 
 const removeConnectionFromState = (
   current: BrokerState,
@@ -168,33 +174,11 @@ const selectorDiagnosticsFromInput = (
   return {};
 };
 
-const hostAssignmentKey = (scope: McpInvocationContext.McpInvocationScope): string =>
-  `${scope.environmentId}\u0000${
-    scope.principal?.type === "provider-session"
-      ? scope.principal.providerSessionId
-      : scope.principal?.type === "management-key"
-        ? `management-key:${scope.principal.keyId}`
-        : (scope.providerSessionId ?? "legacy")
-  }`;
-
-const providerPreviewContext = (scope: McpInvocationContext.McpInvocationScope) =>
-  scope.principal?.type === "provider-session"
-    ? {
-        threadId: scope.principal.threadId,
-        providerSessionId: scope.principal.providerSessionId,
-        providerInstanceId: scope.principal.providerInstanceId,
-      }
-    : scope.threadId !== undefined &&
-        scope.providerSessionId !== undefined &&
-        scope.providerInstanceId !== undefined
-      ? {
-          threadId: scope.threadId,
-          providerSessionId: scope.providerSessionId,
-          providerInstanceId: scope.providerInstanceId,
-        }
-      : undefined;
+const hostAssignmentKey = (scope: McpInvocationContext.McpThreadInvocationScope): string =>
+  `${scope.environmentId}\u0000${scope.thread.providerSessionId}`;
 
 const isPreviewTabId = Schema.is(PreviewTabId);
+const decodeControlReason = Schema.decodeUnknownOption(PreviewAutomationControlReason);
 
 const readResultTabId = (result: unknown): PreviewTabId | null | undefined => {
   if (typeof result !== "object" || result === null || !("tabId" in result)) return undefined;
@@ -223,6 +207,9 @@ function remoteDetailKind(detail: unknown): RemoteDetailKind {
       return "object";
   }
 }
+
+/** Enough for a browser's own error line, such as a refused connection and its URL. */
+const MAX_REASON_CHARS = 500;
 
 const classifyResponseError = (
   context: PreviewAutomationRequestErrorContext,
@@ -275,15 +262,24 @@ const classifyResponseError = (
         ...context,
         ...remoteDiagnostics,
       });
-    case "PreviewAutomationControlInterruptedError":
+    case "PreviewAutomationControlInterruptedError": {
+      const reason = decodeControlReason(error.detail);
       return new PreviewAutomationControlInterruptedError({
         ...context,
         ...remoteDiagnostics,
+        ...(Option.isSome(reason) ? { reason: reason.value } : {}),
       });
+    }
     case "PreviewAutomationInvalidSelectorError": {
+      const staleRef =
+        typeof error.detail === "object" &&
+        error.detail !== null &&
+        "staleRef" in error.detail &&
+        error.detail.staleRef === true;
       return new PreviewAutomationInvalidSelectorError({
         ...context,
         ...remoteDiagnostics,
+        ...(staleRef ? { staleRef } : {}),
       });
     }
     case "PreviewAutomationTargetNotEditableError": {
@@ -342,6 +338,10 @@ const classifyResponseError = (
       return new PreviewAutomationExecutionError({
         ...context,
         ...remoteDiagnostics,
+        // The server's own browser writes these; other hosts' text stays out of the agent's context.
+        ...(context.clientId === SERVER_BROWSER_AUTOMATION_CLIENT_ID
+          ? { reason: error.message.slice(0, MAX_REASON_CHARS) }
+          : {}),
       });
   }
 };
@@ -359,47 +359,59 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
   const closeConnection = Effect.fn("PreviewAutomationBroker.closeConnection")(function* (
     queue: ClientConnection["queue"],
     disconnected: ReadonlyArray<PendingRequest>,
+    completeStream = false,
   ) {
+    if (completeStream) {
+      // Discard this generation's commands and complete the RPC stream so a
+      // responsive desktop can re-register after a timeout eviction.
+      yield* Queue.clear(queue);
+      yield* Queue.end(queue);
+    } else {
+      // Replaced registrations must not reconnect and displace their successor.
+      yield* Queue.shutdown(queue);
+    }
     yield* Effect.forEach(
       disconnected,
       ({ deferred, context }) =>
         Deferred.fail(deferred, new PreviewAutomationClientDisconnectedError(context)),
       { discard: true },
     );
-    yield* Queue.shutdown(queue);
   });
 
   const disconnect = Effect.fn("PreviewAutomationBroker.disconnect")(function* (
     clientId: string,
     queue: ClientConnection["queue"],
+    completeStream = false,
   ) {
-    const disconnected = yield* SynchronizedRef.modify(state, (current) => {
+    yield* SynchronizedRef.modifyEffect(state, (current) => {
+      // Retired generations were already closed by their replacement or eviction.
+      if (current.clients.get(clientId)?.queue !== queue) {
+        return Effect.succeed([undefined, current] as const);
+      }
       const removed = removeConnectionFromState(current, clientId, queue);
-      return [removed.disconnected, removed.state] as const;
+      return closeConnection(queue, removed.disconnected, completeStream).pipe(
+        Effect.as([undefined, removed.state] as const),
+      );
     });
-    yield* closeConnection(queue, disconnected);
   });
 
   const acquireConnection = Effect.fn("PreviewAutomationBroker.acquireConnection")(function* (
     host: PreviewAutomationHost,
+    options: PreviewAutomationConnectOptions | undefined,
   ) {
     const clientId = host.clientId;
     const queue = yield* Queue.unbounded<PreviewAutomationStreamEvent, Cause.Done>();
     const connectionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
-    yield* Queue.offer(queue, {
-      type: "connected",
-      connectionId,
-      supportsRequestAcknowledgement: true,
-    });
+    yield* Queue.offer(queue, { type: "connected", connectionId });
     const connection: ClientConnection = {
       clientId,
       connectionId,
       environmentId: host.environmentId,
       supportedOperations: new Set(host.supportedOperations ?? PREVIEW_AUTOMATION_V1_OPERATIONS),
       focused: false,
+      preferred: options?.preferred ?? false,
       liveTabs: [],
       focusOrder: 0,
-      unhealthyUntil: 0,
       queue,
     };
     const registration = yield* SynchronizedRef.modify(state, (current) => {
@@ -428,10 +440,10 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
 
   const connect: PreviewAutomationBroker["Service"]["connect"] = Effect.fn(
     "PreviewAutomationBroker.connect",
-  )((host) =>
+  )((host, options) =>
     Effect.succeed(
       Stream.unwrap(
-        Effect.acquireRelease(acquireConnection(host), (connection) =>
+        Effect.acquireRelease(acquireConnection(host, options), (connection) =>
           disconnect(connection.clientId, connection.queue),
         ).pipe(Effect.map((connection) => Stream.fromQueue(connection.queue))),
       ),
@@ -455,7 +467,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       clients.set(host.clientId, {
         ...currentHost,
         focused: host.focused,
-        unhealthyUntil: 0,
         liveTabs: host.liveTabs ?? currentHost.liveTabs,
         focusOrder: host.focused ? focusSequence : currentHost.focusOrder,
       });
@@ -463,65 +474,21 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     });
   });
 
-  const quarantineTimedOutConnection = Effect.fn(
-    "PreviewAutomationBroker.quarantineTimedOutConnection",
-  )(function* (connection: ClientConnection, requestId: string) {
-    const now = yield* Clock.currentTimeMillis;
-    yield* SynchronizedRef.update(state, (current) => {
-      const active = current.clients.get(connection.clientId);
-      if (active?.connectionId !== connection.connectionId || active.queue !== connection.queue) {
-        return current;
-      }
-      const pending = current.pending.get(requestId);
-      // A completion may win the race after the response deadline but before
-      // this timeout cleanup runs. There is no stale host to quarantine then.
-      if (!pending || pending.acknowledged) return current;
-      const clients = new Map(current.clients);
-      clients.set(connection.clientId, {
-        ...active,
-        focused: false,
-        unhealthyUntil: now + HOST_TIMEOUT_QUARANTINE_MS,
-      });
-      const assignments = new Map(
-        Array.from(current.assignments).filter(
-          ([, assignment]) => assignment.queue !== active.queue,
-        ),
-      );
-      return { ...current, clients, assignments };
-    });
-  });
-
   const respond: PreviewAutomationBroker["Service"]["respond"] = Effect.fn(
     "PreviewAutomationBroker.respond",
   )(function* (response) {
     const pending = yield* SynchronizedRef.modify(state, (current) => {
-      const responseClient = current.clients.get(response.clientId);
-      const responseIsFromActiveConnection = responseClient?.connectionId === response.connectionId;
-      const clients =
-        responseIsFromActiveConnection && responseClient.unhealthyUntil !== 0
-          ? new Map(current.clients).set(response.clientId, {
-              ...responseClient,
-              unhealthyUntil: 0,
-            })
-          : current.clients;
       const entry = current.pending.get(response.requestId);
       if (
         !entry ||
         entry.context.clientId !== response.clientId ||
         entry.context.connectionId !== response.connectionId
       ) {
-        return [
-          undefined,
-          clients === current.clients ? current : { ...current, clients },
-        ] as const;
+        return [undefined, current] as const;
       }
       const next = new Map(current.pending);
-      if (response.phase === "started") {
-        if (response.ok) next.set(response.requestId, { ...entry, acknowledged: true });
-        return [undefined, { ...current, clients, pending: next }] as const;
-      }
       next.delete(response.requestId);
-      return [entry, { ...current, clients, pending: next }] as const;
+      return [entry, { ...current, pending: next }] as const;
     });
     if (!pending) return;
     if (response.ok) {
@@ -539,25 +506,18 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
   const invoke = Effect.fn("PreviewAutomationBroker.invoke")(function* <A = unknown>(
     input: Parameters<PreviewAutomationBroker["Service"]["invoke"]>[0],
   ): Effect.fn.Return<A, PreviewAutomationError> {
-    const timeoutMs = input.timeoutMs ?? 15_000;
     const deferred = yield* Deferred.make<unknown, PreviewAutomationError>();
-    const now = yield* Clock.currentTimeMillis;
     const route = yield* SynchronizedRef.modify(state, (current) => {
       const assignments = new Map(
         Array.from(current.assignments).filter(([, assignment]) => {
           const connection = current.clients.get(assignment.clientId);
           return (
             connection?.connectionId === assignment.connectionId &&
-            connection.queue === assignment.queue &&
-            connection.unhealthyUntil <= now
+            connection.queue === assignment.queue
           );
         }),
       );
       const assignmentKey = hostAssignmentKey(input.scope);
-      const provider = providerPreviewContext(input.scope);
-      if (!provider) {
-        return [undefined, { ...current, assignments }] as const;
-      }
       const assigned = assignments.get(assignmentKey);
       const assignedConnection = assigned ? current.clients.get(assigned.clientId) : undefined;
       const hasLiveAssignment = assignedConnection?.environmentId === input.scope.environmentId;
@@ -570,7 +530,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       const ownsTargetTab = (host: ClientConnection, visibleOnly = false) =>
         host.liveTabs.some(
           (tab) =>
-            tab.threadId === provider.threadId &&
+            tab.threadId === input.scope.thread.threadId &&
             (!visibleOnly || tab.visible === true) &&
             (input.tabId === undefined || tab.tabId === input.tabId),
         );
@@ -583,11 +543,13 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
                 .filter(
                   (host) =>
                     host.environmentId === input.scope.environmentId &&
-                    host.unhealthyUntil <= now &&
                     supportsOperation(host, input.operation),
                 )
                 .sort(
                   (left, right) =>
+                    Number(input.tabId !== undefined && ownsTargetTab(right)) -
+                      Number(input.tabId !== undefined && ownsTargetTab(left)) ||
+                    Number(right.preferred) - Number(left.preferred) ||
                     Number(ownsTargetTab(right, true)) - Number(ownsTargetTab(left, true)) ||
                     Number(ownsTargetTab(right)) - Number(ownsTargetTab(left)) ||
                     Number(right.focused) - Number(left.focused) ||
@@ -597,6 +559,10 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         if (!hasLiveAssignment) assignments.delete(assignmentKey);
         return [undefined, { ...current, assignments }] as const;
       }
+      // The environment host may install Chromium on its first open (up to
+      // ten minutes). Keep that request alive without replaying its effects.
+      const timeoutMs =
+        input.timeoutMs ?? (input.operation === "open" && connection.preferred ? 660_000 : 15_000);
       const canReuseAssignedTab =
         assigned !== undefined &&
         assigned.connectionId === connection.connectionId &&
@@ -618,7 +584,9 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       const context: PreviewAutomationRequestErrorContext = {
         operation: input.operation,
         environmentId: input.scope.environmentId,
-        ...provider,
+        threadId: input.scope.thread.threadId,
+        providerSessionId: input.scope.thread.providerSessionId,
+        providerInstanceId: input.scope.thread.providerInstanceId,
         clientId: connection.clientId,
         connectionId: connection.connectionId,
         requestId,
@@ -627,27 +595,23 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         ...selectorDiagnostics,
       };
       const pending = new Map(current.pending);
-      pending.set(requestId, { queue: connection.queue, deferred, context, acknowledged: false });
+      pending.set(requestId, { queue: connection.queue, deferred, context });
       return [
         { connection, requestId, requestContext: context, requestSequence },
         { ...current, assignments, pending, requestSequence: current.requestSequence + 1 },
       ] as const;
     });
     if (!route) {
-      const provider = providerPreviewContext(input.scope);
-      if (!provider) {
-        return yield* new PreviewAutomationUnavailableError({
-          capability: "preview",
-          environmentId: input.scope.environmentId,
-        });
-      }
       return yield* new PreviewAutomationNoAvailableHostError({
         operation: input.operation,
         environmentId: input.scope.environmentId,
-        ...provider,
+        threadId: input.scope.thread.threadId,
+        providerSessionId: input.scope.thread.providerSessionId,
+        providerInstanceId: input.scope.thread.providerInstanceId,
       });
     }
     const { connection, requestId, requestContext, requestSequence } = route;
+    const { timeoutMs } = requestContext;
     input.onTargetTab?.(requestContext.tabId);
     const removePending = SynchronizedRef.update(state, (next) => {
       if (!next.pending.has(requestId)) return next;
@@ -657,7 +621,8 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     });
     const awaitResponse = Effect.fn("PreviewAutomationBroker.awaitResponse")(function* () {
       const offered = yield* SynchronizedRef.modifyEffect(state, (current) => {
-        // Serialize the live-generation check and queue offer with queue closure.
+        // A route can outlive its generation while another request evicts it.
+        // Serialize the live-generation check and offer with queue closure.
         if (
           current.clients.get(connection.clientId)?.queue !== connection.queue ||
           !current.pending.has(requestId)
@@ -667,12 +632,12 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         return Queue.offer(connection.queue, {
           type: "request",
           connectionId: connection.connectionId,
-          supportsRequestAcknowledgement: true,
           request: {
             requestId,
-            threadId: requestContext.threadId,
+            threadId: input.scope.thread.threadId,
             tabId: requestContext.tabId,
             tabIdExplicit: input.tabId !== undefined,
+            agentSessionId: hostAssignmentKey(input.scope),
             operation: input.operation,
             input: input.input,
             timeoutMs,
@@ -688,13 +653,17 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       }
       const result = yield* Deferred.await(deferred).pipe(Effect.timeoutOption(timeoutMs));
       return yield* Option.match(result, {
-        // An acknowledged request proves the renderer consumed the command.
-        // Slow page work must not quarantine the entire desktop or forget its
-        // current tabs. A silent stream still needs stale-host failover.
         onNone: () =>
-          quarantineTimedOutConnection(connection, requestId).pipe(
-            Effect.andThen(Effect.fail(new PreviewAutomationTimeoutError(requestContext))),
-          ),
+          Effect.gen(function* () {
+            // An unanswered request invalidates this connection. Do not replay
+            // actions: the client may have applied them before becoming unreachable.
+            // A background metadata read has a short budget and changes nothing,
+            // so a slow one must not cut the host off from the agent's next call.
+            if (input.updateCurrentTab !== false) {
+              yield* disconnect(connection.clientId, connection.queue, true);
+            }
+            return yield* new PreviewAutomationTimeoutError(requestContext);
+          }),
         onSome: (value) => Effect.succeed(value as A),
       });
     });

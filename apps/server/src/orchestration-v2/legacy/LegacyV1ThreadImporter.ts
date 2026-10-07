@@ -16,23 +16,21 @@ import {
   type OrchestrationV2TurnItem,
   ProjectId,
   ProviderInstanceId,
-  ProviderDriverKind,
-  ProviderThreadId,
   ThreadId,
   ThreadLinkedPullRequest,
   ThreadPullRequestLink,
   TurnItemId,
 } from "@t3tools/contracts";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventSink from "../EventSink.ts";
-import { makeKeyedSerialExecutor } from "../KeyedSerialExecutor.ts";
 import { randomUuidV4 } from "../RandomUuid.ts";
 
 const IMPORT_EVENT_PREFIX = "migration:v1";
@@ -63,9 +61,6 @@ interface LegacyThreadRow {
   readonly branch_pull_request_json: string | null;
   readonly active_order_key: string | null;
   readonly deleted_at: string | null;
-  readonly runtime_provider_name?: string | null;
-  readonly runtime_provider_instance_id?: string | null;
-  readonly runtime_resume_cursor_json?: string | null;
 }
 
 interface LegacyRepairRow extends LegacyThreadRow {
@@ -77,7 +72,6 @@ interface LegacyMessageRow {
   readonly thread_id: string;
   readonly role: "user" | "assistant";
   readonly text: string;
-  readonly suggestion: string | null;
   readonly attachments_json: string | null;
   readonly context_json?: string | null;
   readonly is_streaming: number;
@@ -248,62 +242,6 @@ function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
   };
 }
 
-function importedNativeProviderThread(
-  row: LegacyThreadRow,
-  thread: OrchestrationV2AppThread,
-  now: DateTime.Utc,
-): OrchestrationV2DomainEvent | undefined {
-  const driverName = row.runtime_provider_name;
-  const driver =
-    driverName === "codex" || driverName === "claudeAgent"
-      ? ProviderDriverKind.make(driverName)
-      : undefined;
-  if (driver === undefined || row.runtime_resume_cursor_json == null) return undefined;
-  if (
-    row.runtime_provider_instance_id !== null &&
-    row.runtime_provider_instance_id !== undefined &&
-    row.runtime_provider_instance_id !== String(thread.providerInstanceId)
-  ) {
-    return undefined;
-  }
-  const cursor = parseJson(row.runtime_resume_cursor_json);
-  if (typeof cursor !== "object" || cursor === null) return undefined;
-  const nativeId =
-    driver === "codex"
-      ? (cursor as { readonly threadId?: unknown }).threadId
-      : (cursor as { readonly resume?: unknown }).resume;
-  if (typeof nativeId !== "string" || nativeId.trim() === "") return undefined;
-  const providerThreadId = ProviderThreadId.make(`provider-thread:legacy:${thread.id}`);
-  const nativeRef = {
-    driver,
-    nativeId,
-    strength: "strong" as const,
-  };
-  return {
-    id: EventId.make(`${IMPORT_EVENT_PREFIX}:provider-thread:${row.thread_id}`),
-    type: "provider-thread.updated",
-    threadId: thread.id,
-    occurredAt: now,
-    payload: {
-      id: providerThreadId,
-      driver,
-      providerInstanceId: thread.providerInstanceId,
-      providerSessionId: null,
-      appThreadId: thread.id,
-      ownerNodeId: null,
-      nativeThreadRef: nativeRef,
-      nativeConversationHeadRef: nativeRef,
-      status: "idle",
-      firstRunOrdinal: null,
-      lastRunOrdinal: null,
-      handoffIds: [],
-      forkedFrom: null,
-      createdAt: now,
-      updatedAt: now,
-    },
-  };
-}
-
 function messageEvents(row: LegacyMessageRow): ReadonlyArray<OrchestrationV2DomainEvent> {
   const threadId = ThreadId.make(row.thread_id);
   const messageId = MessageId.make(row.message_id);
@@ -319,7 +257,6 @@ function messageEvents(row: LegacyMessageRow): ReadonlyArray<OrchestrationV2Doma
     nodeId: null,
     role: row.role,
     text: row.text,
-    ...(row.suggestion?.trim() ? { suggestion: row.suggestion.trim() } : {}),
     ...(row.context_json
       ? {
           context: Schema.decodeUnknownSync(OrchestrationMessageContext)(
@@ -372,7 +309,6 @@ function messageEvents(row: LegacyMessageRow): ReadonlyArray<OrchestrationV2Doma
           type: "assistant_message",
           messageId,
           text: row.text,
-          ...(row.suggestion?.trim() ? { suggestion: row.suggestion.trim() } : {}),
           ...(row.context_json
             ? {
                 context: Schema.decodeUnknownSync(OrchestrationMessageContext)(
@@ -411,7 +347,7 @@ function chunks<A>(items: ReadonlyArray<A>, size: number): Array<ReadonlyArray<A
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const eventSink = yield* EventSink.EventSinkV2;
-  const transcriptImports = yield* makeKeyedSerialExecutor<ThreadId>();
+  const transcriptImports = yield* KeyedLock.make<ThreadId>();
 
   const listMessages = (threadId: ThreadId) =>
     sql<LegacyMessageRow>`
@@ -420,7 +356,6 @@ const make = Effect.gen(function* () {
         thread_id,
         role,
         text,
-        suggestion,
         attachments_json,
         context_json,
         is_streaming,
@@ -637,12 +572,7 @@ const make = Effect.gen(function* () {
         thread.branch_pull_request_json,
         thread.active_order_key,
         thread.deleted_at
-        ,runtime.provider_name AS runtime_provider_name
-        ,runtime.provider_instance_id AS runtime_provider_instance_id
-        ,runtime.resume_cursor_json AS runtime_resume_cursor_json
       FROM projection_threads AS thread
-      LEFT JOIN provider_session_runtime AS runtime
-        ON runtime.thread_id = thread.thread_id
       WHERE NOT EXISTS (
         SELECT 1
         FROM orchestration_events AS event INDEXED BY orchestration_events_v2_created_threads_idx
@@ -658,7 +588,6 @@ const make = Effect.gen(function* () {
     for (const row of rows) {
       const thread = importedThread(row);
       const previews = yield* listShellMessages(thread.id);
-      const nativeProviderThread = importedNativeProviderThread(row, thread, thread.updatedAt);
       const events: Array<OrchestrationV2DomainEvent> = [
         {
           id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:created`),
@@ -669,7 +598,6 @@ const make = Effect.gen(function* () {
           payload: thread,
         },
         ...previews.flatMap(messageEvents),
-        ...(nativeProviderThread === undefined ? [] : [nativeProviderThread]),
         {
           id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:shell`),
           type: "thread.metadata-updated",

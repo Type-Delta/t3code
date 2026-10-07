@@ -1,95 +1,79 @@
-import * as NodeCrypto from "node:crypto";
-
 import {
-  ForwardCompatibleArray,
   ProviderDriverKind,
-  TrimmedNonEmptyString,
   UsageLimitSourceError,
   type ProviderConsumeResetCreditResult,
   type UsageLimitSourceAccount,
   type UsageLimitSourceConfig,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
+import * as Hex from "effect/encoding/Hex";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
-import { codexPlanLabel } from "../provider/Layers/CodexProvider.ts";
-import { codexRateLimitsToLimits } from "../provider/Layers/codexUsageLimits.ts";
-import { claudeUsageResponseToLimits } from "../provider/Layers/claudeUsageLimits.ts";
+import { codexPlanLabel } from "../provider/CodexProvider.ts";
+import { codexRateLimitsToLimits } from "../provider/codexUsageLimits.ts";
+import { claudeUsageResponseToLimits } from "../provider/claudeUsageLimits.ts";
 import { makeUnavailableUsageLimits } from "../provider/providerUsageLimits.ts";
 
-// Optional upstream fields must not discard otherwise usable account/window data.
-const forgivingOptional = <S extends Schema.Constraint>(schema: S) =>
-  Schema.NullOr(schema).pipe(
-    Schema.catchDecoding<Schema.NullOr<S>>(() => Effect.succeed(Option.some(null))),
-    Schema.optional,
-  );
-const UsageNumber = Schema.Union([
-  Schema.Finite,
-  TrimmedNonEmptyString.pipe(Schema.decodeTo(Schema.FiniteFromString)),
-]);
-const NonNegativeUsageNumber = UsageNumber.check(Schema.isGreaterThanOrEqualTo(0));
-const PositiveUsageNumber = UsageNumber.check(Schema.isGreaterThan(0));
 const AuthFile = Schema.Struct({
-  id: TrimmedNonEmptyString,
-  auth_index: TrimmedNonEmptyString,
-  provider: TrimmedNonEmptyString,
-  email: forgivingOptional(TrimmedNonEmptyString),
+  id: Schema.String,
+  auth_index: Schema.String,
+  provider: Schema.String,
+  email: Schema.optional(Schema.String),
   disabled: Schema.optional(Schema.Boolean),
-  id_token: forgivingOptional(
+  id_token: Schema.optional(
     Schema.Struct({
-      chatgpt_account_id: forgivingOptional(TrimmedNonEmptyString),
-      plan_type: forgivingOptional(TrimmedNonEmptyString),
-      chatgpt_plan_type: forgivingOptional(TrimmedNonEmptyString),
+      chatgpt_account_id: Schema.optional(Schema.String),
+      chatgpt_plan_type: Schema.optional(Schema.String),
     }),
   ),
 });
-const AuthFiles = Schema.Struct({ files: ForwardCompatibleArray(AuthFile) });
+const AuthFiles = Schema.Struct({ files: Schema.Array(AuthFile) });
 const ApiResponse = Schema.Struct({ status_code: Schema.Number, body: Schema.String });
 const CodexWindow = Schema.Struct({
-  used_percent: UsageNumber,
-  reset_at: forgivingOptional(PositiveUsageNumber),
-  reset_after_seconds: forgivingOptional(NonNegativeUsageNumber),
-  limit_window_seconds: forgivingOptional(PositiveUsageNumber),
+  used_percent: Schema.Number,
+  reset_at: Schema.optional(Schema.NullOr(Schema.Number)),
+  limit_window_seconds: Schema.optional(Schema.Number),
 });
 const CodexUsage = Schema.Struct({
-  plan_type: forgivingOptional(TrimmedNonEmptyString),
-  rate_limit: forgivingOptional(
+  plan_type: Schema.optional(Schema.String),
+  rate_limit: Schema.NullOr(
     Schema.Struct({
-      primary_window: forgivingOptional(CodexWindow),
-      secondary_window: forgivingOptional(CodexWindow),
+      primary_window: Schema.optional(Schema.NullOr(CodexWindow)),
+      secondary_window: Schema.optional(Schema.NullOr(CodexWindow)),
     }),
   ),
 });
 const ClaudeWindow = Schema.Struct({
-  utilization: UsageNumber,
-  resets_at: forgivingOptional(Schema.String),
+  utilization: Schema.Number,
+  resets_at: Schema.NullOr(Schema.String),
 });
 const ClaudeUsage = Schema.Struct({
-  five_hour: forgivingOptional(ClaudeWindow),
-  seven_day: forgivingOptional(ClaudeWindow),
-  limits: forgivingOptional(
-    ForwardCompatibleArray(
+  five_hour: Schema.optional(Schema.NullOr(ClaudeWindow)),
+  seven_day: Schema.optional(Schema.NullOr(ClaudeWindow)),
+  limits: Schema.optional(
+    Schema.Array(
       Schema.Struct({
         kind: Schema.String,
-        percent: forgivingOptional(UsageNumber),
-        resets_at: forgivingOptional(Schema.String),
-        scope: forgivingOptional(
-          Schema.Struct({
-            model: forgivingOptional(Schema.Struct({ display_name: TrimmedNonEmptyString })),
-          }),
+        percent: Schema.optional(Schema.NullOr(Schema.Number)),
+        resets_at: Schema.optional(Schema.NullOr(Schema.String)),
+        scope: Schema.optional(
+          Schema.NullOr(
+            Schema.Struct({
+              model: Schema.optional(Schema.NullOr(Schema.Struct({ display_name: Schema.String }))),
+            }),
+          ),
         ),
       }),
     ),
   ),
 });
 const CreditList = Schema.Struct({
-  credits: ForwardCompatibleArray(
+  credits: Schema.Array(
     Schema.Struct({
-      id: TrimmedNonEmptyString,
+      id: Schema.String,
       status: Schema.String,
       reset_type: Schema.String,
       expires_at: Schema.String,
@@ -115,74 +99,56 @@ const decodeConsumeResponse = Schema.decodeUnknownEffect(
 const CODEX_BASE = "https://chatgpt.com/backend-api/wham";
 const CREDIT_URL = `${CODEX_BASE}/rate-limit-reset-credits`;
 
+// 6f1c2a9e-2d4b-4c1e-9a7f-3b8d5e0c1a42
+const CREDIT_REDEEM_NAMESPACE = new Uint8Array([
+  0x6f, 0x1c, 0x2a, 0x9e, 0x2d, 0x4b, 0x4c, 0x1e, 0x9a, 0x7f, 0x3b, 0x8d, 0x5e, 0x0c, 0x1a, 0x42,
+]);
+
 // UUIDv5 per account and credit also deduplicates retries across T3 environments.
-export function creditRedeemRequestId(accountId: string, creditId: string): string {
-  const bytes = NodeCrypto.createHash("sha1")
-    .update(Buffer.from("6f1c2a9e2d4b4c1e9a7f3b8d5e0c1a42", "hex"))
-    .update(`${accountId}:${creditId}`)
-    .digest()
-    .subarray(0, 16);
+const creditRedeemRequestId = Effect.fn("CliproxyApi.creditRedeemRequestId")(function* (
+  accountId: string,
+  creditId: string,
+) {
+  const crypto = yield* Crypto.Crypto;
+  const name = new TextEncoder().encode(`${accountId}:${creditId}`);
+  const input = new Uint8Array(CREDIT_REDEEM_NAMESPACE.length + name.length);
+  input.set(CREDIT_REDEEM_NAMESPACE);
+  input.set(name, CREDIT_REDEEM_NAMESPACE.length);
+  const bytes = (yield* crypto.digest("SHA-1", input).pipe(Effect.orDie)).slice(0, 16);
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
+  const hex = Hex.encode(bytes);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
+});
 
 export const makeCliproxyApi = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
-  const managementLocks = new Map<string, Semaphore.Semaphore>();
-  const denied = new Map<string, { key: string; error: UsageLimitSourceError }>();
+  const crypto = yield* Crypto.Crypto;
 
-  const management = Effect.fn("CliproxyApi.management")(
-    function* (config: UsageLimitSourceConfig, path: string, body?: unknown) {
-      const previous = denied.get(config.url);
-      if (previous?.key === config.managementKey) return yield* previous.error;
-      denied.delete(config.url);
-      const url = yield* Effect.try({
-        try: () => new URL(`/v0/management/${path}`, config.url).toString(),
-        catch: () => new UsageLimitSourceError({ detail: "The hub URL is not valid." }),
-      });
-      const request = (
-        body === undefined ? HttpClientRequest.get(url) : HttpClientRequest.post(url)
-      ).pipe(HttpClientRequest.setHeader("Authorization", `Bearer ${config.managementKey}`));
-      const response = yield* client
-        .execute(
-          body === undefined ? request : request.pipe(HttpClientRequest.bodyJsonUnsafe(body)),
-        )
-        .pipe(
-          Effect.flatMap(
-            Effect.fnUntraced(function* (response) {
-              if (response.status === 401 || response.status === 403) {
-                const error = new UsageLimitSourceError({
-                  detail: `The hub denied management access (HTTP ${response.status}). Requests are paused until the hub URL or management key changes.`,
-                });
-                denied.set(config.url, { key: config.managementKey, error });
-                return yield* error;
-              }
-              if (response.status < 200 || response.status >= 300) {
-                return yield* new UsageLimitSourceError({
-                  detail: `The hub management request failed (HTTP ${response.status}).`,
-                });
-              }
-              return yield* response.json;
-            }),
-          ),
-          Effect.timeout("15 seconds"),
-          Effect.mapError((error) =>
-            isUsageLimitSourceError(error)
-              ? error
-              : new UsageLimitSourceError({ detail: "The hub management request failed." }),
-          ),
-        );
-      return response;
-    },
-    (effect, config) => {
-      // One request per hub prevents queued account probes from accumulating auth failures.
-      const lock = managementLocks.get(config.url) ?? Semaphore.makeUnsafe(1);
-      managementLocks.set(config.url, lock);
-      return lock.withPermits(1)(effect);
-    },
-  );
+  const management = Effect.fn("CliproxyApi.management")(function* (
+    config: UsageLimitSourceConfig,
+    path: string,
+    body?: unknown,
+  ) {
+    const url = yield* Effect.try({
+      try: () => new URL(`/v0/management/${path}`, config.url).toString(),
+      catch: () => new UsageLimitSourceError({ detail: "The hub URL is not valid." }),
+    });
+    const request = (
+      body === undefined ? HttpClientRequest.get(url) : HttpClientRequest.post(url)
+    ).pipe(HttpClientRequest.setHeader("Authorization", `Bearer ${config.managementKey}`));
+    const response = yield* client
+      .execute(body === undefined ? request : request.pipe(HttpClientRequest.bodyJsonUnsafe(body)))
+      .pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap((response) => response.json),
+        Effect.timeout("15 seconds"),
+        Effect.mapError(
+          () => new UsageLimitSourceError({ detail: "The hub management request failed." }),
+        ),
+      );
+    return response;
+  });
 
   const authFiles = Effect.fn("CliproxyApi.authFiles")(function* (config: UsageLimitSourceConfig) {
     const response = yield* management(config, "auth-files");
@@ -273,37 +239,24 @@ export const makeCliproxyApi = Effect.gen(function* () {
             response: {
               rate_limits_available: true,
               rate_limits: {
-                five_hour: usage.five_hour
-                  ? { ...usage.five_hour, resets_at: usage.five_hour.resets_at ?? null }
-                  : null,
-                seven_day: usage.seven_day
-                  ? { ...usage.seven_day, resets_at: usage.seven_day.resets_at ?? null }
-                  : null,
+                five_hour: usage.five_hour ?? null,
+                seven_day: usage.seven_day ?? null,
                 model_scoped,
-              } as unknown as NonNullable<
-                Parameters<typeof claudeUsageResponseToLimits>[0]["response"]["rate_limits"]
-              >,
+              },
             },
           }).limits,
         };
       }
       const body = yield* apiCall(config, account, `${CODEX_BASE}/usage`);
       const usage = yield* decodeCodexUsage(body);
-      const planType =
-        usage.plan_type ?? account.id_token?.plan_type ?? account.id_token?.chatgpt_plan_type;
-      const nowSeconds = DateTime.toEpochMillis(yield* DateTime.now) / 1000;
       const toWindow = (window: typeof CodexWindow.Type | null | undefined) =>
         window
           ? {
               usedPercent: window.used_percent,
-              resetsAt:
-                window.reset_at ??
-                (window.reset_after_seconds == null
-                  ? null
-                  : nowSeconds + window.reset_after_seconds),
-              ...(window.limit_window_seconds == null
+              resetsAt: window.reset_at ?? null,
+              ...(window.limit_window_seconds === undefined
                 ? {}
-                : { windowDurationMins: Math.ceil(window.limit_window_seconds / 60) }),
+                : { windowDurationMins: window.limit_window_seconds / 60 }),
             }
           : null;
       // A credits outage must not hide successfully fetched quota windows.
@@ -311,12 +264,12 @@ export const makeCliproxyApi = Effect.gen(function* () {
       const next = available?.[0];
       return {
         ...base,
-        plan: codexPlanLabel(planType),
+        plan: codexPlanLabel(usage.plan_type ?? account.id_token?.chatgpt_plan_type),
         usageLimits: {
           ...codexRateLimitsToLimits({
             checkedAt,
             snapshot: {
-              planType: planType ?? null,
+              planType: usage.plan_type ?? null,
               primary: toWindow(usage.rate_limit?.primary_window),
               secondary: toWindow(usage.rate_limit?.secondary_window),
             },
@@ -338,20 +291,6 @@ export const makeCliproxyApi = Effect.gen(function* () {
       };
     });
     return yield* read.pipe(
-      Effect.map((result) =>
-        result.usageLimits.windows.length > 0
-          ? result
-          : {
-              ...result,
-              usageLimits: {
-                ...result.usageLimits,
-                unavailable: {
-                  reason: "probeFailed" as const,
-                  message: "The hub returned no readable usage windows.",
-                },
-              },
-            },
-      ),
       Effect.orElseSucceed(() => ({
         ...base,
         usageLimits: makeUnavailableUsageLimits({
@@ -367,13 +306,11 @@ export const makeCliproxyApi = Effect.gen(function* () {
     config: UsageLimitSourceConfig,
   ): Effect.fn.Return<ReadonlyArray<UsageLimitSourceAccount>, UsageLimitSourceError> {
     const accounts = yield* authFiles(config).pipe(
-      Effect.mapError((error) =>
-        isUsageLimitSourceError(error)
-          ? error
-          : new UsageLimitSourceError({ detail: "The hub could not list accounts." }),
+      Effect.mapError(
+        () => new UsageLimitSourceError({ detail: "The hub could not list accounts." }),
       ),
     );
-    const result = yield* Effect.forEach(
+    return yield* Effect.forEach(
       accounts.filter(
         (account) =>
           !account.disabled && (account.provider === "codex" || account.provider === "claude"),
@@ -381,9 +318,6 @@ export const makeCliproxyApi = Effect.gen(function* () {
       (account) => readAccount(config, account),
       { concurrency: 4 },
     );
-    const failure = denied.get(config.url);
-    if (failure?.key === config.managementKey) return yield* failure.error;
-    return result;
   });
 
   const consume = Effect.fn("CliproxyApi.consume")(function* (
@@ -399,15 +333,13 @@ export const makeCliproxyApi = Effect.gen(function* () {
         });
       }
       const body = yield* apiCall(config, account, `${CREDIT_URL}/consume`, {
-        redeem_request_id: creditRedeemRequestId(
+        redeem_request_id: yield* creditRedeemRequestId(
           account.id_token?.chatgpt_account_id ?? account.id,
           creditId,
-        ),
+        ).pipe(Effect.provideService(Crypto.Crypto, crypto)),
+        credit_id: creditId,
       });
-      const response = yield* decodeConsumeResponse(body).pipe(
-        Effect.orElseSucceed(() => undefined),
-      );
-      if (!response) return { outcome: "accepted" } as const;
+      const response = yield* decodeConsumeResponse(body);
       const outcome = (
         {
           reset: "reset",
@@ -416,7 +348,19 @@ export const makeCliproxyApi = Effect.gen(function* () {
           already_redeemed: "alreadyRedeemed",
         } as const
       )[response.code];
-      return { outcome };
+      if (outcome !== "reset" && outcome !== "alreadyRedeemed") return { outcome };
+      const cleared = yield* management(config, "reset-quota", {
+        auth_index: account.auth_index,
+      }).pipe(Effect.result);
+      return {
+        outcome,
+        ...(cleared._tag === "Failure"
+          ? {
+              warning:
+                "Credit redeemed, but the hub cooldown could not be cleared. Routing may resume after its cooldown expires.",
+            }
+          : {}),
+      } as const;
     });
     return yield* operation.pipe(
       Effect.mapError((error) =>

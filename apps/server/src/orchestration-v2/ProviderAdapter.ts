@@ -14,12 +14,10 @@ import {
   OrchestrationV2ProviderFailure,
   OrchestrationV2ProviderRetry,
   OrchestrationV2ProviderThread,
-  type OrchestrationV2ProviderRef,
   OrchestrationV2ProviderTurn,
   OrchestrationV2RuntimeRequest,
   OrchestrationV2Subagent,
   OrchestrationV2TurnItem,
-  PromptSuggestionPreference,
   ProviderApprovalDecision,
   ProviderInteractionMode,
   ProviderDriverKind,
@@ -396,11 +394,12 @@ export interface ProviderAdapterV2EnsureThreadInput {
 }
 
 export interface ProviderAdapterV2TurnInput {
-  readonly promptSuggestion?: PromptSuggestionPreference;
   readonly appThread: OrchestrationV2AppThread;
   readonly threadId: ThreadId;
   readonly runId: RunId;
   readonly runOrdinal: number;
+  /** Whether the current native session has an accepted turn; omitted when unknown. */
+  readonly nativeThreadHasTurns?: boolean;
   readonly providerTurnOrdinal: number;
   readonly restartContinuationOfRunId?: RunId;
   readonly attemptId: RunAttemptId;
@@ -468,7 +467,6 @@ export interface ProviderAdapterV2ForkThreadInput {
   readonly sourceProviderThread: OrchestrationV2ProviderThread;
   readonly sourceProviderTurns?: ReadonlyArray<OrchestrationV2ProviderTurn>;
   readonly providerTurnId?: ProviderTurnId;
-  readonly nativeBoundaryRef?: OrchestrationV2ProviderRef;
   readonly targetThreadId: ThreadId;
   readonly ownerNodeId?: NodeId;
   readonly modelSelection?: ModelSelection;

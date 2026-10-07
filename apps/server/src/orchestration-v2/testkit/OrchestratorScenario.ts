@@ -153,6 +153,7 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "thread.pull-request.link":
     case "thread.pull-request.unlink":
     case "thread.pull-request-link.sync":
+    case "thread.pull-request.watch":
     case "thread.pull-request.sync":
     case "thread.title.regeneration.complete":
     case "thread.runtime-mode.set":
@@ -164,6 +165,7 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "prepared-run.release":
     case "prepared-run.progress":
     case "prepared-run.fail":
+    case "prepared-run.retry":
     case "run.interrupt":
     case "queued-message.promote-to-steer":
     case "queue.resume":
@@ -173,7 +175,6 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "runtime-request.respond":
     case "thread.user-input.dismiss":
     case "checkpoint.rollback":
-    case "checkpoint.navigate":
     case "provider.switch":
       return [command.threadId];
     case "delegated_task.request":
@@ -185,9 +186,8 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "thread.fork":
     case "thread.merge_back":
       return [command.sourceThreadId, command.targetThreadId];
-    default:
-      return [];
   }
+  throw new Error(`Unsupported orchestration scenario command: ${command.type}`);
 }
 
 function scenarioSteps(

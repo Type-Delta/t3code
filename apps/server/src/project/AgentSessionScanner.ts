@@ -182,19 +182,6 @@ export type AgentSessionRecentThread =
 export class AgentSessionScanner extends Context.Service<
   AgentSessionScanner,
   {
-    /** Validate a saved provider conversation before adopting its native binding. */
-    readonly validateNativeConversation: (input: {
-      readonly providerInstanceId: ProviderInstanceId;
-      readonly driver: "codex" | "claudeAgent";
-      readonly nativeThreadId: string;
-      readonly cwd: string;
-    }) => Effect.Effect<
-      | { readonly status: "valid"; readonly nativeThreadId: string; readonly cwd: string }
-      | {
-          readonly status: "missing" | "ambiguous" | "invalid" | "unavailable";
-          readonly reason: string;
-        }
-    >;
     /**
      * Discover every directory the configured Claude and Codex homes have run
      * a session in. Candidates are returned newest-first; the client decides
@@ -934,34 +921,6 @@ export const make = Effect.gen(function* () {
     return path.join(NodeOS.homedir(), ".claude");
   };
 
-  const resolveInstanceHome = Effect.fn("AgentSessionScanner.resolveInstanceHome")(function* (
-    source: "claudeAgent" | "codex",
-    instance: ProviderInstanceConfig,
-  ) {
-    const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-    const environmentHome =
-      instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
-      hostEnvironment[homeVariable];
-    if (source === "claudeAgent") {
-      const config = decodeClaudeSettings(instance.config ?? {});
-      return Option.isNone(config)
-        ? null
-        : resolveClaudeConfigDir(config.value.homePath, environmentHome);
-    }
-    const config = decodeCodexSettings(instance.config ?? {});
-    if (Option.isNone(config)) return null;
-    const codexSettings =
-      config.value.homePath.trim().length === 0 &&
-      config.value.shadowHomePath.trim().length === 0 &&
-      environmentHome?.trim()
-        ? { ...config.value, homePath: environmentHome }
-        : config.value;
-    const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
-      Effect.provideService(Path.Path, path),
-    );
-    return layout.sharedHomePath;
-  });
-
   const discoverClaudeTranscripts = Effect.fn("AgentSessionScanner.discoverClaudeTranscripts")(
     function* (homePath: string, providerInstanceId: ProviderInstanceId, operationBudget: number) {
       const projectsDir = path.join(homePath, "projects");
@@ -1166,8 +1125,30 @@ export const make = Effect.gen(function* () {
       const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
       const seenHomes = new Set<string>();
       for (const { instanceId, config: instance } of instances) {
-        const homePath = yield* resolveInstanceHome(source, instance);
-        if (homePath === null) continue;
+        const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
+        const environmentHome =
+          instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
+          hostEnvironment[homeVariable];
+
+        let homePath: string;
+        if (source === "claudeAgent") {
+          const config = decodeClaudeSettings(instance.config ?? {});
+          if (Option.isNone(config)) continue;
+          homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
+        } else {
+          const config = decodeCodexSettings(instance.config ?? {});
+          if (Option.isNone(config)) continue;
+          const codexSettings =
+            config.value.homePath.trim().length === 0 &&
+            config.value.shadowHomePath.trim().length === 0 &&
+            environmentHome?.trim()
+              ? { ...config.value, homePath: environmentHome }
+              : config.value;
+          const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
+            Effect.provideService(Path.Path, path),
+          );
+          homePath = layout.sharedHomePath;
+        }
 
         const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
         if (seenHomes.has(homeKey)) continue;
@@ -1395,14 +1376,9 @@ export const make = Effect.gen(function* () {
       (source) => `${source.providerInstanceId}\0${source.filePath}`,
     );
     const importedSessions = new Set<string>();
-    const importBudget = {
-      bytesRemaining: MAX_IMPORT_BYTES,
-      transcriptsRemaining: MAX_IMPORT_TRANSCRIPTS,
-      recordsRemaining: MAX_IMPORT_RECORDS,
-    };
-    // Unreliable file IDs require snapshot validation on retries. Bound that
-    // work separately so completed histories cannot consume the next batch.
-    const completedValidationBudget = { ...importBudget };
+    let bytesRemaining = MAX_IMPORT_BYTES;
+    let transcriptsRemaining = MAX_IMPORT_TRANSCRIPTS;
+    let recordsRemaining = MAX_IMPORT_RECORDS;
     return Stream.fromIteratorSucceed(eligibleTranscripts.values(), 1).pipe(
       Stream.mapEffect(({ candidate, transcript }) =>
         Effect.gen(function* () {
@@ -1411,9 +1387,7 @@ export const make = Effect.gen(function* () {
           );
           if (
             completed === undefined &&
-            (importBudget.transcriptsRemaining === 0 ||
-              importBudget.bytesRemaining === 0 ||
-              importBudget.recordsRemaining === 0)
+            (transcriptsRemaining === 0 || bytesRemaining === 0 || recordsRemaining === 0)
           ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
@@ -1426,14 +1400,7 @@ export const make = Effect.gen(function* () {
             (source) =>
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
           );
-          // NTFS file IDs can be absent or exceed Number precision. Replacement
-          // files can share a tunneled birthtime, so read their provider session
-          // identity before treating history with an unreliable inode as imported.
-          if (
-            completedSource !== undefined &&
-            identity.inode !== null &&
-            Number.isSafeInteger(identity.inode)
-          ) {
+          if (completedSource !== undefined) {
             const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
             if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
             importedSessions.add(sessionKey);
@@ -1442,28 +1409,27 @@ export const make = Effect.gen(function* () {
               source: completedSource,
             });
           }
-          const budget = completedSource === undefined ? importBudget : completedValidationBudget;
           if (
-            budget.transcriptsRemaining === 0 ||
-            budget.recordsRemaining === 0 ||
+            transcriptsRemaining === 0 ||
+            recordsRemaining === 0 ||
             identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES ||
-            identity.size > budget.bytesRemaining
+            identity.size > bytesRemaining
           ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
           // Reserve the whole file even if its read or parse fails.
-          budget.transcriptsRemaining -= 1;
-          budget.bytesRemaining -= identity.size;
+          transcriptsRemaining -= 1;
+          bytesRemaining -= identity.size;
           const snapshot = yield* readTranscript(
             transcript.filePath,
             identity,
-            budget.recordsRemaining,
+            recordsRemaining,
             candidate.source,
           );
           if (snapshot === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-          budget.recordsRemaining -= snapshot.recordCount;
+          recordsRemaining -= snapshot.recordCount;
 
           // A stable replacement file can belong to a different project than the cached candidate.
           let snapshotCwd: string | null = null;
@@ -1502,30 +1468,10 @@ export const make = Effect.gen(function* () {
             providerSessionId: parsedThread.providerSessionId,
           };
           const sessionKey = `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
-          const alreadyImported =
-            completedSource?.providerSessionId === parsedThread.providerSessionId;
-          // A replacement discovered during validation is new history too.
-          if (completedSource !== undefined && !alreadyImported) {
-            if (
-              importBudget.transcriptsRemaining === 0 ||
-              identity.size > importBudget.bytesRemaining ||
-              snapshot.recordCount > importBudget.recordsRemaining
-            ) {
-              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
-            }
-            importBudget.transcriptsRemaining -= 1;
-            importBudget.bytesRemaining -= identity.size;
-            importBudget.recordsRemaining -= snapshot.recordCount;
-          }
           if (importedSessions.has(sessionKey)) {
-            return alreadyImported
-              ? Option.none<AgentSessionRecentThread>()
-              : Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
+            return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
           }
           importedSessions.add(sessionKey);
-          if (alreadyImported) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "AlreadyImported", source });
-          }
           return Option.some<AgentSessionRecentThread>({
             _tag: "Importable",
             thread: parsedThread,
@@ -1543,200 +1489,7 @@ export const make = Effect.gen(function* () {
     completedSources = [],
   ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
 
-  const validateNativeConversation: AgentSessionScanner["Service"]["validateNativeConversation"] = (
-    input,
-  ) =>
-    Effect.gen(function* () {
-      if (!/^[a-zA-Z0-9_-]+$/.test(input.nativeThreadId)) {
-        return {
-          status: "invalid",
-          reason: "Native conversation ID is not a safe transcript identifier",
-        } as const;
-      }
-      const settings = yield* serverSettings.getSettings;
-      const instance =
-        settings.providerInstances[input.providerInstanceId] ??
-        (input.providerInstanceId === input.driver
-          ? {
-              driver: ProviderDriverKind.make(input.driver),
-              config: settings.providers[input.driver],
-            }
-          : undefined);
-      if (instance === undefined || instance.driver !== input.driver) {
-        return {
-          status: "invalid",
-          reason: "Native conversation provider instance does not match its driver",
-        } as const;
-      }
-      const home = yield* resolveInstanceHome(input.driver, instance);
-      if (home === null)
-        return { status: "invalid", reason: "Provider home configuration is invalid" } as const;
-      const workspace = yield* fileSystem.stat(input.cwd);
-      if (workspace.type !== "Directory") {
-        return {
-          status: "invalid",
-          reason: "Native conversation workspace is not a directory",
-        } as const;
-      }
-      const expectedCwd = yield* directoryIdentity(input.cwd, workspace);
-      const candidates: string[] = [];
-      // Exact lookup has no discovery-age or newest-first budget. An old saved
-      // conversation must remain resumable even in a large provider home.
-      if (input.driver === "claudeAgent") {
-        const projects = path.join(home, "projects");
-        if (yield* fileSystem.exists(projects)) {
-          for (const entry of yield* fileSystem.readDirectory(projects)) {
-            const directory = path.join(projects, entry);
-            if ((yield* fileSystem.stat(directory)).type !== "Directory") continue;
-            const candidate = path.join(directory, `${input.nativeThreadId}.jsonl`);
-            if (yield* fileSystem.exists(candidate)) candidates.push(candidate);
-          }
-        }
-      } else {
-        const directories = [path.join(home, "sessions"), path.join(home, "archived_sessions")];
-        const visited = new Set<string>();
-        while (directories.length > 0) {
-          const directory = directories.pop()!;
-          if (!(yield* fileSystem.exists(directory))) continue;
-          const identity = yield* fileSystem.realPath(directory);
-          if (visited.has(identity)) continue;
-          visited.add(identity);
-          for (const entry of yield* fileSystem.readDirectory(directory)) {
-            const candidate = path.join(directory, entry);
-            const stats = yield* fileSystem.stat(candidate);
-            if (stats.type === "Directory") directories.push(candidate);
-            else if (
-              stats.type === "File" &&
-              (entry === `${input.nativeThreadId}.jsonl` ||
-                entry.endsWith(`-${input.nativeThreadId}.jsonl`))
-            )
-              candidates.push(candidate);
-          }
-        }
-      }
-      if (candidates.length === 0)
-        return {
-          status: "missing",
-          reason: "Native conversation transcript was not found in the configured provider home",
-        } as const;
-
-      const metadataSchema = Schema.Struct({
-        type: Schema.optional(Schema.String),
-        sessionId: Schema.optional(Schema.String),
-        cwd: Schema.optional(Schema.String),
-        payload: Schema.optional(
-          Schema.Struct({
-            id: Schema.optional(Schema.String),
-            cwd: Schema.optional(Schema.String),
-          }),
-        ),
-      });
-      const select = createTranscriptJsonSelector(metadataSchema);
-      const decode = Schema.decodeUnknownOption(metadataSchema);
-      let validCount = 0;
-      for (const candidate of candidates) {
-        const metadata = yield* Effect.scoped(
-          Effect.gen(function* () {
-            const file = yield* fileSystem.open(candidate, { flag: "r" });
-            const before = transcriptIdentity(candidate, yield* file.stat);
-            let selectedBytes = 0;
-            const reserve = (bytes: number) => {
-              selectedBytes += bytes;
-              if (selectedBytes > MAX_TRANSCRIPT_SCAN_BYTES)
-                throw new TranscriptJsonLimitError("Native metadata exceeds memory limit");
-            };
-            let reader = createTranscriptJsonReader(reserve, select);
-            let decoder = new TextDecoder();
-            let bytesRead = 0;
-            let found: { id: string; cwd: string } | undefined;
-            const finish = () => {
-              reader.write(decoder.decode());
-              const record = decode(reader.finish());
-              if (Option.isSome(record)) {
-                const value = record.value;
-                const id =
-                  input.driver === "codex"
-                    ? value.type === "session_meta"
-                      ? value.payload?.id
-                      : undefined
-                    : value.sessionId;
-                const cwd = input.driver === "codex" ? value.payload?.cwd : value.cwd;
-                if (id !== undefined && cwd !== undefined) found = { id, cwd };
-              }
-              reader = createTranscriptJsonReader(reserve, select);
-              decoder = new TextDecoder();
-            };
-            while (
-              bytesRead < Math.min(before.size, MAX_TRANSCRIPT_SCAN_BYTES) &&
-              found === undefined
-            ) {
-              const chunk = yield* file.readAlloc(
-                Math.min(
-                  METADATA_READ_BYTES,
-                  before.size - bytesRead,
-                  MAX_TRANSCRIPT_SCAN_BYTES - bytesRead,
-                ),
-              );
-              if (Option.isNone(chunk)) break;
-              bytesRead += chunk.value.byteLength;
-              yield* Effect.try(() => {
-                let start = 0;
-                while (start < chunk.value.byteLength && found === undefined) {
-                  const newline = chunk.value.indexOf(10, start);
-                  const end = newline === -1 ? chunk.value.byteLength : newline;
-                  reader.write(decoder.decode(chunk.value.subarray(start, end), { stream: true }));
-                  if (newline === -1) break;
-                  finish();
-                  start = newline + 1;
-                }
-              });
-            }
-            if (found === undefined && bytesRead === before.size && before.size > 0)
-              yield* Effect.try(finish);
-            if (!sameTranscriptIdentity(before, transcriptIdentity(candidate, yield* file.stat))) {
-              return {
-                status: "unavailable",
-                reason: "Native conversation transcript changed during validation",
-              } as const;
-            }
-            if (found === undefined)
-              return {
-                status: "unavailable",
-                reason:
-                  "Native conversation metadata is missing, malformed, or exceeds the validation limit",
-              } as const;
-            return { status: "metadata", ...found } as const;
-          }),
-        );
-        if (metadata.status !== "metadata") return metadata;
-        if (
-          metadata.id !== input.nativeThreadId ||
-          (yield* directoryIdentity(metadata.cwd)) !== expectedCwd
-        ) {
-          return {
-            status: "invalid",
-            reason:
-              "Native conversation transcript ID or workspace does not match the saved binding",
-          } as const;
-        }
-        validCount += 1;
-      }
-      return validCount === 1
-        ? ({ status: "valid", nativeThreadId: input.nativeThreadId, cwd: input.cwd } as const)
-        : ({
-            status: "ambiguous",
-            reason: "Multiple transcripts match the saved native conversation",
-          } as const);
-    }).pipe(
-      Effect.catch(() =>
-        Effect.succeed({
-          status: "unavailable" as const,
-          reason: "Native conversation transcript or provider home could not be read safely",
-        }),
-      ),
-    );
-
-  return AgentSessionScanner.of({ scan, recentThreads, validateNativeConversation });
+  return AgentSessionScanner.of({ scan, recentThreads });
 });
 
 export const layer = Layer.effect(AgentSessionScanner, make);

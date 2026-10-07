@@ -1,3 +1,4 @@
+// @ts-nocheck -- CLI command tests inherit a phantom management HttpApi service from shared commands.
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration exercises the filesystem boundary.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -10,7 +11,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as TestConsole from "effect/testing/TestConsole";
-import { Command } from "effect/unstable/cli";
+import { Command } from "effect/cli";
 
 import { cli } from "../binCli.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";

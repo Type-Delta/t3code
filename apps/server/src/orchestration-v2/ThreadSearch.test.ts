@@ -10,18 +10,18 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ThreadSearch from "./ThreadSearch.ts";
 
-const TestLayer = Layer.mergeAll(
+const layerTest = Layer.mergeAll(
   ThreadSearch.layer,
   ProjectionStore.layer,
   ProjectStore.layer,
-).pipe(Layer.provideMerge(SqlitePersistenceMemory));
+).pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
 
 const providerInstanceId = ProviderInstanceId.make("codex");
 const at = (minute: number) => DateTime.makeUnsafe(Date.UTC(2026, 8, 27, 0, minute));
@@ -114,7 +114,7 @@ const message = (
   },
 });
 
-it.layer(TestLayer)("ThreadSearch", (it) => {
+it.layer(layerTest)("ThreadSearch", (it) => {
   it.effect("returns one finished user or assistant match per active thread", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -172,48 +172,6 @@ it.layer(TestLayer)("ThreadSearch", (it) => {
       assert.lengthOf((yield* search.search({ query: "needle", limit: 1 })).matches, 1);
       // LIKE wildcards in the query match literally.
       assert.deepEqual((yield* search.search({ query: "ne%le" })).matches, []);
-    }),
-  );
-
-  it.effect("limits project searches after excluding matches from other projects", () =>
-    Effect.gen(function* () {
-      const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const search = yield* ThreadSearch.ThreadSearch;
-      const localProject = ProjectId.make("project:search-local");
-      const otherProject = ProjectId.make("project:search-other");
-      const localThread = ThreadId.make("thread:search-local");
-      const otherThread = ThreadId.make("thread:search-other");
-      yield* createProject(localProject);
-      yield* createProject(otherProject);
-      yield* Effect.forEach(
-        [
-          thread(localThread, localProject),
-          message(localThread, "search-local", "assistant", "scope-needle in the local project", {
-            minute: 1,
-          }),
-          thread(otherThread, otherProject),
-          message(otherThread, "search-other", "user", "scope-needle in another project", {
-            minute: 2,
-          }),
-        ],
-        projections.apply,
-        { discard: true },
-      );
-
-      const global = yield* search.search({ query: "scope-needle", limit: 1 });
-      assert.deepEqual(
-        global.matches.map((match) => match.threadId),
-        [otherThread],
-      );
-      const local = yield* search.search({
-        query: "scope-needle",
-        limit: 1,
-        projectId: localProject,
-      });
-      assert.deepEqual(
-        local.matches.map((match) => match.threadId),
-        [localThread],
-      );
     }),
   );
 

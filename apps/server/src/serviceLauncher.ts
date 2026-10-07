@@ -96,9 +96,6 @@ async function syncFile(filePath: string): Promise<void> {
 // has no directory fsync: the handle opens but sync fails with EPERM, and
 // NTFS journals the rename on its own.
 async function syncDirectory(directory: string): Promise<void> {
-  // Windows cannot fsync directory handles. File contents are still synced before replacement.
-  // oxlint-disable-next-line t3code/no-global-process-runtime -- standalone launcher has no Effect runtime.
-  if (process.platform === "win32") return;
   const handle = await NodeFSP.open(directory, "r");
   try {
     await handle.sync();
@@ -261,52 +258,11 @@ function waitForExit(child: NodeChildProcess.ChildProcess): Promise<void> {
   return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
-async function terminateWindowsProcessTree(child: NodeChildProcess.ChildProcess): Promise<boolean> {
-  if (child.pid === undefined) return false;
-  return new Promise((resolve) => {
-    // The launcher owns this server PID. `/T` therefore terminates only its
-    // descendants, including provider app-server children, without a scan.
-    NodeChildProcess.execFile(
-      "taskkill",
-      ["/pid", String(child.pid), "/T", "/F"],
-      { windowsHide: true },
-      (error) => resolve(error === null),
-    );
-  });
-}
-
-export async function terminateChild(
+async function terminateChild(
   child: NodeChildProcess.ChildProcess,
   signal: NodeJS.Signals = "SIGTERM",
 ): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  if (NodePath.sep === "\\") {
-    if (child.connected && child.send !== undefined) {
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        const exited = waitForExit(child);
-        const stopped = await Promise.race([
-          sendMessage(child, { type: "shutdown" })
-            .then(() => exited)
-            .then(
-              () => true,
-              () => false,
-            ),
-          new Promise<boolean>((resolve) => {
-            timer = setTimeout(() => resolve(false), TERMINATE_GRACE_MS);
-          }),
-        ]);
-        if (stopped) return;
-      } finally {
-        clearTimeout(timer);
-      }
-    }
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    if (await terminateWindowsProcessTree(child)) {
-      await waitForExit(child);
-      return;
-    }
-  }
   child.kill(signal);
   const force = setTimeout(() => child.kill("SIGKILL"), TERMINATE_GRACE_MS);
   try {

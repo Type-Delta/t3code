@@ -265,23 +265,6 @@ const make = Effect.gen(function* () {
             return true;
           }
 
-          // Discovery parses a transcript, but adoption must re-check the
-          // native binding immediately before it is persisted. Provider homes
-          // can change between the scan and import, and a stale binding would
-          // create a thread that cannot be resumed.
-          const validation = yield* scanner.validateNativeConversation({
-            providerInstanceId: thread.providerInstanceId,
-            driver: thread.source,
-            nativeThreadId: thread.providerSessionId,
-            cwd: project.workspaceRoot,
-          });
-          if (validation.status !== "valid") {
-            return yield* new AgentSessionUnresumableSessionError({
-              source: thread.source,
-              providerSessionId: thread.providerSessionId,
-            });
-          }
-
           const driver = ProviderDriverKind.make(thread.source);
           const model = thread.model ?? DEFAULT_MODEL_BY_PROVIDER[driver] ?? DEFAULT_MODEL;
           const providerThreadId = idAllocator.derive.providerThread({
