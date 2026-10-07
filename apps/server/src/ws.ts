@@ -200,7 +200,6 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
-import * as ZrokShare from "./remoteAccess/ZrokShare.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { requiredScopeForRpcMethod, requiredScopeForDeviceList } from "./auth/RpcAuthorization.ts";
@@ -1153,7 +1152,6 @@ const makeWsRpcLayer = (
       const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
-      const zrokShare = yield* ZrokShare.ZrokShare;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
@@ -2020,18 +2018,6 @@ const makeWsRpcLayer = (
           }),
         [WS_METHODS.serverProbe]: (_input) =>
           observeRpcEffect(WS_METHODS.serverProbe, Effect.succeed({}), {
-            "rpc.aggregate": "server",
-          }),
-        [WS_METHODS.serverGetZrokShareStatus]: (_input) =>
-          observeRpcEffect(WS_METHODS.serverGetZrokShareStatus, zrokShare.getStatus, {
-            "rpc.aggregate": "server",
-          }),
-        [WS_METHODS.serverStartZrokShare]: (_input) =>
-          observeRpcEffect(WS_METHODS.serverStartZrokShare, zrokShare.start, {
-            "rpc.aggregate": "server",
-          }),
-        [WS_METHODS.serverStopZrokShare]: (_input) =>
-          observeRpcEffect(WS_METHODS.serverStopZrokShare, zrokShare.stop, {
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.serverGetConfig]: (_input) =>

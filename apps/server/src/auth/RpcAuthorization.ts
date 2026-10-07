@@ -1,7 +1,6 @@
 import {
   type DeviceListInput,
   AuthAccessReadScope,
-  AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
@@ -37,9 +36,6 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.projectsMutate]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverProbe]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetConfig]: AuthOrchestrationReadScope,
-  [WS_METHODS.serverGetZrokShareStatus]: AuthOrchestrationReadScope,
-  [WS_METHODS.serverStartZrokShare]: AuthAccessWriteScope,
-  [WS_METHODS.serverStopZrokShare]: AuthAccessWriteScope,
   [WS_METHODS.serverRefreshProviders]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverUpdateProvider]: AuthOrchestrationOperateScope,
   [WS_METHODS.providerAuthStart]: AuthOrchestrationOperateScope,

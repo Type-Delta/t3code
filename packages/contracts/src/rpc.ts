@@ -335,7 +335,6 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
-import { ZrokShareStatus } from "./remoteAccess.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
@@ -468,9 +467,6 @@ export const WS_METHODS = {
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
-  serverGetZrokShareStatus: "server.getZrokShareStatus",
-  serverStartZrokShare: "server.startZrokShare",
-  serverStopZrokShare: "server.stopZrokShare",
   serverRefreshUsageRates: "server.refreshUsageRates",
 
   // Scheduled tasks
@@ -563,24 +559,6 @@ const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   payload: Schema.Struct({}),
   success: ServerConfig,
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError, EnvironmentAuthorizationError]),
-});
-
-export const WsServerGetZrokShareStatusRpc = Rpc.make(WS_METHODS.serverGetZrokShareStatus, {
-  payload: Schema.Struct({}),
-  success: ZrokShareStatus,
-  error: EnvironmentAuthorizationError,
-});
-
-export const WsServerStartZrokShareRpc = Rpc.make(WS_METHODS.serverStartZrokShare, {
-  payload: Schema.Struct({}),
-  success: ZrokShareStatus,
-  error: EnvironmentAuthorizationError,
-});
-
-export const WsServerStopZrokShareRpc = Rpc.make(WS_METHODS.serverStopZrokShare, {
-  payload: Schema.Struct({}),
-  success: ZrokShareStatus,
-  error: EnvironmentAuthorizationError,
 });
 
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
@@ -1716,9 +1694,6 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
-  WsServerGetZrokShareStatusRpc,
-  WsServerStartZrokShareRpc,
-  WsServerStopZrokShareRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,

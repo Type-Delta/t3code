@@ -1,5 +1,4 @@
 import {
-  AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
@@ -40,14 +39,6 @@ describe("RPC authorization scopes", () => {
       AuthRelayReadScope,
     );
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
-  });
-
-  it("separates zrok share observation from control", () => {
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverGetZrokShareStatus)).toBe(
-      AuthOrchestrationReadScope,
-    );
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverStartZrokShare)).toBe(AuthAccessWriteScope);
-    expect(requiredScopeForRpcMethod(WS_METHODS.serverStopZrokShare)).toBe(AuthAccessWriteScope);
   });
 
   it("requires permission to operate on a thread before uploading feedback", () => {

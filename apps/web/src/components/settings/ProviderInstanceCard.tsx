@@ -51,7 +51,6 @@ import type { DriverOption, ProviderEnvironmentFieldDefinition } from "./provide
 import { deriveProviderSettingsFields, ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import { SubscriptionUsageBars } from "../SubscriptionUsage";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
@@ -1161,11 +1160,6 @@ export function ProviderInstanceCard({
             </div>
           }
         />
-        {liveProvider?.usage ? (
-          <SettingsRow title="Subscription limits">
-            <SubscriptionUsageBars usage={liveProvider.usage} />
-          </SettingsRow>
-        ) : null}
       </SettingsSection>
 
       {setup || environmentFields.length > 0 ? (

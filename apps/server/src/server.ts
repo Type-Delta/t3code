@@ -120,7 +120,6 @@ import {
 } from "./auth/http.ts";
 import * as ManagementApiKeyService from "./auth/ManagementApiKeyService.ts";
 import * as ManagementApiKeys from "./persistence/ManagementApiKeys.ts";
-import * as ZrokShare from "./remoteAccess/ZrokShare.ts";
 import * as ReplayMarkers from "./auth/replayMarkers.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
@@ -622,7 +621,6 @@ const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
   Layer.provideMerge(TraceDiagnostics.layer),
   Layer.provideMerge(AnalyticsService.layer),
   Layer.provideMerge(ExternalLauncher.layer),
-  Layer.provideMerge(ZrokShare.layer),
   Layer.provideMerge(RemoteOpenTargets.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),

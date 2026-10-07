@@ -71,7 +71,6 @@ import {
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
-import { fetchCodexSubscriptionUsage } from "../subscriptionUsage.ts";
 import {
   makeGatewayModelCatalog,
   mergeGatewayModelCatalog,
@@ -245,13 +244,6 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         homePath: homeLayout.effectiveHomePath ?? "",
         launchArgs: effectiveLaunchArgs,
       } satisfies CodexSettings;
-      // Mirror the probe's CODEX_HOME resolution: explicit homePath first,
-      // then the instance environment, else the fetcher's ~/.codex default.
-      const codexUsageHome =
-        effectiveConfig.homePath.trim().length > 0
-          ? expandHomePath(effectiveConfig.homePath.trim())
-          : effectiveProcessEnv["CODEX_HOME"]?.trim() || undefined;
-
       const resolveModelContextWindows = (
         catalog: typeof gatewayCatalog,
       ): Readonly<Record<string, number>> =>
@@ -372,15 +364,6 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               }),
             ),
             Effect.provideService(HttpClient.HttpClient, httpClient),
-            Effect.flatMap((enrichedSnapshot) =>
-              enrichedSnapshot.auth.status === "authenticated"
-                ? Effect.promise(() => fetchCodexSubscriptionUsage(codexUsageHome)).pipe(
-                    Effect.map((usage) =>
-                      usage ? { ...enrichedSnapshot, usage } : enrichedSnapshot,
-                    ),
-                  )
-                : Effect.succeed(enrichedSnapshot),
-            ),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
       }).pipe(

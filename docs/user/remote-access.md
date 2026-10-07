@@ -62,24 +62,6 @@ created in Settings can only be copied from the client that created them while
 its Connections page stays open. If you leave or reload that page, create
 another link to share.
 
-### zrok Public Share
-
-For a temporary public route, open **Settings** → **Connections** and turn on
-**zrok public share**. The server starts an ephemeral share and adds its public URL to
-**Reachable URLs**. While it is active, that URL is preferred for the QR code and pairing
-links; you can still choose another endpoint explicitly.
-
-The zrok executable must be installed on the server, visible on the server process's `PATH`,
-and already enabled and authenticated. T3 Code uses the current v2 `zrok2` command when it is
-present. It uses legacy v1 `zrok` only when `zrok2` is not on `PATH`; it does not switch accounts
-after a resolved `zrok2` command fails. Fix or remove that `zrok2` installation before retrying
-with legacy `zrok`. If the share is unavailable, fix the installation or authentication on the
-server and retry the switch; unavailable is a retryable state.
-
-Starting or stopping a public share requires the `access:write` permission. Turning the switch
-off, restarting the server, or shutting it down ends the ephemeral share and invalidates its
-public URL and any pairing links that use it.
-
 ### Balance new threads across machines
 
 Auto balance is off by default. On web and desktop, enable it in

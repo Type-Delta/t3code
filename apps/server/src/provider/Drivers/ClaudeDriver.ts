@@ -71,7 +71,6 @@ import {
   makeClaudeContinuationGroupKey,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
-import { fetchClaudeSubscriptionUsage } from "../subscriptionUsage.ts";
 import { discoverClaudeSkills } from "./ClaudeSkills.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
@@ -172,7 +171,6 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           ? configDir
           : undefined,
       );
-      const resolvedClaudeHome = configDir;
       const stampIdentity = withInstanceIdentity({
         instanceId,
         driverKind: DRIVER_KIND,
@@ -278,15 +276,6 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
               }),
             ),
             Effect.provideService(HttpClient.HttpClient, httpClient),
-            Effect.flatMap((enrichedSnapshot) =>
-              enrichedSnapshot.auth.status === "authenticated"
-                ? Effect.promise(() => fetchClaudeSubscriptionUsage(resolvedClaudeHome)).pipe(
-                    Effect.map((usage) =>
-                      usage ? { ...enrichedSnapshot, usage } : enrichedSnapshot,
-                    ),
-                  )
-                : Effect.succeed(enrichedSnapshot),
-            ),
             Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
           ),
       }).pipe(
