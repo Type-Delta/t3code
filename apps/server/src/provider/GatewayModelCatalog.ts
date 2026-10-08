@@ -8,6 +8,7 @@ import type {
   ServerProviderModel,
 } from "@t3tools/contracts";
 import { readCustomModelEntries } from "@t3tools/shared/model";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- SHA-256 fingerprints are local cache keys; Effect Crypto does not expose synchronous hashing.
 import * as NodeCrypto from "node:crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -17,7 +18,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Option from "effect/Option";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import { ServerConfig } from "../config.ts";

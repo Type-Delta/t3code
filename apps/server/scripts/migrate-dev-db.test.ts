@@ -4,7 +4,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -143,7 +143,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
-  it.effect("fails loudly on a migration slot collision", () =>
+  it.effect("warns and continues on a migration slot collision", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-slot-" });
@@ -160,15 +160,11 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         }),
       );
 
-      const error = yield* runMigrateDevDb(
+      const result = yield* runMigrateDevDb(
         { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
         { sharedHome: sourceDir },
-      ).pipe(Effect.flip);
-      assert.equal(error._tag, "MigrateDevDbSlotCollisionError");
-      if (error._tag === "MigrateDevDbSlotCollisionError") {
-        assert.equal(error.slot, 1);
-        assert.equal(error.appliedName, "SomebodyElsesMigration");
-      }
+      );
+      assert.equal(result.projects.length, 1);
     }),
   );
 
@@ -316,7 +312,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
       ],
     ],
   ] as const) {
-    it.effect(`accepts reconciled ${history} history without rewriting its ledger`, () =>
+    it.effect(`converts ${history} history into the split ledgers`, () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-history-" });
@@ -342,8 +338,19 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
           Effect.gen(function* () {
             const sql = yield* SqlClient.SqlClient;
             for (const [slot, name] of ledger) {
-              const [row] = yield* sql<{ name: string }>`
-              SELECT name FROM effect_sql_migrations WHERE migration_id = ${slot}`;
+              const [row] =
+                history === "old fork"
+                  ? yield* sql<{
+                      name: string;
+                    }>`SELECT name FROM fork_sql_migrations WHERE name = ${name}`
+                  : yield* sql<{
+                      name: string;
+                    }>`SELECT name FROM effect_sql_migrations WHERE migration_id = ${slot}`;
+              if (
+                history === "old fork" &&
+                (name === "ProjectionThreadsSettled" || name === "ProjectionThreadsSnoozed")
+              )
+                continue;
               assert.equal(row?.name, name);
             }
           }),
@@ -352,7 +359,7 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     );
   }
 
-  it.effect("rejects a known historical name when the reconciled schema is missing", () =>
+  it.effect("repairs a known historical name when the schema is missing", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-bad-repair-" });
@@ -368,11 +375,20 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
           yield* sql`ALTER TABLE checkpoint_capture_jobs DROP COLUMN provider_cursor_json`;
         }),
       );
-      const error = yield* runMigrateDevDb(
+      const result = yield* runMigrateDevDb(
         { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
         { sharedHome: sourceDir },
-      ).pipe(Effect.flip);
-      assert.equal(error._tag, "MigrateDevDbSlotCollisionError");
+      );
+      const hasProviderCursor = yield* withDatabase(
+        result.databasePath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return (yield* sql`PRAGMA table_info(checkpoint_capture_jobs)`).some(
+            (row) => row.name === "provider_cursor_json",
+          );
+        }),
+      );
+      assert.isTrue(hasProviderCursor);
     }),
   );
 

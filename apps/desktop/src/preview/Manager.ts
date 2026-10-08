@@ -5,7 +5,6 @@
  * elements live in the renderer; we only attach listeners and forward state
  * here). Single layer-scoped browser session partition.
  */
-import * as NodeCrypto from "node:crypto";
 import {
   DesktopPreviewRecordingInputSchema,
   DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER,
@@ -34,6 +33,7 @@ import type {
   PreviewAutomationSnapshot,
   PreviewAutomationTypeInput,
   PreviewAutomationWaitForInput,
+  PreviewForwardedShortcut,
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
@@ -49,6 +49,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -643,6 +644,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   pictureInPicturePreloadPath: string,
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
+  const crypto = yield* Crypto.Crypto;
   const hostPlatform = yield* HostProcessPlatform;
   const path = yield* Path.Path;
   const parentScope = yield* Scope.Scope;
@@ -4428,10 +4430,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const context = { operation: "automationPress.awaitNativeKey", tabId, webContentsId: wc.id };
     const evaluate = (frame: Electron.WebFrameMain, expression: string) =>
       attemptPromise(context, () => frame.executeJavaScript(expression));
+    const receiptId = yield* crypto.randomUUIDv4;
     const { frames, receiptKey } = yield* Effect.acquireRelease(
       attempt(context, () => ({
         frames: wc.mainFrame.framesInSubtree,
-        receiptKey: JSON.stringify(`__t3NativeKey_${NodeCrypto.randomUUID()}`),
+        receiptKey: JSON.stringify(`__t3NativeKey_${receiptId}`),
       })),
       ({ frames, receiptKey }) =>
         Effect.forEach(
@@ -4687,10 +4690,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           keySequence,
           clipboardData,
         );
-        const selectionKey = yield* encodeJson(
-          context,
-          `__t3EditingSelection_${NodeCrypto.randomUUID()}`,
-        );
+        const selectionId = yield* crypto.randomUUIDv4;
+        const selectionKey = yield* encodeJson(context, `__t3EditingSelection_${selectionId}`);
         // Editing requires an active document. Preserve the target
         // and selection across focus handlers without focusing the desktop.
         yield* Effect.acquireUseRelease(
@@ -4759,7 +4760,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   ) {
     const wc = yield* requireWebContents(tabId);
     yield* withControlSession(tabId, wc, "press", (send, sendCleanup, checkControl) =>
-      performAutomationPress(tabId, wc, input, send, sendCleanup, checkControl),
+      performAutomationPress(tabId, wc, input, send, sendCleanup, checkControl).pipe(
+        Effect.catchTags({
+          PlatformError: (cause) =>
+            Effect.fail(new PreviewOperationError({ operation: "automationPress", tabId, cause })),
+        }),
+      ),
     );
   });
 
@@ -5019,12 +5025,16 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     refresh,
     registerWebview,
     resetZoom: (tabId: string) => applyZoom(tabId, () => DEFAULT_ZOOM_FACTOR),
+    setZoomFactor: (tabId: string, zoomFactor: number) =>
+      applyZoom(tabId, () => normalizeZoomFactor(zoomFactor)),
     revealArtifact,
     saveRecording,
     setAnnotationTheme,
+    setAnnotationSendEnabled: (_tabId: string, _enabled: boolean) => Effect.void,
     setAudioMuted,
     setColorScheme,
     setMainWindow,
+    setForwardedShortcuts: (_shortcuts: ReadonlyArray<PreviewForwardedShortcut>) => Effect.void,
     startRecording,
     closePictureInPicture,
     stopRecording,
@@ -5390,6 +5400,17 @@ export class PreviewManager extends Context.Service<
     readonly setAnnotationTheme: (
       theme: DesktopPreviewAnnotationTheme,
     ) => Effect.Effect<void, PreviewManagerError>;
+    readonly setAnnotationSendEnabled: (
+      tabId: string,
+      enabled: boolean,
+    ) => Effect.Effect<void, PreviewManagerError>;
+    readonly setForwardedShortcuts: (
+      shortcuts: ReadonlyArray<PreviewForwardedShortcut>,
+    ) => Effect.Effect<void>;
+    readonly setZoomFactor: (
+      tabId: string,
+      zoomFactor: number,
+    ) => Effect.Effect<void, PreviewManagerError>;
     readonly pickElement: (
       tabId: string,
     ) => Effect.Effect<PreviewAnnotationSubmissionResult | null, PreviewManagerError>;
@@ -5523,6 +5544,9 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       },
     ),
     setAnnotationTheme: operations.setAnnotationTheme,
+    setAnnotationSendEnabled: operations.setAnnotationSendEnabled,
+    setForwardedShortcuts: operations.setForwardedShortcuts,
+    setZoomFactor: operations.setZoomFactor,
     pickElement: operations.pickElement,
     cancelPickElement: operations.cancelPickElement,
     captureScreenshot: operations.captureScreenshot,

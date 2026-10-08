@@ -2,7 +2,7 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
 import * as Predicate from "effect/Predicate";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 function isMissingExecutable(error: unknown): boolean {
   const seen = new Set<unknown>();

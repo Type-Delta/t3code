@@ -2,7 +2,7 @@ import { ApiGatewaySettings } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { codexLaunchArgv } from "../Layers/codexLaunchArgs.ts";
+import { codexLaunchArgv } from "../codexLaunchArgs.ts";
 import { syncCodexGatewayLaunchArgs, withCodexGatewayInventoryAuthority } from "./CodexDriver.ts";
 
 const decodeGatewaySettings = Schema.decodeSync(ApiGatewaySettings);

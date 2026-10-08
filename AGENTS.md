@@ -27,15 +27,16 @@ But this process requires explicit user consent.
 If you are tasked with syncing this fork with the upstream T3 Code repository, please do it with the following considerations:
 
 - Keep features from both sides
-- If both fixes the same issue, prefer fixes from theirs.
-- If some feature conflicts in a way that it is best to choose either theirs or ours, pause and ask me.
+- If both fixes the same issue, prefer fixes from theirs ONLY if theirs is more elegant AND has the same or larger coverage.
+- If some feature/changes conflicts in a way that it is best to choose either theirs or ours, pause and ask me.
 - If you are unsure about how to proceed, please ask me for guidance.
 - This is not a "fix merge conflicts" task, you have to make sure that all features are behaving as expected and that those features make sense together both functionally, aesthetically and user experience. An app that works isn't necessarily a good app.
+- All features/changes described in [Divergence Log](./FORK.md#divergence-log) must exist (make sure you go through ALL of them when auditing), and thoroughly verified/audited after the merge, ensureing no feature is left half-broken or missing even when the tests are green (because the test it self might be missing). Execption can be made for features/changes intentinally drop after explicit approval from the user.
 - After merging, please run the full test suite and ensure that no regressions or addition test failures have been introduced. Then smoke test the app to make sure that all main upstream features and fork-introduced features are working as expected. If auth is already setup, test it E2E with the live models. Also test database migration, desktop builds and installer builds.
 - After all the code related changes are done (merged, fixed, verified, finalized/cleanup), do the following:
   - Update "Divergence Log" and "Merge History" sections in FORK.md with the latest changes.
   - Commit merge changes in a single commit with a clear message describing the merge decisions made.
-  - Move the "base" tag to the commit you just created. Force pushing this tag is fine since its only used for reference. (if `gdx` are available, you can use `gdx tag mv base ~0` to move "base" to the latest commit)
+  - Move the "base" tag to the fork parent commit before the merge commit. Force pushing this tag is fine since its only used for reference. (if `gdx` are available, you can use `gdx tag mv base ~0` to move "base" to the latest commit)
 
 ## What makes T3 Code special?
 
@@ -183,8 +184,9 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 ## Taste
 
 - Complexity belongs at the adapter boundary. Orchestration stays pure, UI stays dumb.
+- Client mutations use `createEnvironmentRpcCommand`. Add protected methods to `CLIENT_GUARDED_RPC_SCOPES` in contracts and use the command's `permissionAtom` for UI availability. Grants are checked at execution against the destination environment; the server remains authoritative. Keep raw RPC clients inside `rpc/`, and extend the permission behavior tests when adding a protected method.
 - Server features are services; transports stay thin. A `ws.ts` RPC handler, HTTP route, or MCP tool decodes input, calls one service method, and maps errors. See [Effect services](docs/internals/effect-services.md).
-- `apps/web/src/components/ui` exports own their look. Pick a `variant` or `size`; do not restyle one with `className`. If none fits and the look is a generic concept, add a variant to the component; a look that belongs to one feature stays in that feature's own component, not in `components/ui`. Layout classes (width, flex, margin, position) belong on the parent. `shadcn/no-restyle` fails lint on violations.
+- `apps/web/src/components/ui` exports own their look. Pick a `variant` or `size`; do not restyle one with `className`. If none fits and the look is a generic concept, add a variant to the component; a look that belongs to one feature stays in that feature's own component, not in `components/ui`. Layout classes (width, flex, margin, position) belong on the parent. `shadcn/no-restyle` fails lint on violations. See [Web UI](docs/internals/web-ui.md).
 - Inferred types over annotations. `any` is the enemy.
 - Comments describe how a thing is used, and move when the code moves. To be used mostly to describe functions, not to annotate every line of behavior.
 - Our users drive agents all day and notice a dropped frame, a lying spinner, and a stale label. No continuously repainting animations; they peg the GPU on high-refresh displays.

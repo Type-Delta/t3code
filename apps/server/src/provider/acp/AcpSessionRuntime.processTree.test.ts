@@ -13,8 +13,8 @@ import * as Exit from "effect/Exit";
 import * as Sink from "effect/Sink";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import {
   capturePosixOwnershipLedger,
@@ -152,10 +152,10 @@ describe("terminatePosixOwnedProcessTree", () => {
         );
 
       yield* run(false);
-      expect(taskkillCalls).toBe(1);
+      expect(taskkillCalls).toBe(2);
       failNextTaskkill = true;
       yield* run(true);
-      expect(taskkillCalls).toBe(3);
+      expect(taskkillCalls).toBe(4);
     }).pipe(
       Effect.provide(NodeServices.layer),
       Effect.provideService(HostProcessPlatform, "win32"),

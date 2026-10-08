@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - FileSystem cannot create a FIFO.
 import * as NodeChildProcess from "node:child_process";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeFS from "node:fs";
 import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -17,15 +17,13 @@ import * as WorkspacePaths from "./WorkspacePaths.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
-const resolveNativePath = (filePath: string) => NodeFS.realpathSync.native(filePath);
-
-const ProjectLayer = WorkspaceFileSystem.layer.pipe(
+const layerProject = WorkspaceFileSystem.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
   Layer.provide(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
 );
 
-const TestLayer = Layer.empty.pipe(
-  Layer.provideMerge(ProjectLayer),
+const layerTest = Layer.empty.pipe(
+  Layer.provideMerge(layerProject),
   Layer.provideMerge(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
   Layer.provideMerge(WorkspacePaths.layer),
   Layer.provideMerge(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
@@ -58,7 +56,7 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
   yield* fileSystem.writeFileString(absolutePath, contents).pipe(Effect.orDie);
 });
 
-it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
+it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
   describe("readFile", () => {
     it.effect("reads UTF-8 files relative to the workspace root", () =>
       Effect.gen(function* () {
@@ -163,8 +161,8 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           const error = yield* workspaceFileSystem
             .readFile({ cwd, relativePath: "linked-secret.txt" })
             .pipe(Effect.flip);
-          const resolvedWorkspaceRoot = resolveNativePath(cwd);
-          const resolvedPath = resolveNativePath(path.join(outsideDir, "secret.txt"));
+          const resolvedWorkspaceRoot = yield* fileSystem.realPath(cwd);
+          const resolvedPath = yield* fileSystem.realPath(path.join(outsideDir, "secret.txt"));
 
           expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
           expect(error).toMatchObject({
@@ -188,7 +186,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const error = yield* workspaceFileSystem
           .readFile({ cwd, relativePath: "src" })
           .pipe(Effect.flip);
-        const resolvedPath = resolveNativePath(path.join(cwd, "src"));
+        const resolvedPath = yield* fileSystem.realPath(path.join(cwd, "src"));
 
         expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathNotFileError);
         expect(error).toMatchObject({
@@ -212,7 +210,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const error = yield* workspaceFileSystem
           .readFile({ cwd, relativePath: "asset.bin" })
           .pipe(Effect.flip);
-        const resolvedPath = resolveNativePath(absolutePath);
+        const resolvedPath = yield* fileSystem.realPath(absolutePath);
 
         expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceBinaryFileError);
         expect(error).toMatchObject({

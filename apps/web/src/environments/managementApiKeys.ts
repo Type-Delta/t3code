@@ -8,7 +8,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientError } from "effect/unstable/http";
+import { HttpClient, HttpClientError } from "effect/http";
 
 import {
   createEnvironmentManagementApiKey as createAdapterManagementApiKey,

@@ -7,13 +7,13 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { ManagementApiKeyId, ManagementApiKeyScopes } from "@t3tools/contracts";
 
 import * as ManagementApiKeyService from "./ManagementApiKeyService.ts";
 import * as ManagementApiKeys from "../persistence/ManagementApiKeys.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { layerMemory as SqlitePersistenceMemory } from "../persistence/Sqlite.ts";
 
 const serviceLayer = ManagementApiKeyService.layer.pipe(
   Layer.provideMerge(ManagementApiKeys.layer),

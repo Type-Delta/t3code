@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
-import * as ProviderEventLoggers from "../../provider/Layers/ProviderEventLoggers.ts";
+import * as ProviderEventLoggers from "../../provider/ProviderEventLoggers.ts";
 import * as ClaudeAdapter from "./ClaudeAdapterV2.ts";
 
 const sdk = vi.hoisted(() => ({ query: vi.fn(), resolve: vi.fn() }));
@@ -20,7 +20,7 @@ beforeEach(() => {
   sdk.query.mockReset();
   sdk.resolve.mockReset();
 });
-const layer = ClaudeAdapter.claudeAgentSdkQueryRunnerLiveLayer.pipe(
+const layer = ClaudeAdapter.layerQueryRunner.pipe(
   Layer.provide(NodeServices.layer),
   Layer.provide(
     Layer.succeed(

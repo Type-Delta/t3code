@@ -671,6 +671,33 @@ This is an append-only historical decision record. It provides context for integ
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
 
+### 2026-10-08 — Redo upstream merge after `cad0f83ed6`
+
+**Merge commit:** local redo on `fix/redo-merge`; verification is still in progress
+**Parents:** `dba09c35aa` (fork) and `079e4bccdc` (upstream/main)
+
+This merge supersedes `cad0f83ed6`. It ports the fork divergences onto upstream's flattened
+server/provider APIs instead of dropping modules whose old `Services/` and `Layers/` paths moved.
+It restores per-instance gateway catalogs and launch metadata, durable management-key HTTP/MCP
+access, scoped MCP authorization, provider recovery, checkpoint/orchestration/VCS behavior,
+preview automation, and the desktop/web/mobile contract changes. The two intentional removals from
+the fork parent remain removed: zrok sharing (DL022) and subscription usage meters (DL003).
+
+Persistence now keeps upstream's `effect_sql_migrations` ids and adds an independent
+`fork_sql_migrations` ledger. A name-based conversion handles current and legacy fork histories,
+the bad merge's 67/68/69 records, upstream V1/V2, and V2 preview records. Conversion writes a
+`VACUUM INTO` rollback copy first, runs idempotent fork migrations after upstream migrations, and
+keeps divergence as a warning instead of refusing startup. A read-only copy of the live database
+retained 394 threads, passed `PRAGMA integrity_check`, and restarted cleanly on a second run.
+
+**Validation:** migration fixtures, provider/gateway/compaction, Claude prompt pinning, MCP service
+and HTTP suites, delegated completion, ACP teardown, and the Windows MCP integration pass. `vp check`
+formatting passes with existing lint diagnostics, `vp run lint:mobile` passes, and scoped server
+typecheck has no TypeScript errors. The unrestricted full suite still reports unrelated provider and
+server-settings failures and was stopped during long Windows suites. Browser, native-device, remote,
+real-provider, and installer verification remain unavailable in this environment. This redo is ready
+for final review but must not replace `main` until those environment checks are completed.
+
 ### 2026-10-04 — Orchestrator V2 sync
 
 **Merge commit:** `8f5699626c824140598278078461819e6a17152d`

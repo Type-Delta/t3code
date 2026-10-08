@@ -19,6 +19,7 @@ import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementSer
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import { ThreadToolkitHandlersLive } from "./handlers.ts";
 import { ThreadToolkit } from "./tools.ts";
 
@@ -67,7 +68,11 @@ const makeToolkit = (
     Layer.succeed(McpInvocationContext.McpInvocationContext, invocation),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadRecords: (threadId) => Effect.succeed(projectionFor(threadId)),
-      getThreadShell: () => Effect.succeed(options.caller ?? null),
+      getThreadShell: (threadId) =>
+        Effect.succeed(
+          (options.caller ?? { ...projectionFor(threadId).thread, deletedAt: null }) as never,
+        ),
+      getProjectThreadRecords: (request) => Effect.succeed(projectionFor(request.threadId)),
       dispatch: (command) =>
         Effect.sync(() => {
           dispatched.push(command);
@@ -86,7 +91,9 @@ const makeToolkit = (
   );
   return {
     toolkit: ThreadToolkit.pipe(
-      Effect.provide(ThreadToolkitHandlersLive.pipe(Layer.provide(dependencies))),
+      Effect.provide(
+        Layer.provide(McpToolAccess.HandlersLayer.layer(ThreadToolkitHandlersLive), dependencies),
+      ),
     ),
     dependencies,
   };
@@ -102,7 +109,7 @@ it.effect("requires management keys to scope reads and mutations to explicit thr
     const missingTarget = yield* toolkit
       .handle("t3_thread_configuration", {})
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
-    expect(missingTarget.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    expect(missingTarget.at(-1)?.result).toMatchObject({ code: "target_required" });
 
     const configuration = yield* toolkit
       .handle("t3_thread_configuration", { threadId: targetThreadId })
@@ -198,9 +205,11 @@ it.effect("allows global provider search across projects while keeping project s
     const providerScope = (mcpToolScope: "global" | "project") =>
       ({
         environmentId,
-        threadId: sourceThreadId,
-        providerSessionId: "mcp-thread-tools-provider-session",
-        providerInstanceId,
+        thread: {
+          threadId: sourceThreadId,
+          providerSessionId: "mcp-thread-tools-provider-session",
+          providerInstanceId,
+        },
         capabilities: new Set(["orchestration" as const]),
         mcpToolScope,
         issuedAt: 1,

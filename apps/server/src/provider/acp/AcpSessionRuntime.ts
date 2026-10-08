@@ -20,15 +20,14 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
-import { withExecutablePathRecovery } from "../executableRecovery.ts";
 
 import { signalProcessGroup } from "../../process/processGroup.ts";
 import { appendAcpStderrTail, sanitizeAcpStderrExcerpt } from "./AcpStderr.ts";
@@ -88,6 +87,7 @@ export interface AcpSpawnInput {
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly extendEnv?: boolean;
+  readonly shell?: false;
 }
 
 export interface AcpSessionRuntimeOptions {
@@ -1387,7 +1387,8 @@ export const make = (
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const runtimeScope = yield* Scope.Scope;
+    // A child of the caller's scope, so termination can close the runtime without closing the caller's.
+    const runtimeScope = yield* Scope.fork(yield* Scope.Scope);
     const eventQueue = yield* Queue.unbounded<AcpSessionRuntimeEvent>();
     const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
     const toolCallsRef = yield* Ref.make(new Map<string, AcpToolCallTrackedState>());
@@ -1517,6 +1518,13 @@ export const make = (
         ),
       );
 
+    const spawnCommand =
+      options.spawn.shell === false
+        ? { command: options.spawn.command, args: options.spawn.args, shell: false }
+        : yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
+            ...(options.spawn.env ? { env: options.spawn.env } : {}),
+            extendEnv: options.spawn.extendEnv ?? true,
+          });
     const linuxCgroupLease =
       options.ownDescendantProcessGroups === true && options.processGroupPlatform === "linux"
         ? yield* Effect.sync(() => {
@@ -1538,68 +1546,62 @@ export const make = (
         ),
       );
     }
-    const launch = Effect.gen(function* () {
-      const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
-        ...(options.spawn.env ? { env: options.spawn.env } : {}),
-        extendEnv: options.spawn.extendEnv ?? true,
-      });
-      const containedTargetCommand =
-        linuxCgroupLease === undefined || NodePath.isAbsolute(spawnCommand.command)
-          ? spawnCommand.command
-          : yield* Effect.gen(function* () {
-              const resolved = resolveLinuxCgroupTargetCommand(
-                spawnCommand.command,
-                options.spawn.cwd ?? options.cwd,
-                { ...process.env, ...options.spawn.env },
-              );
-              if (resolved !== undefined) return resolved;
-              return yield* new EffectAcpErrors.AcpSpawnError({
-                command: options.spawn.command,
-                cause: new Error("Contained ACP command was not found on PATH"),
-              });
+    const containedTargetCommand =
+      linuxCgroupLease === undefined || NodePath.isAbsolute(spawnCommand.command)
+        ? spawnCommand.command
+        : yield* Effect.gen(function* () {
+            const resolved = resolveLinuxCgroupTargetCommand(
+              spawnCommand.command,
+              options.spawn.cwd ?? options.cwd,
+              { ...process.env, ...options.spawn.env },
+            );
+            if (resolved !== undefined) return resolved;
+            return yield* new EffectAcpErrors.AcpSpawnError({
+              command: options.spawn.command,
+              cause: new Error("Contained ACP command was not found on PATH"),
             });
-      const containedSpawnCommand =
-        linuxCgroupLease === undefined
-          ? spawnCommand
-          : {
-              ...wrapCommandForLinuxCgroup(
-                linuxCgroupLease,
-                containedTargetCommand,
-                spawnCommand.args,
-              ),
-              shell: false,
-            };
-      const spawnEnvironment =
-        linuxCgroupLease === undefined
-          ? options.spawn.env
-          : {
-              ...options.spawn.env,
-              ELECTRON_RUN_AS_NODE: "1",
-              T3_ACP_CGROUP_WRAPPER: "1",
-            };
-      return yield* spawner
-        .spawn(
-          ChildProcess.make(containedSpawnCommand.command, containedSpawnCommand.args, {
-            ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-            ...(spawnEnvironment ? { env: spawnEnvironment } : {}),
-            extendEnv: options.spawn.extendEnv ?? true,
-            ...(options.ownDetachedProcessGroup === undefined
-              ? {}
-              : { detached: options.ownDetachedProcessGroup }),
-            shell: containedSpawnCommand.shell,
-          }),
-        )
-        .pipe(Effect.provideService(Scope.Scope, runtimeScope));
-    });
-    const child = yield* withExecutablePathRecovery(
-      options.spawn.command,
-      launch,
-      () => launch,
-    ).pipe(
-      Effect.mapError(
-        (cause) => new EffectAcpErrors.AcpSpawnError({ command: options.spawn.command, cause }),
-      ),
-    );
+          });
+    const containedSpawnCommand =
+      linuxCgroupLease === undefined
+        ? spawnCommand
+        : {
+            ...wrapCommandForLinuxCgroup(
+              linuxCgroupLease,
+              containedTargetCommand,
+              spawnCommand.args,
+            ),
+            shell: false,
+          };
+    const spawnEnvironment =
+      linuxCgroupLease === undefined
+        ? options.spawn.env
+        : {
+            ...options.spawn.env,
+            ELECTRON_RUN_AS_NODE: "1",
+            T3_ACP_CGROUP_WRAPPER: "1",
+          };
+    const child = yield* spawner
+      .spawn(
+        ChildProcess.make(containedSpawnCommand.command, containedSpawnCommand.args, {
+          ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
+          ...(spawnEnvironment ? { env: spawnEnvironment } : {}),
+          extendEnv: options.spawn.extendEnv ?? true,
+          ...(options.ownDetachedProcessGroup === undefined
+            ? {}
+            : { detached: options.ownDetachedProcessGroup }),
+          shell: containedSpawnCommand.shell,
+        }),
+      )
+      .pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.mapError(
+          (cause) =>
+            new EffectAcpErrors.AcpSpawnError({
+              command: options.spawn.command,
+              cause,
+            }),
+        ),
+      );
 
     const posixOwnershipLedger = new Map<string, AcpOwnedPosixProcess>();
     const posixOwnershipFrontier = new Map<number, AcpOwnedPosixProcess>();
@@ -1729,26 +1731,19 @@ export const make = (
       }
       yield* signalOwnedProcessGroup("SIGKILL");
     }).pipe(withWallClock);
-    const processGroupTerminationLock = yield* Semaphore.make(1);
-    const processGroupTerminatedRef = yield* Ref.make(false);
-    const terminateOwnedProcessGroup = (
-      effect: Effect.Effect<void, AcpProcessGroupTerminationError>,
-    ) =>
-      processGroupTerminationLock.withPermit(
-        Effect.gen(function* () {
-          if (yield* Ref.get(processGroupTerminatedRef)) return;
-          yield* effect;
-          yield* Ref.set(processGroupTerminatedRef, true);
-        }),
-      );
-    const terminateProcessGroup = Effect.uninterruptible(
-      terminateOwnedProcessGroup(terminateOwnedProcessGroupImpl),
+    const terminateProcessGroup = yield* Effect.cached(
+      Effect.uninterruptible(terminateOwnedProcessGroupImpl),
     );
     if (options.ownDetachedProcessGroup === true) {
       const hostPlatform = yield* HostProcessPlatform;
       const forceTerminateOwnedProcessGroup =
         hostPlatform === "win32"
-          ? terminateWindowsProcessTreeWithTaskkill(spawner, Number(child.pid))
+          ? // Explicit callers share the cached one-shot effect above so two
+            // concurrent closes do not race. A scope finalizer must use a fresh
+            // Windows taskkill attempt: an earlier explicit close can fail while
+            // the process tree is still coming down, and caching that failure
+            // would make the finalizer retry a no-op.
+            Effect.uninterruptible(terminateOwnedProcessGroupImpl)
           : linuxCgroupLease !== undefined
             ? terminateLinuxCgroupLease(linuxCgroupLease)
             : options.ownDescendantProcessGroups === true
@@ -1756,7 +1751,7 @@ export const make = (
               : signalOwnedProcessGroup("SIGKILL").pipe(Effect.asVoid);
       yield* Scope.addFinalizer(
         runtimeScope,
-        Effect.uninterruptible(terminateOwnedProcessGroup(forceTerminateOwnedProcessGroup)).pipe(
+        Effect.uninterruptible(forceTerminateOwnedProcessGroup).pipe(
           Effect.ignoreCause({ log: true }),
         ),
       );
@@ -2422,10 +2417,6 @@ export const make = (
       if (yield* Ref.get(stoppingRef)) {
         return;
       }
-      // Extension notifications and session updates share this permit. Waiting
-      // for it keeps a prompt-completion fallback from overtaking content that
-      // was already dispatched from the same native stdout batch.
-      yield* notificationSemaphore.withPermit(Effect.void);
       const acknowledge = yield* Deferred.make<void>();
       yield* notificationSemaphore.withPermit(
         Effect.gen(function* () {
@@ -2520,10 +2511,7 @@ export const make = (
       handleUnknownExtRequest: acp.handleUnknownExtRequest,
       handleUnknownExtNotification: acp.handleUnknownExtNotification,
       handleExtRequest: acp.handleExtRequest,
-      handleExtNotification: (method, payload, handler) =>
-        acp.handleExtNotification(method, payload, (notification) =>
-          notificationSemaphore.withPermit(handler(notification)),
-        ),
+      handleExtNotification: acp.handleExtNotification,
       initialize: () => initialize,
       authenticate: (methodId) =>
         initialize.pipe(

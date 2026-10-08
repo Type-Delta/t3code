@@ -15,7 +15,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import * as McpInvocationContext from "./McpInvocationContext.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
@@ -58,7 +57,7 @@ function commandId(input: {
     [
       "command",
       "mcp",
-      stablePart(McpInvocationContext.getInvocationCredentialId(input.scope) ?? ""),
+      stablePart(input.scope.requestNamespace ?? "legacy"),
       "thread-update",
       stablePart(input.threadId),
       stablePart(input.action),
@@ -140,59 +139,36 @@ const make = Effect.gen(function* () {
     scope: McpInvocationScope,
     input: ThreadMetadataMcpUpdateInput,
   ) {
-    const isManagementKey = McpInvocationContext.isManagementKeyPrincipal(scope.principal);
-    if (
-      isManagementKey
-        ? !McpInvocationContext.managementKeyCanUseTool(scope, "t3_thread_update")
-        : scope.capabilities?.has("orchestration") !== true
-    ) {
+    if (!(scope.capabilities ?? new Set()).has("orchestration")) {
       return yield* failure(
         "capability_denied",
         "This MCP credential does not grant orchestration capabilities.",
       );
     }
-    const callerThreadId = McpInvocationContext.getInvocationThreadId(scope);
-    if (!isManagementKey && callerThreadId === undefined) {
-      return yield* failure("capability_denied", "This credential has no calling thread.");
-    }
-    const threadId = input.threadId ?? callerThreadId;
+
+    const threadId = input.threadId ?? scope.thread?.threadId;
     if (threadId === undefined) {
-      return yield* failure("invalid_request", "A management key must provide threadId.");
+      return yield* failure(
+        "target_required",
+        "Pass threadId: this MCP client is not running inside a T3 thread.",
+      );
     }
-    const callerShell =
-      callerThreadId === undefined
-        ? null
-        : yield* threadManagement
-            .getThreadShell(callerThreadId)
-            .pipe(
-              Effect.mapError((error) =>
-                failure(
-                  "orchestration_error",
-                  `Unable to locate calling thread ${callerThreadId}: ${errorMessage(error)}`,
-                ),
-              ),
-            );
-    if (callerThreadId !== undefined && callerShell === null) {
-      return yield* failure("thread_not_found", `Calling thread ${callerThreadId} was not found.`);
-    }
-    const canCrossProjects = isManagementKey || scope.mcpToolScope === "global";
-    const target = canCrossProjects
-      ? yield* threadManagement
-          .getThreadRecords(threadId, [])
-          .pipe(
-            Effect.mapError((error) =>
-              failure(
-                "orchestration_error",
-                `Unable to read thread ${threadId}: ${errorMessage(error)}`,
-              ),
-            ),
-          )
-      : yield* threadManagement
-          .getProjectThreadRecords({ projectId: callerShell!.projectId, threadId }, [])
-          .pipe(Effect.mapError(threadLookupFailure));
-    if (target.thread.deletedAt !== null) {
+    const shell = yield* threadManagement
+      .getThreadShell(threadId)
+      .pipe(
+        Effect.mapError((error) =>
+          failure(
+            "orchestration_error",
+            `Unable to locate thread ${threadId}: ${errorMessage(error)}`,
+          ),
+        ),
+      );
+    if (shell === null || shell.deletedAt !== null) {
       return yield* failure("thread_not_found", `Thread ${threadId} was not found.`);
     }
+    const target = yield* threadManagement
+      .getProjectThreadRecords({ projectId: shell.projectId, threadId }, [])
+      .pipe(Effect.mapError(threadLookupFailure));
     const requestKey =
       input.clientRequestId === undefined
         ? yield* crypto.randomUUIDv4.pipe(Effect.orDie)
