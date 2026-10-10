@@ -63,7 +63,7 @@ import { ClaudeExecutableFileCheck } from "../../provider/Drivers/ClaudeExecutab
 import type { EventNdjsonLogger } from "../../provider/EventNdjsonLogger.ts";
 import {
   ProviderAdapterV2RuntimePolicy,
-  type ProviderAdapterV2Event,
+  ProviderAdapterV2Event,
   type ProviderAdapterV2TurnInput,
 } from "../ProviderAdapter.ts";
 import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
@@ -5090,6 +5090,74 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               event.type === "message.updated" &&
               event.message.text === STALE_TASK_NOTIFICATION_RESULT_TEXT,
           ),
+        );
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  // Recorded through an Anthropic-compatible proxy: the assistant frame's
+  // usage carries only input_tokens, and the stream ends right after result.
+  it.effect("completes a one-shot turn whose assistant usage omits token counts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-partial-usage");
+        const promptUuid = yield* ClaudeAdapterV2.claudePromptUuid(attemptId);
+        const echo = { user_message_uuid: promptUuid, user_message_uuids: [promptUuid] };
+        const assistant = makeAssistantTextFrame({
+          uuid: "00000000-0000-4000-8000-000000000901",
+          text: "Hi. What are we working on today?",
+        });
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "hi",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            ...assistant,
+            ...echo,
+            message: { ...Reflect.get(assistant, "message"), usage: { input_tokens: 0 } },
+          }),
+        );
+        yield* harness.offerAndWait(
+          claudeSdkFrame({
+            ...makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000902",
+              result: "Hi. What are we working on today?",
+            }),
+            ...echo,
+          }),
+        );
+        yield* Queue.shutdown(harness.sdkMessages);
+
+        yield* awaitUntil(() => harness.terminalEvents().length >= 1, "one-shot terminal");
+        let settleYields = 0;
+        yield* awaitUntil(() => settleYields++ >= 50, "no second terminal");
+        assert.lengthOf(harness.terminalEvents(), 1);
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        // The ingestor rejects an event its schema refuses, failing the run.
+        for (const event of harness.events) {
+          assert.isTrue(
+            Exit.isSuccess(Schema.decodeUnknownExit(ProviderAdapterV2Event)(event)),
+            `${event.type} must satisfy the provider event schema`,
+          );
+        }
+        assert.deepEqual(
+          harness.events.flatMap((event) =>
+            event.type === "message.updated" && event.message.role === "assistant"
+              ? [event.message.text]
+              : [],
+          ),
+          ["Hi. What are we working on today?"],
         );
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),

@@ -154,26 +154,33 @@ function claudeContextWindow(modelSelection: ModelSelection): number | null {
     : 200_000;
 }
 
+function claudeTokenCount(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : 0;
+}
+
+// Anthropic-compatible proxies can omit usage fields the SDK types as
+// required (e.g. `{ input_tokens: 0 }` alone), so every count is optional.
 export function claudeProviderTurnTokenUsage(
   usage: {
-    readonly input_tokens: number;
+    readonly input_tokens?: number | null;
     readonly cache_creation_input_tokens?: number | null;
     readonly cache_read_input_tokens?: number | null;
-    readonly output_tokens: number;
+    readonly output_tokens?: number | null;
   },
   modelSelection: ModelSelection,
   updatedAt: string,
 ) {
+  const cachedInputTokens = claudeTokenCount(usage.cache_read_input_tokens);
   const inputTokens =
-    usage.input_tokens +
-    (usage.cache_creation_input_tokens ?? 0) +
-    (usage.cache_read_input_tokens ?? 0);
-  const outputTokens = usage.output_tokens;
+    claudeTokenCount(usage.input_tokens) +
+    claudeTokenCount(usage.cache_creation_input_tokens) +
+    cachedInputTokens;
+  const outputTokens = claudeTokenCount(usage.output_tokens);
   return {
     usedTokens: inputTokens + outputTokens,
     maxTokens: claudeContextWindow(modelSelection),
     inputTokens,
-    cachedInputTokens: usage.cache_read_input_tokens ?? 0,
+    cachedInputTokens,
     outputTokens,
     reasoningOutputTokens: 0,
     updatedAt,

@@ -665,6 +665,26 @@ background-command test.
 
 **Last updated:** 2026-10-05
 
+### DL044 — Claude turns tolerate partial gateway usage
+
+Anthropic-compatible gateways can send assistant `usage` with only some token
+counts (for example `{ input_tokens: 0 }`). The Claude V2 adapter treats each
+count as optional, so live context usage stays schema-valid. Before this, the
+`provider_turn.updated` event failed provider-event validation. Ingestion then
+stopped and recorded a generic `Provider turn failed.` even though Claude had
+returned a successful result.
+
+**Implementation evidence:** `claudeProviderTurnTokenUsage` in
+`apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts` and its
+partial-usage one-shot regression test.
+
+**Recorded validation:** the regression fails on `main` with a schema-invalid
+`provider_turn.updated` and passes with the fix. A temporary orchestrator replay
+of the recorded native log reproduced the failed run and completed it after the
+fix. One unrelated Claude adapter roster test also fails on clean `main`.
+
+**Last updated:** 2026-10-09
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
