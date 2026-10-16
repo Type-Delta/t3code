@@ -72,6 +72,7 @@ describe("Codex API gateway launch configuration", () => {
       apiGateway: {
         enabled: true,
         baseUrl: configured,
+        useCodexCatalog: false,
         catalogFormat: "auto",
         authMode: "bearer",
       },
@@ -101,6 +102,7 @@ describe("Codex API gateway launch configuration", () => {
       apiGateway: {
         enabled: true,
         baseUrl: "https://proxy.example/v1",
+        useCodexCatalog: false,
         catalogFormat: "codex",
         apiKeyEnvironmentVariable: "CPA_API_KEY",
         authMode: "bearer",
@@ -131,6 +133,7 @@ describe("Codex API gateway launch configuration", () => {
         apiGateway: {
           enabled: true,
           baseUrl: "https://username:password@proxy.example/v1",
+          useCodexCatalog: false,
           catalogFormat: "auto",
           authMode: "bearer",
         },
@@ -144,6 +147,7 @@ describe("Codex API gateway launch configuration", () => {
       apiGateway: {
         enabled: true,
         baseUrl: "https://proxy.example/v1",
+        useCodexCatalog: false,
         catalogFormat: "openai",
         apiKeyEnvironmentVariable: "PROXY_API_KEY",
         authMode: "x-api-key",
@@ -156,5 +160,29 @@ describe("Codex API gateway launch configuration", () => {
       ),
       true,
     );
+  });
+
+  it("lets Codex fetch a gateway catalog with command-backed bearer auth", () => {
+    const args = codexGatewayLaunchArgv({
+      apiGateway: {
+        enabled: true,
+        baseUrl: "https://proxy.example/v1",
+        catalogFormat: "codex",
+        apiKeyEnvironmentVariable: "PROXY_API_KEY",
+        authMode: "bearer",
+        useCodexCatalog: true,
+      },
+      codexCatalogPath: "/tmp/should-not-be-used.json",
+    });
+
+    NodeAssert.ok(
+      args.includes(
+        'model_providers.t3_api_gateway.model_catalog_url="https://proxy.example/v1/models"',
+      ),
+    );
+    NodeAssert.ok(args.join(" ").includes("model_providers.t3_api_gateway.auth={command="));
+    NodeAssert.ok(args.join(" ").includes('"PROXY_API_KEY"]}'));
+    NodeAssert.ok(!args.join(" ").includes("model_catalog_json"));
+    NodeAssert.ok(!args.join(" ").includes("secret-value"));
   });
 });

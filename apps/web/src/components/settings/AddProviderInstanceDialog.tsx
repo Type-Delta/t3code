@@ -685,6 +685,7 @@ export function AddProviderInstanceDialog({
                     environment={environmentDraft}
                     idPrefix={`add-provider-${driver}`}
                     variant="dialog"
+                    showCodexCatalogToggle={driver === ProviderDriverKind.make("codex")}
                     onChange={setGatewayDraft}
                   />
                 ) : null}

@@ -17,6 +17,7 @@ export interface ApiGatewayDraft {
   readonly enabled: boolean;
   readonly baseUrl: string;
   readonly catalogUrl: string;
+  readonly useCodexCatalog: boolean;
   readonly catalogFormat: ApiGatewayCatalogFormat;
   readonly apiKeyEnvironmentVariable: string;
   readonly authMode: ApiGatewayAuthMode;
@@ -34,6 +35,7 @@ const DEFAULT_GATEWAY: ApiGatewayDraft = {
   enabled: false,
   baseUrl: "",
   catalogUrl: "",
+  useCodexCatalog: false,
   catalogFormat: "auto",
   apiKeyEnvironmentVariable: "",
   authMode: "bearer",
@@ -65,6 +67,7 @@ export function readApiGatewayDraft(config: unknown): ApiGatewayDraft {
     enabled: gateway.enabled === true,
     baseUrl: typeof gateway.baseUrl === "string" ? gateway.baseUrl : "",
     catalogUrl: typeof gateway.catalogUrl === "string" ? gateway.catalogUrl : "",
+    useCodexCatalog: gateway.useCodexCatalog === true,
     catalogFormat:
       catalogFormat === "codex" || catalogFormat === "anthropic" || catalogFormat === "openai"
         ? catalogFormat
@@ -86,6 +89,7 @@ export function configWithApiGateway(
   base.apiGateway = {
     enabled: gateway.enabled,
     baseUrl: gateway.baseUrl.trim(),
+    useCodexCatalog: gateway.useCodexCatalog,
     catalogFormat: gateway.catalogFormat,
     authMode: gateway.authMode,
     ...(gateway.catalogUrl.trim() ? { catalogUrl: gateway.catalogUrl.trim() } : {}),
@@ -205,6 +209,7 @@ interface CompatibleApiGatewaySectionProps {
   readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly idPrefix: string;
   readonly variant: "card" | "dialog";
+  readonly showCodexCatalogToggle?: boolean;
   readonly onChange: (
     nextConfig: Record<string, unknown>,
     nextEnvironment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
@@ -264,6 +269,7 @@ export function CompatibleApiGatewaySection({
   environment,
   idPrefix,
   variant,
+  showCodexCatalogToggle = false,
   onChange,
 }: CompatibleApiGatewaySectionProps) {
   const [gateway, setGateway] = useState(() => readApiGatewayDraft(value));
@@ -359,6 +365,25 @@ export function CompatibleApiGatewaySection({
             variant={variant}
             onChange={(catalogUrl) => publish({ catalogUrl })}
           />
+
+          {showCodexCatalogToggle ? (
+            <label className="flex items-start justify-between gap-3 rounded-md border border-border/60 p-2.5">
+              <span className="grid gap-0.5">
+                <span className="text-xs font-medium text-foreground">
+                  Let Codex request the model catalog
+                </span>
+                <span className="text-2xs leading-snug text-muted-foreground">
+                  Codex fetches the gateway catalog directly, including metadata its bundled catalog
+                  does not know.
+                </span>
+              </span>
+              <Switch
+                checked={gateway.useCodexCatalog}
+                onCheckedChange={(checked) => publish({ useCodexCatalog: Boolean(checked) })}
+                aria-label="Let Codex request the model catalog"
+              />
+            </label>
+          ) : null}
 
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="grid gap-1.5">

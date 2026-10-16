@@ -102,4 +102,29 @@ describe("Codex gateway launch arguments", () => {
 
     expect(environment["T3CODE_CODEX_LAUNCH_ARGS"]).not.toContain("model_catalog_json");
   });
+
+  it("does not pass the generated catalog file when Codex owns discovery", () => {
+    const apiGateway = decodeGatewaySettings({
+      enabled: true,
+      baseUrl: "https://gateway.example/v1",
+      catalogFormat: "codex",
+      authMode: "bearer",
+      useCodexCatalog: true,
+    });
+    const environment: NodeJS.ProcessEnv = {};
+
+    syncCodexGatewayLaunchArgs({
+      environment,
+      baseLaunchArgs: "",
+      apiGateway,
+      catalog: {
+        source: "network",
+        models: [{ slug: "gateway-model", name: "Gateway model" }],
+        codexCatalogPath: "/tmp/generated-codex-models.json",
+      },
+    });
+
+    expect(environment["T3CODE_CODEX_LAUNCH_ARGS"]).not.toContain("model_catalog_json");
+    expect(environment["T3CODE_CODEX_LAUNCH_ARGS"]).toContain("model_catalog_url");
+  });
 });

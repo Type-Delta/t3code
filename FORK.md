@@ -379,6 +379,11 @@ The generated Codex catalog is deep-merged from the configured Codex JSON, or th
 native `models_cache.json` when no Codex JSON is configured, with explicit custom models appended
 by slug so nested native metadata is retained.
 
+CLI-managed Codex gateways can opt into native catalog discovery. T3 configures Codex with the
+gateway's `model_catalog_url` and a command-backed bearer token reader, so Codex can use gateway
+model metadata that its bundled catalog does not contain. x-api-key gateways keep their
+environment-backed header when native discovery is enabled.
+
 **Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
 `apps/server/src/provider/{Drivers/ClaudeDriver.ts,ClaudeProvider.ts,GatewayModelCatalog.ts}`,
 `apps/server/src/textGeneration/ClaudeTextGeneration.ts`,

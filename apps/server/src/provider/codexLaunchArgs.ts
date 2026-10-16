@@ -19,12 +19,22 @@ export const appendCodexLaunchArgs = (
 ): string => [...codexLaunchArgv(launchArgs), ...additionalArgs].map(quoteCliArg).join(" ");
 
 const codexConfigValue = (value: string): string => JSON.stringify(value);
+const codexConfigArray = (values: ReadonlyArray<string>): string =>
+  `[${values.map(codexConfigValue).join(", ")}]`;
 
 const normalizeCodexResponsesBaseUrl = (url: URL): string => {
   const path = url.pathname.replace(/\/+$/, "");
   url.pathname = path.endsWith("/v1") ? path : `${path}/v1`;
   return url.toString();
 };
+
+const codexGatewayCatalogUrl = (url: URL): string => {
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = path.endsWith("/v1") ? `${path}/models` : `${path}/v1/models`;
+  return url.toString();
+};
+
+const CODEX_GATEWAY_AUTH_SCRIPT = 'process.stdout.write(process.env[process.argv[1]] ?? "")';
 
 export function codexGatewayLaunchArgv(input: {
   readonly apiGateway: ApiGatewaySettings | undefined;
@@ -50,7 +60,36 @@ export function codexGatewayLaunchArgv(input: {
           "-c",
           'model_providers.t3_api_gateway.wire_api="responses"',
         );
-        if (gateway.apiKeyEnvironmentVariable) {
+        if (gateway.useCodexCatalog) {
+          const catalogUrl = gateway.catalogUrl?.trim()
+            ? new URL(gateway.catalogUrl.trim())
+            : new URL(baseUrl);
+          if (
+            (catalogUrl.protocol === "http:" || catalogUrl.protocol === "https:") &&
+            catalogUrl.username.length === 0 &&
+            catalogUrl.password.length === 0
+          ) {
+            args.push(
+              "-c",
+              `model_providers.t3_api_gateway.model_catalog_url=${codexConfigValue(
+                gateway.catalogUrl?.trim()
+                  ? catalogUrl.toString()
+                  : codexGatewayCatalogUrl(catalogUrl),
+              )}`,
+            );
+          }
+          if (gateway.apiKeyEnvironmentVariable && gateway.authMode === "bearer") {
+            args.push(
+              "-c",
+              `model_providers.t3_api_gateway.auth={command=${codexConfigValue(process.execPath)}, args=${codexConfigArray(["-e", CODEX_GATEWAY_AUTH_SCRIPT, gateway.apiKeyEnvironmentVariable])}}`,
+            );
+          } else if (gateway.apiKeyEnvironmentVariable && gateway.authMode === "x-api-key") {
+            args.push(
+              "-c",
+              `model_providers.t3_api_gateway.env_http_headers={"x-api-key"=${codexConfigValue(gateway.apiKeyEnvironmentVariable)}}`,
+            );
+          }
+        } else if (gateway.apiKeyEnvironmentVariable) {
           args.push(
             "-c",
             gateway.authMode === "x-api-key"
@@ -63,7 +102,7 @@ export function codexGatewayLaunchArgv(input: {
       // Invalid gateway URLs remain visible in settings but are never sent to Codex.
     }
   }
-  if (input.codexCatalogPath) {
+  if (input.codexCatalogPath && !gateway?.useCodexCatalog) {
     args.push("-c", `model_catalog_json=${codexConfigValue(input.codexCatalogPath)}`);
   }
   return args;

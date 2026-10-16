@@ -128,7 +128,9 @@ export function syncCodexGatewayLaunchArgs(input: {
     codexGatewayLaunchArgv({
       apiGateway: input.apiGateway,
       codexCatalogPath:
-        input.catalog.models.length > 0 ? input.catalog.codexCatalogPath : undefined,
+        !input.apiGateway?.useCodexCatalog && input.catalog.models.length > 0
+          ? input.catalog.codexCatalogPath
+          : undefined,
     }),
   );
   input.environment[T3CODE_CODEX_LAUNCH_ARGS_ENV] = launchArgs;

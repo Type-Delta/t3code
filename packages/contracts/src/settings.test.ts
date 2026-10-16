@@ -65,6 +65,7 @@ describe("provider API gateway model settings", () => {
     expect(decoded.apiGateway).toEqual({
       enabled: true,
       baseUrl: "https://gateway.example/v1",
+      useCodexCatalog: false,
       catalogFormat: "auto",
       apiKeyEnvironmentVariable: "GATEWAY_API_KEY",
       authMode: "bearer",
