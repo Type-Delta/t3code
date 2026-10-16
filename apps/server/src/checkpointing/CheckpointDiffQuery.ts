@@ -7,6 +7,7 @@
  * @module CheckpointDiffQuery
  */
 import {
+  type CheckpointScopeId,
   OrchestrationGetTurnDiffResult,
   type OrchestrationGetFullThreadDiffInput,
   type OrchestrationGetFullThreadDiffResult,
@@ -20,7 +21,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
+import {
+  checkpointRefForScopeOrdinal,
+  sidecarSnapshotIdForScopeOrdinal,
+} from "../orchestration-v2/CheckpointService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import {
   CheckpointDiffResultInvalidError,
@@ -31,6 +35,31 @@ import {
   type CheckpointServiceError,
 } from "./Errors.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
+import { isGitImport, parseTurnDiffFilesFromNumstat, type TurnDiffFileSummary } from "./Diffs.ts";
+
+// Windows limits a command line to 32,767 characters. Leave room for the rest of git's arguments.
+const MAX_PATHSPEC_CHARS = 24_000;
+
+/** Splits files into pathspec lists that each fit on one git command line. Renames keep both paths together. */
+function batchFilePaths(files: ReadonlyArray<TurnDiffFileSummary>) {
+  const batches: string[][] = [];
+  let batch: string[] = [];
+  let length = 0;
+  for (const file of files) {
+    const paths = file.previousPath === undefined ? [file.path] : [file.previousPath, file.path];
+    // Each pathspec also carries a `:(top,literal)` prefix and a separator.
+    const size = paths.reduce((total, path) => total + path.length + 16, 0);
+    if (batch.length > 0 && length + size > MAX_PATHSPEC_CHARS) {
+      batches.push(batch);
+      batch = [];
+      length = 0;
+    }
+    batch.push(...paths);
+    length += size;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
 
 /** Service tag for checkpoint diff queries. */
 export class CheckpointDiffQuery extends Context.Service<
@@ -79,6 +108,31 @@ export const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const crypto = yield* Crypto.Crypto;
+
+  // The thread-start boundary: its sidecar snapshot, else the in-repo ref an
+  // older thread recorded. A missing ref is left to the HEAD fallback.
+  const threadBaselineRef = (scope: { readonly id: CheckpointScopeId; readonly cwd: string }) =>
+    Effect.gen(function* () {
+      const boundary = { scopeId: scope.id, ordinalWithinScope: 0 };
+      const sidecarRef = yield* sidecarSnapshotIdForScopeOrdinal(boundary).pipe(
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.flatMap((snapshotId) =>
+          checkpointStore.allocateCheckpointRef({ cwd: scope.cwd, snapshotId }),
+        ),
+        Effect.orElseSucceed(() => null),
+      );
+      if (
+        sidecarRef !== null &&
+        (yield* checkpointStore
+          .hasCheckpointRef({ cwd: scope.cwd, checkpointRef: sidecarRef })
+          .pipe(Effect.orElseSucceed(() => false)))
+      ) {
+        return sidecarRef;
+      }
+      return yield* checkpointRefForScopeOrdinal(boundary).pipe(
+        Effect.provideService(Crypto.Crypto, crypto),
+      );
+    });
 
   const getTurnDiff: CheckpointDiffQuery["Service"]["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
@@ -167,10 +221,7 @@ export const make = Effect.gen(function* () {
         input.fromTurnCount === 0
           ? firstScope === undefined
             ? undefined
-            : yield* checkpointRefForScopeOrdinal({
-                scopeId: firstScope.id,
-                ordinalWithinScope: 0,
-              }).pipe(Effect.provideService(Crypto.Crypto, crypto))
+            : yield* threadBaselineRef(firstScope)
           : readyCheckpoints.find((checkpoint) => checkpoint.appRunOrdinal === input.fromTurnCount)
               ?.ref;
       if (fromCheckpointRef === undefined) {
@@ -182,15 +233,42 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const diff = yield* checkpointStore
-        .diffCheckpoints({
-          cwd: toScope.cwd,
-          fromCheckpointRef,
-          toCheckpointRef: toCheckpoint.ref,
-          fallbackFromToHead: false,
-          ignoreWhitespace,
-        })
-        .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
+      const comparison = {
+        cwd: toScope.cwd,
+        fromCheckpointRef,
+        toCheckpointRef: toCheckpoint.ref,
+        // An older thread may have no captured baseline; it then compares
+        // against the repository HEAD instead of failing to load.
+        fallbackFromToHead: input.fromTurnCount === 0,
+        ignoreWhitespace,
+      };
+      // Leave out files that a pull, merge, or rebase brought in, matching the turn's file summary.
+      // Filtering is optional: when it cannot run, the complete diff still loads.
+      const authoredPaths = yield* checkpointStore
+        .listAuthoredPaths(comparison)
+        .pipe(Effect.orElseSucceed(() => null));
+      const files =
+        authoredPaths === null
+          ? []
+          : yield* checkpointStore.diffCheckpoints({ ...comparison, format: "numstat" }).pipe(
+              Effect.map(parseTurnDiffFilesFromNumstat),
+              Effect.orElseSucceed(() => []),
+            );
+      const retainedFiles = files.filter((file) => !isGitImport(file, authoredPaths));
+      // Select retained paths before generating a patch, so imported bulk cannot exhaust its output limit.
+      const diff =
+        retainedFiles.length === files.length
+          ? yield* checkpointStore
+              .diffCheckpoints(comparison)
+              .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"))
+          : (yield* Effect.forEach(
+              batchFilePaths(retainedFiles),
+              (filePaths) =>
+                checkpointStore
+                  .diffCheckpoints({ ...comparison, filePaths })
+                  .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints")),
+              { concurrency: 4 },
+            )).join("");
 
       const turnDiff = buildTurnDiffResult(input, diff);
       if (!isTurnDiffResult(turnDiff)) {

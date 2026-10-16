@@ -9,6 +9,7 @@ import {
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
+  type ProjectId,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -118,17 +119,49 @@ const managementToolScopes: Readonly<Record<string, ManagementApiKeyScope>> = {
   t3_thread_configure: "threads:message",
   t3_thread_fork: "threads:message",
   t3_thread_merge_back: "threads:message",
+  write_pull_request_guides: "pullRequests:review",
+  read_pull_request_guide: "pullRequests:review",
 };
 export const managementMcpToolScope = (name: string): ManagementApiKeyScope | undefined =>
   managementToolScopes[name];
 export const isManagementMcpToolAllowed = (name: string) =>
   managementMcpToolScope(name) !== undefined;
+const managementToolCapabilities: Readonly<Record<string, McpCapability>> = {
+  write_pull_request_guides: "pull-requests",
+  read_pull_request_guide: "pull-requests",
+};
+export const managementMcpToolCapability = (name: string): McpCapability | undefined =>
+  managementToolCapabilities[name];
 export const isManagementKeyPrincipal = (
   p: McpPrincipal | undefined,
 ): p is Extract<McpPrincipal, { type: "management-key" }> => p?.type === "management-key";
 export const isProviderSessionPrincipal = (
   p: McpPrincipal | undefined,
 ): p is Extract<McpPrincipal, { type: "provider-session" }> => p?.type === "provider-session";
+/** Whether this invocation may address records outside its calling project. */
+export const canCrossProjects = (invocation: McpInvocationScope): boolean =>
+  isManagementKeyPrincipal(invocation.principal) ||
+  (isProviderSessionPrincipal(invocation.principal)
+    ? invocation.mcpToolScope === "global"
+    : invocation.mcpToolScope !== "project");
+
+/**
+ * Refuse a project target outside a project-scoped provider session. A scoped
+ * caller whose own project is unknown can address no project at all.
+ */
+export const assertProjectAllowed = (
+  invocation: McpInvocationScope,
+  caller: { readonly projectId: ProjectId } | undefined,
+  projectId: ProjectId,
+  denied = new OrchestratorMcpFailure({
+    code: "invalid_request",
+    message: "The project was not found.",
+  }),
+): Effect.Effect<void, OrchestratorMcpFailure> =>
+  !canCrossProjects(invocation) && caller?.projectId !== projectId
+    ? Effect.fail(denied)
+    : Effect.void;
+
 export const managementKeyCanUseTool = (invocation: McpInvocationScope, name: string) =>
   isManagementKeyPrincipal(invocation.principal) &&
   invocation.principal.scopes.has(

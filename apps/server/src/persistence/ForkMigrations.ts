@@ -2,7 +2,9 @@
 import * as NodeCrypto from "node:crypto";
 
 import * as Effect from "effect/Effect";
+import type { SchemaError } from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 
 import CheckpointDurableState from "./Migrations/036_CheckpointDurableState.ts";
 import CheckpointLegacyMigration from "./Migrations/037_CheckpointLegacyMigration.ts";
@@ -12,6 +14,24 @@ import AutoResumeJobs from "./Migrations/051_AutoResumeJobs.ts";
 import ProjectionThreadMessageSuggestions from "./Migrations/062_ProjectionThreadMessageSuggestions.ts";
 
 const noOp = Effect.void;
+
+/**
+ * Older fork builds appended these names to effect_sql_migrations at ids that
+ * are now owned by upstream. They are historical fork records, so conversion
+ * must identify them by name and move them to the fork ledger before the
+ * upstream migrator's id-clash guard runs.
+ */
+const historicalForkRecordNames = new Set([
+  "ProjectionThreadsActiveOrderKey",
+  "ProjectionThreadPullRequests",
+  "ProjectionThreadMessageContext",
+  "ProjectionThreadMessageSuggestions",
+  "ProjectionThreadTitleState",
+  "PullRequestFilesViewed",
+  "ReconcileBranchPullRequestHistory",
+  "ProjectionThreadsAutoSettleDisabledAt",
+  "CoreV2Cutover",
+]);
 
 /** The fork ledger is independent of upstream's effect_sql_migrations table. */
 export const forkMigrationEntries = [
@@ -107,7 +127,7 @@ export const forkMigrationManifest = forkMigrationEntries.map(([id, name]) => [i
 // This migration removes columns that older fork builds added after recording
 // the entry. Re-run its guarded cleanup so a partially converted database is
 // repaired on the next boot.
-const repairOnEveryRun = new Set([7]);
+const repairOnEveryRun = new Set([3, 7]);
 
 /** Run the independent fork ledger. Effect's numeric migrator assumes a
  * contiguous history and skips holes below the highest applied id, while
@@ -129,6 +149,11 @@ export const runForkMigrations = Effect.fn("runForkMigrations")(function* () {
     Effect.gen(function* () {
       for (const [id, name, migration] of forkMigrationEntries) {
         if (appliedIds.has(id) && !repairOnEveryRun.has(id)) continue;
+        if (id === 3) {
+          const tables = yield* sql<{ readonly name: string }>`
+            SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'checkpoint_capture_jobs'`;
+          if (tables.length === 0) continue;
+        }
         yield* migration;
         if (!appliedIds.has(id)) {
           yield* sql`INSERT INTO fork_sql_migrations (migration_id, name)
@@ -143,6 +168,11 @@ export const runForkMigrations = Effect.fn("runForkMigrations")(function* () {
 });
 
 type Manifest = ReadonlyArray<readonly [number, string]>;
+type MigrationEntry = readonly [
+  number,
+  string,
+  Effect.Effect<unknown, SqlError | SchemaError, SqlClient.SqlClient>,
+];
 type MigrationRow = {
   readonly migration_id: number;
   readonly name: string;
@@ -158,6 +188,47 @@ const readHistory = Effect.gen(function* () {
     : yield* sql<MigrationRow>`SELECT migration_id, name, created_at FROM effect_sql_migrations ORDER BY migration_id`;
 });
 
+/**
+ * Effect's migrator only considers IDs above the recorded high-water mark.
+ * Reconciliation can deliberately remove a fork row from an upstream slot,
+ * leaving a lower upstream migration absent while later migrations remain.
+ * Run those free slots explicitly before the normal migrator resumes.
+ */
+export const runMissingUpstreamMigrations = Effect.fn("runMissingUpstreamMigrations")(function* (
+  entries: ReadonlyArray<MigrationEntry>,
+  toMigrationInclusive?: number,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const tables =
+    yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
+  if (tables.length === 0) return [] as Array<readonly [number, string]>;
+
+  const rows = yield* sql<MigrationRow>`
+    SELECT migration_id, name, created_at FROM effect_sql_migrations ORDER BY migration_id
+  `;
+  const highestRecordedId = Math.max(0, ...rows.map((row) => row.migration_id));
+  const limit = Math.min(toMigrationInclusive ?? highestRecordedId, highestRecordedId);
+  const recordedNames = new Set(rows.map((row) => row.name));
+  const occupiedIds = new Set(rows.map((row) => row.migration_id));
+  const missing = entries.filter(
+    ([id, name]) => id <= limit && !recordedNames.has(name) && !occupiedIds.has(id),
+  );
+  if (missing.length === 0) return [] as Array<readonly [number, string]>;
+
+  const executed: Array<readonly [number, string]> = [];
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      for (const [id, name, migration] of missing) {
+        yield* Effect.orDie(migration);
+        yield* sql`INSERT INTO effect_sql_migrations (migration_id, name)
+          VALUES (${id}, ${name})`;
+        executed.push([id, name]);
+      }
+    }),
+  );
+  return executed;
+});
+
 /** Snapshot the complete SQLite database, including WAL contents, before a
  * one-way ledger conversion. Memory-only fixtures have no file to copy. */
 export const backupMigrationHistory = Effect.fn("backupMigrationHistory")(function* (
@@ -167,7 +238,8 @@ export const backupMigrationHistory = Effect.fn("backupMigrationHistory")(functi
   const byName = new Map(manifest.map(([id, name]) => [name, id]));
   const needsConversion = rows.some(
     (row) =>
-      forkMigrationManifest.some(([, name]) => name === row.name && !byName.has(name)) ||
+      (row.migration_id >= 59 && historicalForkRecordNames.has(row.name)) ||
+      (forkMigrationManifest.some(([, name]) => name === row.name) && !byName.has(row.name)) ||
       row.name === "ThreadSummaryTimeline" ||
       (byName.has(row.name) && byName.get(row.name) !== row.migration_id),
   );
@@ -193,6 +265,7 @@ export const reconcileForkMigrationHistory = Effect.fn("reconcileForkMigrationHi
   const forkNames = new Map<string, number>(forkMigrationManifest.map(([id, name]) => [name, id]));
   const needsConversion = rows.some(
     (row) =>
+      (row.migration_id >= 59 && historicalForkRecordNames.has(row.name)) ||
       (forkNames.has(row.name) && !upstreamByName.has(row.name)) ||
       row.name === "ThreadSummaryTimeline" ||
       (upstreamByName.has(row.name) && upstreamByName.get(row.name) !== row.migration_id),
@@ -210,6 +283,19 @@ export const reconcileForkMigrationHistory = Effect.fn("reconcileForkMigrationHi
       const forkRows = new Map<number, MigrationRow>();
       const knownIds = new Set<number>();
       for (const row of rows) {
+        const isHistoricalForkRecord =
+          row.migration_id >= 59 && historicalForkRecordNames.has(row.name);
+        // IDs 59-67 were occupied by fork migrations in deployed builds. The
+        // row's name is authoritative; do not reinterpret it as the current
+        // upstream migration with the same name.
+        if (isHistoricalForkRecord) {
+          knownIds.add(row.migration_id);
+          forkRows.set(row.migration_id, row);
+          continue;
+        }
+        // The old fork applied thread pinning at 41, but some deployments
+        // recorded a site-local timeline name in that slot. Its schema is the
+        // upstream 36 migration, so preserve that fact by name during cutover.
         const upstreamId = row.name === "ThreadSummaryTimeline" ? 36 : upstreamByName.get(row.name);
         const forkId = forkNames.get(row.name);
         if (upstreamId !== undefined) {
@@ -232,7 +318,7 @@ export const reconcileForkMigrationHistory = Effect.fn("reconcileForkMigrationHi
         for (const id of equivalents) {
           if (!upstreamRows.has(id)) upstreamRows.set(id, { ...row, name: upstreamNames.get(id)! });
         }
-        if (row.name === "CoreV2Cutover") {
+        if (row.name === "CoreV2Cutover" && row.migration_id < 59) {
           for (const [id, name] of forkMigrationManifest) {
             if (id <= 11 && !forkRows.has(id)) forkRows.set(id, { ...row, migration_id: id, name });
           }

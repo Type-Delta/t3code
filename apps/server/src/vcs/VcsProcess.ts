@@ -113,6 +113,35 @@ const isTransientGitExit = (stderr: string) =>
   /unable to create [^\n]*\.lock['"]?: file exists/i.test(stderr) ||
   /(?:unable to stat|lstat\(|error: open\()[^\n]+: no such file or directory/i.test(stderr);
 
+// Variables that bind Git to a repository instead of the command's cwd.
+const GIT_REPOSITORY_BINDINGS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+] as const;
+
+/**
+ * Drops repository bindings the server inherited, e.g. when started from a Git
+ * hook, so every Git command resolves its own cwd. A binding an operation sets
+ * to its own value, such as a private `GIT_INDEX_FILE`, is kept.
+ */
+const gitCommandEnvironment = (
+  env: NodeJS.ProcessEnv | undefined,
+): NodeJS.ProcessEnv | undefined => {
+  const inherited = GIT_REPOSITORY_BINDINGS.filter((key) => process.env[key] !== undefined);
+  if (inherited.length === 0) return env;
+  const sanitized: NodeJS.ProcessEnv = { ...env };
+  for (const key of inherited) {
+    if (sanitized[key] === undefined || sanitized[key] === process.env[key]) {
+      sanitized[key] = undefined;
+    }
+  }
+  return sanitized;
+};
+
 export const make = Effect.gen(function* () {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const vcsProcesses = yield* Semaphore.make(VCS_PROCESS_CONCURRENCY);
@@ -126,6 +155,7 @@ export const make = Effect.gen(function* () {
       argumentCount: input.args.length,
     };
 
+    const env = input.command === "git" ? gitCommandEnvironment(input.env) : input.env;
     const result = yield* processRunner
       .run({
         command: input.command,
@@ -134,7 +164,7 @@ export const make = Effect.gen(function* () {
         ...(input.spawnCwd !== undefined ? { spawnCwd: input.spawnCwd } : {}),
         ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
         ...(input.onStdoutChunk !== undefined ? { onStdoutChunk: input.onStdoutChunk } : {}),
-        ...(input.env !== undefined ? { env: input.env } : {}),
+        ...(env !== undefined ? { env } : {}),
         timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         maxOutputBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
         outputMode: input.outputMode ?? "truncate",

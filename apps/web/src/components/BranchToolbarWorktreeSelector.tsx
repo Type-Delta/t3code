@@ -6,32 +6,40 @@ import type {
   WorktreePickerModel,
   WorktreePickerOption,
 } from "./BranchToolbar.logic";
+import { ComposerSelectControl } from "./chat/ComposerControl";
+import { useComposerMenuProps } from "./chat/composerEventScope";
+import { ComposerContextLabel } from "./ComposerContextLabel";
 import {
   Select,
   SelectGroup,
   SelectGroupLabel,
   SelectItem,
   SelectPopup,
-  SelectTrigger,
   SelectValue,
 } from "./ui/select";
-import { cn } from "../lib/utils";
 
 interface BranchToolbarWorktreeSelectorProps {
-  className?: string;
   model: WorktreePickerModel | null;
   locked: boolean;
   lockedDisplay: WorktreeDisplay | null;
   onWorktreeChange: (worktree: WorktreePickerOption) => void;
 }
 
+function WorktreeIcon({ isPrimary }: { isPrimary: boolean | undefined }) {
+  return isPrimary ? <FolderIcon className="size-3" /> : <FolderGitIcon className="size-3" />;
+}
+
+/**
+ * Pins a Current checkout draft to an existing Git worktree. Once the thread
+ * exists, the choice is shown as an immutable label.
+ */
 export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktreeSelector({
-  className,
   model,
   locked,
   lockedDisplay,
   onWorktreeChange,
 }: BranchToolbarWorktreeSelectorProps) {
+  const composerFloatingLayerProps = useComposerMenuProps();
   const selectedWorktree = model?.options.find((worktree) => worktree.path === model.value);
 
   if (locked) {
@@ -39,17 +47,12 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
     if (!display) return null;
     return (
       <span
-        className={cn(
-          "inline-flex min-w-0 items-center gap-1 border border-transparent px-2.75 text-sm font-medium text-muted-foreground/70 sm:text-xs",
-          className,
-        )}
+        className="inline-flex h-7 min-w-0 items-center gap-1 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-xs sm:h-6"
+        aria-label={`Worktree: ${display.label}`}
+        data-composer-context-control
       >
-        {display.isPrimary ? (
-          <FolderIcon className="size-3 shrink-0" />
-        ) : (
-          <FolderGitIcon className="size-3 shrink-0" />
-        )}
-        <span className="truncate">{display.label}</span>
+        <WorktreeIcon isPrimary={display.isPrimary} />
+        <ComposerContextLabel>{display.label}</ComposerContextLabel>
       </span>
     );
   }
@@ -66,31 +69,24 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
       }}
       items={model.options.map((worktree) => ({ value: worktree.path, label: worktree.label }))}
     >
-      <SelectTrigger
-        variant="ghost"
-        weight="medium"
+      <ComposerSelectControl
         size="xs"
-        className={cn("min-w-0", className)}
+        className="min-w-0 shrink"
         aria-label="Worktree"
+        data-composer-context-control
       >
-        {selectedWorktree?.isPrimary ? (
-          <FolderIcon className="size-3 shrink-0" />
-        ) : (
-          <FolderGitIcon className="size-3 shrink-0" />
-        )}
-        <SelectValue>{selectedWorktree?.label}</SelectValue>
-      </SelectTrigger>
-      <SelectPopup>
+        <WorktreeIcon isPrimary={selectedWorktree?.isPrimary} />
+        <ComposerContextLabel>
+          <SelectValue />
+        </ComposerContextLabel>
+      </ComposerSelectControl>
+      <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
         <SelectGroup>
           <SelectGroupLabel>Worktree</SelectGroupLabel>
           {model.options.map((worktree) => (
             <SelectItem key={worktree.path} value={worktree.path}>
               <span className="inline-flex min-w-0 items-center gap-1.5">
-                {worktree.isPrimary ? (
-                  <FolderIcon className="size-3 shrink-0" />
-                ) : (
-                  <FolderGitIcon className="size-3 shrink-0" />
-                )}
+                <WorktreeIcon isPrimary={worktree.isPrimary} />
                 <span className="truncate">{worktree.label}</span>
               </span>
             </SelectItem>

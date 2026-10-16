@@ -2,6 +2,7 @@ import {
   CommandId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
   RunAttemptId,
@@ -119,6 +120,35 @@ export interface EventSinkV2Shape {
     },
     EventSinkV2Error
   >;
+  /**
+   * Atomically commit only while the stored provider thread still equals
+   * `expected`, the row its writer read, so a read-modify-write of the row
+   * cannot overwrite an update published in between. The whole row is
+   * compared because not every writer moves `updatedAt`.
+   */
+  readonly writeIfProviderThreadUnchanged: (input: {
+    readonly expected: OrchestrationV2ProviderThread;
+    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+  }) => Effect.Effect<
+    {
+      readonly committed: boolean;
+      readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+    },
+    EventSinkV2Error
+  >;
+  /**
+   * Atomically removes ended tasks from a provider thread's background roster
+   * and keeps the rest of the stored row. A run that no longer owns the thread
+   * uses it so its late "task ended" updates still land without overwriting
+   * the newer run's snapshot. Writes nothing when no listed task is pending.
+   */
+  readonly removeProviderThreadBackgroundTasks: (input: {
+    readonly eventId: OrchestrationV2DomainEvent["id"];
+    readonly threadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly taskIds: ReadonlySet<string>;
+    readonly occurredAt: DateTime.Utc;
+  }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly commitCommand: (input: {
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
@@ -509,6 +539,82 @@ const layerBase: Layer.Layer<
       );
     });
 
+    const writeIfProviderThreadUnchangedEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeIfProviderThreadUnchanged",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfProviderThreadUnchanged"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.event_count": input.events.length,
+        "orchestration_v2.provider_thread_id": input.expected.id,
+      });
+      const expectedJson = yield* ProjectionStore.encodeProviderThreadPayload(input.expected);
+
+      return yield* commitThenPublish(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly payload_json: string }>`
+            SELECT payload_json
+            FROM orchestration_v2_projection_provider_threads
+            WHERE provider_thread_id = ${input.expected.id}
+            LIMIT 1
+          `;
+          if (rows[0]?.payload_json !== expectedJson) {
+            return {
+              committed: false as const,
+              storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+            };
+          }
+
+          const normalized = yield* normalizeEvents(input.events);
+          const storedEvents = yield* eventStore.append({ events: normalized });
+          yield* applyStoredEvents(storedEvents);
+          return { committed: true as const, storedEvents };
+        }),
+        (result) => (result.committed ? publishStoredEvents(result.storedEvents) : Effect.void),
+      );
+    });
+
+    const removeProviderThreadBackgroundTasksEffect = Effect.fn(
+      "orchestrationV2.EventSink.removeProviderThreadBackgroundTasks",
+    )(function* (input: Parameters<EventSinkV2Shape["removeProviderThreadBackgroundTasks"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.provider_thread_id": input.providerThreadId,
+        "orchestration_v2.task_count": input.taskIds.size,
+      });
+      return yield* commitThenPublish(
+        Effect.gen(function* () {
+          const { providerThreads } = yield* projectionStore.getThreadRecords(input.threadId, [
+            "providerThreads",
+          ]);
+          const providerThread = providerThreads.find(
+            (candidate) => candidate.id === input.providerThreadId,
+          );
+          const tasks = providerThread?.pendingBackgroundTasks ?? [];
+          const remaining = tasks.filter((task) => !input.taskIds.has(task.taskId));
+          if (providerThread === undefined || remaining.length === tasks.length) {
+            return [] as ReadonlyArray<OrchestrationV2StoredEvent>;
+          }
+          const normalized = yield* normalizeEvents([
+            {
+              id: input.eventId,
+              type: "provider-thread.updated",
+              threadId: input.threadId,
+              driver: providerThread.driver,
+              providerInstanceId: providerThread.providerInstanceId,
+              occurredAt: input.occurredAt,
+              payload: {
+                ...providerThread,
+                pendingBackgroundTasks: remaining,
+                updatedAt: input.occurredAt,
+              },
+            },
+          ]);
+          const storedEvents = yield* eventStore.append({ events: normalized });
+          yield* applyStoredEvents(storedEvents);
+          return storedEvents;
+        }),
+        publishStoredEvents,
+      );
+    });
+
     const existingCommandResult = (commandId: CommandId) =>
       Effect.gen(function* () {
         const existing = yield* commandReceipts.getByCommandId(commandId);
@@ -803,6 +909,16 @@ const layerBase: Layer.Layer<
                 cause,
               }),
           ),
+        ),
+      writeIfProviderThreadUnchanged: (input) =>
+        writeIfProviderThreadUnchangedEffect(input).pipe(
+          Effect.mapError(
+            (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
+          ),
+        ),
+      removeProviderThreadBackgroundTasks: (input) =>
+        removeProviderThreadBackgroundTasksEffect(input).pipe(
+          Effect.mapError((cause) => new EventSinkWriteError({ eventCount: 1, cause })),
         ),
       commitCommand: (input) =>
         commitCommandEffect(input).pipe(

@@ -12,7 +12,7 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 import type { VcsDriverKind } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as VcsDriver from "../VcsDriver.ts";
 
 function normalizePathForComparison(value: string, platform: NodeJS.Platform): string {
@@ -76,7 +76,7 @@ export function runVcsDriverContractSuite<R, E>(input: VcsDriverContractSuiteInp
           yield* input.fixture.writeFile(cwd, "src/index.ts", "export const value = 1;\n");
           const identity = yield* driver.detectRepository(cwd);
           assert.equal(identity?.kind, input.kind);
-          const platform = yield* HostProcessPlatform;
+          const platform = yield* HostProcess.Platform;
           // Effect's lexical Windows fallback preserves 8.3 aliases while
           // Git expands them. Native realpath gives both values the same
           // canonical long-path spelling before this strict identity check.

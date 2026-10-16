@@ -124,7 +124,8 @@ describe("VcsDriverRegistry", () => {
         yield* fs.remove(path.join(repoDir, ".git"), { recursive: true });
 
         assert.equal(yield* registry.detect({ cwd: repoDir }), null);
-        assert.equal(calls.filter((call) => call === "rev-parse --is-inside-work-tree").length, 2);
+        // Without a `.git` entry the second detection is answered by stats alone.
+        assert.equal(calls.filter((call) => call === "rev-parse --is-inside-work-tree").length, 1);
       }).pipe(Effect.provide(makeDiskBackedLayer(repoDir, calls)));
     }).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -189,8 +190,78 @@ describe("VcsDriverRegistry", () => {
         yield* fs.makeDirectory(path.join(repoDir, ".git"));
 
         assert.equal((yield* registry.detect({ cwd: repoDir }))?.repository.rootPath, repoDir);
-        assert.equal(calls.filter((call) => call === "rev-parse --is-inside-work-tree").length, 2);
+        // The negative lookup was answered by stats, so only the hit reached git.
+        assert.equal(calls.filter((call) => call === "rev-parse --is-inside-work-tree").length, 1);
       }).pipe(Effect.provide(makeDiskBackedLayer(repoDir, calls)));
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("ignores Git repository bindings the server inherited", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.realPath(
+        yield* fs.makeTempDirectoryScoped({ prefix: "t3-vcs-registry-env-" }),
+      );
+      const decoy = path.join(root, "decoy");
+      const project = path.join(root, "project");
+      const other = path.join(root, "other");
+      yield* fs.makeDirectory(decoy);
+      yield* fs.makeDirectory(project);
+      yield* fs.makeDirectory(other);
+      yield* fs.writeFileString(path.join(decoy, "decoy.txt"), "decoy\n");
+      yield* fs.writeFileString(path.join(project, "project.txt"), "project\n");
+
+      yield* Effect.gen(function* () {
+        const vcsProcess = yield* VcsProcess.VcsProcess;
+        for (const cwd of [decoy, project, other]) {
+          yield* vcsProcess.run({
+            operation: "test.init",
+            command: "git",
+            cwd,
+            args: ["-C", cwd, "init"],
+          });
+        }
+        const bindings = { GIT_DIR: path.join(decoy, ".git"), GIT_WORK_TREE: decoy };
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            const previous = {
+              GIT_DIR: process.env.GIT_DIR,
+              GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+            };
+            Object.assign(process.env, bindings);
+            return previous;
+          }),
+          (previous) =>
+            Effect.sync(() => {
+              for (const [key, value] of Object.entries(previous)) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+              }
+            }),
+        );
+
+        const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
+        const handle = yield* registry.resolve({ cwd: project });
+        assert.equal(handle.repository.rootPath, project);
+        const files = yield* handle.driver.listWorkspaceFiles(project);
+        assert.deepEqual(files.paths, ["project.txt"]);
+        // An operation's own binding still applies.
+        const own = yield* handle.driver.execute({
+          operation: "test.ownBinding",
+          cwd: project,
+          args: ["rev-parse", "--absolute-git-dir"],
+          env: { GIT_DIR: path.join(other, ".git") },
+        });
+        assert.equal(own.stdout.trim(), path.join(other, ".git"));
+      }).pipe(
+        Effect.provide(
+          VcsDriverRegistry.layer.pipe(
+            Layer.provideMerge(VcsProcess.layer),
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

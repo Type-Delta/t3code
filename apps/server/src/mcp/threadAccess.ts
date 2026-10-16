@@ -23,16 +23,20 @@ export const unavailable = () =>
   });
 
 /** Decider string rejections are public; wrapped storage and hydration causes are not. */
-export const dispatchFailure = (error: OrchestratorV2Error) =>
-  (error._tag === "OrchestratorDispatchError" ||
-    error._tag === "OrchestratorCommandRejectedError") &&
-  typeof error.cause === "string" &&
-  error.cause.length > 0
-    ? new OrchestratorMcpFailure({
-        code: "orchestration_error",
-        message: Array.from(error.cause).slice(0, 1000).join(""),
-      })
-    : unavailable();
+export const dispatchFailure = (
+  error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
+) =>
+  error._tag === "ThreadManagementProviderInstanceDisabledError"
+    ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.message })
+    : (error._tag === "OrchestratorDispatchError" ||
+          error._tag === "OrchestratorCommandRejectedError") &&
+        typeof error.cause === "string" &&
+        error.cause.length > 0
+      ? new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: Array.from(error.cause).slice(0, 1000).join(""),
+        })
+      : unavailable();
 
 /**
  * The most a caller may hand to the threads it targets. A thread caller is
@@ -51,6 +55,8 @@ export interface Caller {
   readonly caller: OrchestrationV2ThreadShell | undefined;
   readonly limits: CallerLimits;
 }
+
+export const assertProjectAllowed = McpInvocationContext.assertProjectAllowed;
 
 export const readCaller = Effect.fn("mcp.readCaller")(function* () {
   const scope = yield* McpInvocationContext.McpInvocationContext;
@@ -186,6 +192,16 @@ export const readThread = Effect.fn("mcp.readThread")(function* <
       message: "The thread was not found.",
     });
   }
+  if (
+    context.caller !== undefined &&
+    !McpInvocationContext.canCrossProjects(context.scope) &&
+    shell.projectId !== context.caller.projectId
+  ) {
+    return yield* new OrchestratorMcpFailure({
+      code: "thread_not_found",
+      message: "The thread was not found.",
+    });
+  }
   const projection = yield* context.threads
     .getProjectThreadRecords({ projectId: shell.projectId, threadId: targetId }, fields, {
       turnItemTypes: ["user_input_request"],
@@ -205,5 +221,5 @@ export const readThread = Effect.fn("mcp.readThread")(function* <
 
 export const newCommandId = Effect.fn("mcp.newCommandId")(function* () {
   const crypto = yield* Crypto.Crypto;
-  return CommandId.make(`mcp:${yield* crypto.randomUUIDv4.pipe(Effect.orDie)}`);
+  return CommandId.make(`mcp:${yield* crypto.randomUUIDv4().pipe(Effect.orDie)}`);
 });

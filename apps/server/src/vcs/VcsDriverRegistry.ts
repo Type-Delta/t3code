@@ -104,18 +104,37 @@ export const make = Effect.gen(function* () {
     } satisfies VcsDriverHandle;
   });
 
+  // True when some folder from the cwd up to the filesystem root holds `.git`.
+  // Walks the real path, as git does, so a symlinked workspace finds its repository.
+  const hasGitEntryAbove = Effect.fn("VcsDriverRegistry.hasGitEntryAbove")(function* (cwd: string) {
+    let folder = yield* fileSystem
+      .realPath(cwd)
+      .pipe(Effect.orElseSucceed(() => path.resolve(cwd)));
+    while (true) {
+      if (yield* fileSystem.exists(path.join(folder, ".git"))) return true;
+      const parent = path.dirname(folder);
+      if (parent === folder) return false;
+      folder = parent;
+    }
+  });
+
   const detectResolvedKind = Effect.fn("VcsDriverRegistry.detectResolvedKind")(function* (input: {
     readonly cwd: string;
     readonly requestedKind: VcsDriverKind | "auto";
   }) {
     const requestedKind = input.requestedKind;
-
-    if (requestedKind !== "auto" && requestedKind !== "unknown") {
-      const driver = yield* get(requestedKind);
-      return yield* detectWithDriver(requestedKind, driver, input.cwd);
+    const kind = requestedKind !== "auto" && requestedKind !== "unknown" ? requestedKind : "git";
+    // A negative detection is never cached, and status polls, reviews, and
+    // checkpoints all detect every open cwd. Without a `.git` entry above the
+    // cwd there is no repository, so stats answer it before git is spawned.
+    if (
+      kind === "git" &&
+      !(yield* hasGitEntryAbove(input.cwd).pipe(Effect.orElseSucceed(() => true)))
+    ) {
+      return null;
     }
-
-    return yield* detectWithDriver("git", git, input.cwd);
+    const driver = yield* get(kind);
+    return yield* detectWithDriver(kind, driver, input.cwd);
   });
 
   // The cwd and each parent below the repository root. A new `.git` in any of

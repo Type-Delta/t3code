@@ -1,4 +1,4 @@
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -86,7 +86,7 @@ const makeFakeArchives = Effect.fn("test.makeFakeArchives")(function* () {
     );
     yield* fs.chmod(path.join(contentDir, "t3"), 0o755);
     let archiveInput = stem;
-    if ((yield* HostProcessPlatform) === "win32") {
+    if ((yield* HostProcess.Platform) === "win32") {
       // Give the source archive a POSIX helper mode that NTFS cannot retain.
       const metadata = path.join(stage, "source.mtree");
       const described = yield* run("tar", ["--format=mtree", "-cf", metadata, stem], {
@@ -196,7 +196,7 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
       );
       assert.isTrue(yield* fs.exists(path.join(linuxDir, "node_modules/node-pty")));
       // NTFS cannot expose POSIX execute bits; verify the published archive below.
-      if ((yield* HostProcessPlatform) !== "win32") {
+      if ((yield* HostProcess.Platform) !== "win32") {
         assert.equal(Number((yield* fs.stat(path.join(linuxDir, "t3"))).mode) & 0o111, 0o111);
       }
 
@@ -287,8 +287,8 @@ it.layer(NodeServices.layer)("build-npm-platform-packages", (it) => {
 
       // NODE_PATH stands in for node_modules: require.resolve finds the
       // platform package there exactly as it would after `npm install`.
-      const hostPlatform = yield* HostProcessPlatform;
-      const hostArch = yield* HostProcessArchitecture;
+      const hostPlatform = yield* HostProcess.Platform;
+      const hostArch = yield* HostProcess.Architecture;
       const env = { ...process.env, NODE_PATH: fixture.outputDir } as Record<string, string>;
       if (KEYS.some((key) => key === `${hostPlatform}-${hostArch}`)) {
         const passthrough = yield* run(process.execPath, ["bin/t3.js", "serve", "--port", "1234"], {

@@ -8,6 +8,8 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
 import {
@@ -29,14 +31,25 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
+/**
+ * Bounds one checkpoint capture attempt. A capture runs many VCS calls, each
+ * with its own process timeout, so a hung backend would otherwise hold the
+ * effect for minutes per attempt and keep a `waiting` run open that long.
+ */
+export const CHECKPOINT_CAPTURE_TIMEOUT = Duration.minutes(2);
+
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
   "OrchestrationEffectExecutionError",
   {
     effectId: Schema.String,
     effectType: Schema.String,
     cause: Schema.optional(Schema.Defect()),
+    /** The worker retries the effect even after its last attempt. */
+    retryAfterLastAttempt: Schema.optional(Schema.Boolean),
   },
 ) {}
+
+const isOrchestrationEffectExecutionError = Schema.is(OrchestrationEffectExecutionError);
 
 /**
  * Pure interrupt races with hard process teardown or a dead session produce
@@ -162,46 +175,73 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "provider-turn.interrupt":
+          case "provider-turn.interrupt": {
+            const request = effect.request;
             return providerTurnControl
               .interrupt({
                 threadId: effect.threadId,
-                providerSessionId: effect.request.providerSessionId,
-                providerThreadId: effect.request.providerThreadId,
-                providerTurnId: effect.request.providerTurnId,
+                providerSessionId: request.providerSessionId,
+                providerThreadId: request.providerThreadId,
+                providerTurnId: request.providerTurnId,
+                ...(request.subagent === undefined
+                  ? {}
+                  : {
+                      subagent: {
+                        ...request.subagent,
+                        requestedAt: DateTime.makeUnsafe(effect.createdAt),
+                      },
+                    }),
               })
               .pipe(
+                Effect.tapError((cause) =>
+                  request.subagent === undefined
+                    ? Effect.void
+                    : Effect.logWarning("orchestration-v2.subagent-stop-failed", {
+                        effectId: effect.id,
+                        cause,
+                      }),
+                ),
                 Effect.catch((cause) =>
+                  request.subagent === undefined &&
                   isNonRetryableProviderTurnControlFailure(
-                    effect.request.type,
+                    request.type,
                     Cause.pretty(Cause.fail(cause)),
                   )
                     ? Effect.void
                     : Effect.fail(cause),
                 ),
-                // The provider has stopped what it still ran and reported it.
-                // Whatever the thread still shows on that provider thread is
-                // work no process will report on, so the Stop ends it too.
-                // One Stop can interrupt several provider threads, so the
-                // settle is keyed by effect, not by the Stop command.
-                Effect.andThen(
-                  threads.dispatch({
-                    type: "thread.background-work.settle",
-                    commandId: CommandId.make(`${effect.id}:background-work-settled`),
-                    threadId: effect.threadId,
-                    providerThreadId: effect.request.providerThreadId,
-                    providerTurnId: effect.request.providerTurnId,
-                  }),
+                // A targeted Stop repairs only an outcome the provider actually observed.
+                // A full-turn Stop retains its existing process-teardown repair.
+                Effect.andThen((outcome) =>
+                  request.subagent !== undefined && outcome === undefined
+                    ? Effect.void
+                    : threads.dispatch({
+                        type: "thread.background-work.settle",
+                        commandId: CommandId.make(`${effect.id}:background-work-settled`),
+                        ...(request.subagent === undefined || outcome === undefined
+                          ? {}
+                          : {
+                              subagent: {
+                                id: request.subagent.id,
+                                stoppedAt: DateTime.makeUnsafe(effect.createdAt),
+                                outcome,
+                              },
+                            }),
+                        threadId: effect.threadId,
+                        providerThreadId: request.providerThreadId,
+                        providerTurnId: request.providerTurnId,
+                      }),
                 ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({
                       effectId: effect.id,
-                      effectType: effect.request.type,
+                      effectType: request.type,
                       cause,
                     }),
                 ),
               );
+          }
           case "provider-turn.steer":
             return providerTurnControl
               .steer({
@@ -251,41 +291,61 @@ export const layerExecutor: Layer.Layer<
                     if (message === undefined || run === undefined) return yield* error;
                     // Reuse the message identity and a stable command receipt so an outbox
                     // retry cannot append a duplicate message or start a second follow-up.
-                    yield* threads.dispatch({
-                      type: "message.dispatch",
-                      commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
-                      threadId: effect.threadId,
-                      messageId: message.id,
-                      text: message.text,
-                      ...(message.context ? { context: message.context } : {}),
-                      attachments: message.attachments,
-                      // A user's follow-up starts on the thread's saved selection,
-                      // which already holds the steer's choice. A delegated
-                      // completion stays pinned to the run it reports to.
-                      ...(message.delegatedCompletion === undefined
-                        ? {}
-                        : { modelSelection: run.modelSelection }),
-                      dispatchMode: {
-                        type:
-                          message.delegatedCompletion === undefined
-                            ? "start_immediately"
-                            : "queue_after_active",
-                      },
-                      createdBy: message.createdBy,
-                      creationSource: message.creationSource,
-                      ...(message.delegatedCompletion === undefined
-                        ? {}
-                        : { delegatedCompletion: message.delegatedCompletion }),
-                      ...(message.notification === undefined
-                        ? {}
-                        : { notification: message.notification }),
-                      ...(message.scheduledTaskId === undefined
-                        ? {}
-                        : { scheduledTaskId: message.scheduledTaskId }),
-                      ...(message.senderThreadId === undefined
-                        ? {}
-                        : { senderThreadId: message.senderThreadId }),
-                    });
+                    yield* threads
+                      .dispatch({
+                        type: "message.dispatch",
+                        commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
+                        threadId: effect.threadId,
+                        messageId: message.id,
+                        text: message.text,
+                        ...(message.context ? { context: message.context } : {}),
+                        attachments: message.attachments,
+                        // A user's follow-up starts on the thread's saved selection,
+                        // which already holds the steer's choice. A delegated
+                        // completion stays pinned to the run it reports to.
+                        ...(message.delegatedCompletion === undefined
+                          ? {}
+                          : { modelSelection: run.modelSelection }),
+                        dispatchMode: {
+                          type:
+                            message.delegatedCompletion === undefined
+                              ? "start_immediately"
+                              : "queue_after_active",
+                        },
+                        createdBy: message.createdBy,
+                        creationSource: message.creationSource,
+                        ...(message.delegatedCompletion === undefined
+                          ? {}
+                          : { delegatedCompletion: message.delegatedCompletion }),
+                        ...(message.notification === undefined
+                          ? {}
+                          : { notification: message.notification }),
+                        ...(message.scheduledTaskId === undefined
+                          ? {}
+                          : { scheduledTaskId: message.scheduledTaskId }),
+                        ...(message.senderThreadId === undefined
+                          ? {}
+                          : { senderThreadId: message.senderThreadId }),
+                      })
+                      .pipe(
+                        // The turn that just completed leaves no further retry
+                        // target once the instance is off: the completed turn
+                        // stands as the thread's result instead of going
+                        // through the outbox's bounded retry on a refusal that
+                        // retrying cannot change.
+                        Effect.catchTags({
+                          ThreadManagementProviderInstanceDisabledError: (disabledError) =>
+                            Effect.logInfo(
+                              "orchestration-v2.effect-worker.steer-follow-up-disabled",
+                              {
+                                threadId: effect.threadId,
+                                messageId: message.id,
+                                projectId: disabledError.projectId,
+                                instanceId: disabledError.instanceId,
+                              },
+                            ),
+                        }),
+                      );
                   }),
                 ),
                 Effect.mapError(
@@ -411,25 +471,72 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "checkpoint.capture":
-            return runFinalization
-              .finalize({
-                threadId: effect.threadId,
-                runId: effect.request.runId,
-                scopeId: effect.request.scopeId,
-              })
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestrationEffectExecutionError({
+          case "checkpoint.capture": {
+            const target = {
+              threadId: effect.threadId,
+              runId: effect.request.runId,
+              scopeId: effect.request.scopeId,
+            };
+            return runFinalization.finalize(target).pipe(
+              Effect.timeout(CHECKPOINT_CAPTURE_TIMEOUT),
+              // A run parked at `waiting` is only completed by its capture. The
+              // last failed attempt completes it without a checkpoint instead,
+              // retrying that write. When every write fails, the effect stays
+              // queued, so the run cannot stay `waiting` until restart.
+              Effect.catchCause((cause) =>
+                willRetry || Cause.hasInterruptsOnly(cause)
+                  ? Effect.failCause(cause)
+                  : runFinalization.abandonCapture(target).pipe(
+                      Effect.retry({
+                        times: 4,
+                        schedule: Schedule.exponential("200 millis"),
+                      }),
+                      Effect.catchCause((abandonCause) =>
+                        Cause.hasInterruptsOnly(abandonCause)
+                          ? Effect.interrupt
+                          : Effect.logError(
+                              "Failed to complete run after checkpoint capture failure; retrying later",
+                              { effectId: effect.id, cause: abandonCause },
+                            ).pipe(
+                              Effect.andThen(
+                                Effect.fail(
+                                  new OrchestrationEffectExecutionError({
+                                    effectId: effect.id,
+                                    effectType: effect.request.type,
+                                    cause: Cause.squash(abandonCause),
+                                    retryAfterLastAttempt: true,
+                                  }),
+                                ),
+                              ),
+                            ),
+                      ),
+                      Effect.andThen(Effect.failCause(cause)),
+                    ),
+              ),
+              Effect.mapError((cause) =>
+                isOrchestrationEffectExecutionError(cause)
+                  ? cause
+                  : new OrchestrationEffectExecutionError({
                       effectId: effect.id,
                       effectType: effect.request.type,
                       cause,
                     }),
-                ),
-              );
+              ),
+            );
+          }
           case "terminal.cleanup":
             return resourceCleanup.cleanupTerminals(effect.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
+          case "preview.cleanup":
+            return resourceCleanup.cleanupPreviews(effect.threadId).pipe(
               Effect.mapError(
                 (cause) =>
                   new OrchestrationEffectExecutionError({
@@ -521,7 +628,13 @@ export interface OrchestrationEffectWorkerOptions {
   readonly workerId?: string;
   readonly leaseDurationMs?: number;
   readonly maxAttempts?: number;
+  /** Checkpoint captures this process runs at once. */
+  readonly maxConcurrentCaptures?: number;
 }
+
+// A capture can run for minutes. Capping them below the daemon's worker count
+// keeps a turn start or Stop on another thread from waiting behind captures.
+const DEFAULT_MAX_CONCURRENT_CHECKPOINT_CAPTURES = 2;
 
 export const layerWithOptions = (
   options: OrchestrationEffectWorkerOptions = {},
@@ -538,6 +651,15 @@ export const layerWithOptions = (
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
+      const maxConcurrentCaptures = Math.max(
+        1,
+        options.maxConcurrentCaptures ?? DEFAULT_MAX_CONCURRENT_CHECKPOINT_CAPTURES,
+      );
+      const runningCaptures = yield* Ref.make(0);
+      // A finished capture frees a slot; wake a worker that skipped captures.
+      const releaseCaptureSlot = Ref.update(runningCaptures, (count) => count - 1).pipe(
+        Effect.andThen(outbox.notifyAvailable(1)),
+      );
       const wasCancelled = (effectId: string) =>
         outbox.get(effectId).pipe(
           Effect.map(
@@ -628,11 +750,13 @@ export const layerWithOptions = (
           ? requeueClaim(effect, cause)
           : terminalizeClaim(effect, cause);
 
-      const runOnce = (excludeRestartContinuations = false) =>
+      const runClaim = (
+        claimExit: Exit.Exit<
+          Option.Option<EffectOutbox.OrchestrationEffectV2>,
+          EffectOutbox.EffectOutboxError
+        >,
+      ) =>
         Effect.gen(function* () {
-          const claimExit = yield* Effect.exit(
-            outbox.claimNext({ workerId, leaseDurationMs, excludeRestartContinuations }),
-          );
           yield* increment(orchestrationEffectClaimsTotal, {
             result: Exit.isFailure(claimExit)
               ? "error"
@@ -704,6 +828,12 @@ export const layerWithOptions = (
 
           const error = Cause.pretty(exit.cause);
           const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
+          const retryAfterLastAttempt = Option.exists(
+            Cause.findErrorOption(exit.cause),
+            (failure) =>
+              isOrchestrationEffectExecutionError(failure) &&
+              failure.retryAfterLastAttempt === true,
+          );
           yield* Effect.logWarning("Orchestration effect execution failed", {
             effectId: effect.id,
             effectType: effect.request.type,
@@ -717,7 +847,7 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : effect.attemptCount >= maxAttempts && !retryAfterLastAttempt
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
@@ -738,7 +868,37 @@ export const layerWithOptions = (
             });
           }
           return true;
-        }).pipe(
+        });
+
+      const runOnce = (excludeRestartContinuations = false) =>
+        Effect.uninterruptibleMask((restore) =>
+          Effect.gen(function* () {
+            // Reserve a capture slot before claiming, so concurrent workers
+            // cannot run more captures than the cap.
+            const captureSlot = yield* Ref.modify(runningCaptures, (count) =>
+              count < maxConcurrentCaptures ? [true, count + 1] : [false, count],
+            );
+            const claimExit = yield* Effect.exit(
+              restore(
+                outbox.claimNext({
+                  workerId,
+                  leaseDurationMs,
+                  excludeRestartContinuations,
+                  excludeCheckpointCaptures: !captureSlot,
+                }),
+              ),
+            );
+            const claimedCapture =
+              Exit.isSuccess(claimExit) &&
+              Option.isSome(claimExit.value) &&
+              claimExit.value.value.request.type === "checkpoint.capture";
+            if (!claimedCapture) {
+              if (captureSlot) yield* Ref.update(runningCaptures, (count) => count - 1);
+              return yield* restore(runClaim(claimExit));
+            }
+            return yield* restore(runClaim(claimExit)).pipe(Effect.ensuring(releaseCaptureSlot));
+          }),
+        ).pipe(
           Effect.mapError((cause) =>
             isOrchestrationEffectWorkerError(cause)
               ? cause
@@ -750,7 +910,10 @@ export const layerWithOptions = (
         awaitWork: outbox.awaitAvailable,
         runOnce: runOnce(),
         runRecoveryOnce: runOnce(true),
-        nextClaimableAt: outbox.nextClaimableAt.pipe(
+        nextClaimableAt: Ref.get(runningCaptures).pipe(
+          Effect.flatMap((count) =>
+            outbox.nextClaimableAt({ excludeCheckpointCaptures: count >= maxConcurrentCaptures }),
+          ),
           Effect.mapError(
             (cause) =>
               new OrchestrationEffectWorkerError({

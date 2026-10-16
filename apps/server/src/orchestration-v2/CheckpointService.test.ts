@@ -1,6 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
 import {
+  CheckpointRef,
   CheckpointScopeId,
   NodeId,
   ProviderThreadId,
@@ -16,7 +17,7 @@ import * as Layer from "effect/Layer";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as CheckpointService from "./CheckpointService.ts";
-import * as IdAllocator from "./IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 it.effect.each([false, true, "interrupt"] as const)(
   "materializes baseline, lookup fails=%s",
@@ -54,6 +55,8 @@ it.effect.each([false, true, "interrupt"] as const)(
           IdAllocator.layer,
           Layer.mock(CheckpointStore.CheckpointStore)({
             isGitRepository: () => Effect.succeed(true),
+            allocateCheckpointRef: (input) =>
+              Effect.succeed(CheckpointRef.make(`t3-sidecar:v1:${input.snapshotId}`)),
             hasCheckpointRef,
             captureCheckpoint: () => Effect.void,
           }),
@@ -88,17 +91,26 @@ it.effect.each([false, true, "interrupt"] as const)(
       });
 
       assert.equal(baseline.ordinalWithinScope, 2);
-      assert.equal(
-        baseline.ref,
-        yield* CheckpointService.checkpointRefForScopeOrdinal({
+      const sidecarRef = CheckpointRef.make(
+        `t3-sidecar:v1:${yield* CheckpointService.sidecarSnapshotIdForScopeOrdinal({
           scopeId: scope.id,
           ordinalWithinScope: 2,
-        }),
+        })}`,
+      );
+      // A found boundary is its sidecar snapshot; an unavailable one keeps the stable legacy ref.
+      assert.equal(
+        baseline.ref,
+        lookupFails
+          ? yield* CheckpointService.checkpointRefForScopeOrdinal({
+              scopeId: scope.id,
+              ordinalWithinScope: 2,
+            })
+          : sidecarRef,
       );
       assert.equal(baseline.status, lookupFails ? "missing" : "ready");
       assert.deepEqual(hasCheckpointRef.mock.calls[0]?.[0], {
         cwd: scope.cwd,
-        checkpointRef: baseline.ref,
+        checkpointRef: sidecarRef,
       });
     }).pipe(Effect.provide(layerTest));
   },

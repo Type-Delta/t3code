@@ -1,6 +1,9 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CheckpointId,
+  CheckpointScopeId,
   CommandId,
+  NodeId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -13,12 +16,14 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
@@ -82,6 +87,7 @@ function layerExecutorFor(input: {
   readonly threads?: Partial<ThreadManagementService.ThreadManagementService["Service"]>;
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
+  readonly finalization?: RunFinalizationService.RunFinalizationService["Service"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -130,7 +136,11 @@ function layerExecutorFor(input: {
     ),
     Layer.succeed(
       RunFinalizationService.RunFinalizationService,
-      RunFinalizationService.RunFinalizationService.of({ finalize: () => Effect.void }),
+      input.finalization ??
+        RunFinalizationService.RunFinalizationService.of({
+          finalize: () => Effect.void,
+          abandonCapture: () => Effect.void,
+        }),
     ),
     Layer.succeed(
       CheckpointRollbackService.CheckpointRollbackServiceV2,
@@ -228,6 +238,48 @@ it.effect("settles a stopped run when its adapter has already lost the native tu
     }).pipe(Effect.provide(layer));
     assert.deepEqual(yield* Ref.get(events), ["thread.background-work.settle"]);
   }),
+);
+
+// A run parked at `waiting` is only completed by its capture, so a capture
+// that will not be retried must still complete it.
+it.effect.each([true, false])(
+  "completes a waiting run only after its final capture attempt fails, willRetry=%s",
+  (willRetry) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const layer = layerExecutorFor({
+        events,
+        finalization: RunFinalizationService.RunFinalizationService.of({
+          finalize: (input) =>
+            new RunFinalizationService.RunFinalizationError({
+              ...input,
+              operation: "capture-checkpoint",
+              cause: "simulated checkpoint backend failure",
+            }),
+          abandonCapture: (input) =>
+            Ref.update(events, (current) => [...current, `abandon:${input.runId}`]),
+        }),
+      });
+      const exit = yield* Effect.gen(function* () {
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+        return yield* executor
+          .execute(
+            {
+              ...restartEffect(now, { type: "detach" }),
+              request: {
+                type: "checkpoint.capture",
+                runId,
+                scopeId: CheckpointScopeId.make("scope:effect-worker-capture"),
+              },
+            },
+            { willRetry },
+          )
+          .pipe(Effect.exit);
+      }).pipe(Effect.provide(layer));
+      assert.isTrue(Exit.isFailure(exit));
+      assert.deepEqual(yield* Ref.get(events), willRetry ? [] : [`abandon:${runId}`]);
+    }),
 );
 
 it.effect("requeues a claim when a pre-execution worker check fails", () =>
@@ -836,4 +888,406 @@ it.effect("settles a delegated child once its restart continuation fails for goo
       assert.deepEqual(yield* Ref.get(recovered), [threadId]);
     }).pipe(Effect.provide(layer));
   }),
+);
+
+it.effect.each(["confirmed", "unconfirmed", "failed"] as const)(
+  "a native subagent stop only repairs %s provider evidence",
+  (outcome) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const layer = layerExecutorFor({
+        events,
+        interrupt: (input) => {
+          assert.equal(input.subagent?.nativeTaskId, "native-task");
+          return Ref.update(events, (current) => [...current, "stop-child"]).pipe(
+            Effect.andThen(
+              outcome === "failed"
+                ? new ProviderTurnControlService.ProviderTurnControlError({
+                    threadId,
+                    providerTurnId,
+                    operation: "interrupt",
+                    cause: "SDK stop failed",
+                  })
+                : Effect.succeed(
+                    outcome === "confirmed"
+                      ? {
+                          status: "cancelled" as const,
+                          completedAt: now,
+                          result: "Stopped by Claude",
+                        }
+                      : undefined,
+                  ),
+            ),
+          );
+        },
+        threads: {
+          dispatch: (command) => {
+            assert.equal(command.type, "thread.background-work.settle");
+            if (command.type === "thread.background-work.settle") {
+              assert.equal(command.subagent?.id, "subagent");
+              assert.deepEqual(command.subagent?.outcome, {
+                status: "cancelled",
+                completedAt: now,
+                result: "Stopped by Claude",
+              });
+            }
+            return Ref.update(events, (current) => [...current, "settle-child"]).pipe(
+              Effect.as({ sequence: 1, storedEvents: [] }),
+            );
+          },
+        },
+      });
+      const execution = yield* Effect.gen(function* () {
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+        yield* executor.execute({
+          ...restartEffect(now, { type: "detach" }),
+          request: {
+            type: "provider-turn.interrupt",
+            providerSessionId: oldSessionId,
+            providerThreadId,
+            providerTurnId,
+            subagent: { id: NodeId.make("subagent"), nativeTaskId: "native-task" },
+          },
+        });
+      }).pipe(Effect.provide(layer), Effect.exit);
+      assert.equal(Exit.isFailure(execution), outcome === "failed");
+      assert.deepEqual(
+        yield* Ref.get(events),
+        outcome === "confirmed" ? ["stop-child", "settle-child"] : ["stop-child"],
+      );
+    }),
+);
+
+// DL020: a terminal run's capture must never delay the thread's next turn or Stop.
+it.effect("starts a new turn and Stop while the previous run's capture hangs", () =>
+  Effect.gen(function* () {
+    const captureStarted = yield* Deferred.make<void>();
+    const started = yield* Deferred.make<string>();
+    const executor = EffectWorker.OrchestrationEffectExecutorV2.of({
+      execute: (effect) =>
+        effect.request.type === "checkpoint.capture"
+          ? Deferred.succeed(captureStarted, undefined).pipe(Effect.andThen(Effect.never))
+          : Deferred.succeed(started, effect.request.type).pipe(Effect.asVoid),
+    });
+    const layer = EffectWorker.layer.pipe(
+      Layer.provideMerge(EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+      Layer.provide(Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, executor)),
+    );
+    yield* Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const commandId = CommandId.make("command:effect-worker-hung-capture");
+      yield* outbox.enqueue([
+        {
+          id: "effect:hung-capture:a-capture",
+          commandId,
+          threadId,
+          request: {
+            type: "checkpoint.capture",
+            runId,
+            scopeId: CheckpointScopeId.make("scope:effect-worker-hung-capture"),
+          },
+        },
+      ]);
+      const captureWorker = yield* Effect.forkChild(worker.runOnce);
+      yield* Deferred.await(captureStarted);
+
+      yield* outbox.enqueue([
+        {
+          id: "effect:hung-capture:b-start",
+          commandId,
+          threadId,
+          request: { type: "provider-turn.start", runId: RunId.make("run:effect-worker-next") },
+        },
+      ]);
+      assert.isTrue(yield* worker.runOnce);
+      assert.equal(yield* Deferred.await(started), "provider-turn.start");
+
+      yield* outbox.enqueue([
+        {
+          id: "effect:hung-capture:c-stop",
+          commandId,
+          threadId,
+          request: {
+            type: "provider-turn.interrupt",
+            providerSessionId: oldSessionId,
+            providerThreadId,
+            providerTurnId,
+          },
+        },
+      ]);
+      assert.isTrue(yield* worker.runOnce);
+      assert.equal(
+        Option.map(yield* outbox.get("effect:hung-capture:c-stop"), (effect) => effect.status).pipe(
+          Option.getOrUndefined,
+        ),
+        "succeeded",
+      );
+      yield* Fiber.interrupt(captureWorker);
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+// DL020: captures on other threads must leave workers for a turn start or Stop.
+it.effect("keeps workers free for other threads while captures saturate", () =>
+  Effect.gen(function* () {
+    const capturesStarted = yield* Queue.unbounded<string>();
+    const releaseCaptures = yield* Deferred.make<void>();
+    const started = yield* Deferred.make<void>();
+    const executor = EffectWorker.OrchestrationEffectExecutorV2.of({
+      execute: (effect) =>
+        effect.request.type === "checkpoint.capture"
+          ? Queue.offer(capturesStarted, effect.id).pipe(
+              Effect.andThen(Deferred.await(releaseCaptures)),
+            )
+          : Deferred.succeed(started, undefined).pipe(Effect.asVoid),
+    });
+    const layer = EffectWorker.layer.pipe(
+      Layer.provideMerge(EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+      Layer.provide(Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, executor)),
+    );
+    yield* Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const commandId = CommandId.make("command:effect-worker-capture-saturation");
+      yield* outbox.enqueue([
+        ...[1, 2, 3, 4].map((index) => ({
+          id: `effect:capture-saturation:a-capture-${index}`,
+          commandId,
+          threadId: ThreadId.make(`thread:capture-saturation:${index}`),
+          request: {
+            type: "checkpoint.capture" as const,
+            runId: RunId.make(`run:capture-saturation:${index}`),
+            scopeId: CheckpointScopeId.make(`scope:capture-saturation:${index}`),
+          },
+        })),
+        {
+          id: "effect:capture-saturation:b-start",
+          commandId,
+          threadId: ThreadId.make("thread:capture-saturation:other"),
+          request: { type: "provider-turn.start", runId: RunId.make("run:capture-saturation:5") },
+        },
+      ]);
+      const daemon = yield* EffectWorker.runDaemonWithOptions({ concurrency: 4 }).pipe(
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      assert.deepEqual(yield* Queue.takeAll(capturesStarted), [
+        "effect:capture-saturation:a-capture-1",
+        "effect:capture-saturation:a-capture-2",
+      ]);
+
+      // A finished capture frees its slot for the next one.
+      yield* Deferred.succeed(releaseCaptures, undefined);
+      assert.deepEqual(
+        [yield* Queue.take(capturesStarted), yield* Queue.take(capturesStarted)].toSorted(),
+        ["effect:capture-saturation:a-capture-3", "effect:capture-saturation:a-capture-4"],
+      );
+      yield* Fiber.interrupt(daemon);
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("times out a hung capture so its run can settle", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const layer = layerExecutorFor({
+      events,
+      finalization: RunFinalizationService.RunFinalizationService.of({
+        finalize: () => Effect.never,
+        abandonCapture: (input) =>
+          Ref.update(events, (current) => [...current, `abandon:${input.runId}`]),
+      }),
+    });
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      const fiber = yield* executor
+        .execute(
+          {
+            ...restartEffect(now, { type: "detach" }),
+            request: {
+              type: "checkpoint.capture",
+              runId,
+              scopeId: CheckpointScopeId.make("scope:effect-worker-capture-timeout"),
+            },
+          },
+          { willRetry: false },
+        )
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* TestClock.adjust(EffectWorker.CHECKPOINT_CAPTURE_TIMEOUT);
+      const exit = yield* Fiber.join(fiber);
+      assert.isTrue(Exit.isFailure(exit));
+      assert.deepEqual(yield* Ref.get(events), [`abandon:${runId}`]);
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("keeps a capture queued while its run cannot be completed", () =>
+  Effect.gen(function* () {
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const writesFail = yield* Ref.make(true);
+    const layer = EffectWorker.layerWithOptions({ maxAttempts: 1 }).pipe(
+      Layer.provideMerge(EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+      Layer.provide(
+        layerExecutorFor({
+          events,
+          finalization: RunFinalizationService.RunFinalizationService.of({
+            finalize: (input) =>
+              new RunFinalizationService.RunFinalizationError({
+                ...input,
+                operation: "capture-checkpoint",
+                cause: "simulated checkpoint backend failure",
+              }),
+            abandonCapture: (input) =>
+              Ref.update(events, (current) => [...current, "abandon"]).pipe(
+                Effect.andThen(Ref.get(writesFail)),
+                Effect.flatMap((fail) =>
+                  fail
+                    ? new RunFinalizationService.RunFinalizationError({
+                        ...input,
+                        operation: "capture-checkpoint",
+                        cause: "simulated projection write failure",
+                      })
+                    : Effect.void,
+                ),
+              ),
+          }),
+        }),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const effectId = "effect:abandon-writes-fail:capture";
+      const status = outbox
+        .get(effectId)
+        .pipe(Effect.map(Option.match({ onNone: () => undefined, onSome: (row) => row.status })));
+      yield* outbox.enqueue([
+        {
+          id: effectId,
+          commandId: CommandId.make("command:abandon-writes-fail"),
+          threadId,
+          request: {
+            type: "checkpoint.capture",
+            runId,
+            scopeId: CheckpointScopeId.make("scope:abandon-writes-fail"),
+          },
+        },
+      ]);
+      const runAttempt = Effect.gen(function* () {
+        const attempt = yield* Effect.forkChild(worker.runOnce);
+        yield* TestClock.adjust("1 minute");
+        assert.isTrue(yield* Fiber.join(attempt));
+      });
+
+      // The only attempt fails, and so does every write that completes the run.
+      yield* runAttempt;
+      assert.equal(yield* status, "pending");
+      assert.equal((yield* Ref.get(events)).length, 5);
+
+      yield* Ref.set(writesFail, false);
+      yield* runAttempt;
+      assert.equal(yield* status, "failed");
+      assert.equal((yield* Ref.get(events)).length, 6);
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("retries completing a run whose capture failed for good", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const attempts = yield* Ref.make(0);
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const layer = layerExecutorFor({
+      events,
+      finalization: RunFinalizationService.RunFinalizationService.of({
+        finalize: (input) =>
+          new RunFinalizationService.RunFinalizationError({
+            ...input,
+            operation: "capture-checkpoint",
+            cause: "simulated checkpoint backend failure",
+          }),
+        abandonCapture: (input) =>
+          Ref.updateAndGet(attempts, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count < 3
+                ? new RunFinalizationService.RunFinalizationError({
+                    ...input,
+                    operation: "capture-checkpoint",
+                    cause: "simulated projection write failure",
+                  })
+                : Effect.void,
+            ),
+          ),
+      }),
+    });
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      const fiber = yield* executor
+        .execute(
+          {
+            ...restartEffect(now, { type: "detach" }),
+            request: {
+              type: "checkpoint.capture",
+              runId,
+              scopeId: CheckpointScopeId.make("scope:effect-worker-abandon-retry"),
+            },
+          },
+          { willRetry: false },
+        )
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* TestClock.adjust("1 minute");
+      const exit = yield* Fiber.join(fiber);
+      assert.isTrue(Exit.isFailure(exit));
+      assert.equal(yield* Ref.get(attempts), 3);
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("keeps checkpoint capture and rollback in order on their thread", () =>
+  Effect.gen(function* () {
+    const outbox = yield* EffectOutbox.EffectOutboxV2;
+    const commandId = CommandId.make("command:effect-worker-capture-rollback-lane");
+    const claim = outbox.claimNext({ workerId: "lane-worker", leaseDurationMs: 30_000 });
+    yield* outbox.enqueue([
+      {
+        id: "effect:lane:a-capture",
+        commandId,
+        threadId,
+        request: {
+          type: "checkpoint.capture",
+          runId,
+          scopeId: CheckpointScopeId.make("scope:effect-worker-lane"),
+        },
+      },
+      {
+        id: "effect:lane:b-rollback",
+        commandId,
+        threadId,
+        request: {
+          type: "provider-thread.rollback",
+          providerThreadId,
+          checkpointId: CheckpointId.make("checkpoint:effect-worker-lane"),
+          scopeId: CheckpointScopeId.make("scope:effect-worker-lane"),
+        },
+      },
+      {
+        id: "effect:lane:c-start",
+        commandId,
+        threadId,
+        request: { type: "provider-turn.start", runId: RunId.make("run:effect-worker-lane") },
+      },
+    ]);
+
+    const capture = yield* claim;
+    assert.equal(Option.getOrUndefined(capture)?.id, "effect:lane:a-capture");
+    // The rollback waits for the running capture, and the turn waits for the rollback.
+    assert.isTrue(Option.isNone(yield* claim));
+    yield* outbox.succeed({ effectId: "effect:lane:a-capture", workerId: "lane-worker" });
+    assert.equal(Option.getOrUndefined(yield* claim)?.id, "effect:lane:b-rollback");
+    assert.isTrue(Option.isNone(yield* claim));
+    yield* outbox.succeed({ effectId: "effect:lane:b-rollback", workerId: "lane-worker" });
+    assert.equal(Option.getOrUndefined(yield* claim)?.id, "effect:lane:c-start");
+  }).pipe(Effect.provide(EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)))),
 );

@@ -52,6 +52,7 @@ import {
   readThreadShells,
 } from "../state/entities";
 import { useUiStateStore } from "../uiStateStore";
+import { clearThreadPreviewState } from "../previewStateStore";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "../threadRoutes";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
@@ -454,6 +455,7 @@ export function useThreadActions() {
           refreshArchivedThreadsForEnvironment(target.environmentId);
           useSplitViewStore.getState().removeThread(target);
           useRightPanelStore.getState().removeThread(target);
+          clearThreadPreviewState(target);
         }
         return result;
       }
@@ -565,6 +567,7 @@ export function useThreadActions() {
       const splitFallback = useSplitViewStore.getState().removeThread(threadRef);
       const activeSplitFallback = selectActiveSplitPane(useSplitViewStore.getState());
       useRightPanelStore.getState().removeThread(threadRef);
+      clearThreadPreviewState(threadRef);
 
       if (shouldNavigateToFallback) {
         const preferredFallback = wasActiveSplitPane

@@ -46,6 +46,7 @@ vi.mock("../state/query", () => ({ useEnvironmentQuery: () => ({ data: null }) }
 vi.mock("../state/shell", () => ({ environmentShell: { stateAtom: () => null } }));
 vi.mock("../threadRoutes", () => ({
   buildThreadRouteParams: () => ({}),
+  isThreadRouteSnapshotAuthoritative: () => false,
   resolveThreadRouteRenderState: () => "loading",
 }));
 vi.mock("../threadSync", () => ({ resolveThreadSyncPhase: () => "loading" }));

@@ -19,6 +19,8 @@ const legacyReaders = ["orchestration-v2/legacy/", "persistence/Migrations/"] as
 const legacyReaderFiles: Record<string, string> = {
   // Provider history for settings migration reads V1 thread sessions once at load.
   "serverSettings.ts": "one-time provider history for settings migration",
+  // The fork's independent migration ledger is schema history, like persistence/Migrations/.
+  "persistence/ForkMigrations.ts": "fork schema migrations on the V1 tables",
 };
 const retiredPaths = [
   "orchestration",

@@ -8,7 +8,13 @@ export const MANAGEMENT_API_KEY_SCOPES = [
   "threads:create",
   "threads:message",
   "threads:wait",
+  "pullRequests:review",
 ] as const satisfies ReadonlyArray<ContractManagementApiKeyScope>;
+
+/** Scopes covering every thread-management tool; pull request access stays opt-in. */
+const THREAD_ORCHESTRATION_SCOPES = MANAGEMENT_API_KEY_SCOPES.filter(
+  (scope) => scope.startsWith("threads:") || scope === "models:read",
+);
 
 export type ManagementApiKeyScope = ContractManagementApiKeyScope;
 export type ManagementApiKeyPreset = "read-only" | "thread-orchestration" | "custom";
@@ -92,6 +98,11 @@ export const MANAGEMENT_API_KEY_SCOPE_DETAILS: ReadonlyArray<{
     label: "Wait for threads",
     description: "Wait for target threads to finish or need attention.",
   },
+  {
+    scope: "pullRequests:review",
+    label: "Review pull requests",
+    description: "Write and read pull request review guides.",
+  },
 ];
 
 export const MANAGEMENT_API_KEY_PRESETS: ReadonlyArray<{
@@ -112,7 +123,7 @@ export const MANAGEMENT_API_KEY_PRESETS: ReadonlyArray<{
   {
     value: "custom",
     label: "Custom",
-    description: "Choose exactly which thread-management tools this key can use.",
+    description: "Choose exactly which tools this key can use, including pull request review.",
   },
 ];
 
@@ -131,7 +142,7 @@ export function scopesForManagementApiKeyPreset(
     return ["models:read", "threads:list", "threads:read"];
   }
   if (preset === "thread-orchestration") {
-    return MANAGEMENT_API_KEY_SCOPES;
+    return THREAD_ORCHESTRATION_SCOPES;
   }
   return orderedManagementApiKeyScopes(customScopes);
 }
@@ -147,8 +158,8 @@ export function managementApiKeyPresetForScopes(
     return "read-only";
   }
   if (
-    ordered.length === MANAGEMENT_API_KEY_SCOPES.length &&
-    MANAGEMENT_API_KEY_SCOPES.every((scope) => ordered.includes(scope))
+    ordered.length === THREAD_ORCHESTRATION_SCOPES.length &&
+    THREAD_ORCHESTRATION_SCOPES.every((scope) => ordered.includes(scope))
   ) {
     return "thread-orchestration";
   }

@@ -67,6 +67,18 @@ describe("management API key access presets", () => {
     );
     expect(managementApiKeyPresetForScopes(["threads:read"])).toBe("custom");
   });
+
+  it("keeps pull request review out of the orchestration preset", () => {
+    const orchestration = scopesForManagementApiKeyPreset("thread-orchestration");
+    expect(orchestration).not.toContain("pullRequests:review");
+    expect(managementApiKeyPresetForScopes(orchestration)).toBe("thread-orchestration");
+    expect(managementApiKeyPresetForScopes([...orchestration, "pullRequests:review"])).toBe(
+      "custom",
+    );
+    expect(scopesForManagementApiKeyPreset("custom", ["pullRequests:review"])).toEqual([
+      "pullRequests:review",
+    ]);
+  });
 });
 
 describe("management API key lifecycle helpers", () => {

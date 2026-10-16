@@ -6,9 +6,12 @@
  *
  * `vp run migrate-dev-db` from a worktree:
  *   1. Nukes `<worktree>/.t3/userdata/statev2.sqlite`.
- *   2. Snapshots the real db (`~/.t3/userdata/statev2.sqlite`, read-only
- *      VACUUM INTO) and prunes it to the most recently updated projects and,
- *      per project, the most recent threads that have fully stopped, with
+ *   2. Copies a slice of the real db (`~/.t3/userdata/statev2.sqlite`,
+ *      attached read-only): the schema, and every row except those of
+ *      deleted, archived, and settled threads, which are nearly all of a
+ *      long-lived database. It then prunes that to the most recently updated
+ *      projects and, per project, the most recent threads that have fully
+ *      stopped, with
  *      their forks and subagents. Working, settled, and archived threads, and
  *      threads with pending recovery, are skipped, and scheduled tasks and
  *      queued effects are dropped, so the dev server never adopts live work.
@@ -28,6 +31,7 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
+import * as NodeURL from "node:url";
 import { resolveWorktreeT3Home } from "@t3tools/shared/devHome";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -109,24 +113,6 @@ export class MigrateDevDbDestinationBusyError extends Schema.TaggedError<Migrate
         ? "the database is write-locked"
         : "another connection is holding its WAL";
     return `Dev database at '${this.databasePath}' looks in use (${detail}). Stop the dev server first; if none is running, delete the -wal/-shm files next to it.`;
-  }
-}
-
-/**
- * Two branches claimed the same Migrations/NNN_ slot: the id was already
- * recorded under a different name, so this checkout's migration was
- * silently skipped and its schema changes never applied.
- */
-export class MigrateDevDbSlotCollisionError extends Schema.TaggedError<MigrateDevDbSlotCollisionError>()(
-  "MigrateDevDbSlotCollisionError",
-  {
-    slot: Schema.Number,
-    codeName: Schema.String,
-    appliedName: Schema.String,
-  },
-) {
-  override get message(): string {
-    return `Migration slot collision at ${this.slot}: this checkout registers '${this.codeName}' but the database already applied '${this.appliedName}' in that slot. Renumber the new migration to a free slot.`;
   }
 }
 
@@ -242,6 +228,88 @@ const RECOVERY_KINDS: ReadonlyArray<ProjectionStore.ProjectionRecoveryKind> = [
   "delegated-completions",
 ];
 
+/** Tables the prune empties. The copy skips their rows. */
+const CLEARED_TABLES: ReadonlyArray<string> = [
+  // Pending work the dev server would otherwise pick up and run.
+  "scheduled_tasks",
+  "orchestration_v2_effect_outbox",
+  "orchestration_v2_thread_launch_workflows",
+  "orchestration_command_receipts",
+  "provider_session_runtime",
+  "auto_resume_jobs",
+  "auth_sessions",
+  "auth_pairing_links",
+];
+
+/** Shared between threads; the prune keeps the ones a kept thread is bound to. */
+const PROVIDER_SESSIONS_TABLE = "orchestration_v2_projection_provider_sessions";
+
+/** Whether the thread aliased `root` is shown: not deleted, archived, or settled. */
+const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
+  root.deleted_at IS NULL
+  AND json_extract(root.payload_json, '$.deletedAt') IS NULL
+  AND json_extract(root.payload_json, '$.archivedAt') IS NULL
+  AND json_extract(root.payload_json, '$.settledAt') IS NULL
+  AND json_extract(root.payload_json, '$.settledOverride') IS NOT 'settled'`;
+
+/**
+ * Copies the source into the empty snapshot, without the rows of thread families whose root is
+ * hidden. The prune drops those anyway, and they hold nearly all of a long-lived database's
+ * events, so copying them is what used to make this take a full-size copy of the real db.
+ * A source from before the V2 thread tables has no visibility to filter on, so it is copied
+ * whole. One transaction reads the source, so the copy is consistent while the real server writes.
+ */
+const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath: string) {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`ATTACH DATABASE ${`${NodeURL.pathToFileURL(sourcePath).href}?mode=ro`} AS src`;
+  const schema = yield* sql<{ type: string; name: string; sql: string }>`
+    SELECT type, name, sql FROM src.sqlite_master
+    WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'`;
+  const threadColumns = yield* sql<{ name: string; notnull: number }>`
+    SELECT m.name, c."notnull" FROM src.sqlite_master m, pragma_table_info(m.name, 'src') c
+    WHERE m.type = 'table' AND c.name = 'thread_id'`;
+  const threadIdNullable = new Map(threadColumns.map((row) => [row.name, row.notnull === 0]));
+  const tables = schema.filter((entry) => entry.type === "table");
+  const filtered = tables.some((table) => table.name === "orchestration_v2_projection_threads");
+
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      for (const table of tables) yield* sql.unsafe(table.sql).unprepared;
+      if (filtered) {
+        yield* sql`CREATE TEMP TABLE copied_threads (thread_id TEXT PRIMARY KEY)`;
+        yield* sql`INSERT OR IGNORE INTO copied_threads
+          SELECT family.thread_id FROM src.orchestration_v2_projection_threads family
+          JOIN src.orchestration_v2_projection_threads root ON root.thread_id =
+            COALESCE(json_extract(family.payload_json, '$.lineage.rootThreadId'), family.thread_id)
+          WHERE ${rootIsVisible(sql)}`;
+      }
+      for (const { name } of tables) {
+        if (CLEARED_TABLES.includes(name)) continue;
+        const nullable = threadIdNullable.get(name);
+        const filter = !filtered
+          ? ""
+          : name === "orchestration_events"
+            ? // Two ranges rather than `<>`, so SQLite seeks the (aggregate_kind, stream_id)
+              // index instead of scanning every event.
+              `WHERE (aggregate_kind = 'thread' AND stream_id IN (SELECT thread_id FROM copied_threads))
+                OR aggregate_kind < 'thread' OR aggregate_kind > 'thread'`
+            : nullable === undefined || name === PROVIDER_SESSIONS_TABLE
+              ? ""
+              : `WHERE thread_id IN (SELECT thread_id FROM copied_threads)${nullable ? " OR thread_id IS NULL" : ""}`;
+        yield* sql.unsafe(`INSERT INTO main."${name}" SELECT * FROM src."${name}" ${filter}`)
+          .unprepared;
+      }
+      // The source's AUTOINCREMENT high-water marks, so new events append after them.
+      yield* sql`DELETE FROM main.sqlite_sequence`;
+      yield* sql`INSERT INTO main.sqlite_sequence SELECT name, seq FROM src.sqlite_sequence`;
+      for (const entry of schema) {
+        if (entry.type !== "table") yield* sql.unsafe(entry.sql).unprepared;
+      }
+    }),
+  );
+  yield* sql`DETACH DATABASE src`;
+});
+
 const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigrateDevDbInput) {
   const sql = yield* SqlClient.SqlClient;
 
@@ -278,11 +346,7 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
     SELECT f.root_id, root.project_id, MAX(f.updated_at) AS updated_at
     FROM thread_families f
     JOIN orchestration_v2_projection_threads root ON root.thread_id = f.root_id
-    WHERE root.deleted_at IS NULL
-      AND json_extract(root.payload_json, '$.deletedAt') IS NULL
-      AND json_extract(root.payload_json, '$.archivedAt') IS NULL
-      AND json_extract(root.payload_json, '$.settledAt') IS NULL
-      AND json_extract(root.payload_json, '$.settledOverride') IS NOT 'settled'
+    WHERE ${rootIsVisible(sql)}
     GROUP BY f.root_id, root.project_id
     HAVING SUM(f.thread_id IN (SELECT thread_id FROM live_threads)) = 0`;
 
@@ -323,7 +387,7 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
   const threadTables = yield* sql<{ name: string }>`
     SELECT m.name FROM sqlite_master m, pragma_table_info(m.name) c
     WHERE m.type = 'table' AND c.name = 'thread_id'
-      AND m.name <> 'orchestration_v2_projection_provider_sessions'`;
+      AND m.name <> ${PROVIDER_SESSIONS_TABLE}`;
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
@@ -348,7 +412,7 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
         WHERE repository_key NOT IN (SELECT repository_key FROM checkpoint_snapshots)`;
       yield* sql`DELETE FROM projection_projects
         WHERE project_id NOT IN (SELECT project_id FROM kept_projects)`;
-      yield* sql`DELETE FROM orchestration_v2_projection_provider_sessions
+      yield* sql`DELETE FROM ${sql(PROVIDER_SESSIONS_TABLE)}
         WHERE COALESCE(thread_id, '') NOT IN (SELECT thread_id FROM kept_threads)
           AND provider_session_id NOT IN (
             SELECT provider_session_id FROM orchestration_v2_projection_provider_session_bindings
@@ -367,15 +431,9 @@ const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigra
             AND stream_id NOT IN (SELECT thread_id FROM kept_threads))
            OR (aggregate_kind = 'project'
             AND stream_id NOT IN (SELECT project_id FROM kept_projects))`;
-      // Pending work the dev server would otherwise pick up and run.
-      yield* sql`DELETE FROM scheduled_tasks`;
-      yield* sql`DELETE FROM auto_resume_jobs`;
-      yield* sql`DELETE FROM orchestration_v2_effect_outbox`;
-      yield* sql`DELETE FROM orchestration_v2_thread_launch_workflows`;
-      yield* sql`DELETE FROM orchestration_command_receipts`;
-      yield* sql`DELETE FROM provider_session_runtime`;
-      yield* sql`DELETE FROM auth_sessions`;
-      yield* sql`DELETE FROM auth_pairing_links`;
+      for (const table of CLEARED_TABLES) {
+        yield* sql`DELETE FROM ${sql(table)}`;
+      }
     }),
   );
 
@@ -478,22 +536,16 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
       );
 
   yield* removeDatabaseFiles(snapshotPath);
-  // The snapshot is a full-size copy of the source; make sure it is removed
-  // even when a phase fails partway through.
+  // Make sure the snapshot is removed even when a phase fails partway through.
   const { executedMigrations, pruned } = yield* Effect.gen(function* () {
-    yield* Console.log(`Snapshotting ${sourcePath} (read-only)...`);
-    yield* Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* sql`VACUUM INTO ${snapshotPath}`;
-    }).pipe(
-      Effect.provide(NodeSqliteClient.layer({ filename: sourcePath, readonly: true })),
+    yield* Console.log(`Copying visible threads from ${sourcePath} (read-only)...`);
+    yield* copySourceSlice(sourcePath).pipe(
+      Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
       wrapPhase("snapshot", sourcePath),
     );
 
     // Migrate before pruning: a source older than this checkout would
     // otherwise crash the prune queries on columns that don't exist yet.
-    // Running against the full snapshot also exercises new migrations on the
-    // same data volume the real database would face.
     yield* Console.log("Running migrations on the snapshot...");
     const executed = yield* Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

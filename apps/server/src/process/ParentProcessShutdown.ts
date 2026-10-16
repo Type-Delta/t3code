@@ -1,7 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- this type describes Node's stdin boundary.
 import type * as NodeStream from "node:stream";
 
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -40,10 +40,10 @@ export class ParentProcessShutdown extends Context.Service<
 >()("t3/process/ParentProcessShutdown") {}
 
 const make = Effect.gen(function* () {
-  const platform = yield* HostProcessPlatform;
+  const platform = yield* HostProcess.Platform;
   if (platform !== "win32") return ParentProcessShutdown.of({ awaitRequest: Effect.never });
   const config = yield* ServerConfig;
-  const environment = yield* HostProcessEnvironment;
+  const environment = yield* HostProcess.Environment;
   const host = yield* ParentProcessShutdownHost;
   const requested = yield* Deferred.make<void>();
   const request = () => Deferred.doneUnsafe(requested, Effect.void);

@@ -34,6 +34,7 @@ vi.mock("../WorkspaceBreadcrumb", () => ({
   WorkspaceBreadcrumb: "div",
   WorkspaceBreadcrumbItem: "div",
   WorkspaceBreadcrumbSeparator: "span",
+  WorkspaceBreadcrumbText: "span",
 }));
 vi.mock("../WorkspacePageContainer", () => ({ WorkspacePageContainer: "main" }));
 vi.mock("../WorkspacePageHeader", () => ({ WorkspacePageHeader: "header" }));
@@ -43,6 +44,7 @@ vi.mock("./usageProviders", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./usageProviders")>();
   return {
     ...actual,
+    PROVIDER_ORDER: ["codex", "claude"],
     PROVIDER_PRESENTATION: {
       codex: { color: "white", label: "Codex", mark: "span" },
       claude: { color: "orange", label: "Claude Code", mark: "span" },
@@ -100,6 +102,7 @@ const environments = [
   {
     environmentId: EnvironmentId.make("test-environment"),
     label: "Test environment",
+    isConnected: true,
     isPending: false,
     canReadDiagnostics: true,
     error: null,
@@ -119,7 +122,10 @@ const environments = [
 
 beforeEach(() => {
   testState.metric = "cost";
-  testState.useUsage.mockReturnValue({
+  testState.useUsage.mockImplementation((window: unknown) => ({
+    get shown() {
+      return { window, merged: this.merged };
+    },
     merged: {
       ...mergeUsage([], USAGE_CONTRACT_VERSION),
       models: modelTotals,
@@ -145,7 +151,7 @@ beforeEach(() => {
     isPending: false,
     isPartial: false,
     refresh: vi.fn(),
-  });
+  }));
 });
 
 describe("UsagePage Escape navigation", () => {
@@ -174,7 +180,10 @@ describe("UsagePage Escape navigation", () => {
   });
 
   it("shows answered usage while another environment is still reporting", async () => {
-    testState.useUsage.mockReturnValue({
+    testState.useUsage.mockImplementation((window: unknown) => ({
+      get shown() {
+        return { window, merged: this.merged };
+      },
       merged: { ...mergeUsage([], USAGE_CONTRACT_VERSION), costUsd: 42, sessions: 2 },
       environments: [
         {
@@ -190,13 +199,16 @@ describe("UsagePage Escape navigation", () => {
           summary: null,
         },
       ],
+      get selectedEnvironments() {
+        return this.environments;
+      },
       isPending: false,
       isPartial: true,
       refresh: vi.fn(),
-    });
+    }));
     await act(() => renderer.render(<UsagePage />));
     expect(container.textContent).toContain("$42.00");
-    expect(container.textContent).toContain("1 device still scanning");
+    expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
   });
 
   it("keeps recent activity first in both cost and token breakdowns", async () => {

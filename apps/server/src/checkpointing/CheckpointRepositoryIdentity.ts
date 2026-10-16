@@ -8,7 +8,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -53,7 +53,7 @@ const hashKey = (payload: string) => NodeCrypto.createHash("sha256").update(payl
 export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const process = yield* VcsProcess.VcsProcess;
-  const hostPlatform = yield* HostProcessPlatform;
+  const hostPlatform = yield* HostProcess.Platform;
 
   const git = (operation: string, cwd: string, args: ReadonlyArray<string>) =>
     process.run({

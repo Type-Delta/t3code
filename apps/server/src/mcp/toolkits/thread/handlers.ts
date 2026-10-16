@@ -13,6 +13,7 @@ import { modelSelectionCommandType } from "@t3tools/shared/model";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import {
+  assertProjectAllowed,
   dispatchFailure,
   newCommandId,
   readCaller,
@@ -80,21 +81,32 @@ export const ThreadToolkitHandlersLive = McpToolAccess.toLayer(ThreadToolkit, {
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;
+      const context = yield* readCaller();
       const { tasks } = yield* scheduler.list().pipe(Effect.mapError(unavailable));
-      if (!tasks.some((task) => task.id === input.taskId))
+      const task = tasks.find((candidate) => candidate.id === input.taskId);
+      if (task === undefined)
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
           message: "The scheduled task was not found.",
         });
-      const { task } = yield* scheduler
+      yield* assertProjectAllowed(
+        context.scope,
+        context.caller,
+        task.projectId,
+        new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The scheduled task was not found.",
+        }),
+      );
+      const { task: runTask } = yield* scheduler
         .runNow({ id: input.taskId })
         .pipe(Effect.mapError(unavailable));
       return {
-        taskId: task.id,
-        threadId: task.threadId,
-        lastRunStatus: task.lastRunStatus,
-        runCount: task.runCount,
-        nextRunAt: task.nextRunAt,
+        taskId: runTask.id,
+        threadId: runTask.threadId,
+        lastRunStatus: runTask.lastRunStatus,
+        runCount: runTask.runCount,
+        nextRunAt: runTask.nextRunAt,
       };
     }),
   ),
@@ -105,6 +117,7 @@ export const ThreadToolkitHandlersLive = McpToolAccess.toLayer(ThreadToolkit, {
       const { projectId: requested, ...query } = input;
       // Like the other project tools, an omitted project means the caller's own; a client
       // outside a thread searches every project.
+      if (requested !== undefined) yield* assertProjectAllowed(invocation, caller, requested);
       const projectId =
         requested ?? (invocation.mcpToolScope === "global" ? undefined : caller?.projectId);
       const threadSearch = yield* ThreadSearch.ThreadSearch;
@@ -297,8 +310,13 @@ export const ThreadToolkitHandlersLive = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection } = yield* readThread(input.threadId);
+      const { threads, projection, caller } = yield* readThread(input.threadId);
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
+      if (input.action === "settle") {
+        return yield* threads
+          .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
+          .pipe(Effect.mapError(dispatchFailure));
+      }
       let command: OrchestrationV2Command;
       switch (input.action) {
         case "snooze":

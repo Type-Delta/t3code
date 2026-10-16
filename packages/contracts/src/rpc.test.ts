@@ -41,6 +41,17 @@ describe("WebSocket RPC contracts", () => {
     expect(methods.filter((method) => method.startsWith("orchestrationV1."))).toEqual([]);
   });
 
+  it("does not expose the removed preview automation broker RPCs", () => {
+    const methods = [...WsRpcGroup.requests.keys()];
+    expect(methods).not.toEqual(
+      expect.arrayContaining([
+        "previewAutomation.connect",
+        "previewAutomation.respond",
+        "previewAutomation.focusHost",
+      ]),
+    );
+  });
+
   it("rejects server-internal commands sent to dispatchCommand", () => {
     const dispatchCommand = WsRpcGroup.requests.get(ORCHESTRATION_V2_WS_METHODS.dispatchCommand);
     if (dispatchCommand === undefined) throw new Error("dispatchCommand is not registered");

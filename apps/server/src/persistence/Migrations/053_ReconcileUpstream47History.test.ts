@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { runForkMigrations } from "../ForkMigrations.ts";
 import { runMigrations } from "../Migrations.ts";
 import projectionThreadsPinned from "./041_ProjectionThreadsPinned.ts";
 import projectionTurnsKeysetIndex from "./042_ProjectionTurnsKeysetIndex.ts";
@@ -58,6 +59,8 @@ layer("053_ReconcileUpstream47History", (it) => {
       `;
 
       yield* runMigrations({ toMigrationInclusive: 53 });
+      // Fork schema lives in its own ledger, which a bounded upstream run skips.
+      yield* runForkMigrations();
 
       const checkpointTables = yield* sql<{ readonly name: string }>`
         SELECT name FROM sqlite_master
@@ -101,10 +104,10 @@ layer("053_ReconcileUpstream47History", (it) => {
 
       const ledger = yield* sql<{ readonly migrationId: number; readonly name: string }>`
         SELECT migration_id AS "migrationId", name
-        FROM effect_sql_migrations
-        WHERE migration_id = 53
+        FROM fork_sql_migrations
+        WHERE name = 'ReconcileUpstream47History'
       `;
-      assert.deepEqual(ledger, [{ migrationId: 53, name: "ReconcileUpstream47History" }]);
+      assert.deepEqual(ledger, [{ migrationId: 14, name: "ReconcileUpstream47History" }]);
     }),
   );
 });

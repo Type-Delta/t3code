@@ -5,7 +5,7 @@ import * as NodeStream from "node:stream";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -55,9 +55,9 @@ it.layer(NodeServices.layer)("parent process shutdown", (it) => {
           }),
         ).pipe(
           Effect.provideService(ParentProcessShutdown.ParentProcessShutdownHost, host),
-          Effect.provideService(HostProcessPlatform, mode === "linux-desktop" ? "linux" : "win32"),
+          Effect.provideService(HostProcess.Platform, mode === "linux-desktop" ? "linux" : "win32"),
           Effect.provideService(
-            HostProcessEnvironment,
+            HostProcess.Environment,
             mode === "service" ? { [SERVICE_LAUNCHER_CONTEXT_ENV]: "managed" } : {},
           ),
           Effect.provideService(ServerConfig.ServerConfig, {

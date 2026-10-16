@@ -102,6 +102,22 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
     }).pipe(Effect.provide(serviceLayer)),
   );
 
+  it.effect("round-trips the review-guide scope through persistence", () =>
+    Effect.gen(function* () {
+      const service = yield* ManagementApiKeyService.ManagementApiKeyService;
+      const issued = yield* service.create({
+        name: "Review guide integration",
+        scopes: ["pullRequests:review"],
+      });
+      expect(issued.key.scopes).toEqual(["pullRequests:review"]);
+      const resolved = yield* service.resolveToken(issued.secret);
+      expect(Option.isSome(resolved)).toBe(true);
+      if (Option.isSome(resolved)) {
+        expect([...resolved.value.scopes]).toEqual(["pullRequests:review"]);
+      }
+    }).pipe(Effect.provide(serviceLayer)),
+  );
+
   it.effect("rejects malformed, expired, and revoked credentials", () =>
     Effect.gen(function* () {
       const service = yield* ManagementApiKeyService.ManagementApiKeyService;

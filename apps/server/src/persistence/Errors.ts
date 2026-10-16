@@ -72,10 +72,7 @@ export class PersistenceDecodeError extends Schema.TaggedError<PersistenceDecode
   }
 }
 
-/**
- * Read a SQLite condition through SQL error wrappers.
- * Use Node's fixed description or Bun's numeric code, never the driver message.
- */
+/** Read a SQLite condition through SQL error wrappers without exposing driver messages. */
 function sqliteCondition(cause: unknown): string | undefined {
   let value = cause;
   for (let depth = 0; depth < 4 && Predicate.isObject(value); depth += 1) {
@@ -142,6 +139,7 @@ export type ProviderSessionRuntimeRepositoryError = PersistenceSqlError | Persis
 export type AuthPairingLinkRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type AuthSessionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type ManagementApiKeyRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type PullRequestFilesViewedRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type PullRequestReviewGuideRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
-export type PullRequestFilesViewedRepositoryError = PersistenceSqlError | PersistenceDecodeError;

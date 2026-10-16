@@ -399,7 +399,7 @@ export const make = Effect.gen(function* () {
     const now = yield* DateTime.now;
     yield* validateInput(input, now);
     const id = ManagementApiKeyId.make(
-      yield* crypto.randomUUIDv4.pipe(Effect.mapError((cause) => internal("create.id", cause))),
+      yield* crypto.randomUUIDv4().pipe(Effect.mapError((cause) => internal("create.id", cause))),
     );
     const generated = yield* generateToken(id);
     const secretHash = yield* hashToken(generated.token);

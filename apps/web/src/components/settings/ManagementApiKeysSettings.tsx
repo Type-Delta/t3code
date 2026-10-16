@@ -8,7 +8,7 @@ import {
   RotateCwIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { EnvironmentId } from "@t3tools/contracts";
 import type { PreparedConnection } from "@t3tools/client-runtime/connection";
@@ -245,6 +245,7 @@ function CreateManagementApiKeyDialog({
   const [customScopes, setCustomScopes] = useState<ReadonlyArray<ManagementApiKeyScope>>(
     scopesForManagementApiKeyPreset(DEFAULT_PRESET),
   );
+  const formId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -286,8 +287,8 @@ function CreateManagementApiKeyDialog({
             Create a durable credential for {environmentLabel}. The full secret is shown once.
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit}>
-          <DialogPanel>
+        <DialogPanel>
+          <form id={formId} onSubmit={handleSubmit}>
             <div className="space-y-5">
               <div className="space-y-2">
                 <Label htmlFor="management-api-key-name">Name</Label>
@@ -402,20 +403,21 @@ function CreateManagementApiKeyDialog({
                 </p>
               ) : null}
             </div>
-          </DialogPanel>
-          <DialogFooter variant="bare">
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              disabled={isSubmitting || !name.trim() || selectedScopes.length === 0}
-            >
-              {isSubmitting ? <Spinner /> : <PlusIcon aria-hidden />}
-              {isSubmitting ? "Creating…" : "Create key"}
-            </Button>
-          </DialogFooter>
-        </form>
+          </form>
+        </DialogPanel>
+        <DialogFooter variant="bare">
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            form={formId}
+            type="submit"
+            disabled={isSubmitting || !name.trim() || selectedScopes.length === 0}
+          >
+            {isSubmitting ? <Spinner /> : <PlusIcon aria-hidden />}
+            {isSubmitting ? "Creating…" : "Create key"}
+          </Button>
+        </DialogFooter>
       </DialogPopup>
     </Dialog>
   );

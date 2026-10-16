@@ -2,6 +2,7 @@ import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
@@ -9,7 +10,15 @@ import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.t
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import {
+  assertProjectAllowed,
+  newCommandId,
+  readCaller,
+  resolveProjectId,
+  unavailable,
+  type Caller,
+} from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
@@ -48,9 +57,21 @@ const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (
 });
 
 const access = Effect.gen(function* () {
-  yield* readCaller();
-  return yield* Project.ProjectService;
+  const context = yield* readCaller();
+  return { ...context, projects: yield* Project.ProjectService };
 });
+
+// A scoped credential whose calling thread is gone has no project of its own,
+// so it fails closed instead of reaching every project.
+const assertProjectCreationAllowed = (context: Caller) =>
+  !McpInvocationContext.canCrossProjects(context.scope)
+    ? Effect.fail(
+        new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: "Project-scoped credentials cannot create projects outside their project.",
+        }),
+      )
+    : Effect.void;
 export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_thread_launch: McpToolAccess.startsThreads(
     (input) => input,
@@ -76,6 +97,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
           });
+        if (input.scratch === true) yield* assertProjectCreationAllowed(context);
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
@@ -89,6 +111,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 ),
               )).projectId
             : yield* resolveProjectId(context, input.projectId);
+        yield* assertProjectAllowed(context.scope, context.caller, projectId);
         const readProject = Project.ProjectService.pipe(
           Effect.flatMap((projects) => projects.getById(projectId)),
           Effect.mapError(unavailable),
@@ -103,6 +126,26 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             });
           yield* assertProjectWorktree(project.workspaceRoot, input.workspaceStrategy.worktreePath);
         }
+        // A launch is accepted before its worktree is provisioned, so a base
+        // ref that cannot resolve is refused while the agent can still act on it.
+        const strategy = input.workspaceStrategy;
+        if (strategy?.type === "worktree")
+          yield* ThreadLaunch.ThreadLaunchService.pipe(
+            Effect.flatMap((launches) =>
+              launches.checkWorktreeBase({ projectId, workspaceStrategy: strategy }),
+            ),
+            Effect.mapError(
+              (error) =>
+                new OrchestratorMcpFailure({
+                  code: "invalid_request",
+                  message: `${error.message} No thread was created. Pass a branch, tag, or commit that exists there${
+                    strategy.startFromOrigin === true
+                      ? "; the project has no origin remote to fetch it from."
+                      : ", or set startFromOrigin:true if it exists only on origin."
+                  }`,
+                }),
+            ),
+          );
         const modelSelection =
           input.modelSelection ??
           caller?.modelSelection ??
@@ -136,11 +179,21 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           createdBy: "agent",
           creationSource: "mcp",
         }).pipe(
-          Effect.mapError((error) =>
-            error._tag === "AttachmentClaimError"
-              ? new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message })
-              : unavailable(),
-          ),
+          Effect.mapError((error) => {
+            if (error._tag === "AttachmentClaimError") {
+              return new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message: error.message,
+              });
+            }
+            if (error._tag === "ThreadManagementProviderInstanceDisabledError") {
+              return new OrchestratorMcpFailure({
+                code: "invalid_request",
+                message: error.message,
+              });
+            }
+            return unavailable();
+          }),
         );
         const thread = result.projection.thread;
         const run = result.projection.runs.find((run) => run.userMessageId === messageId);
@@ -155,9 +208,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
-      const projects = yield* access;
+      const { projects, caller, scope } = yield* access;
       const snapshot = yield* projects.snapshot.pipe(Effect.mapError(unavailable));
-      const rows = snapshot.projects.filter((project) => project.deletedAt === null);
+      const rows = snapshot.projects.filter(
+        (project) =>
+          project.deletedAt === null &&
+          (McpInvocationContext.canCrossProjects(scope) || project.id === caller?.projectId),
+      );
       const start = input.cursor ?? 0,
         end = start + (input.limit ?? 20);
       return { projects: rows.slice(start, end), nextCursor: end < rows.length ? end : null };
@@ -165,7 +222,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
-      const projects = yield* access;
+      const context = yield* access;
+      yield* assertProjectAllowed(context.scope, context.caller, input.projectId);
+      const { projects } = context;
       const result = yield* projects.getById(input.projectId).pipe(Effect.mapError(unavailable));
       if (Option.isNone(result))
         return yield* new OrchestratorMcpFailure({
@@ -177,6 +236,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_create: McpToolAccess.writesEnvironment(({ workspaceRoot, ...input }) =>
     Effect.gen(function* () {
+      const context = yield* access;
+      yield* assertProjectCreationAllowed(context);
       const projects = yield* Project.ProjectService;
       if (workspaceRoot === undefined) {
         // Project creation records no model default (only an update does), so
@@ -221,7 +282,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_update: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
-      const projects = yield* Project.ProjectService;
+      const context = yield* access;
+      yield* assertProjectAllowed(context.scope, context.caller, input.projectId);
+      const { projects } = context;
       return yield* projects
         .update({ ...input, commandId: yield* newCommandId() })
         .pipe(Effect.mapError(projectFailure));
@@ -229,7 +292,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_delete: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
-      const projects = yield* Project.ProjectService;
+      const context = yield* access;
+      yield* assertProjectAllowed(context.scope, context.caller, input.projectId);
+      const { projects } = context;
       return yield* projects
         .delete({ ...input, commandId: yield* newCommandId() })
         .pipe(Effect.mapError(projectFailure));
@@ -237,6 +302,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_clone: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
+      const context = yield* access;
+      yield* assertProjectCreationAllowed(context);
       const repositories = yield* Repositories.SourceControlRepositoryService;
       return yield* repositories.cloneRepository(input).pipe(
         Effect.mapError(

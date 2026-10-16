@@ -5,6 +5,7 @@ import {
   type ManagementApiKeyScope,
   ProjectId,
   ProviderInstanceId,
+  type ScheduledTask,
   ThreadId,
   type OrchestrationSearchThreadsResult,
   type OrchestrationV2ThreadProjection,
@@ -61,6 +62,8 @@ const makeToolkit = (
   options: {
     readonly matches?: OrchestrationSearchThreadsResult["matches"];
     readonly caller?: OrchestrationV2ThreadShell | null;
+    readonly scheduledTasks?: ReadonlyArray<ScheduledTask>;
+    readonly onRunScheduledTask?: () => void;
   } = {},
 ) => {
   const dependencies = Layer.mergeAll(
@@ -87,7 +90,14 @@ const makeToolkit = (
             .slice(0, input.limit ?? 50),
         }),
     }),
-    Layer.mock(ScheduledTasks.ScheduledTaskService)({}),
+    Layer.mock(ScheduledTasks.ScheduledTaskService)({
+      list: () => Effect.succeed({ tasks: options.scheduledTasks ?? [] }),
+      runNow: () =>
+        Effect.sync(() => {
+          options.onRunScheduledTask?.();
+          return { task: options.scheduledTasks?.[0] } as never;
+        }),
+    }),
   );
   return {
     toolkit: ThreadToolkit.pipe(
@@ -229,4 +239,67 @@ it.effect("allows global provider search across projects while keeping project s
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(project.dependencies));
     expect(projectResult.at(-1)?.result).toMatchObject({ matches: [matches[1]] });
   }),
+);
+
+it.effect(
+  "scopes run_scheduled_task_now by project while preserving global and management callers",
+  () =>
+    Effect.gen(function* () {
+      const foreignProjectId = ProjectId.make("mcp-thread-tools-foreign-project");
+      const foreignTask = {
+        id: "mcp-thread-tools-foreign-task",
+        projectId: foreignProjectId,
+        threadId: null,
+        lastRunStatus: "never",
+        runCount: 0,
+        nextRunAt: null,
+      } as unknown as ScheduledTask;
+      const caller = {
+        id: sourceThreadId,
+        projectId,
+        deletedAt: null,
+        archivedAt: null,
+        activeRunId: "run-active",
+        providerInstanceId,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      } as unknown as OrchestrationV2ThreadShell;
+      const providerScope = (mcpToolScope: "global" | "project") =>
+        ({
+          environmentId,
+          principal: {
+            type: "provider-session" as const,
+            threadId: sourceThreadId,
+            providerSessionId: "mcp-thread-tools-provider-session",
+            providerInstanceId,
+          },
+          thread: {
+            threadId: sourceThreadId,
+            providerSessionId: "mcp-thread-tools-provider-session",
+            providerInstanceId,
+          },
+          capabilities: new Set(["orchestration" as const]),
+          mcpToolScope,
+          issuedAt: 1,
+        }) satisfies McpInvocationContext.McpInvocationScope;
+      const run = (invocation: McpInvocationContext.McpInvocationScope) => {
+        const harness = makeToolkit(invocation, [], {
+          caller,
+          scheduledTasks: [foreignTask],
+        });
+        return Effect.gen(function* () {
+          const toolkit = yield* harness.toolkit;
+          return yield* toolkit
+            .handle("run_scheduled_task_now", { taskId: foreignTask.id })
+            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(harness.dependencies));
+        });
+      };
+
+      const denied = yield* run(providerScope("project"));
+      expect(denied.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+      const global = yield* run(providerScope("global"));
+      expect(global.at(-1)?.result).toMatchObject({ taskId: foreignTask.id });
+      const management = yield* run(managementInvocation(["threads:message"]));
+      expect(management.at(-1)?.result).toMatchObject({ taskId: foreignTask.id });
+    }),
 );

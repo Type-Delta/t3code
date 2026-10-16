@@ -149,7 +149,8 @@ it.effect.each(["on time", "after restart"])(
           type: "message.dispatch",
           usageLimitContinuationOfRunId: thread.latestRunId,
           usageLimitRecoveryRequestId: thread.limitRecovery!.requestId,
-          text: "Continue where you left off.",
+          // Fork DL032: the automatic resume uses the fork continuation prompt.
+          text: expect.stringContaining("[T3 Code automatic resume]"),
         });
       }).pipe(Effect.provide(layerWorkers));
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),

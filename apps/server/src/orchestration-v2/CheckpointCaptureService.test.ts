@@ -28,7 +28,7 @@ import { VcsProcessTimeoutError } from "@t3tools/contracts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointCaptureService from "./CheckpointCaptureService.ts";
 import * as EventSink from "./EventSink.ts";
-import * as IdAllocator from "./IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 const layerProjectionStoreTest = Layer.mergeAll(
@@ -277,6 +277,9 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
                         IdAllocator.layer,
                         NodeCrypto.layer,
                         Layer.mock(CheckpointStore.CheckpointStore)({
+                          allocateCheckpointRef: () =>
+                            Effect.succeed(CheckpointRef.make("t3-sidecar:v1:test")),
+                          listAuthoredPaths: () => Effect.succeed(null),
                           isGitRepository: () => Effect.succeed(true),
                           captureCheckpoint: () => Effect.void,
                           hasCheckpointRef: () =>
@@ -734,6 +737,145 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
       );
       assert.equal(projected.rootNode?.status, "cancelled");
       assert.deepEqual([...projected.readyCheckpointOrdinals].toSorted(), [0, 1]);
+    }),
+  );
+  // A completed turn with open background work parks at `waiting`, and only its
+  // capture completes it. When capture fails for good, the run must still end.
+  it.effect("completes a waiting run without a checkpoint and leaves settled runs alone", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const turnEndedAt = DateTime.add(now, { seconds: 1 });
+      const waitingThreadId = ThreadId.make("thread:checkpoint-capture-abandoned");
+      const waitingRunId = RunId.make("run:checkpoint-capture-abandoned");
+      const waitingScopeId = CheckpointScopeId.make("scope:checkpoint-capture-abandoned");
+      const waitingRootNodeId = NodeId.make("node:checkpoint-capture-abandoned-root");
+      const event = (name: string) => EventId.make(`event:checkpoint-capture-abandoned:${name}`);
+      yield* projectionStore.apply({
+        id: event("thread"),
+        type: "thread.created",
+        threadId: waitingThreadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: waitingThreadId,
+          projectId,
+          title: "Checkpoint capture abandoned",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: waitingThreadId,
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      const waitingRun: OrchestrationV2Run = {
+        id: waitingRunId,
+        threadId: waitingThreadId,
+        ordinal: 1,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId,
+        userMessageId: MessageId.make("message:checkpoint-capture-abandoned"),
+        rootNodeId: waitingRootNodeId,
+        activeAttemptId: null,
+        status: "waiting",
+        requestedAt: now,
+        startedAt: now,
+        completedAt: turnEndedAt,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      yield* projectionStore.apply({
+        id: event("run"),
+        type: "run.updated",
+        threadId: waitingThreadId,
+        runId: waitingRunId,
+        nodeId: waitingRootNodeId,
+        providerInstanceId,
+        occurredAt: turnEndedAt,
+        payload: waitingRun,
+      });
+      yield* projectionStore.apply({
+        id: event("node"),
+        type: "node.updated",
+        threadId: waitingThreadId,
+        runId: waitingRunId,
+        nodeId: waitingRootNodeId,
+        providerInstanceId,
+        occurredAt: turnEndedAt,
+        payload: {
+          id: waitingRootNodeId,
+          threadId: waitingThreadId,
+          runId: waitingRunId,
+          parentNodeId: null,
+          rootNodeId: waitingRootNodeId,
+          kind: "root_turn",
+          status: "waiting",
+          countsForRun: true,
+          providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: waitingScopeId,
+          startedAt: now,
+          completedAt: turnEndedAt,
+        },
+      });
+
+      const commits = yield* Ref.make(0);
+      const layerCapture = CheckpointCaptureService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            Layer.mock(CheckpointService.CheckpointServiceV2)({}),
+            Layer.mock(EventSink.EventSinkV2)({
+              commitCommand: (input) =>
+                Effect.forEach(input.events, (next) => projectionStore.apply(next)).pipe(
+                  Effect.andThen(Ref.update(commits, (count) => count + 1)),
+                  Effect.as({ committed: true } as never),
+                  Effect.orDie,
+                ),
+            }),
+          ),
+        ),
+      );
+      const target = { threadId: waitingThreadId, runId: waitingRunId, scopeId: waitingScopeId };
+      yield* Effect.gen(function* () {
+        const service = yield* CheckpointCaptureService.CheckpointCaptureServiceV2;
+        yield* service.completeWithoutCheckpoint(target);
+        // Already terminal: a second call writes nothing.
+        yield* service.completeWithoutCheckpoint(target);
+      }).pipe(Effect.provide(layerCapture));
+
+      assert.equal(yield* Ref.get(commits), 1);
+      const projected = yield* projectionStore.getCheckpointCaptureContext(waitingThreadId, {
+        runId: waitingRunId,
+        scopeId: waitingScopeId,
+      });
+      assert.equal(projected.run?.status, "completed");
+      assert.isNull(projected.run?.checkpointId ?? null);
+      const completedAt = projected.run?.completedAt;
+      assert.equal(
+        completedAt ? DateTime.formatIso(completedAt) : completedAt,
+        DateTime.formatIso(turnEndedAt),
+      );
+      assert.equal(projected.rootNode?.status, "completed");
     }),
   );
 });

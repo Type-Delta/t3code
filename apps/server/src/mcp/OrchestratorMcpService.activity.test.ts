@@ -20,10 +20,18 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+
+const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
+  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+);
 
 const environmentId = EnvironmentId.make("environment-mcp-orchestrator-detail");
 const projectId = ProjectId.make("project-mcp-orchestrator-detail");
@@ -39,7 +47,9 @@ const codexDriver = ProviderDriverKind.make("codex");
 const customCodexInstanceId = ProviderInstanceId.make("codex-custom-workspace");
 const parentInstanceId = ProviderInstanceId.make("codex");
 
-const makeScope = (): McpInvocationContext.McpInvocationScope => ({
+const makeScope = (
+  mcpToolScope: "global" | "project" = "global",
+): McpInvocationContext.McpInvocationScope => ({
   environmentId,
   requestNamespace: "provider-session-mcp-orchestrator-detail",
   thread: {
@@ -49,6 +59,7 @@ const makeScope = (): McpInvocationContext.McpInvocationScope => ({
   },
   client: undefined,
   capabilities: new Set(["orchestration"]),
+  mcpToolScope,
   issuedAt: 1,
 });
 
@@ -126,7 +137,7 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
     updatedAt: now,
   } as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = OrchestratorMcpService.layer.pipe(
+  const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -146,6 +157,7 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
               ? Effect.succeed(projection)
               : Effect.die(`unexpected thread ${input.threadId}`),
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
@@ -191,7 +203,7 @@ it("readThread prefers waiting activity status over a newer cancelled queued run
     updatedAt: now,
   } as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = OrchestratorMcpService.layer.pipe(
+  const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -211,6 +223,7 @@ it("readThread prefers waiting activity status over a newer cancelled queued run
               ? Effect.succeed(projection)
               : Effect.die(`unexpected thread ${input.threadId}`),
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
@@ -313,7 +326,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
     updatedAt: now,
   } as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = OrchestratorMcpService.layer.pipe(
+  const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -324,6 +337,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
             return Effect.die(`unexpected thread ${threadId}`);
           },
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
@@ -411,7 +425,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       updatedAt: now,
     }) as unknown as OrchestrationV2ThreadProjection;
 
-  const layer = OrchestratorMcpService.layer.pipe(
+  const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
@@ -441,12 +455,26 @@ it("readThread and sendToThread reach threads in other projects", async () => {
                     threadId: input.threadId,
                   }),
                 ),
+          getShellSnapshot: () =>
+            Effect.succeed({
+              threads: [parentProjection.thread, foreignProjection(foreignThreadId).thread],
+            } as never),
+          listProjectThreads: (input) =>
+            input.projectId === projectId
+              ? Effect.succeed([parentProjection.thread] as never)
+              : Effect.succeed([foreignProjection(foreignThreadId).thread] as never),
           sendToThread: () =>
             Effect.succeed({
               run: { id: "run-foreign", status: "queued" },
               delivery: "started",
             } as unknown as ThreadManagementService.ThreadManagementSendResult),
+          waitForThread: () =>
+            Effect.succeed({
+              run: { id: "run-foreign", status: "completed" },
+              timedOut: false,
+            } as never),
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+        ServerSettings.layerTest(),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([]),
         } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
@@ -485,6 +513,31 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       message: "hi",
     });
     expect(sent.threadId).toBe(foreignThreadId);
+    const globalWait = yield* service.waitForThread(makeScope(), { threadId: foreignThreadId });
+    expect(globalWait.threadId).toBe(foreignThreadId);
+    const globalList = yield* service.listThreads(makeScope(), { projectId: foreignProjectId });
+    expect(globalList.threads.map((thread) => thread.threadId)).toEqual([foreignThreadId]);
+
+    const projectScope = makeScope("project");
+    const deniedRead = yield* service
+      .readThread(projectScope, { threadId: foreignThreadId })
+      .pipe(Effect.flip);
+    expect(deniedRead.code).toBe("thread_not_found");
+    const deniedSend = yield* service
+      .sendToThread(projectScope, { threadId: foreignThreadId, message: "blocked" })
+      .pipe(Effect.flip);
+    expect(deniedSend.code).toBe("thread_not_found");
+    const deniedWait = yield* service
+      .waitForThread(projectScope, { threadId: foreignThreadId })
+      .pipe(Effect.flip);
+    expect(deniedWait.code).toBe("thread_not_found");
+    const deniedList = yield* service
+      .listThreads(projectScope, { projectId: foreignProjectId })
+      .pipe(Effect.flip);
+    expect(deniedList.code).toBe("thread_not_found");
+    const localList = yield* service.listThreads(projectScope, {});
+    expect(localList.projectId).toBe(projectId);
+    expect(localList.threads.map((thread) => thread.threadId)).toEqual([parentThreadId]);
 
     // Once the caller's run ends, it can still read other threads but no longer write to them.
     parentRuns = [];

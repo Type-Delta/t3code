@@ -5,14 +5,17 @@ import * as NodeOS from "node:os";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 
-import { spawnProviderProcess, withExecutablePathRecovery } from "./executableRecovery.ts";
+import {
+  spawnProviderProcess,
+  withExecutablePathRecovery,
+} from "@t3tools/provider-core/server/executableRecovery";
 
 const missingPath = NodePath.join(NodeOS.tmpdir(), "t3-missing-executable-recovery", "gone.exe");
 
@@ -39,7 +42,7 @@ describe("provider executable recovery", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(NodeServices.layer),
-        Effect.provideService(HostProcessPlatform, "win32"),
+        Effect.provideService(HostProcess.Platform, "win32"),
         Effect.provideService(SpawnExecutableResolution, () => {
           resolutions += 1;
           return resolutions === 1 ? missingPath : process.execPath;
@@ -60,7 +63,7 @@ describe("provider executable recovery", () => {
       }).pipe(
         Effect.scoped,
         Effect.provide(NodeServices.layer),
-        Effect.provideService(HostProcessPlatform, "win32"),
+        Effect.provideService(HostProcess.Platform, "win32"),
         Effect.provideService(SpawnExecutableResolution, () => {
           resolutions += 1;
           return missingPath;
@@ -103,7 +106,7 @@ describe("provider executable recovery", () => {
     }).pipe(
       Effect.scoped,
       Effect.provide(NodeServices.layer),
-      Effect.provideService(HostProcessPlatform, "win32"),
+      Effect.provideService(HostProcess.Platform, "win32"),
       Effect.provideService(SpawnExecutableResolution, () => {
         resolutions += 1;
         return process.execPath;

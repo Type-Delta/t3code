@@ -10,11 +10,27 @@ import {
   makePendingClaudeProvider,
   normalizeClaudeCliEffort,
   resolveClaudeApiModelId,
+  shouldResolveClaudeModel,
 } from "./ClaudeProvider.ts";
 
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 it.layer(NodeServices.layer)("Claude gateway model metadata", (it) => {
+  it("resolves bundled models when a manual override supplies runtime metadata", () => {
+    const model = claudeModelsFromSettings(
+      decodeClaudeSettings({
+        modelOverrides: { "claude-opus-4-6": { contextWindowTokens: 300_000 } },
+      }),
+    ).find((candidate) => candidate.slug === "claude-opus-4-6");
+
+    expect(
+      shouldResolveClaudeModel(model, "claude-opus-4-6", {
+        "claude-opus-4-6": { contextWindowTokens: 300_000 },
+      }),
+    ).toBe(true);
+    expect(shouldResolveClaudeModel(model, "claude-opus-4-6", {})).toBe(false);
+  });
+
   it("merges discovered models and manual metadata per provider instance", () => {
     const settings = decodeClaudeSettings({
       customModels: ["claude-private"],
@@ -149,6 +165,14 @@ it.layer(NodeServices.layer)("Claude gateway model metadata", (it) => {
         capabilities: xhighCapabilities,
       }),
     ).toBe("xhigh");
+    for (const model of [
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-fable-5-1",
+      "claude-haiku-5-5",
+    ]) {
+      expect(normalizeClaudeCliEffort("xhigh", model)).toBe("xhigh");
+    }
     expect(normalizeClaudeCliEffort("xhigh", "claude-opus-4-7")).toBe("max");
   });
 

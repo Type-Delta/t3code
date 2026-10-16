@@ -37,20 +37,10 @@ export const MAX_CUSTOM_MODEL_LENGTH = 256;
 const DEFAULT_TEXT_GENERATION_INSTANCE_ID = ProviderInstanceId.make("codex");
 
 /**
- * Resolve the custom-model list for a given instance, preferring the
- * instance's own `providerInstances[id].config.customModels` blob when
- * present and falling back to the legacy per-kind
- * `settings.providers[kind].customModels` bucket for default instances only.
- *
- * The Settings UI promotes the legacy bucket into an explicit
- * `providerInstances[defaultId]` entry on every edit (the "migrate on
- * first write" scheme documented in
- * `ProviderInstanceRegistryHydration`), so this helper exists primarily
- * so readers pick up that promotion immediately — and so first-time
- * viewers on pre-migration settings still see their legacy list on
- * default slots. Custom instances intentionally do not read the legacy
- * per-driver bucket; otherwise one custom model added to `claude_openrouter`
- * can appear on the stock `claudeAgent` instance.
+ * Resolve the custom-model list for a given instance from its own
+ * `providerInstances[id].config.customModels` blob. Each instance keeps its
+ * own list, so a custom model added to `claude_openrouter` never appears on
+ * the stock `claudeAgent` instance.
  */
 function readInstanceCustomModels(
   settings: UnifiedSettings,
@@ -66,15 +56,7 @@ function readInstanceCustomModels(
       return readCustomModelEntries(value);
     }
   }
-  const defaultInstanceId = defaultInstanceIdForDriver(driverKind);
-  if (instanceId !== defaultInstanceId) {
-    return [];
-  }
-  const legacyProviders = settings.providers as Record<
-    string,
-    { readonly customModels: ReadonlyArray<unknown> } | undefined
-  >;
-  return readCustomModelEntries(legacyProviders[driverKind]?.customModels ?? []);
+  return [];
 }
 
 export interface AppModelOption {
@@ -243,14 +225,12 @@ function getAppModelOptions(
  * come from the instance's own `entry.models` snapshot (rather than the
  * first-matching-kind fallback in `getProviderModels`), so each custom
  * instance gets the precise model list its driver reported. Custom model
- * slugs come from the instance's own `providerInstances[id].config.customModels`
- * when present, falling back to the legacy per-kind
- * `settings.providers[driverKind].customModels` bucket for default
- * instances only. This keeps two instances of the same kind from leaking
- * custom slugs into each other. Gateway rows from an authoritative inventory
- * are included when they are not also represented by a manually configured
- * entry. Other server custom rows remain ignored so a slug removed in Settings
- * disappears without waiting for the next provider probe.
+ * slugs come from the instance's own `providerInstances[id].config.customModels`,
+ * so two instances of the same kind never leak custom slugs into each other.
+ * Gateway rows from an authoritative inventory are included when they are not
+ * also represented by a manually configured entry. Other server custom rows
+ * remain ignored so a slug removed in Settings disappears without waiting for
+ * the next provider probe.
  */
 export function getAppModelOptionsForInstance(
   settings: UnifiedSettings,

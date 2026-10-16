@@ -28,10 +28,12 @@ export class RunFinalizationRefreshError extends Schema.TaggedError<RunFinalizat
 
 export class RunFinalizationObserver extends Context.Reference<{
   readonly refreshAfterTurn: (projectId: ProjectId) => Effect.Effect<void>;
+  /** Refreshes the file search index, and VCS and PR status unless `vcs` is false. */
   readonly refresh: (input: {
     readonly cwd: string;
     readonly threadId: ThreadId;
     readonly runId: RunId;
+    readonly vcs?: boolean;
   }) => Effect.Effect<void, RunFinalizationRefreshError>;
 }>("t3/orchestration-v2/RunFinalizationObserver", {
   defaultValue: () => ({ refresh: () => Effect.void, refreshAfterTurn: () => Effect.void }),
@@ -41,6 +43,12 @@ export class RunFinalizationService extends Context.Service<
   RunFinalizationService,
   {
     readonly finalize: (input: {
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+      readonly scopeId: CheckpointScopeId;
+    }) => Effect.Effect<void, RunFinalizationError>;
+    /** Completes a still-waiting run after its capture's last attempt failed. */
+    readonly abandonCapture: (input: {
       readonly threadId: ThreadId;
       readonly runId: RunId;
       readonly scopeId: CheckpointScopeId;
@@ -71,9 +79,23 @@ const make = Effect.gen(function* () {
         ),
       );
     const cwd = projection.checkpointScopes.find((scope) => scope.id === input.scopeId)?.cwd;
+    // A `missing` checkpoint means the workspace has no repository, so there is
+    // no VCS status to refresh and no reason to spawn VCS processes for it.
+    // The file search index still follows the turn's edits.
+    const nonRepository = projection.checkpoints.some(
+      (checkpoint) =>
+        checkpoint.runId === input.runId &&
+        checkpoint.scopeId === input.scopeId &&
+        checkpoint.status === "missing",
+    );
     if (cwd !== undefined) {
       yield* observer
-        .refresh({ cwd, threadId: input.threadId, runId: input.runId })
+        .refresh({
+          cwd,
+          threadId: input.threadId,
+          runId: input.runId,
+          ...(nonRepository ? { vcs: false } : {}),
+        })
         .pipe(
           Effect.mapError(
             (cause) =>
@@ -82,7 +104,15 @@ const make = Effect.gen(function* () {
         );
     }
   });
-  return RunFinalizationService.of({ finalize });
+  const abandonCapture: RunFinalizationService["Service"]["abandonCapture"] = (input) =>
+    checkpointCapture
+      .completeWithoutCheckpoint(input)
+      .pipe(
+        Effect.mapError(
+          (cause) => new RunFinalizationError({ ...input, operation: "capture-checkpoint", cause }),
+        ),
+      );
+  return RunFinalizationService.of({ finalize, abandonCapture });
 });
 
 export const layer = Layer.effect(RunFinalizationService, make);
@@ -96,8 +126,9 @@ export const layerObserver = Layer.effect(
     const pullRequests = yield* PullRequestService.PullRequestService;
     return {
       refreshAfterTurn: pullRequests.refreshAfterTurn,
-      refresh: ({ cwd, threadId, runId }) =>
+      refresh: ({ cwd, threadId, runId, vcs = true }) =>
         Effect.gen(function* () {
+          if (!vcs) return yield* workspaceEntries.refresh(cwd);
           const [, local] = yield* Effect.all(
             [workspaceEntries.refresh(cwd), vcsStatus.refreshLocalStatus(cwd)],
             { concurrency: "unbounded" },

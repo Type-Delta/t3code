@@ -20,6 +20,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
+import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ManagementApiKeyService from "../auth/ManagementApiKeyService.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -167,8 +168,31 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const managementKeys = yield* ManagementApiKeyService.ManagementApiKeyService;
   const environment = yield* ServerEnvironment.ServerEnvironment;
+  const threads = yield* Effect.serviceOption(ThreadManagementService.ThreadManagementService);
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
   const environmentId = yield* environment.getEnvironmentId;
+  const resolveToolScope = (invocation: McpInvocationContext.McpInvocationScope) =>
+    Effect.gen(function* () {
+      // Management keys keep their explicit-project semantics. OAuth clients
+      // likewise choose an explicit project; only a provider session inherits
+      // the project/global policy of its calling thread.
+      if (
+        McpInvocationContext.isManagementKeyPrincipal(invocation.principal) ||
+        (!McpInvocationContext.isProviderSessionPrincipal(invocation.principal) &&
+          invocation.thread === undefined)
+      )
+        return invocation;
+      const threadId = McpInvocationContext.getInvocationThreadId(invocation);
+      if (threadId === undefined) return { ...invocation, mcpToolScope: "project" as const };
+      const caller = yield* Option.match(threads, {
+        onNone: () => Effect.succeed(null),
+        onSome: (service) =>
+          service.getThreadShell(threadId).pipe(Effect.catch(() => Effect.succeed(null))),
+      });
+      if (caller === null) return { ...invocation, mcpToolScope: "project" as const };
+      const mcpToolScope = yield* McpToolScope.resolveProjectMcpToolScope(caller.projectId);
+      return { ...invocation, mcpToolScope };
+    });
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (
     httpEffect: AuthenticatedHttpEffect,
   ) {
@@ -202,7 +226,11 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         presentedToken: token.length > 0,
         offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
       });
-    const isManagementKey = McpInvocationContext.isManagementKeyPrincipal(invocation.principal);
+    invocation = yield* resolveToolScope(invocation);
+    const authenticatedInvocation = invocation;
+    const isManagementKey = McpInvocationContext.isManagementKeyPrincipal(
+      authenticatedInvocation.principal,
+    );
     const body = isManagementKey
       ? yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))
       : undefined;
@@ -212,7 +240,10 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         message.method === "tools/call" &&
         Predicate.isObject(message.params) &&
         (typeof message.params.name !== "string" ||
-          !McpInvocationContext.managementKeyCanUseTool(invocation, message.params.name)),
+          !McpInvocationContext.managementKeyCanUseTool(
+            authenticatedInvocation,
+            message.params.name,
+          )),
     );
     if (rejected) {
       const name =
@@ -226,8 +257,20 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
           : "Management API keys cannot use this tool.",
       );
     }
+    let requestInvocation = authenticatedInvocation;
+    if (isManagementKey) {
+      const capabilities = new Set(authenticatedInvocation.capabilities ?? []);
+      for (const message of requests) {
+        if (message.method !== "tools/call" || !Predicate.isObject(message.params)) continue;
+        const name = message.params.name;
+        if (typeof name !== "string") continue;
+        const capability = McpInvocationContext.managementMcpToolCapability(name);
+        if (capability !== undefined) capabilities.add(capability);
+      }
+      requestInvocation = { ...authenticatedInvocation, capabilities };
+    }
     return yield* httpEffect.pipe(
-      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, requestInvocation),
       Effect.map(normalizeMcpHttpResponse),
     );
   }) satisfies McpAuthMiddleware;
@@ -454,7 +497,7 @@ const saveScreenshot = Effect.fn("McpHttpServer.saveScreenshot")(function* (
   const millis = yield* Clock.currentTimeMillis;
   const crypto = yield* Crypto.Crypto;
   // Two saves in the same millisecond must not overwrite each other.
-  const unique = (yield* crypto.randomUUIDv4.pipe(Effect.orDie)).slice(0, 8);
+  const unique = (yield* crypto.randomUUIDv4().pipe(Effect.orDie)).slice(0, 8);
   const fileName = `browser-screenshot-${screenshotSiteSlug(pageUrl)}-${millis.toString(36)}-${unique}.png`;
   const screenshotPath = path.join(config.browserArtifactsDir, fileName);
   yield* fileSystem.makeDirectory(config.browserArtifactsDir, { recursive: true }).pipe(
@@ -557,7 +600,10 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
               const png = new Uint8Array(Buffer.from(screenshot.data, "base64"));
               const screenshotPath =
                 payload?.save === true ? yield* saveScreenshot(snapshot.url, png) : undefined;
-              if (screenshotPath !== undefined && payload?.includeImage === false) {
+              // Images stay out of tool history unless asked for: providers replay them on every
+              // later request, and some reject inline images outright.
+              const includeImage = payload?.includeImage === true;
+              if (screenshotPath !== undefined && !includeImage) {
                 // The agent only wants a file to show the user. The url keeps the site icon on the tool row.
                 const saved = {
                   url: cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
@@ -602,9 +648,9 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                           text: `Snapshot text was bounded. Omitted: ${bounded.omitted.join("; ")}.`,
                         },
                       ]),
-                  ...(payload?.includeImage === false
-                    ? []
-                    : [{ type: "image" as const, data: png, mimeType: screenshot.mimeType }]),
+                  ...(includeImage
+                    ? [{ type: "image" as const, data: png, mimeType: screenshot.mimeType }]
+                    : []),
                 ],
               });
             }),
@@ -813,11 +859,25 @@ const registerHtmlPreview = Effect.fn("McpHttpServer.registerHtmlPreview")(funct
 /**
  * `McpServer.toolkit` for handlers that declared their access (see
  * `McpToolAccess`). Every toolkit on `/mcp` registers through this.
+ *
+ * `McpServer.toolkit` asks for every service its tools declare when it
+ * registers them, but the auth middleware provides `McpInvocationContext` to
+ * each request instead. Registration must not get one: the services it
+ * captures would replace the request's.
  */
 export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, RX>(
   toolkit: Toolkit.Toolkit<Tools>,
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
-) => McpServer.toolkit(toolkit).pipe(Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)));
+) => {
+  const registration = McpServer.toolkit(toolkit);
+  // @effect-diagnostics-next-line unsafeEffectTypeAssertion:off - the auth middleware provides it per request.
+  const registered = registration as Layer.Layer<
+    never,
+    never,
+    Exclude<Layer.Services<typeof registration>, McpInvocationContext.McpInvocationContext>
+  >;
+  return registered.pipe(Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)));
+};
 
 /** A hand-registered tool, also only with handlers that declared their access. */
 const imageToolRegistration = <Tools extends Record<string, Tool.Any>, A, E, R, EX, RX>(
@@ -862,14 +922,14 @@ const layerPreviewControlsRegistration = toolkitRegistration(
   PreviewControlsHandlers.layer,
 );
 
-const layerEnvironmentRegistration = toolkitRegistration(
+export const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentToolkit,
   EnvironmentHandlers.layer,
-);
+).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
 const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
 
-const layerAttachmentRegistration = toolkitRegistration(
+export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
   AttachmentHandlers.layer,
 );
@@ -899,15 +959,16 @@ export const layerMcpTransport = McpServer.layerHttp({
   version: packageJson.version,
   path: "/mcp",
   protocols: [McpProtocol.v2025_06_18],
+  allowSessionTermination: true,
 }).pipe(Layer.provide(layerMcpAuthMiddleware));
 
 export const layer = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,
-  layerAttachmentRegistration,
+  layerAttachmentToolkit,
   layerProjectRegistration,
-  layerEnvironmentRegistration,
+  layerEnvironmentToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

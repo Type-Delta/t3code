@@ -64,7 +64,7 @@ environment variable; it is not included when keys are listed later.
 
 Each management key belongs to one environment and works only with that machine's MCP endpoint. A
 different environment needs its own key. Keys can be limited to model discovery and thread reading,
-or granted the thread orchestration tools. They do not grant access to terminals, files, previews,
+or granted the thread orchestration tools. The optional `pullRequests:review` scope enables pull-request review guide tools; it is not included in the thread-orchestration preset. They do not grant access to terminals, files, previews,
 settings, connections, or other management keys. Runtime permissions belong to threads, not keys:
 new threads use T3 Code's normal default, and messages use the existing thread's current mode.
 

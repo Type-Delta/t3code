@@ -14,9 +14,6 @@ import { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
 import { executeAuthenticatedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
 
 const DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS = 6_000;
-const managementApiUrl = (httpBaseUrl: string, suffix = ""): string =>
-  `${httpBaseUrl.replace(/\/+$/, "")}/api/management/keys${suffix}`;
-
 /** Load management keys from the selected environment. */
 export const listEnvironmentManagementApiKeys = Effect.fn(
   "clientRuntime.state.listEnvironmentManagementApiKeys",
@@ -29,7 +26,7 @@ export const listEnvironmentManagementApiKeys = Effect.fn(
     remoteAuthorization,
     group: "management",
     method: "GET",
-    url: (httpBaseUrl) => managementApiUrl(httpBaseUrl),
+    url: (urls) => urls.keys(),
     timeoutMs: input.timeoutMs ?? DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS,
     request: ({ client, headers }) => client.keys({ headers }),
   });
@@ -51,7 +48,7 @@ export const createEnvironmentManagementApiKey = Effect.fn(
     remoteAuthorization,
     group: "management",
     method: "POST",
-    url: (httpBaseUrl) => managementApiUrl(httpBaseUrl),
+    url: (urls) => urls.keys(),
     timeoutMs: input.timeoutMs ?? DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS,
     request: ({ client, headers }) => client.createKey({ headers, payload: input.payload }),
   });
@@ -73,8 +70,7 @@ export const rotateEnvironmentManagementApiKey = Effect.fn(
     remoteAuthorization,
     group: "management",
     method: "POST",
-    url: (httpBaseUrl) =>
-      managementApiUrl(httpBaseUrl, `/${encodeURIComponent(String(input.id))}/rotate`),
+    url: (urls) => urls.rotateKey({ params: { id: input.id } }),
     timeoutMs: input.timeoutMs ?? DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS,
     request: ({ client, headers }) =>
       client.rotateKey({
@@ -100,8 +96,7 @@ export const revokeEnvironmentManagementApiKey = Effect.fn(
     remoteAuthorization,
     group: "management",
     method: "POST",
-    url: (httpBaseUrl) =>
-      managementApiUrl(httpBaseUrl, `/${encodeURIComponent(String(input.id))}/revoke`),
+    url: (urls) => urls.revokeKey({ params: { id: input.id } }),
     timeoutMs: input.timeoutMs ?? DEFAULT_MANAGEMENT_API_KEYS_TIMEOUT_MS,
     request: ({ client, headers }) =>
       client.revokeKey({

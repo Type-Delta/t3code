@@ -3,7 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -91,7 +91,7 @@ function isElectronNodeRuntime(environment: NodeJS.ProcessEnv): boolean {
  */
 export const resolveClaudeSdkExecutablePath = Effect.fn("resolveClaudeSdkExecutablePath")(
   function* (binaryPath: string, environment: NodeJS.ProcessEnv): Effect.fn.Return<string> {
-    const platform = yield* HostProcessPlatform;
+    const platform = yield* HostProcess.Platform;
     if (platform !== "win32") {
       return binaryPath;
     }

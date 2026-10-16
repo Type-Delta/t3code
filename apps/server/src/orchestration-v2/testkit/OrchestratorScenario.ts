@@ -23,7 +23,7 @@ import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 
 import * as Orchestrator from "../Orchestrator.ts";
-import type { ProviderReplayGate } from "./ProviderReplayGate.testkit.ts";
+import type { ProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 
 export type OrchestratorV2ScenarioStep =
   | {
@@ -166,6 +166,7 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "prepared-run.progress":
     case "prepared-run.fail":
     case "prepared-run.retry":
+    case "subagent.stop":
     case "run.interrupt":
     case "queued-message.promote-to-steer":
     case "queue.resume":
@@ -214,9 +215,13 @@ function scenarioCommands(scenario: OrchestratorV2Scenario): ReadonlyArray<Orche
 const findPendingRuntimeRequest = (projection: OrchestrationV2ThreadProjection) =>
   projection.runtimeRequests.find((request) => request.status === "pending");
 
+// DL020: a turn is `completed` before its checkpoint capture lands, so a
+// scenario is idle only once each completed run has recorded its checkpoint.
 const hasActiveRun = (projection: OrchestrationV2ThreadProjection) =>
-  projection.runs.some((run) =>
-    ["preparing", "queued", "starting", "running", "waiting"].includes(run.status),
+  projection.runs.some(
+    (run) =>
+      ["preparing", "queued", "starting", "running", "waiting"].includes(run.status) ||
+      (run.status === "completed" && run.startedAt !== null && run.checkpointId === null),
   );
 
 const SCENARIO_WAIT_ATTEMPTS = 10_000;

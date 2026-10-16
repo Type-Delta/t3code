@@ -1,5 +1,6 @@
 import { assert, it, vi } from "@effect/vitest";
 import {
+  CheckpointRef,
   CheckpointScopeId,
   RunId,
   ThreadId,
@@ -47,6 +48,75 @@ it.effect("refreshes workspace after checkpoint capture without reading history"
     yield* service.finalize({ threadId, runId, scopeId });
     assert.equal(capture.mock.calls.length, 1);
     assert.deepEqual(refresh.mock.calls[0], [{ cwd: "/repo", threadId, runId }]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("skips only the VCS refresh when the turn's workspace has no repository", () => {
+  const threadId = ThreadId.make("thread_finalize_non_git");
+  const runId = RunId.make("run_finalize_non_git");
+  const scopeId = CheckpointScopeId.make("scope_finalize_non_git");
+  const refresh = vi.fn(() => Effect.void);
+  const layer = RunFinalization.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(CheckpointCapture.CheckpointCaptureServiceV2)({ execute: () => Effect.void }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getCheckpointContext: () =>
+            Effect.succeed({
+              runs: [],
+              checkpointScopes: [{ id: scopeId, runId, kind: "root_run" as const, cwd: "/plain" }],
+              checkpoints: [
+                {
+                  scopeId,
+                  runId,
+                  appRunOrdinal: 1,
+                  status: "missing" as const,
+                  ref: CheckpointRef.make("checkpoint-ref:non-git"),
+                },
+              ],
+            }),
+        }),
+        Layer.succeed(RunFinalization.RunFinalizationObserver, {
+          refresh,
+          refreshAfterTurn: () => Effect.void,
+        }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const service = yield* RunFinalization.RunFinalizationService;
+    yield* service.finalize({ threadId, runId, scopeId });
+    assert.deepEqual(refresh.mock.calls, [[{ cwd: "/plain", threadId, runId, vcs: false }]]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("refreshes only the file search index when VCS refresh is skipped", () => {
+  const refreshedEntries: string[] = [];
+  const layer = RunFinalization.layerObserver.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(WorkspaceEntries.WorkspaceEntries)({
+          refresh: (cwd) => Effect.sync(() => void refreshedEntries.push(cwd)),
+        }),
+        Layer.mock(PullRequestService.PullRequestService)({
+          refreshAfterTurn: () => Effect.void,
+        }),
+        Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
+          refreshLocalStatus: () => Effect.die("a non-repository must not refresh VCS status"),
+        }),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const observer = yield* RunFinalization.RunFinalizationObserver;
+    yield* observer.refresh({
+      cwd: "/plain",
+      threadId: ThreadId.make("thread-non-git-entries"),
+      runId: RunId.make("run-non-git-entries"),
+      vcs: false,
+    });
+    assert.deepEqual(refreshedEntries, ["/plain"]);
   }).pipe(Effect.provide(layer));
 });
 

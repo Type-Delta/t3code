@@ -10,6 +10,7 @@ import {
   PlanId,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -23,9 +24,11 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
 import {
   AVAILABLE_CONNECTION_STATE,
@@ -33,6 +36,7 @@ import {
   type PreparedConnection,
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFixtures.ts";
@@ -78,6 +82,7 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   readonly launches?: OrchestrationV2ThreadLaunchInput[];
   readonly projection?: OrchestrationV2ThreadProjection;
   readonly projectionRequests?: ThreadId[];
+  readonly launchStalled?: boolean;
   readonly advertiseServerResolvedCommandContext?: boolean;
 }) {
   const client = {
@@ -94,14 +99,16 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
         return input.projection ?? v2Projection;
       }),
     [ORCHESTRATION_V2_WS_METHODS.launchThread]: (launchInput: OrchestrationV2ThreadLaunchInput) =>
-      Effect.sync(() => {
-        input.launches?.push(launchInput);
-        return {
-          threadId: launchInput.threadId ?? v2ThreadId,
-          projection: input.projection ?? v2Projection,
-          resumed: false,
-        };
-      }),
+      input.launchStalled
+        ? Effect.never
+        : Effect.sync(() => {
+            input.launches?.push(launchInput);
+            return {
+              threadId: launchInput.threadId ?? v2ThreadId,
+              projection: input.projection ?? v2Projection,
+              resumed: false,
+            };
+          }),
     [WS_METHODS.projectsMutate]: (mutation: ProjectMutation) =>
       Effect.sync(() => {
         input.projects.push(mutation);
@@ -234,6 +241,33 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
+  it.effect("fails an unacknowledged command instead of leaving it pending forever", () =>
+    Effect.gen(function* () {
+      const supervisor = yield* makeSupervisor({ commands: [], projects: [] });
+      const session = Option.getOrThrow(yield* SubscriptionRef.get(supervisor.session));
+      const stalledSupervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+        ...supervisor,
+        session: yield* SubscriptionRef.make(
+          Option.some({
+            ...session,
+            client: {
+              ...session.client,
+              [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: () => Effect.never,
+            } as unknown as WsRpcProtocolClient,
+          }),
+        ),
+      });
+      const fiber = yield* archiveThread({ threadId: ThreadId.make("thread-1") }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, stalledSupervisor),
+        Effect.flip,
+        Effect.forkChild,
+      );
+
+      yield* TestClock.adjust("10 seconds");
+      expect(yield* Fiber.join(fiber)).toBeInstanceOf(EnvironmentRpcUnavailableError);
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
   it.effect("resolves run ordinal zero to the persisted thread-start checkpoint", () =>
     Effect.gen(function* () {
       const scopeId = CheckpointScopeId.make("checkpoint-scope-root");
@@ -361,6 +395,46 @@ describe("V2 environment commands", () => {
           branch: "feature",
         },
       });
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect("times out a launch acknowledgement without waiting for workspace setup", () =>
+    Effect.gen(function* () {
+      const supervisor = yield* makeSupervisor({
+        commands: [],
+        projects: [],
+        launchStalled: true,
+      });
+      const fiber = yield* startThreadTurn({
+        commandId: CommandId.make("launch-timeout"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-launch-timeout"),
+          role: "user",
+          text: "Start",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        bootstrap: {
+          createThread: {
+            projectId: v2Projection.thread.projectId,
+            title: v2Projection.thread.title,
+            modelSelection: v2Projection.thread.modelSelection,
+            runtimeMode: v2Projection.thread.runtimeMode,
+            interactionMode: v2Projection.thread.interactionMode,
+            branch: null,
+            worktreePath: null,
+            createdAt: String(v2Projection.thread.createdAt),
+          },
+        },
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.flip,
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust("10 seconds");
+      expect(yield* Fiber.join(fiber)).toBeInstanceOf(EnvironmentRpcUnavailableError);
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
@@ -1039,6 +1113,60 @@ describe("V2 environment commands", () => {
         },
       ]);
     }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect(
+    "a native subagent stop targets its owning run rather than holding the parent queue",
+    () =>
+      Effect.gen(function* () {
+        const subagentId = NodeId.make("native-subagent");
+        const runId = RunId.make("settled-owner-run");
+        const commands: OrchestrationV2Command[] = [];
+        const supervisor = yield* makeSupervisor({
+          commands,
+          projects: [],
+          projection: {
+            ...v2Projection,
+            subagents: [
+              {
+                id: subagentId,
+                threadId: v2ThreadId,
+                runId,
+                parentNodeId: NodeId.make("owner-node"),
+                origin: "provider_native",
+                createdBy: "agent",
+                driver: ProviderDriverKind.make("claudeAgent"),
+                providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+                providerThreadId: null,
+                childThreadId: ThreadId.make("native-child-thread"),
+                nativeTaskRef: null,
+                prompt: "Work",
+                title: null,
+                model: null,
+                result: null,
+                status: "running",
+                startedAt: v2Now,
+                completedAt: null,
+                updatedAt: v2Now,
+              },
+            ],
+          },
+        });
+        yield* interruptThreadTurn({
+          commandId: CommandId.make("native-stop"),
+          threadId: v2ThreadId,
+          subagentId,
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        expect(commands).toEqual([
+          {
+            type: "subagent.stop",
+            commandId: "native-stop",
+            threadId: v2ThreadId,
+            runId,
+            subagentId,
+          },
+        ]);
+      }).pipe(Effect.provide(layerTestCrypto)),
   );
 
   it.effect("interrupts a known run without fetching the full projection", () =>

@@ -1,6 +1,8 @@
+import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
 
+import { assertProjectAllowed, readCaller, unavailable } from "../../threadAccess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
@@ -34,6 +36,41 @@ const handlers = {
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.cancelTask(scope, input);
     }),
+  ),
+  t3_workflow_stop: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
+    (input) =>
+      Effect.gen(function* () {
+        const context = yield* readCaller();
+        const target = yield* context.threads
+          .getThreadShell(input.threadId)
+          .pipe(Effect.mapError(unavailable));
+        if (target !== null) {
+          yield* assertProjectAllowed(
+            context.scope,
+            context.caller,
+            target.projectId,
+            new OrchestratorMcpFailure({
+              code: "thread_not_found",
+              message: "The thread was not found.",
+            }),
+          );
+        }
+        const { threads } = context;
+        return yield* threads.stopWorkflow(input).pipe(
+          Effect.as({}),
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({
+                code:
+                  cause.reason === "unavailable" || cause.reason === "stop-failed"
+                    ? "orchestration_error"
+                    : "invalid_request",
+                message: cause.message,
+              }),
+          ),
+        );
+      }),
   ),
   schedule_task: McpToolAccess.startsThreads(
     // A scheduled task runs with the caller's own modes.

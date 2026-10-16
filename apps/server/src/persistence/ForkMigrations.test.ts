@@ -1,7 +1,6 @@
 import { assert, it } from "@effect/vitest";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- fixture UUIDs are test-only filesystem names.
 import * as NodeCrypto from "node:crypto";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- fixture paths are test-only filesystem names.
 import * as NodeOS from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- fixture paths are test-only filesystem names.
 import * as NodePath from "node:path";
@@ -12,6 +11,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import {
   forkMigrationManifest,
   reconcileForkMigrationHistory,
+  runMissingUpstreamMigrations,
   runForkMigrations,
 } from "./ForkMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
@@ -105,7 +105,10 @@ it.effect.each([
     const forkTables =
       yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fork_sql_migrations'`;
     if (forkTables.length > 0) {
-      assert.equal((yield* sql`SELECT count(*) AS count FROM fork_sql_migrations`)[0]?.count, 15);
+      assert.isAtLeast(
+        Number((yield* sql`SELECT count(*) AS count FROM fork_sql_migrations`)[0]?.count ?? 0),
+        15,
+      );
     }
     yield* reconcileForkMigrationHistory(migrationManifest);
     yield* runForkMigrations();
@@ -115,6 +118,79 @@ it.effect.each([
         filename: NodePath.join(
           NodeOS.tmpdir(),
           `t3-fork-migrations-${shape}-${NodeCrypto.randomUUID()}.sqlite`,
+        ),
+      }),
+    ),
+  ),
+);
+
+it.effect("converts every deployed 59-67 fork collision before upstream migrations", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 58 });
+    for (const [id, name] of [
+      [59, "ProjectionThreadsActiveOrderKey"],
+      [60, "ProjectionThreadPullRequests"],
+      [61, "ProjectionThreadMessageContext"],
+      [62, "ProjectionThreadMessageSuggestions"],
+      [63, "ProjectionThreadTitleState"],
+      [64, "PullRequestFilesViewed"],
+      [65, "ReconcileBranchPullRequestHistory"],
+      [66, "ProjectionThreadsAutoSettleDisabledAt"],
+      [67, "CoreV2Cutover"],
+    ] as const) {
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (${id}, ${name})`;
+    }
+    const executed = yield* runMigrations();
+    assert.deepStrictEqual(executed, [
+      [59, "McpAppModelContext"],
+      [60, "ThreadSnapshotWindowIndexes"],
+      [61, "PullRequestReviewGuides"],
+      [62, "ThreadFailureLookupIndex"],
+    ]);
+    const effectRows = yield* sql<{ migration_id: number; name: string }>`
+      SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 48 ORDER BY migration_id`;
+    assert.deepEqual(effectRows.slice(-15), [
+      { migration_id: 48, name: "ProjectionThreadBranchPullRequest" },
+      { migration_id: 49, name: "ProjectionThreadsActiveOrderKey" },
+      { migration_id: 50, name: "ProjectionThreadPullRequests" },
+      { migration_id: 51, name: "ProjectionThreadMessageContext" },
+      { migration_id: 52, name: "ProjectionThreadTitleState" },
+      { migration_id: 53, name: "PullRequestFilesViewed" },
+      { migration_id: 54, name: "ProjectionThreadsAutoSettleDisabledAt" },
+      { migration_id: 55, name: "OrchestrationV2" },
+      { migration_id: 56, name: "RemoveRedundantProjectionIndexes" },
+      { migration_id: 57, name: "ScheduledTaskWebhooks" },
+      { migration_id: 58, name: "WebhookRelayDeliveries" },
+      { migration_id: 59, name: "McpAppModelContext" },
+      { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
+      { migration_id: 61, name: "PullRequestReviewGuides" },
+      { migration_id: 62, name: "ThreadFailureLookupIndex" },
+    ]);
+    const forkRows = yield* sql<{ migration_id: number; name: string }>`
+      SELECT migration_id, name FROM fork_sql_migrations WHERE migration_id >= 59 ORDER BY migration_id`;
+    assert.deepEqual(
+      forkRows.map((row) => [row.migration_id, row.name]),
+      [
+        [59, "ProjectionThreadsActiveOrderKey"],
+        [60, "ProjectionThreadPullRequests"],
+        [61, "ProjectionThreadMessageContext"],
+        [62, "ProjectionThreadMessageSuggestions"],
+        [63, "ProjectionThreadTitleState"],
+        [64, "PullRequestFilesViewed"],
+        [65, "ReconcileBranchPullRequestHistory"],
+        [66, "ProjectionThreadsAutoSettleDisabledAt"],
+        [67, "CoreV2Cutover"],
+      ],
+    );
+    assert.deepStrictEqual(yield* runMigrations(), []);
+  }).pipe(
+    Effect.provide(
+      NodeSqliteClient.layer({
+        filename: NodePath.join(
+          NodeOS.tmpdir(),
+          `t3-fork-collisions-${NodeCrypto.randomUUID()}.sqlite`,
         ),
       }),
     ),
@@ -131,4 +207,65 @@ it.effect("keeps the manifests collision-free and names every deployed record", 
     assert.isTrue(forkMigrationManifest.some(([, name]) => name === "CheckpointDurableState"));
     assert.isTrue(migrationManifest.some(([, name]) => name === "OrchestrationV2"));
   }),
+);
+
+it.effect("repairs a lower upstream gap created by reconciliation once", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`CREATE TABLE effect_sql_migrations (
+      migration_id integer PRIMARY KEY NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      created_at datetime NOT NULL DEFAULT current_timestamp
+    )`;
+    yield* sql`
+      INSERT INTO effect_sql_migrations (migration_id, name)
+      VALUES (36, 'ProjectionThreadsPinned'),
+             (41, 'ThreadSummaryTimeline'),
+             (42, 'Tail')
+    `;
+
+    const repaired = Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE repaired_upstream_gap (value TEXT NOT NULL)`;
+      yield* sql`INSERT INTO repaired_upstream_gap (value) VALUES ('applied')`;
+    });
+    const entries = [
+      [36, "ProjectionThreadsPinned", Effect.void],
+      [41, "AuthSessionClientConnection", repaired],
+      [42, "Tail", Effect.void],
+    ] as const;
+
+    yield* reconcileForkMigrationHistory([
+      [36, "ProjectionThreadsPinned"],
+      [41, "AuthSessionClientConnection"],
+      [42, "Tail"],
+    ]);
+    assert.deepStrictEqual(yield* runMissingUpstreamMigrations(entries), [
+      [41, "AuthSessionClientConnection"],
+    ]);
+    assert.deepStrictEqual(yield* sql`SELECT value FROM repaired_upstream_gap`, [
+      { value: "applied" },
+    ]);
+    assert.deepStrictEqual(
+      yield* sql`SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id = 41`,
+      [{ migration_id: 41, name: "AuthSessionClientConnection" }],
+    );
+
+    yield* reconcileForkMigrationHistory([
+      [36, "ProjectionThreadsPinned"],
+      [41, "AuthSessionClientConnection"],
+      [42, "Tail"],
+    ]);
+    assert.deepStrictEqual(yield* runMissingUpstreamMigrations(entries), []);
+    assert.equal((yield* sql`SELECT count(*) AS count FROM repaired_upstream_gap`)[0]?.count, 1);
+  }).pipe(
+    Effect.provide(
+      NodeSqliteClient.layer({
+        filename: NodePath.join(
+          NodeOS.tmpdir(),
+          `t3-fork-migrations-gap-${NodeCrypto.randomUUID()}.sqlite`,
+        ),
+      }),
+    ),
+  ),
 );

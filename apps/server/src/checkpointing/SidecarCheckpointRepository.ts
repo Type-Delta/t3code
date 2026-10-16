@@ -55,6 +55,14 @@ export interface SidecarDiffInput {
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;
   readonly format?: "patch" | "numstat";
+  /** Limits the diff to these repository-relative paths. An empty list yields an empty diff. */
+  readonly filePaths?: ReadonlyArray<string>;
+}
+
+export interface SidecarAuthoredPathsInput {
+  readonly cwd: string;
+  readonly fromCheckpointRef: CheckpointRef;
+  readonly toCheckpointRef: CheckpointRef;
 }
 
 export interface SidecarImportLegacyInput {
@@ -126,6 +134,8 @@ const sidecarRef = (locator: SidecarCheckpointLocator) =>
     .update(`${locator.worktreeKey}\0${locator.snapshotId}`)
     .digest("hex")}`;
 const CHECKPOINT_PATHS_MAX_BYTES = 64 * 1024 * 1024;
+/** Per-worktree capture indexes inside each private sidecar repository. */
+const PERSISTED_INDEXES_DIRECTORY = "t3-indexes";
 
 export class SidecarCheckpointRepository extends Context.Service<
   SidecarCheckpointRepository,
@@ -149,6 +159,10 @@ export class SidecarCheckpointRepository extends Context.Service<
     readonly diff: (
       input: SidecarDiffInput,
     ) => Effect.Effect<string, VcsError | PlatformError.PlatformError>;
+    /** Same contract as `CheckpointStore.listAuthoredPaths`, for ranges with a sidecar end. */
+    readonly authoredPaths: (
+      input: SidecarAuthoredPathsInput,
+    ) => Effect.Effect<ReadonlySet<string> | null, VcsError | PlatformError.PlatformError>;
     readonly importLegacy: (
       input: SidecarImportLegacyInput,
     ) => Effect.Effect<SidecarImportLegacyResult, VcsError | PlatformError.PlatformError>;
@@ -610,11 +624,12 @@ export const make = Effect.gen(function* () {
         const gitDir = yield* ensureRepository(input.cwd, identity);
         if (yield* resolveCommit(input.cwd, gitDir, identity.worktreeRoot, locator)) return;
 
-        const temporaryDir = path.join(config.checkpointsDir, "tmp", NodeCrypto.randomUUID());
-        const indexPath = path.join(temporaryDir, "index");
-        const verificationIndexPath = path.join(temporaryDir, "verification-index");
-        const pathsFile = path.join(temporaryDir, "paths.z");
-        const verificationPathsFile = path.join(temporaryDir, "verification-paths.z");
+        // A private index kept per worktree. Its stat cache lets update-index hash
+        // only files changed since the last capture, as the project's own index
+        // does, and the tree matches one built from an empty index.
+        const indexDirectory = path.join(gitDir, PERSISTED_INDEXES_DIRECTORY, identity.worktreeKey);
+        const indexPath = path.join(indexDirectory, "index");
+        const indexKeyPath = path.join(indexDirectory, "key");
         const baseEnvironment = {
           ...CheckpointRepositoryIdentity.sanitizedGitEnvironment(),
           GIT_AUTHOR_NAME: "T3 Code",
@@ -622,85 +637,185 @@ export const make = Effect.gen(function* () {
           GIT_COMMITTER_NAME: "T3 Code",
           GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
         };
+        const environment = { ...baseEnvironment, GIT_INDEX_FILE: indexPath };
+        // Blobs depend on line-ending attributes and the sidecar's core settings.
+        // When either changes, unchanged files must be hashed again.
+        const persistedIndexKey = Effect.fn("SidecarCheckpointRepository.capture.indexKey")(
+          function* (paths: ReadonlyArray<string>) {
+            const hash = NodeCrypto.createHash("sha256");
+            hash.update(
+              yield* fileSystem
+                .readFileString(path.join(gitDir, "config"))
+                .pipe(Effect.orElseSucceed(() => "")),
+            );
+            for (const relativePath of paths) {
+              if (relativePath !== ".gitattributes" && !relativePath.endsWith("/.gitattributes")) {
+                continue;
+              }
+              const info = yield* lstat(
+                "SidecarCheckpointRepository.capture.indexKey",
+                input.cwd,
+                path.join(identity.worktreeRoot, relativePath),
+              );
+              hash.update(
+                `\0${relativePath}\0${info.size}\0${info.mtimeMs}\0${info.ctimeMs}\0${info.ino}`,
+              );
+            }
+            return hash.digest("hex");
+          },
+        );
         yield* Effect.gen(function* () {
           yield* fileSystem
-            .makeDirectory(temporaryDir, { recursive: true, mode: 0o700 })
+            .makeDirectory(indexDirectory, { recursive: true, mode: 0o700 })
             .pipe(
               Effect.mapError(() =>
                 checkpointError(
                   "SidecarCheckpointRepository.capture",
                   input.cwd,
-                  "Unable to create sidecar temporary directory.",
+                  "Unable to create the sidecar capture index directory.",
                 ),
               ),
             );
-          const buildVerificationTree = Effect.fn(
-            "SidecarCheckpointRepository.capture.buildVerificationTree",
-          )(function* (index: string, pathspecFile: string, operationSuffix: string) {
-            const [workspace, deleted] = yield* Effect.all([
-              workspacePaths(input.cwd, identity.worktreeRoot),
-              git(
-                "SidecarCheckpointRepository.capture.deletedPaths",
-                input.cwd,
-                ["-C", identity.worktreeRoot, "ls-files", "--deleted", "-z"],
-                { maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES },
-              ),
-            ]);
-            // The private index starts empty, so absent tracked files already
-            // represent deletions. Passing them to git add would fail its pathspec.
-            const deletedPaths = new Set(deleted.stdout.split("\0"));
-            const paths = workspace.filter((relativePath) => !deletedPaths.has(relativePath));
-            yield* fileSystem
-              .writeFileString(pathspecFile, paths.length === 0 ? "" : `${paths.join("\0")}\0`)
-              .pipe(
-                Effect.mapError(() =>
-                  checkpointError(
-                    "SidecarCheckpointRepository.capture",
+          const buildTree = Effect.fn("SidecarCheckpointRepository.capture.buildTree")(
+            function* (operationSuffix: string) {
+              const [workspace, changed] = yield* Effect.all([
+                workspacePaths(input.cwd, identity.worktreeRoot),
+                git(
+                  "SidecarCheckpointRepository.capture.changedPaths",
+                  input.cwd,
+                  ["-C", identity.worktreeRoot, "ls-files", "--modified", "-z"],
+                  { maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES },
+                ),
+              ]);
+              // A tracked file that is gone is a deletion. One replaced by a folder
+              // is captured through the folder's own paths, unless the folder is a
+              // repository and so a gitlink. Neither kind can be added.
+              const removedPaths = new Set<string>();
+              yield* Effect.forEach(
+                changed.stdout.split("\0").filter(Boolean),
+                (relativePath) =>
+                  Effect.tryPromise({
+                    try: async () => {
+                      const lstatIfPresent = (target: string) =>
+                        NodeFSP.lstat(target).catch((error: NodeJS.ErrnoException) =>
+                          error.code === "ENOENT" || error.code === "ENOTDIR"
+                            ? undefined
+                            : Promise.reject(error),
+                        );
+                      const absolutePath = path.join(identity.worktreeRoot, relativePath);
+                      const info = await lstatIfPresent(absolutePath);
+                      if (
+                        info === undefined ||
+                        (info.isDirectory() &&
+                          (await lstatIfPresent(path.join(absolutePath, ".git"))) === undefined)
+                      ) {
+                        removedPaths.add(relativePath);
+                      }
+                    },
+                    catch: () =>
+                      checkpointError(
+                        "SidecarCheckpointRepository.capture.changedPaths",
+                        input.cwd,
+                        "Unable to inspect a checkpoint path.",
+                      ),
+                  }),
+                { concurrency: 16, discard: true },
+              );
+              const paths = workspace.filter((relativePath) => !removedPaths.has(relativePath));
+              const indexKey = yield* persistedIndexKey(paths);
+              const storedIndexKey = yield* fileSystem
+                .readFileString(indexKeyPath)
+                .pipe(Effect.orElseSucceed(() => ""));
+              if (storedIndexKey !== indexKey) {
+                yield* git(
+                  `SidecarCheckpointRepository.capture.emptyIndex.${operationSuffix}`,
+                  input.cwd,
+                  sidecarGitArgs(gitDir, identity.worktreeRoot, ["read-tree", "--empty"]),
+                  { env: environment },
+                );
+                yield* fileSystem
+                  .writeFileString(indexKeyPath, indexKey)
+                  .pipe(
+                    Effect.mapError(() =>
+                      checkpointError(
+                        "SidecarCheckpointRepository.capture",
+                        input.cwd,
+                        "Unable to record the checkpoint index key.",
+                      ),
+                    ),
+                  );
+              } else {
+                // Drop entries the workspace no longer has, such as deleted or
+                // newly ignored files, so only current paths reach the tree.
+                const pathSet = new Set(paths);
+                const indexed = yield* git(
+                  `SidecarCheckpointRepository.capture.indexedPaths.${operationSuffix}`,
+                  input.cwd,
+                  sidecarGitArgs(gitDir, identity.worktreeRoot, ["ls-files", "-z"]),
+                  { env: environment, maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES },
+                );
+                const stalePaths = indexed.stdout
+                  .split("\0")
+                  .filter((relativePath) => relativePath.length > 0 && !pathSet.has(relativePath));
+                if (stalePaths.length > 0) {
+                  yield* git(
+                    `SidecarCheckpointRepository.capture.removeStale.${operationSuffix}`,
                     input.cwd,
-                    "Unable to write checkpoint pathspec file.",
-                  ),
-                ),
-              );
-            const environment = { ...baseEnvironment, GIT_INDEX_FILE: index };
-            yield* git(
-              `SidecarCheckpointRepository.capture.emptyIndex.${operationSuffix}`,
-              input.cwd,
-              sidecarGitArgs(gitDir, identity.worktreeRoot, ["read-tree", "--empty"]),
-              { env: environment },
-            );
-            if (paths.length > 0) {
-              yield* git(
-                `SidecarCheckpointRepository.capture.add.${operationSuffix}`,
+                    sidecarGitArgs(gitDir, identity.worktreeRoot, [
+                      "update-index",
+                      "--force-remove",
+                      "-z",
+                      "--stdin",
+                    ]),
+                    { env: environment, stdin: `${stalePaths.join("\0")}\0` },
+                  );
+                }
+              }
+              // update-index skips entries whose stat is unchanged, and unlike
+              // `git add` it does not match every path against every pathspec.
+              if (paths.length > 0) {
+                yield* git(
+                  `SidecarCheckpointRepository.capture.add.${operationSuffix}`,
+                  input.cwd,
+                  sidecarGitArgs(gitDir, identity.worktreeRoot, [
+                    "update-index",
+                    "--add",
+                    "--replace",
+                    "-z",
+                    "--stdin",
+                  ]),
+                  { env: environment, stdin: `${paths.join("\0")}\0` },
+                );
+              }
+              const tree = yield* git(
+                `SidecarCheckpointRepository.capture.writeTree.${operationSuffix}`,
                 input.cwd,
-                sidecarGitArgs(gitDir, identity.worktreeRoot, [
-                  "add",
-                  "--force",
-                  `--pathspec-from-file=${pathspecFile}`,
-                  "--pathspec-file-nul",
-                ]),
-                { env: environment },
+                sidecarGitArgs(gitDir, identity.worktreeRoot, ["write-tree"]),
+                { env: environment, maxOutputBytes: 4_096 },
               );
-            }
-            const tree = yield* git(
-              `SidecarCheckpointRepository.capture.writeTree.${operationSuffix}`,
-              input.cwd,
-              sidecarGitArgs(gitDir, identity.worktreeRoot, ["write-tree"]),
-              { env: environment, maxOutputBytes: 4_096 },
-            );
-            return tree.stdout.trim();
-          });
-          const treeOid = yield* buildVerificationTree(indexPath, pathsFile, "initial");
+              return tree.stdout.trim();
+            },
+            Effect.onError(() => removeTemporaryPath(indexDirectory, input.cwd)),
+          );
+          // The project HEAD at capture lets authoredPaths tell the turn's own
+          // commits from ones a pull or rebase brought in.
+          const head = yield* git(
+            "SidecarCheckpointRepository.capture.head",
+            input.cwd,
+            ["-C", identity.worktreeRoot, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+            { allowNonZeroExit: true, maxOutputBytes: 4_096 },
+          );
+          const headOid = head.exitCode === 0 ? head.stdout.trim() : "";
+          const treeOid = yield* buildTree("initial");
           if (!treeOid)
             return yield* checkpointError(
               "SidecarCheckpointRepository.capture",
               input.cwd,
               "Sidecar write-tree returned no object id.",
             );
-          const verificationTreeOid = yield* buildVerificationTree(
-            verificationIndexPath,
-            verificationPathsFile,
-            "verification",
-          );
+          // A second pass over the same index rehashes any file whose stat
+          // changed since the first, so a concurrent edit changes the tree.
+          const verificationTreeOid = yield* buildTree("verification");
           if (!verificationTreeOid || verificationTreeOid !== treeOid) {
             return yield* checkpointError(
               "SidecarCheckpointRepository.capture",
@@ -715,7 +830,9 @@ export const make = Effect.gen(function* () {
               "commit-tree",
               treeOid,
               "-m",
-              `t3 checkpoint schema=v1 snapshot=${locator.snapshotId} worktree=${identity.worktreeKey}`,
+              `t3 checkpoint schema=v1 snapshot=${locator.snapshotId} worktree=${identity.worktreeKey}${
+                headOid === "" ? "" : ` head=${headOid}`
+              }`,
             ]),
             { env: baseEnvironment, maxOutputBytes: 4_096 },
           );
@@ -750,7 +867,7 @@ export const make = Effect.gen(function* () {
               "Unable to publish the sidecar checkpoint.",
             );
           }
-        }).pipe(Effect.ensuring(removeTemporaryPath(temporaryDir, input.cwd)));
+        });
       }),
     );
   });
@@ -979,6 +1096,7 @@ export const make = Effect.gen(function* () {
   const diff: SidecarCheckpointRepository["Service"]["diff"] = Effect.fn(
     "SidecarCheckpointRepository.diff",
   )(function* (input) {
+    if (input.filePaths?.length === 0) return "";
     const identity = yield* identities.resolve(input.cwd);
     const gitDir = repositoryDirectory(identity.repositoryKey);
     return yield* withRepositoryLock(
@@ -1083,6 +1201,9 @@ export const make = Effect.gen(function* () {
             ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
             fromCommit,
             toCommit,
+            ...(input.filePaths
+              ? ["--", ...input.filePaths.map((file) => `:(top,literal)${file}`)]
+              : []),
           ]),
           {
             allowNonZeroExit: true,
@@ -1249,6 +1370,100 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  const authoredPaths: SidecarCheckpointRepository["Service"]["authoredPaths"] = Effect.fn(
+    "SidecarCheckpointRepository.authoredPaths",
+  )(function* (input) {
+    const operation = "SidecarCheckpointRepository.authoredPaths";
+    const identity = yield* identities.resolve(input.cwd);
+    const gitDir = repositoryDirectory(identity.repositoryKey);
+    if (!(yield* fileSystem.exists(gitDir))) return null;
+    // Each boundary as its commit, the project HEAD it recorded, and its capture time.
+    const boundary = Effect.fn("SidecarCheckpointRepository.authoredPaths.boundary")(function* (
+      checkpointRef: CheckpointRef,
+    ) {
+      if (!isSidecarCheckpointRef(checkpointRef)) {
+        // In-repo checkpoints record HEAD as their parent.
+        const result = yield* git(
+          operation,
+          input.cwd,
+          [
+            "-C",
+            identity.worktreeRoot,
+            "log",
+            "--no-walk",
+            "--format=%H %P %ct",
+            `${checkpointRef}^{commit}`,
+          ],
+          { allowNonZeroExit: true, maxOutputBytes: 4_096 },
+        );
+        const [commit = "", head = "", time = ""] = result.stdout.trim().split(" ");
+        return result.exitCode === 0 && commit !== "" ? { commit, head, time } : undefined;
+      }
+      const locator = yield* locatorForIdentity(operation, input.cwd, checkpointRef, identity);
+      const commit = yield* resolveCommit(input.cwd, gitDir, identity.worktreeRoot, locator);
+      if (!commit) return undefined;
+      const result = yield* git(
+        operation,
+        input.cwd,
+        sidecarGitArgs(gitDir, identity.worktreeRoot, [
+          "log",
+          "--no-walk",
+          "--format=%ct %s",
+          commit,
+        ]),
+        { maxOutputBytes: 4_096 },
+      );
+      const [time = "", ...subject] = result.stdout.trim().split(" ");
+      const head = /(?:^| )head=([0-9a-f]+)$/.exec(subject.join(" "))?.[1] ?? "";
+      return { commit, head, time };
+    });
+    const [from, to] = yield* Effect.all([
+      boundary(input.fromCheckpointRef),
+      boundary(input.toCheckpointRef),
+    ]);
+    if (!from || !to || from.head === "" || to.head === "" || from.head === to.head) return null;
+
+    // Read-only queries in the project repository. The sidecar objects are an
+    // alternate for this process alone, so nothing is written to the project.
+    const environment = {
+      ...CheckpointRepositoryIdentity.sanitizedGitEnvironment(),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(gitDir, "objects"),
+    };
+    const listPaths = (args: ReadonlyArray<string>) =>
+      git(
+        operation,
+        input.cwd,
+        [
+          "-C",
+          identity.worktreeRoot,
+          ...args,
+          "--name-only",
+          "-z",
+          "--no-renames",
+          "--no-ext-diff",
+        ],
+        { env: environment, maxOutputBytes: 10_000_000, outputMode: "error" },
+      ).pipe(Effect.map((result) => result.stdout.split("\0")));
+    // Uncommitted edits at either boundary, commits that left HEAD, and commits
+    // made after the "from" capture belong to the turn; older commits were imported.
+    const pathLists = yield* Effect.all(
+      [
+        listPaths(["diff", from.head, from.commit]),
+        listPaths(["diff", to.head, to.commit]),
+        listPaths(["log", "--format=", "--diff-merges=remerge", `${to.head}..${from.head}`]),
+        listPaths([
+          "log",
+          "--format=",
+          "--diff-merges=remerge",
+          `--since=@${from.time}`,
+          `${from.head}..${to.head}`,
+        ]),
+      ],
+      { concurrency: "unbounded" },
+    );
+    return new Set(pathLists.flat().filter((entry) => entry.length > 0));
+  });
+
   const gc: SidecarCheckpointRepository["Service"]["gc"] = Effect.fn(
     "SidecarCheckpointRepository.gc",
   )(function* (input) {
@@ -1257,11 +1472,17 @@ export const make = Effect.gen(function* () {
     if (!(yield* fileSystem.exists(gitDir))) return false;
     return yield* withRepositoryLock(
       identity.repositoryKey,
-      git(
-        "SidecarCheckpointRepository.gc",
-        input.cwd,
-        sidecarGitArgs(gitDir, identity.worktreeRoot, ["gc", "--prune=now"]),
-      ).pipe(Effect.as(true)),
+      // Pruning can remove blobs that only a capture index still names.
+      removeTemporaryPath(path.join(gitDir, PERSISTED_INDEXES_DIRECTORY), input.cwd).pipe(
+        Effect.andThen(
+          git(
+            "SidecarCheckpointRepository.gc",
+            input.cwd,
+            sidecarGitArgs(gitDir, identity.worktreeRoot, ["gc", "--prune=now"]),
+          ),
+        ),
+        Effect.as(true),
+      ),
     );
   });
 
@@ -1272,6 +1493,7 @@ export const make = Effect.gen(function* () {
     has,
     restore,
     diff,
+    authoredPaths,
     importLegacy,
     delete: deleteCheckpoints,
     gc,

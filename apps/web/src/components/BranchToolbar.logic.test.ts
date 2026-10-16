@@ -14,7 +14,6 @@ import {
   resolveBranchToolbarValue,
   resolveLockedWorkspaceLabel,
   resolveLockedWorktreeDisplay,
-  resolveWorkspaceDisplayName,
   resolveLocalCheckoutBranchMismatch,
   resolvePreviousWorktreeLabel,
   resolvePreviousWorktreeSeed,
@@ -832,18 +831,6 @@ describe("resolveLockedWorkspaceLabel", () => {
 
   it("describes a worktree that is still being created as a new worktree", () => {
     expect(resolveLockedWorkspaceLabel(null, "worktree")).toBe("New worktree");
-  });
-});
-
-describe("resolveWorkspaceDisplayName", () => {
-  it("returns the final folder for POSIX and Windows paths", () => {
-    expect(resolveWorkspaceDisplayName("/repo/.t3/worktrees/feature-a")).toBe("feature-a");
-    expect(resolveWorkspaceDisplayName("C:\\code\\project\\feature-b\\")).toBe("feature-b");
-  });
-
-  it("handles missing and root paths", () => {
-    expect(resolveWorkspaceDisplayName(null)).toBeNull();
-    expect(resolveWorkspaceDisplayName("/")).toBe("/");
   });
 });
 

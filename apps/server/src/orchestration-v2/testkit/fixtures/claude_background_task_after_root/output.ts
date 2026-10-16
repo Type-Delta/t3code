@@ -34,18 +34,20 @@ export function assertClaudeBackgroundTaskAfterRootOutput(
       event.type === "provider-thread.updated" &&
       event.payload.pendingBackgroundTasks?.some((task) => task.taskId === BACKGROUND_TASK_ID),
   );
+  // DL020: the fork persists a settled root turn `completed` before its
+  // checkpoint capture; upstream parks it at `waiting`. Either way the
+  // background roster must outlive the root turn's settlement.
+  const settled = (status: string) => status === "waiting" || status === "completed";
   const waitingRunIndex = result.domainEvents.findIndex(
     (event) =>
-      event.type === "run.updated" &&
-      event.runId === rootRun.id &&
-      event.payload.status === "waiting",
+      event.type === "run.updated" && event.runId === rootRun.id && settled(event.payload.status),
   );
   const waitingRootNodeIndex = result.domainEvents.findIndex(
     (event) =>
       event.type === "node.updated" &&
       event.payload.runId === rootRun.id &&
       event.payload.kind === "root_turn" &&
-      event.payload.status === "waiting",
+      settled(event.payload.status),
   );
   const idleRosterIndex = result.domainEvents.findIndex(
     (event, index) =>
@@ -59,12 +61,12 @@ export function assertClaudeBackgroundTaskAfterRootOutput(
   assert.isAbove(
     waitingRunIndex,
     pendingRosterIndex,
-    "checkpoint-waiting root run must retain the background roster",
+    "settled root run must retain the background roster",
   );
   assert.isAbove(
     waitingRootNodeIndex,
     pendingRosterIndex,
-    "checkpoint-waiting root node must retain the background roster",
+    "settled root node must retain the background roster",
   );
   assert.isAbove(
     idleRosterIndex,

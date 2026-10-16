@@ -367,8 +367,8 @@ export function serializeTableElementToCsv(table: Element): string {
 function sanitizedHtmlFrom(container: Element): string {
   for (const node of container.querySelectorAll(SANITIZED_HTML_SELECTOR)) {
     if (
-      node.classList.contains("chat-markdown-file-link") ||
-      node.closest(".chat-markdown-file-link")
+      node.hasAttribute("data-chat-markdown-file-link") ||
+      node.closest("[data-chat-markdown-file-link]")
     ) {
       if (node.getAttribute("aria-hidden") === "true" || node.localName === "svg") {
         node.remove();

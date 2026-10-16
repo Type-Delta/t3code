@@ -20,7 +20,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Option from "effect/Option";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
-import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { ServerConfig } from "../config.ts";
 
 const CATALOG_FETCH_TIMEOUT_MS = 5_000;

@@ -1,11 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ModelManifest from "./ModelManifest.ts";
 import { expect, it } from "@effect/vitest";
-import {
-  HostProcessArchitecture,
-  HostProcessEnvironment,
-  HostProcessPlatform,
-} from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -19,7 +15,7 @@ import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as CodexInstallation from "./CodexInstallation.ts";
 
-const hostPlatform = HostProcessPlatform.defaultValue() === "win32" ? "win32" : "darwin";
+const hostPlatform = HostProcess.Platform.defaultValue() === "win32" ? "win32" : "darwin";
 const archive = Buffer.from(
   hostPlatform === "win32"
     ? "H4sIAHwlv2oC/+3XwW6DIADGcR/FcC4WVGyzB9m1QUus2woGaGuz7N0HLlsaL71ML36/AyoxMZH8Ddad3jbmqIZMDSqZBwt2QozHYHoMxMN5mOesyFmSsmQBF+elDY9P1mlc+wTWqv7tn8aRnuNwMs7/5+fgef/lpP+C5yX6X0Jca1SwXj/t99KftradaQ/wvP980j/nbIf+l2BbNID+e9m8y1Zlb87o5fvnYrr/50WB/hfxST7k3Vz8q7KuM5q8pHyTkuvfFWEZF1XGSZgNL6pVPk4O++pQlbRv6K3TR3Nz9OyuTbxHaW/vven0eF/9+HdJvpAbAAAAAAAAAAAAAADA7L4BHTa57wAoAAA="
@@ -76,9 +72,9 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
       forceRefresh: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
       refreshInBackground: Effect.void,
     }),
-    Effect.provideService(HostProcessPlatform, hostPlatform),
-    Effect.provideService(HostProcessArchitecture, "arm64"),
-    Effect.provideService(HostProcessEnvironment, { PATH: input.local ? localDirectory : "" }),
+    Effect.provideService(HostProcess.Platform, hostPlatform),
+    Effect.provideService(HostProcess.Architecture, "arm64"),
+    Effect.provideService(HostProcess.Environment, { PATH: input.local ? localDirectory : "" }),
     Effect.provideService(
       HttpClient.HttpClient,
       HttpClient.make((request) =>

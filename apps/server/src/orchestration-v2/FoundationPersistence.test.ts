@@ -50,7 +50,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
-import * as IdAllocator from "./IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -1873,6 +1873,54 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       assert.equal(providerThread?.lastRunOrdinal, 2);
       assert.equal(providerThread?.status, "active");
       assert.deepEqual(providerThread?.pendingBackgroundTasks ?? [], []);
+
+      // The superseded run can still end its own tasks, keeping the newer
+      // run's snapshot and the tasks it reported.
+      const workflowTask = {
+        taskId: "bg-ended-late",
+        description: "workflow",
+        kind: "background_task" as const,
+      };
+      const newerTask = { taskId: "bg-newer", description: "newer", kind: "command" as const };
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:foundation-provider-thread-owner:newer-roster"),
+            type: "provider-thread.updated",
+            threadId,
+            driver: providerDriver,
+            providerInstanceId,
+            occurredAt: afterReplacement,
+            payload: {
+              ...baseProviderThread,
+              lastRunOrdinal: 2,
+              status: "active",
+              pendingBackgroundTasks: [workflowTask, newerTask],
+              updatedAt: afterReplacement,
+            },
+          },
+        ],
+      });
+      const removeEndedTask = (id: string) =>
+        eventSink.removeProviderThreadBackgroundTasks({
+          eventId: EventId.make(id),
+          threadId,
+          providerThreadId,
+          taskIds: new Set([workflowTask.taskId]),
+          occurredAt: afterReplacement,
+        });
+      const lateClear = yield* removeEndedTask("event:foundation-provider-thread-owner:late-clear");
+      assert.lengthOf(lateClear, 1);
+      assert.lengthOf(
+        yield* removeEndedTask("event:foundation-provider-thread-owner:late-clear-again"),
+        0,
+      );
+      const cleared = (yield* projectionStore.getThreadProjection(threadId)).providerThreads.find(
+        (candidate) => candidate.id === providerThreadId,
+      );
+      assert.equal(cleared?.lastRunOrdinal, 2);
+      assert.equal(cleared?.status, "active");
+      assert.deepEqual(cleared?.pendingBackgroundTasks, [newerTask]);
     }),
   );
 
@@ -2084,6 +2132,37 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect("wakes a settle waiter when its effect finishes", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const effectId = "effect:foundation-await-settled";
+      yield* outbox.enqueue([
+        {
+          id: effectId,
+          commandId: CommandId.make("command:foundation-await-settled"),
+          threadId: ThreadId.make("thread:foundation-await-settled"),
+          request: {
+            type: "provider-runtime.continue",
+            sourceRunId: RunId.make("run:foundation-await-settled"),
+          },
+        },
+      ]);
+      const waiter = yield* outbox.awaitSettled(effectId).pipe(Effect.forkChild);
+      const claimed = yield* outbox.claimNext({
+        workerId: "settle-worker",
+        leaseDurationMs: 30_000,
+      });
+      assert.isTrue(Option.isSome(claimed));
+      yield* Effect.yieldNow;
+      assert.isUndefined(waiter.pollUnsafe());
+
+      yield* outbox.succeed({ effectId, workerId: "settle-worker" });
+      yield* Fiber.join(waiter);
+      // A settled effect does not wait.
+      yield* outbox.awaitSettled(effectId);
+    }),
+  );
+
   it.effect("runs title generation beside critical work while serializing each lane", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
@@ -2226,7 +2305,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       if (Option.isNone(claimed)) return;
       assert.equal(claimed.value.id, "effect:foundation-next-claimable:a1");
 
-      const whileBlocked = yield* outbox.nextClaimableAt;
+      const whileBlocked = yield* outbox.nextClaimableAt();
       assert.isTrue(Option.isSome(whileBlocked));
       if (Option.isSome(whileBlocked)) {
         assert.equal(DateTime.toEpochMillis(whileBlocked.value), DateTime.toEpochMillis(future));
@@ -2236,7 +2315,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         effectId: claimed.value.id,
         workerId: "next-claimable-worker",
       });
-      const afterCompletion = yield* outbox.nextClaimableAt;
+      const afterCompletion = yield* outbox.nextClaimableAt();
       assert.isTrue(Option.isSome(afterCompletion));
       if (Option.isSome(afterCompletion)) {
         assert.isAtMost(DateTime.toEpochMillis(afterCompletion.value), DateTime.toEpochMillis(now));
@@ -2354,14 +2433,15 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
   it.effect("does not emit a SQL span for an empty safety claim", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
-      const spans: Array<string> = [];
+      const statements: Array<unknown> = [];
       const tracer = Tracer.make({
         span: (options) => {
           const span = new Tracer.NativeSpan(options);
           const end = span.end.bind(span);
           span.end = (endTime, exit) => {
             end(endTime, exit);
-            spans.push(span.name);
+            const query = span.attributes.get("db.query.text");
+            if (query !== undefined) statements.push(query);
           };
           return span;
         },
@@ -2372,7 +2452,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         .pipe(Effect.withTracer(tracer));
 
       assert.isTrue(Option.isNone(claim));
-      assert.notInclude(spans, "sql.execute");
+      assert.deepEqual(statements, []);
     }).pipe(Effect.provide(Layer.fresh(layerEffectOutboxProvided))),
   );
 
@@ -2482,7 +2562,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       assert.equal(Option.getOrUndefined(title)?.id, "effect:foundation-retry-order:b-title");
       const blocked = yield* outbox.claimNext({ workerId, leaseDurationMs: 30_000 });
       assert.isTrue(Option.isNone(blocked));
-      const nextClaimable = yield* outbox.nextClaimableAt;
+      const nextClaimable = yield* outbox.nextClaimableAt();
       assert.isTrue(Option.isSome(nextClaimable));
       if (Option.isSome(nextClaimable)) {
         assert.equal(
@@ -2778,6 +2858,8 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
             { id: sessionId, driver: "codex", providerInstanceId, status: "running" },
           ],
           providerTurns: [{ providerThreadId, runAttemptId: attemptId, status: "running" }],
+          runtimeRequests: [],
+          turnItems: [],
         } as unknown as OrchestrationV2ThreadProjection;
         const recovery = yield* ProviderRuntimeRecovery.make.pipe(
           Effect.provide(
@@ -3051,9 +3133,9 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         completedAt: null,
       });
       // The parent run settled while its background subagent kept working,
-      // then the server died. Recovery already cancels the parent's subagent
-      // item, entity, and node; the child's runless root turn lives on another
-      // thread and must be settled too.
+      // Stop ended the subagent's item, then the server died. Recovery cancels
+      // the parent's subagent entity and node; the child's runless root turn
+      // lives on another thread and must be settled too.
       yield* eventSink.commitCommand({
         commandId: CommandId.make("command:foundation-native-subagent"),
         threadId: parentId,
@@ -3185,7 +3267,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
               parentItemId: null,
               ordinal: 1,
               type: "subagent",
-              status: "running",
+              status: "interrupted",
               title: null,
               startedAt: now,
               completedAt: null,
@@ -3221,6 +3303,10 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
 
       const parentProjection = yield* projectionStore.getThreadProjection(parentId);
       assert.equal(parentProjection.subagents[0]?.status, "cancelled");
+      assert.equal(
+        parentProjection.nodes.find((node) => node.id === subagentId)?.status,
+        "cancelled",
+      );
       const childProjection = yield* projectionStore.getThreadProjection(childId);
       const childRoot = childProjection.nodes.find((candidate) => candidate.id === childRootId);
       assert.equal(childRoot?.status, "cancelled");

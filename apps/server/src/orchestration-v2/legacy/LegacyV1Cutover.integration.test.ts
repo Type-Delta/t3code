@@ -44,14 +44,10 @@ import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
-import {
-  ProviderAdapterProtocolError,
-  type ProviderAdapterV2Event,
-  type ProviderAdapterV2Shape,
-} from "../ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
-import { checkpointWorkspace } from "../testkit/ReplayFixtureWorkspace.ts";
+import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const PROJECT_ID = "project:cutover";
 const ACTIVE_THREAD = "thread:cutover:active";
@@ -88,10 +84,10 @@ const codexModelSelection = {
  * A V1 database as it exists on disk before a V2 server first opens it: schema
  * through migration 40 plus the 42-49 tail. Slot 41 carries a site-local
  * `ThreadSummaryTimeline` migration, matching production databases where local
- * builds recorded extra names under the shared id sequence. The V2 runner only
- * applies migrations past the recorded maximum id, so the cutover in this test
- * applies 050, 051 and 052 on top of the untouched copy — the same path the
- * real upgrade takes.
+ * builds recorded extra names under the shared id sequence. Reconciliation
+ * repairs any free upstream slots below the recorded high-water mark before
+ * the normal migrator continues, so this cutover fills upstream 041 and then
+ * applies 050, 051 and 052 on top of the untouched copy.
  */
 const seedV1Database = (fixturePath: string, workspace: string) =>
   Effect.scoped(
@@ -422,7 +418,7 @@ interface CapturedTurn {
 }
 
 const unimplemented = (detail: string) =>
-  Effect.fail(new ProviderAdapterProtocolError({ driver, detail }));
+  Effect.fail(new ProviderAdapter.ProviderAdapterProtocolError({ driver, detail }));
 
 const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =>
   ({
@@ -432,7 +428,7 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (sessionInput) =>
       Effect.gen(function* () {
-        const events = yield* PubSub.unbounded<ProviderAdapterV2Event>();
+        const events = yield* PubSub.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const now = yield* DateTime.now;
         const providerSession: OrchestrationV2ProviderSession = {
           id: sessionInput.providerSessionId,
@@ -551,7 +547,7 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
                   failure: null,
                   threadDisposition: "reusable",
                 },
-              ] satisfies ReadonlyArray<ProviderAdapterV2Event>);
+              ] satisfies ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>);
             }),
           steerTurn: () => Effect.void,
           interruptTurn: () => Effect.void,
@@ -561,7 +557,7 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
           forkThread: () => unimplemented("forkThread unused in cutover test"),
         };
       }),
-  }) satisfies ProviderAdapterV2Shape;
+  }) satisfies ProviderAdapter.ProviderAdapterV2["Service"];
 
 const waitForIdle = Effect.fn("LegacyV1Cutover.waitForIdle")(function* (threadId: ThreadId) {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -931,21 +927,16 @@ describe("orchestration v2 legacy v1 cutover", () => {
             ),
           );
 
-          // The copied database recorded a site-local migration under id 41, so
-          // the migrator skipped this build's AuthSessionClientConnection by
-          // id. The divergence is surfaced at startup while the rest of the
-          // cutover still runs.
+          // The copied database recorded ThreadSummaryTimeline under id 41. The
+          // fork's name-based history conversion files it under its upstream id,
+          // so no divergence is reported and AuthSessionClientConnection runs.
           const divergenceLog = boot1Logs.find((log) =>
             String(log.message).includes("migration history diverges"),
           );
-          assert.deepStrictEqual(divergenceLog?.annotations.divergent, [
-            "41:ThreadSummaryTimeline (this build: AuthSessionClientConnection)",
-          ]);
-          assert.equal(firstBoot.migration41Name, "ThreadSummaryTimeline");
-          // The skipped migration's columns never landed; the schema gap is
-          // what the startup warning points at.
-          assert.notInclude(firstBoot.authSessionColumnNames, "client_surface");
-          assert.notInclude(firstBoot.authSessionColumnNames, "client_app_version");
+          assert.isUndefined(divergenceLog);
+          assert.equal(firstBoot.migration41Name, "AuthSessionClientConnection");
+          assert.include(firstBoot.authSessionColumnNames, "client_surface");
+          assert.include(firstBoot.authSessionColumnNames, "client_app_version");
 
           assert.equal(firstBoot.importRows.length, ALL_THREADS.length);
           const unhydratedRows = firstBoot.importRows.filter(
@@ -1042,9 +1033,9 @@ describe("orchestration v2 legacy v1 cutover", () => {
             ),
           );
 
-          // The recorded-name divergence persists across restarts; the warning
-          // fires again so it cannot be missed between upgrades.
-          assert.isTrue(
+          // The repaired upstream row makes the converted history stable; a
+          // second boot has no migration divergence to report.
+          assert.isFalse(
             boot2Logs.some((log) => String(log.message).includes("migration history diverges")),
           );
         }).pipe(Effect.provide(NodeServices.layer)),

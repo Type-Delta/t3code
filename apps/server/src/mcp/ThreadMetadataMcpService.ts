@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as McpInvocationContext from "./McpInvocationContext.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
@@ -166,12 +167,28 @@ const make = Effect.gen(function* () {
     if (shell === null || shell.deletedAt !== null) {
       return yield* failure("thread_not_found", `Thread ${threadId} was not found.`);
     }
+    if (!McpInvocationContext.canCrossProjects(scope) && scope.thread !== undefined) {
+      const callingThreadId = scope.thread.threadId;
+      const caller = yield* threadManagement
+        .getThreadShell(callingThreadId)
+        .pipe(
+          Effect.mapError((error) =>
+            failure(
+              "orchestration_error",
+              `Unable to locate calling thread ${callingThreadId}: ${errorMessage(error)}`,
+            ),
+          ),
+        );
+      if (caller === null || caller.deletedAt !== null || caller.projectId !== shell.projectId) {
+        return yield* failure("thread_not_found", `Thread ${threadId} was not found.`);
+      }
+    }
     const target = yield* threadManagement
       .getProjectThreadRecords({ projectId: shell.projectId, threadId }, [])
       .pipe(Effect.mapError(threadLookupFailure));
     const requestKey =
       input.clientRequestId === undefined
-        ? yield* crypto.randomUUIDv4.pipe(Effect.orDie)
+        ? yield* crypto.randomUUIDv4().pipe(Effect.orDie)
         : input.clientRequestId;
     const updateCommandId = commandId({
       scope,

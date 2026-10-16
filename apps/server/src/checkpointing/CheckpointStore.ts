@@ -59,6 +59,14 @@ export interface DiffCheckpointsInput {
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;
   readonly format?: "patch" | "numstat";
+  /** Limits the diff to these exact paths. An empty list yields an empty diff. */
+  readonly filePaths?: ReadonlyArray<string>;
+}
+
+export interface ListAuthoredPathsInput {
+  readonly cwd: string;
+  readonly fromCheckpointRef: CheckpointRef;
+  readonly toCheckpointRef: CheckpointRef;
 }
 
 export interface DeleteCheckpointRefsInput {
@@ -117,6 +125,19 @@ export class CheckpointStore extends Context.Service<
     ) => Effect.Effect<string, CheckpointStoreError>;
 
     /**
+     * List paths changed by work done after the "from" checkpoint: uncommitted
+     * edits at either checkpoint, commits made after "from", and commits that
+     * left HEAD. Commits a pull, merge, or rebase brought in are older than
+     * "from", so their paths are not listed.
+     *
+     * Returns null when HEAD did not move or a checkpoint does not record HEAD.
+     * Then every changed path belongs to the turn.
+     */
+    readonly listAuthoredPaths: (
+      input: ListAuthoredPathsInput,
+    ) => Effect.Effect<ReadonlySet<string> | null, CheckpointStoreError>;
+
+    /**
      * Delete the provided checkpoint refs.
      *
      * Best-effort delete: missing refs are tolerated.
@@ -165,6 +186,8 @@ export const make = Effect.gen(function* () {
     return handle.driver.checkpoints satisfies VcsCheckpointOps;
   });
 
+  // Detection answers a non-Git workspace with stats alone, so a turn in a
+  // plain folder spawns no git process.
   const isGitRepository: CheckpointStore["Service"]["isGitRepository"] = (cwd) =>
     vcsRegistry
       .detect({ cwd, requestedKind: "git" })
@@ -230,6 +253,19 @@ export const make = Effect.gen(function* () {
     return yield* checkpoints.diffCheckpoints(input);
   });
 
+  const listAuthoredPaths: CheckpointStore["Service"]["listAuthoredPaths"] = Effect.fn(
+    "listAuthoredPaths",
+  )(function* (input) {
+    if (
+      SidecarCheckpointRepository.isSidecarCheckpointRef(input.fromCheckpointRef) ||
+      SidecarCheckpointRepository.isSidecarCheckpointRef(input.toCheckpointRef)
+    ) {
+      return yield* normalizeSidecarError(input.cwd, sidecars.authoredPaths(input));
+    }
+    const checkpoints = yield* resolveCheckpoints("CheckpointStore.listAuthoredPaths", input.cwd);
+    return yield* checkpoints.listAuthoredPaths(input);
+  });
+
   const deleteCheckpointRefs: CheckpointStore["Service"]["deleteCheckpointRefs"] = Effect.fn(
     "deleteCheckpointRefs",
   )(function* (input) {
@@ -261,6 +297,7 @@ export const make = Effect.gen(function* () {
     hasCheckpointRef,
     restoreCheckpoint,
     diffCheckpoints,
+    listAuthoredPaths,
     deleteCheckpointRefs,
   });
 });

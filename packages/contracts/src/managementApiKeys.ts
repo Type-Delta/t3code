@@ -14,6 +14,7 @@ export const ManagementApiKeyScope = Schema.Literals([
   "threads:create",
   "threads:message",
   "threads:wait",
+  "pullRequests:review",
 ]);
 export type ManagementApiKeyScope = typeof ManagementApiKeyScope.Type;
 export const ManagementApiKeyScopes = Schema.Array(ManagementApiKeyScope);

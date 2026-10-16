@@ -10,7 +10,7 @@ Git repository cache keys use Node's native `realpath` so Windows long paths and
 
 Windows Claude commands are resolved before the Agent SDK starts a session. The resolver follows npm launcher shims to the installed native executable or JavaScript entry point and preserves explicit executable paths. Provider snapshots and DevTools expose sanitized resolver diagnostics; startup provenance identifies installed web artifacts without exposing command output or environment values.
 
-When a PATH-based provider executable disappears before startup, the backend resolves it again and retries once. Claude waits for the SDK initialization handshake before reporting ready and caches a replacement path only after successful initialization. Codex, Cursor, Grok, local OpenCode, and Claude/Codex metadata commands apply the retry at process launch; Antigravity reacquires its PATH installation and harness together. Explicit executable paths and managed Antigravity installations never use this fallback. Failures after a process starts do not replay agent work.
+When a PATH-based provider executable disappears before startup, the backend resolves it again and retries once. Under AgentScope, a stale cached bare command can report exit 127 rather than ENOENT; that shell-level case remains documented as a known limitation because treating every 127 as missing could replay a real command failure. Claude waits for the SDK initialization handshake before reporting ready and caches a replacement path only after successful initialization. Codex, Cursor, Grok, local OpenCode, and Claude/Codex metadata commands apply the retry at process launch; Antigravity reacquires its PATH installation and harness together. Explicit executable paths and managed Antigravity installations never use this fallback. Failures after a process starts do not replay agent work.
 
 Older failed Claude startups could persist a generated session ID before its transcript existed. If Claude explicitly rejects that resume ID and the cursor records zero turns with no assistant checkpoint or turn boundaries, the adapter recreates the session with the same ID once before accepting a turn. Missing sessions with recorded history remain errors.
 
@@ -18,13 +18,15 @@ Each Claude startup attempt owns a separate prompt queue. Closing a failed SDK q
 
 The current server bundle includes the SDK and uses the configured Claude installation. Upstream packaging removes unused SDK native optional dependencies; the older SDK patch and lockfile-free patch-pinning workaround are no longer active. Windows and WSL ship separate runtime archives, each with its own platform dependencies.
 
-**Implementation evidence:** `apps/server/src/provider/executableRecovery.ts`, the Claude and Codex adapter runtimes, `apps/server/src/provider/acp/AcpSessionRuntime.ts`, `apps/server/src/provider/opencodeRuntime.ts`, `apps/server/src/provider/Drivers/{ClaudeExecutable,AntigravityDriver}.ts`, `apps/server/src/provider/Layers/ClaudeProvider.ts`, `apps/server/src/provider/providerSnapshot.ts`, `scripts/build-desktop-artifact.ts`, and `pnpm-workspace.yaml`.
+**Implementation evidence:** `packages/provider-core/src/server/executableRecovery.ts`, the Claude and Codex adapter runtimes, `packages/provider-acp/src/server/AcpSessionRuntime.ts`, `packages/provider-opencode/src/server/OpenCodeRuntime.ts`, `apps/server/src/provider/Drivers/{ClaudeExecutable,AntigravityDriver}.ts`, `apps/server/src/provider/ClaudeProvider.ts`, `packages/provider-core/src/server/snapshotProbe.ts`, `scripts/build-desktop-artifact.ts`, and `pnpm-workspace.yaml`.
 
 **Recorded validation:** 352 focused tests passed across 11 affected suites on Windows, with 14 existing platform skips. Recovery tests cover synchronous and asynchronous Claude startup failures, replacement-path caching, one retry, explicit-path exclusions, real child-process launches, and Antigravity executable/harness reacquisition. The stale Cursor rollback assertion now checks the current navigation contract. Codex metadata tests were run without the inherited `T3CODE_CODEX_LAUNCH_ARGS` override. The OpenCode localhost output fixture timed out in combined runs and passed isolated reruns. `vp check`, `vp run typecheck`, and `git diff --check` passed. Earlier integrations verified initialization and packaging.
 
 The empty-session follow-up initially verified initialization only. A later real-SDK probe reproduced the failed query stealing the replacement's first prompt; the fixed probe delivered that prompt to the replacement and received native `system/init`. All 159 Claude adapter tests passed, including prompt delivery after missing-session and stale-executable recovery.
 
-**Last updated:** 2026-09-30
+The executable recovery primitive now lives in `packages/provider-core/src/server/executableRecovery.ts`, with all provider app-server, ACP, OpenCode, Claude/Codex text-generation, and Claude SDK launches retrying stale bare PATH resolutions once. The failed cached PATH entry is evicted before the retry, and Claude passes the configured bare command separately from its resolved SDK path so Windows recovery remains reachable. Claude also recreates a missing resume session only when its provider thread has no persisted turns; gateway model metadata now drives Claude model IDs and effort in both orchestration and text generation.
+
+**Last updated:** 2026-10-15
 
 ### DL002 — Machine context beside the empty-state hero
 
@@ -44,11 +46,11 @@ The fork hardens desktop collaborative preview control. A debugger detach invali
 
 Automation also retries dynamic click/type targets, re-resolves click targets after cursor movement, keeps snapshots coherent across DOM mutations, bounds guest viewport work, and quarantines an unresponsive host so later requests can fail over and recover without reconnecting the environment. Hung native control work now times out below the broker deadline and detaches only its cached debugger session, so the same tab can reattach instead of retaining a blocked control permit.
 
-Desktop hosts now acknowledge receipt to the broker before starting page work. A slow navigation or snapshot can therefore time out without being mistaken for a disconnected host, while a stream that never acknowledges is still quarantined and failed over. Timeout cleanup also preserves hosts whose completion arrived after the deadline. Automation navigation starts Electron loads without waiting for every subresource, then applies the requested readiness milestone in the renderer.
+The broker acknowledges receipt from the live in-process server browser before starting page work. A slow navigation or snapshot can therefore time out without being mistaken for a disconnected host, while a stream that never acknowledges is still quarantined and failed over. Timeout cleanup also preserves hosts whose completion arrived after the deadline. The former web automation host and its unused client request consumer/readiness helpers were removed after upstream stopped mounting that host; desktop does not acknowledge broker requests.
 
 Browser development's single-origin Vite proxy behavior, including shared and Tailscale origins, is upstream behavior and is not a fork divergence. Explicit IPv4 loopback URLs remain only for the desktop renderer and local-preview automation, where they protect Windows local routing.
 
-**Implementation evidence:** `apps/desktop/src/preview/Manager.ts`, `apps/web/src/components/preview/`, `apps/server/src/mcp/PreviewAutomationBroker.ts`, `apps/server/src/mcp/toolkits/preview/handlers.ts`, and `packages/contracts/src/previewAutomation.ts`.
+**Implementation evidence:** `apps/desktop/src/preview/Manager.ts`, `apps/server/src/preview/ServerBrowser.ts`, `apps/server/src/mcp/PreviewAutomationBroker.ts`, `apps/server/src/mcp/toolkits/preview/handlers.ts`, and `packages/contracts/src/previewAutomation.ts`.
 
 Upstream owns the pinned Electron debugger reference and bounded screenshot retries. Those fixes compose with the fork's stale-session detection and control deadlines; a screenshot that succeeds on retry keeps its debugger session.
 
@@ -66,7 +68,7 @@ Git worktree comparison uses native realpaths and case-folding on Windows so Git
 
 Server-router and HTTP MCP fixtures use native HTTP clients with OS-assigned loopback ports. Windows can assign port `6566`, which Fetch blocks before connecting. Explicit compression checks retain Fetch and its automatic decompression. The fixtures retain real HTTP requests and their status, body, and session assertions.
 
-**Implementation evidence:** `packages/shared/src/shell.ts`, `apps/server/src/git/GitManager.ts`, their remaining fork-specific fixture and canonical-path tests, `apps/server/src/server.test.ts`, `apps/server/src/mcp/McpHttpServer.test.ts`, `packages/tailscale/src/tailscale.test.ts`, and `oxlint-plugin-t3code/test/utils.ts`.
+**Implementation evidence:** `packages/shared/src/shell.ts`, `apps/server/src/git/GitManager.ts`, their remaining fork-specific fixture and canonical-path tests, `apps/server/src/mcp/McpHttpServer.test.ts`, `packages/tailscale/src/tailscale.test.ts`, and `oxlint-plugin-t3code/test/utils.ts`.
 
 **Recorded validation:** targeted Cursor/Grok ACP, provider-runtime ingestion, checkpoint, Git PR-selector, desktop, relay, workspace, Tailscale, and oxlint suites on Windows; `vp check` and `vp run typecheck`.
 
@@ -74,11 +76,15 @@ Server-router and HTTP MCP fixtures use native HTTP clients with OS-assigned loo
 
 ### DL006 — Durable sidecar checkpoints and recoverable navigation
 
-Checkpoint capture and navigation are durable server services. Private bare-Git sidecars hold opaque `t3-sidecar:v1:` snapshots without modifying the project repository; capture, import, restore, retention, and cleanup are serialized and cover linked worktrees, binaries, symlinks, Windows paths, and non-Git workspaces safely.
+V2 turn checkpoints live in a private bare-Git sidecar repository below the server's checkpoints directory, addressed by opaque `t3-sidecar:v1:` locators bound to the repository and worktree. Capture, restore, and diff never write refs, objects, or an index into the project repository. One sidecar repository serves a repository's linked worktrees, and capture, restore, and maintenance are serialized per sidecar. Capture records the project HEAD in the snapshot so upstream's pull, merge, and rebase filtering keeps working between sidecar boundaries. A scope id too long for a snapshot id is hashed.
 
-SQLite persists capture jobs, immutable checkpoint entries, timeline generations and cursors, provider bindings, retention data, and restart-recoverable navigation journals. Undo, redo, and file-state recovery use the V2 checkpoint service; provider conversation rollback/fork and direct active steering are intentionally not part of the fork's retained checkpoint surface.
+Checkpoints captured between the 2026-10-08 redo and this re-port were written as `refs/t3/orchestration-v2/checkpoints/*` refs in the project repository. They still load, diff, and restore: each boundary lookup tries its sidecar snapshot first, then that in-repo ref. New boundaries always go to the sidecar. Upstream's checkpoint rollback locking and the per-workspace capture lock are unchanged.
+
+The SQLite capture-job and navigation-journal tables from fork migrations `036`–`038` remain for schema compatibility. No server code reads them since the V2 cutover; V2 navigation uses upstream's checkpoint rollback.
 
 Fork migrations `036`–`038` establish durable checkpoint state. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
+
+After history reconciliation, startup repairs any absent migration from the current upstream manifest that falls below the recorded high-water mark before the normal migrator runs. This keeps a remapped historical `ThreadSummaryTimeline` row from suppressing upstream `041_AuthSessionClientConnection`; the repair is idempotent.
 
 Migration 053_ReconcileUpstream47History repairs a database carrying upstream history through 047, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at 050-052. Incoming upstream behavior then runs as 054-061, with fork prompt suggestions at 062, and the latest upstream title-state, pull-request-file, auto-settle, and V2 cutover migrations at 063-067. Migration 065_ReconcileBranchPullRequestHistory repairs the known deployed-ID-58 collision idempotently before startup. Migration 067_CoreV2Cutover imports legacy V1 thread shells and messages into V2 projections and removes obsolete V1 runtime state. Schema checks keep these changes safe for both fork and upstream database histories.
 
@@ -94,17 +100,21 @@ Batched allowlisted config reads preserve Git includes and global/local preceden
 
 Capture jobs that first lose the workspace-mutation race or fail can be re-enqueued for the same logical turn boundary. The durable row is reset to pending and remains the single job for its snapshot, while pending, running, and ready jobs are still deduplicated.
 
-Sidecar capture excludes deleted tracked paths from `git add`. Its private index starts empty, so those paths already represent deletions; including them as pathspecs would reject an otherwise valid capture. Deleted and renamed files restore correctly without changing the user's Git index.
+Capture keeps one private index per worktree inside the sidecar repository and passes every tracked or unignored path to `git update-index`, so only files whose stat changed since the last capture are hashed again, as for the project's own index. Paths the workspace no longer has leave that index, and a tracked file that was deleted or replaced by a folder is captured as gone. The index starts over empty when `.gitattributes` or the sidecar's copied core settings change, after any failed Git command, and before sidecar gc, so each tree matches one built from an empty index. A second pass over the same index rehashes anything edited during capture and rejects the capture when the trees differ. Deleted and renamed files restore correctly without changing the user's Git index.
 
-**Implementation evidence:** `apps/server/src/checkpointing/`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,047_AuthSessionClientConnection,048_ProjectionThreadLinkedPullRequest,049_ProjectionThreadsUnsettledAt,053_ReconcileUpstream47History,054_ClearAutomaticProjectModelDefaults,055_ProjectionProjectsAutoPull,056_RepairAutomaticSettlementTimestamps,057_ProjectionProjectIcon}.ts`, `apps/server/src/orchestration/`, `packages/contracts/src/orchestration.ts`, `packages/client-runtime/src/`, and checkpoint-aware web composer and chat components including `ThreadErrorBanner.tsx`.
+**Implementation evidence:** `apps/server/src/checkpointing/{SidecarCheckpointRepository,CheckpointRepositoryIdentity,CheckpointStore}.ts`, `apps/server/src/orchestration-v2/CheckpointService.ts`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,053_ReconcileUpstream47History}.ts`, `apps/server/src/persistence/ForkMigrations.ts`, and their tests. `CheckpointStore.test.ts` holds the sidecar characterization suite, including a comparison of reused-index trees against empty-index `git add` trees across tracked, untracked, deleted, binary, symlinked, ignored, file-to-folder, mode, and attribute changes; `apps/server/src/orchestration-v2/CheckpointService.sidecar.test.ts` runs turns against real temporary repositories and asserts that `git for-each-ref refs/t3` stays empty, that restore works, and that an in-repo checkpoint from the redo period still restores.
 
 **Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated. The deletion/rename regression and all 15 sidecar checkpoint tests passed on Windows with the user-index preservation assertion.
 
 The 2026-10-02 config repair passed all 28 checkpoint-store tests, including exact restored bytes, conditional includes, repeated values, and removed overrides. A single-file capture benchmark measured 3.2–3.4 seconds against 4.6–4.8 seconds for the original fork implementation.
 
+The 2026-10-16 reused capture index was measured on a copy of a 28k-file workspace: the first capture took 10.4 seconds and later ones 0.60 seconds, against 34–41 seconds per capture for the empty-index `git add` capture, which spent most of its time matching each path against every pathspec. Both methods produced identical trees for the same workspace.
+
 The 2026-10-05 completion split passed the focused RunExecutionService, CheckpointCaptureService, CheckpointService, runtime-layer, recovery, projection, `vp check`, and `vp run typecheck` checks. Settled provider turns now remain settled when follow-up checkpoint capture is slow or unavailable.
 
-**Last updated:** 2026-10-05
+The 2026-10-15 re-port restored the 16 sidecar characterization tests the redo dropped (32 checkpoint-store tests pass), plus sidecar authored-path filtering, long scope ids, and the V2 real-repository suite.
+
+**Last updated:** 2026-10-16
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -128,7 +138,7 @@ The 2026-10-07 drag update passed 90 focused drag tests, `vp check`, `vp run typ
 
 ### DL012 — Prompt preservation during draft promotion
 
-The initial optimistic prompt remains visible while a draft route becomes its server-backed thread. Chat timeline state resets only when the scoped thread identity changes, so the projected `thread.message-sent` event replaces the prompt instead of briefly erasing it. Orchestration commands require an acknowledgement within ten seconds; a lost WebSocket reply therefore enters the existing visible failure path and restores the durable composer draft instead of leaving a refresh-only optimistic message indefinitely.
+The initial optimistic prompt remains visible while a draft route becomes its server-backed thread. Chat timeline state resets only when the scoped thread identity changes, so the projected `thread.message-sent` event replaces the prompt instead of briefly erasing it. Dispatch and first-message launch RPCs share a ten-second acknowledgement timeout; a lost WebSocket reply therefore enters the existing visible failure path and restores the durable composer draft instead of leaving a refresh-only optimistic message indefinitely. The acknowledgement covers receipt of the launch RPC, not completion of workspace setup. If an acknowledgement arrives after the ten-second timeout, the server still lands the message while the restored draft remains visible; manually resending that draft can therefore duplicate the message.
 
 **Implementation evidence:** `apps/web/src/components/ChatView.tsx` and `packages/client-runtime/src/operations/commands.ts`.
 
@@ -142,25 +152,27 @@ Codex model and skill discovery is bounded, optional catalog enrichment after a 
 
 App-server errors are classified by scope: retryable transport errors remain warnings, while a typed non-retryable turn error emits the terminal failed-turn lifecycle needed to release the thread for a follow-up message. A root Codex collaboration `wait` that remains open for 30 minutes is failed explicitly after bounded child-then-parent interruption; matching item or turn completion cancels that deadline. Actual process or transport failure still marks the session unavailable. Upstream terminal-state, hard-stop, tool-identity, and liveness fixes remain authoritative; in particular, a late collaboration `interacted` event can enrich an existing child without restarting one that already completed.
 
-**Implementation evidence:** `apps/server/src/provider/Layers/{CodexProvider,CodexSessionRuntime,CodexAdapter}.ts`, `apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`, and `packages/contracts/src/providerRuntime.ts`.
+**Implementation evidence:** `apps/server/src/provider/CodexProvider.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`, and `packages/contracts/src/providerRuntime.ts`.
 
 **Recorded validation:** focused Codex adapter, collaboration-runtime, provider-runtime ingestion, mixed-tool lifecycle, and transfer-budget tests, `vp check`, and `vp run typecheck`. The 2026-09-01 merge-focused provider suites also covered bounded collaboration waits, turn-scoped failure recovery, and upstream child-model enrichment.
 
-**Last updated:** 2026-09-01
+Catalog enrichment remains optional and bounded: skills/list stays at three seconds, while ChatGPT model discovery allows its three-second refresh poll to finish and then returns the cached first catalog. Healthy Codex account probes retain their snapshot when skills or model discovery is slow or fails. The V2 adapter has no surviving root collaboration wait lifecycle equivalent to the former 30-minute V1 watchdog, so that behavior is intentionally not reintroduced.
+
+**Last updated:** 2026-10-15
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 
-Sidecar summary requests use upstream's NUL-delimited numstat format, including the repository-HEAD compatibility fallback, and reject output overflow rather than publishing an incomplete file list. Full patch requests remain available for the diff viewer.
+Sidecar diffs (DL006) use upstream's NUL-delimited numstat format for file summaries and reject output overflow rather than publishing an incomplete file list. Full patch requests remain available for the diff viewer, including upstream's path-limited patches that leave out files a pull, merge, or rebase brought in.
 
-Turn diff summaries are published only for successfully captured, loadable sidecar checkpoints. Each summary and DiffPanel query compares the completed full turn against the immediately preceding turn boundary; an empty turn remains loadable but produces no diff card. Provider-reported `file_change` items are not synthesized into checkpoint references, and the client hides legacy non-ready rows that cannot load a diff.
+A thread-start diff resolves the baseline as its sidecar snapshot, then as the in-repo ref an older thread recorded. When neither exists, as for an older thread that never captured a baseline, it compares against repository `HEAD` instead of failing. This is the surviving baseline fallback from former DL011; provider-derived summary fallback is not retained.
 
-Diff queries use the active checkpoint timeline generation and the stable pre-turn sidecar identity. For an older thread with no captured baseline, the remaining compatibility fallback compares against repository `HEAD`. This absorbs only the surviving baseline-fallback behavior from former DL011; provider-derived summary fallback is not retained.
+The client shows turn diff summaries only for `ready` checkpoints. Rows with a `missing`, `error`, or `stale` checkpoint have nothing to load, so they never show a diff card or DiffPanel entry.
 
-**Implementation evidence:** `apps/server/src/checkpointing/{CheckpointIds,CheckpointDiffQuery,CheckpointStore}.ts`, `apps/server/src/orchestration/Layers/{CheckpointReactor,ProjectionSnapshotQuery}.ts`, `apps/web/src/hooks/useTurnDiffSummaries.ts` with their tests.
+**Implementation evidence:** `apps/server/src/checkpointing/{CheckpointDiffQuery,CheckpointStore,SidecarCheckpointRepository}.ts`, `apps/server/src/orchestration-v2/CheckpointService.ts`, and `apps/web/src/hooks/useTurnDiffSummaries.ts`, with their tests. `CheckpointStore.test.ts` covers the sidecar HEAD fallback and sidecar authored-path filtering. `CheckpointDiffQuery.test.ts` and `CheckpointScopeOwnership.test.ts` cover the baseline lookup, and `useTurnDiffSummaries.test.ts` covers hiding non-ready rows.
 
-**Recorded validation:** focused checkpoint query, nested-worktree, projection, and web-summary tests; rapid multi-turn orchestration integration covering pre-thread changes, consecutive edit turns, a no-edit turn, durable capture, projection summaries, and DiffPanel queries; `vp check`; and `vp run typecheck`.
+**Recorded validation:** focused checkpoint query, sidecar store, scope-ownership, and web-summary tests, plus the 140 replay fixtures. All passed on 2026-10-15.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-10-15
 
 ### DL015 — Case-safe composer subagent utility filename
 
@@ -211,9 +223,28 @@ the child transcript is a normal conversation without a second panel or composer
 child lifecycle events remain authoritative, while T3-owned child threads keep the V2 persistence,
 notification, and recovery behavior.
 
+A follow-up message sent to a T3-owned delegated child reopens the original delegated task instead
+of creating a separate task per follow-up (upstream #17696). Frequent child failures, such as
+provider capacity errors, would otherwise leave a trail of tasks. While the follow-up runs, the task
+shows as running with no result and a pending completion delivery. Further follow-ups join that
+reopened work, and the task publishes once, after the last of them settles. The task's runs carry
+its id, so the result already delivered to the parent is never delivered again, recovery adds
+nothing, and automatic monitor wakes on the child never reopen it. Upstream's
+`DelegatedCompletionDelivery` follow-up cases keep their exactly-once checks, with their task
+identity assertions rewritten for this reopen behavior.
+
+The task reports the latest of its runs that actually started. A follow-up cancelled before it
+started, or one waiting in a held queue (after Stop or a provider failure), does not count, so
+cancelling a queued follow-up restores the earlier result without a second transfer or wake.
+A held follow-up that the user later resumes publishes its own result once. `task_cancel` cancels
+the task's queued or held follow-ups, so a reopened task with nothing running can still be
+cancelled. The delegation's first run is identified by the spawn transfer's target run. A user
+follow-up also reopens a task the parent had cancelled, re-arming its completion wake.
+
 Implementation evidence: orchestrationV2 contracts and server layers; ChatView, Sidebar,
 ThreadRelationshipsControl, ComposerSubagents, V2LifecycleRow, V2ItemInspector, rightPanelStore,
-and session-logic.
+and session-logic. Reopen edge cases: `DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
+follow-up never starts") and `OrchestratorMcpService.test.ts` (held follow-up cancel).
 
 Recorded validation: focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
 and composer tests; vp check; vp run typecheck; and an isolated paired web-app smoke test that
@@ -222,7 +253,7 @@ composer rendered. The preview client's accessibility snapshot and click calls f
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
 
-Last updated: 2026-10-04
+Last updated: 2026-10-15
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
@@ -234,7 +265,7 @@ Tray refresh waits for backend readiness before requesting a bearer session or t
 
 On Windows, the standalone service launcher terminates the known server PID and its descendants during stop, update, and fatal shutdown. This prevents launcher-owned provider processes from surviving as orphaned Codex writers without scanning or killing processes by name; direct-child signaling remains the fallback when process-tree termination fails.
 
-**Implementation evidence:** desktop lifecycle and native tray/status-item modules and their focused tests under `apps/desktop/src/`, dedicated macOS template-image assets and packaging checks, `apps/server/src/orchestration/http.ts`, `apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts`, `packages/contracts/src/environmentHttp.ts`, and `apps/server/src/serviceLauncher.ts`.
+**Implementation evidence:** desktop lifecycle and native tray/status-item modules and their focused tests under `apps/desktop/src/`, dedicated macOS template-image assets and packaging checks, `apps/server/src/orchestration-v2/http.ts`, `packages/contracts/src/environmentHttp.ts`, and `apps/server/src/serviceLauncher.ts`.
 
 Updater-controlled exits retain upstream's synchronous window destruction before process shutdown. Closing the last UI window still keeps the fork's tray-backed backend available.
 
@@ -248,19 +279,19 @@ The 2026-10-02 readiness guard passed 12 focused tests. An isolated source start
 
 ### DL020 — Provider turns survive stalled checkpoint captures
 
-Starting a provider turn no longer waits indefinitely when the previous turn has finished but its post-turn checkpoint capture is still pending. In that state, the server dispatches the next turn without a checkpoint mutation so authentication failures and stalled captures cannot freeze the thread. Active provider mutations retain their existing brief handoff grace period. This behavior applies to every provider through the shared command reactor.
+A provider turn that completes is persisted `completed` immediately. Its checkpoint capture runs afterward as a follow-up effect, so a slow capture (5–10 s on Windows), a hung VCS call, or a failing checkpoint backend never delays the next message, never makes the thread look busy, and never blocks Stop. Upstream instead parks every completed turn at `waiting` until capture finishes. The fork keeps that `waiting` state only for a completed turn that still owns open run-owned background work (native subagents), so that work stays visible and `task_cancel`/Stop can end it. The checkpoint capture completes that run. Each capture attempt is bounded at two minutes, so a VCS call that hangs fails instead of holding the effect. After the last attempt fails, the effect worker completes the run without a checkpoint, retrying that write. If every write fails, the capture effect stays queued and tries again later, so a run can never stay `waiting` forever.
 
-Checkpoint workers also reclaim expired leases while the server remains running and retry transient capture errors up to three times. Their lease heartbeat and five-minute deadline cover both the workspace gate wait and capture execution. Cancellation releases an acquired gate ticket, and a long gate wait cannot let the same job occupy both capture workers through lease expiry. Structured lifecycle logs identify the job, thread, boundary, durable attempt, execution attempt, result, and recovery action so capture failures can be diagnosed without inspecting SQLite.
+The effect outbox serializes each thread's effects, but checkpoint capture has its own lane. A pending or hung capture never queues the thread's next `provider-turn.start`, Stop, or other provider effects behind it. Capture and checkpoint rollback still wait for each other, and the workspace lock serializes their file work. A run's checkpoint baseline is the previous run's capture boundary, so while that capture is still running the next run skips its baseline instead of waiting on the workspace lock. The effect worker runs at most two captures at once, so captures on other threads always leave workers for turn starts, Stop, and other effects.
 
-Provider intents are processed in order per thread. An unanswered interrupt or approval response in one thread no longer blocks other threads. Codex transport and notification-consumer failures terminate the affected session with visible error and exit events, reject pending requests, and stop the owned subprocess. Recoverable provider turn errors still permit session reuse, and failed agent work is never replayed automatically.
+Because the run releases its provider thread at once, the next run (for example Muse's own report turn after a workflow) can claim the thread before the provider's late "background task ended" update reaches the finished run's stream. That update still removes the ended tasks from the stored roster without overwriting the newer run's snapshot, and the server ignores those tasks in later roster snapshots, so an adapter seeded with the older roster cannot bring them back. Upstream avoids this race only because its `waiting` window usually outlasts it.
 
-Compaction replay waits for each provider send to finish before resuming the next queued message. Stopping during a blocked send therefore reports the remaining queued message as canceled instead of silently dispatching it later.
+Workspaces without a Git repository do no VCS work for checkpoints. VCS detection walks the real path from the cwd up to the filesystem root. When no `.git` entry (directory or worktree file) exists along it, filesystem stats answer without spawning `git`. Every detection caller benefits: checkpoints, status polling, review, and git workflows. The turn's baseline, capture, and diff then record `missing` checkpoints, and finalization skips only the VCS and pull-request refresh, so the file search index still follows the turn's edits. Upstream's detection spawns `git rev-parse` for every check because a negative answer is never cached.
 
-**Implementation evidence:** `apps/server/src/checkpointing/CheckpointCaptureQueue.ts` and its tests, `apps/server/src/orchestration/Layers/{CheckpointReactor,ProviderCommandReactor}.ts`, the provider command tests, `apps/server/src/provider/Layers/{CodexSessionRuntime,CodexAdapter}.ts` and their regressions, and `packages/effect-codex-app-server/src/{client,protocol}.ts` and protocol tests.
+**Implementation evidence:** `apps/server/src/orchestration-v2/{RunExecutionService,CheckpointCaptureService,RunFinalizationService,EffectWorker,EffectOutbox,EventSink}.ts`, `apps/server/src/vcs/VcsDriverRegistry.ts`, and their tests. `EffectWorker.test.ts` covers five cases. A hung capture still lets the next turn start and Stop run on the same thread, which fails without the capture lane. Four hung captures on other threads leave a worker for a turn start. The per-capture timeout lets the run settle. A run whose completion writes all fail keeps its capture queued. A capture and a rollback keep their order. `RunExecutionService.test.ts` starts a run while the real `CheckpointService` is still capturing the previous run's boundary. `VcsDriverRegistry.test.ts` resolves a repository and lists its files with `GIT_DIR` and `GIT_WORK_TREE` inherited from the server environment, which `VcsProcess` removes from Git commands unless an operation sets its own value. The late roster clear is covered by `RunExecutionService.test.ts` ("a late roster clear from a released run ends its tasks for good"), `FoundationPersistence.test.ts`, and the `muse_workflow` replay fixture, which fails without it. `apps/server/src/checkpointing/NonGitWorkspace.test.ts` runs a turn's checkpoint work against a real temporary non-Git folder and asserts that no child process is spawned, recorded at the process spawner. It fails without the stat pre-check, and also covers registry detection, symlinked workspaces, and linked worktrees whose `.git` is a file. Upstream's steering, background-stop, and Claude automatic-delivery suites keep every behavioral assertion. Only their "turn finalized" watchers accept `completed` as well as `waiting`. The replay and provider-switch harnesses wait for each completed run's checkpoint before treating a thread as idle.
 
-**Recorded validation:** 82 provider command tests, six capture queue tests, and 159 Codex protocol/client/runtime/adapter tests passed. Deterministic regressions cover gate-wait lease renewal and timeout, post-timeout ticket release, cross-thread progress with same-thread command ordering, compaction replay cancellation, and visible transport failures. `vp check`, `vp run typecheck`, and `git diff --check` passed.
+**Recorded validation:** SteeringCompletion 13, BackgroundWorkStop 12, ClaudeAutomaticDelivery 3, TaskCancelNativeSubagent 1, EffectWorker, CheckpointCaptureService, CheckpointService, RunFinalizationService, RunExecutionService, recovery, and the replay (140/140 including `muse_workflow`)/provider-switch/fork/merge-back harnesses pass.
 
-**Last updated:** 2026-09-30
+**Last updated:** 2026-10-16
 
 ### DL021 — Clickable Windows file links in thread Markdown
 
@@ -279,6 +310,12 @@ global scope per project setting: Git-backed projects default to project scope, 
 default to global scope, and every project can override the default. Project-scoped callers can
 operate only inside their project; global callers may read, launch, send, and wait across projects,
 with the upstream user-attached cross-project read exception preserved.
+
+That boundary also covers every MCP resource selector: pull-request thread links and review-guide
+checkouts, workflow stops, scheduled-task list/update/delete/run-now, and scratch launches. A shared
+project authorization check is applied after resolving the target resource and before any read or
+write that could expose or trigger work in another project; management keys retain their explicit
+environment-wide semantics.
 
 t3_thread_wait accepts up to eight targets and applies the upstream one-hour cap. t3_thread_send can
 select a provider instance and model, and rejects a provider caller that targets its own thread.
@@ -314,6 +351,8 @@ unavailable.
 
 Gateway and manual metadata compose with upstream's custom-model display-name and option-descriptor editor.
 
+Claude's fork-specific model ID and effort normalization applies to gateway, custom, and bundled models with a manual override. Bundled models without overrides use the upstream catalog path, preserving current `xhigh` support (including the 5.5 and Fable 5.1 models); live model switches resolve the effective API ID and effort once and reuse that selection for the process, flags, and query identity.
+
 Models carry usable context, theoretical maximum context, maximum output, and metadata provenance.
 Every visible model accepts manual display, context, output, and reasoning overrides; manual values
 win over gateway and harness metadata. The Models information tooltip shows every known value
@@ -341,8 +380,7 @@ native `models_cache.json` when no Codex JSON is configured, with explicit custo
 by slug so nested native metadata is retained.
 
 **Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
-`apps/server/src/provider/GatewayModelCatalog.ts`,
-`apps/server/src/provider/{Drivers,Layers}/`,
+`apps/server/src/provider/{Drivers/ClaudeDriver.ts,ClaudeProvider.ts,GatewayModelCatalog.ts}`,
 `apps/server/src/textGeneration/ClaudeTextGeneration.ts`,
 `apps/web/src/components/settings/{AddProviderInstanceDialog,CompatibleApiGatewaySection,CustomModelMetadataDialog,ProviderInstanceCard,ProviderModelsSection,ProviderSettingsPanel}.tsx`,
 and `apps/web/src/components/settings/providerModelDetails.ts`.
@@ -353,6 +391,8 @@ tests for authoritative gateway rows, `vp check`, `vp run typecheck`, and integr
 of gateway configuration, custom model metadata, and model-detail tooltips. The 2026-09-03
 add-instance dialog scroll fix was verified in a browser at 1000x720 and 390x700 with the gateway
 section expanded.
+
+Claude adapter and text-generation launches now resolve each selected gateway model through the per-instance catalog, applying `[1m]` model IDs and normalized CLI effort before opening or spawning.
 
 **Last updated:** 2026-09-21
 
@@ -369,7 +409,7 @@ Desktop-managed SSH aliases remain authoritative and continue to omit the
 advertised account. The username field is optional for compatibility with older
 server configurations.
 
-**Implementation evidence:** `packages/shared/src/hostProcess.ts`,
+**Implementation evidence:** `packages/shared/src/HostProcess.ts`,
 `packages/contracts/src/editor.ts`, `apps/server/src/environment/RemoteOpenTargets.ts`,
 `apps/web/src/remoteOpen.ts`, `apps/web/src/components/chat/OpenInPicker.tsx`, and
 `apps/desktop/src/electron/ElectronShell.test.ts`.
@@ -447,7 +487,7 @@ startup link can manage keys on the paired machine without inventing or broadeni
 
 The existing HTTP MCP endpoint accepts these persistent keys alongside ephemeral provider-session
 credentials and enforces one management scope per thread operation. Management callers can select
-projects, create and message threads, read and wait on threads, and list models. Runtime permissions
+projects, create and message threads, read and wait on threads, and list models. The opt-in `pullRequests:review` scope adds pull-request review guide tools. Runtime permissions
 belong to threads rather than keys: external creation uses the normal T3 Code default and messages
 keep the target thread's current mode. Management keys cannot use preview automation or environment
 administration. State-changing
@@ -474,7 +514,7 @@ secrets.
 `apps/server/src/persistence/Migrations/050_ManagementApiKeys.ts`,
 `apps/server/src/persistence/Migrations/052_RemoveManagementApiKeyRuntimeModes.ts`,
 `apps/server/src/mcp/McpInvocationContext.ts`, `apps/server/src/mcp/McpHttpServer.ts`,
-`apps/server/src/mcp/toolkits/threads/handlers.ts`, `packages/contracts/src/managementApiKeys.ts`,
+`apps/server/src/mcp/toolkits/thread/handlers.ts`, `packages/contracts/src/managementApiKeys.ts`,
 and `docs/user/thread-tools.md`.
 
 **Recorded validation:** focused persistence, migration, service concurrency and interruption,
@@ -533,8 +573,7 @@ next prompt. The agent writes it from its real context (repository instructions,
 conversation so far); no separate model call, provider session, or transcript summary is made.
 `ProviderRuntimeIngestion` withholds any partial or open tag from streamed and buffered deltas,
 strips every tagged block at completion, and carries the sanitized text as `suggestion` on the
-assistant message through the decider, projector, client reducer, and SQLite projection
-(migration `062`). The web composer shows it as ghost text once the thread is idle and the
+assistant message through the decider, projector, client reducer, and SQLite projection. Persistence keeps upstream migrations 1–62 in `effect_sql_migrations` and fork migrations 1–15 in the independent `fork_sql_migrations` ledger. The web composer shows it as ghost text once the thread is idle and the
 composer is empty; Tab accepts it, typing dismisses it for that message, and a new message or
 thread resets it. Cursor, Grok, OpenCode, and Antigravity receive no instruction. Mobile has no
 toggle or ghost text. An optional `promptSuggestionInstructions` setting appends extra guidance to
@@ -549,12 +588,11 @@ Suggestion-less streaming updates retain message and timeline-row identity. Clea
 
 **Implementation evidence:** `packages/shared/src/promptSuggestion.ts`,
 `packages/contracts/src/{settings,orchestration,provider}.ts`,
-`apps/server/src/provider/Layers/{ProviderService,CodexSessionRuntime,ClaudeAdapter}.ts`,
+`apps/server/src/orchestration-v2/Adapters/{CodexAdapterV2,ClaudeAdapterV2}.ts`,
 `apps/server/src/provider/CodexDeveloperInstructions.ts`,
-`apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts`,
-`apps/server/src/orchestration/{decider,projector}.ts`,
+`apps/server/src/orchestration-v2/ProviderEventIngestor.ts`,
+`apps/server/src/orchestration-v2/{Orchestrator,ProjectionStore}.ts`,
 `apps/server/src/persistence/Migrations/062_ProjectionThreadMessageSuggestions.ts`,
-`packages/client-runtime/src/state/threadReducer.ts`,
 `apps/web/src/promptSuggestion.logic.ts`, `apps/web/src/components/chat/usePromptSuggestion.ts`,
 `apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/ComposerPromptEditor.tsx`,
 and `apps/web/src/components/settings/SettingsPanels.tsx`.
@@ -583,7 +621,7 @@ The web router ignores `.test.ts` files in the routes directory so route tests d
 
 ### DL037 — Forgiving CLIProxyAPI usage and redemption
 
-Hub requests pause after management HTTP 401/403 until the URL or management key changes. Optional malformed quota fields and array entries no longer discard usable windows; Codex plan fallback accepts both field names and relative reset times. Credit redemption sends only a stable `redeem_request_id`, preserves known outcomes, and reports unfamiliar successful responses as accepted before refreshing usage. T3 leaves cooldown clearing to CPA instead of resetting the entire account. Web, desktop, and mobile display the accepted result.
+Hub requests pause after management HTTP 401/403 until the URL or management key changes. Each ChatGPT account publishes its `id_token.chatgpt_account_id` as `workspaceId`, so one email signed into multiple workspaces remains distinct. Optional malformed quota fields and array entries no longer discard usable windows; Codex plan fallback accepts both field names and relative reset times. Credit redemption sends only a stable `redeem_request_id`, preserves known outcomes, and reports unfamiliar successful responses as accepted before refreshing usage. T3 leaves cooldown clearing to CPA instead of resetting the entire account. Web, desktop, and mobile display the accepted result.
 
 **Implementation evidence:** `apps/server/src/usage/cliproxyApi.ts`, its focused tests, `packages/contracts/src/providerUsageLimits.ts`, and the web/mobile usage components.
 
@@ -609,7 +647,7 @@ On Windows, the service launcher requests shutdown over its existing IPC channel
 
 This is an experiment to reduce abrupt termination. It does not establish or fix the cause of the intermittent zero-handle Codex processes stuck in Windows termination.
 
-**Implementation evidence:** `packages/effect-codex-app-server/src/{client,protocol}.ts`, `apps/server/src/{serviceLauncher,server}.ts`, `apps/server/src/process/ParentProcessShutdown.ts`, `apps/server/src/provider/Layers/CodexSessionRuntime.ts`, and `apps/desktop/src/backend/DesktopBackendManager.ts`.
+**Implementation evidence:** `packages/effect-codex-app-server/src/{client,protocol}.ts`, `apps/server/src/{serviceLauncher,server}.ts`, `apps/server/src/process/ParentProcessShutdown.ts`, and `apps/desktop/src/backend/DesktopBackendManager.ts`.
 
 **Recorded validation:** Focused client, protocol, launcher, parent shutdown, Codex runtime/probe, and desktop lifecycle tests passed. Three isolated installed-Codex initialization/EOF cycles exited with code 0. One full server shutdown through launcher IPC and two through desktop stdin EOF exited with code 0 in 2.7–2.8 seconds. `vp check` and `vp run typecheck` passed.
 
@@ -645,10 +683,16 @@ reference, so the first V2 turn resumes the provider conversation instead of sen
 transcript as a new conversation. Unknown providers, malformed cursors, and instance mismatches keep
 the safe context-handoff path.
 
-Implementation evidence: LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
-projection, Codex and Claude V2 adapters, and the legacy importer/cutover tests.
+A fork or rollback request may carry a saved native turn boundary (`nativeBoundaryRef` on the
+adapter fork input). Codex and Claude fork exactly at a strong ref of their own driver and reject a
+weak, foreign, or synthetic one instead of falling back to a guessed turn count. No orchestrator path
+supplies it yet; V1 import records thread cursors only.
 
-Last updated: 2026-10-04
+Implementation evidence: LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
+projection, Codex and Claude V2 adapters (`resolveCodexForkBoundary`,
+`resolveClaudeForkUpToMessageId`), and the legacy importer/cutover and Codex adapter tests.
+
+Last updated: 2026-10-15
 
 ### DL043 — Codex compaction context usage restored
 
@@ -685,15 +729,70 @@ fix. One unrelated Claude adapter roster test also fails on clean `main`.
 
 **Last updated:** 2026-10-09
 
+### DL045 — Markdown host images recover after files appear
+
+Inline Markdown images backed by host files retry a bounded number of times after an initial asset
+mint fails. Agents can stream a Markdown path before the file is finished writing; the asset query
+otherwise caches the not-found response while opening the same path in the image viewer explicitly
+refreshes it. Retries require the filesystem read permission and stop after the short backoff or a
+successful signed URL. The host-file resource is memoized by value so streaming renders do not restart the retry budget.
+
+**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx` and
+`apps/web/src/components/ChatMarkdown.assets.test.tsx`.
+
+**Recorded validation:** focused ChatMarkdown asset tests.
+
+**Last updated:** 2026-10-15
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
 
+### 2026-10-16 — Merge upstream/main through `7d5a42912a`
+
+**Merge commit:** this commit
+**Parents:** `17a2cf6248` (fork) and `7d5a42912a` (upstream/main); 630 upstream commits since `079e4bccdc`
+
+Upstream moved provider and source-control code into `packages/provider-*` and `packages/source-control-*`,
+renamed `hostProcess.ts` to `HostProcess.ts`, dropped the per-driver `providers` settings map, and added
+migrations 059–062. Fork features were ported onto those shapes. Name-based history conversion maps the
+fork's old 59–67 ids, and a lower-gap repair runs any skipped upstream migration (such as 041 on remapped
+`ThreadSummaryTimeline` histories) before the normal migrator.
+
+Decisions:
+
+- DL032 auto-resume stays on by default with the fork prompt. Model precedence is manual override, then
+  gateway inventory, then upstream's catalog.
+- Management keys gain an opt-in `pullRequests:review` scope for the review-guide tools (DL031).
+- DL020 keeps the fork model: provider turns complete immediately, capture runs on its own bounded lane
+  and never blocks the next send or Stop, and non-Git workspaces spawn no VCS work.
+- DL018 keeps the fork model: a follow-up reopens the original delegated task instead of upstream
+  #17696's separate task, with exactly-once delivery.
+- The image retry from a `dev` stash joins as DL045.
+
+Audits (Astra and Opus each reviewed every round) also restored fork features lost in the 2026-10-08 redo
+and still missing on `dev`: sidecar checkpoints (DL006/DL014), DL042 fork boundaries, DL037 resilient
+usage, DL023 project scope for every MCP tool, DL001 launch recovery on every provider, DL026 gateway
+model resolution, DL004 broker acknowledgement, DL012 command acknowledgement, the DL017 worktree picker
+and the DL002 machine label. Sidecar capture now reuses a per-worktree private index.
+
+**Validation:** `vp check`, `vp run typecheck` and `vp run lint:mobile` pass. Server, contracts, shared and
+client-runtime tests: 10,643 passed; the 13 remaining failures also fail on `dev` (old fork migration
+fixtures, a Codex updater test and a provider probe timeout). Orchestration, checkpointing, VCS and MCP
+pass 2,683/2,683 from the repo root, and the replay fixtures pass 140/140. A copy of a real database
+migrated with 129/129 threads, passed `quick_check`, and booted a second time without migrating again.
+In a browser against that copy, pairing, migrated threads, the draft worktree picker, gateway Claude
+turns, settings, usage and management-key creation with the review scope work; MCP HTTP calls honour
+that scope. Native mobile, desktop installers and Windows were not exercised.
+
+Known follow-ups: Claude's DL034 prompt-suggestion pin briefly reports the provider thread as idle while
+a turn starts; nothing yet supplies DL042's native boundary from the orchestrator.
+
 ### 2026-10-08 — Redo upstream merge after `cad0f83ed6`
 
-**Merge commit:** local redo on `fix/redo-merge`; verification is still in progress
+**Merge commit:** local redo on `fix/redo-merge`; superseded and audited by the 2026-10-15 merge
 **Parents:** `dba09c35aa` (fork) and `079e4bccdc` (upstream/main)
 
 This merge supersedes `cad0f83ed6`. It ports the fork divergences onto upstream's flattened

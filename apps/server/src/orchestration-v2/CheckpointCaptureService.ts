@@ -17,7 +17,7 @@ import * as Schema from "effect/Schema";
 
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
-import * as IdAllocator from "./IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 export class CheckpointCaptureExecutionError extends Schema.TaggedError<CheckpointCaptureExecutionError>()(
@@ -34,6 +34,16 @@ const isCheckpointCaptureExecutionError = Schema.is(CheckpointCaptureExecutionEr
 
 export interface CheckpointCaptureServiceV2Shape {
   readonly execute: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly scopeId: CheckpointScopeId;
+  }) => Effect.Effect<void, CheckpointCaptureExecutionError>;
+  /**
+   * Completes a run still parked at `waiting` without a checkpoint. The effect
+   * worker calls it after the capture's last attempt fails, so a broken
+   * checkpoint backend cannot leave the run active forever.
+   */
+  readonly completeWithoutCheckpoint: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly scopeId: CheckpointScopeId;
@@ -239,21 +249,90 @@ export const layer: Layer.Layer<
       });
     });
 
-    return CheckpointCaptureServiceV2.of({
-      execute: (input) =>
-        execute(input).pipe(
+    const completeWithoutCheckpoint = Effect.fn(
+      "orchestrationV2.checkpointCapture.completeWithoutCheckpoint",
+    )(function* (input: {
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+      readonly scopeId: CheckpointScopeId;
+    }) {
+      const { run, rootNode } = yield* projections.getCheckpointCaptureContext(
+        input.threadId,
+        input,
+      );
+      if (run?.status !== "waiting" || rootNode === undefined) return;
+      const completedAt = yield* DateTime.now;
+      const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } = run;
+      const commandId = CommandId.make(`command:effect:checkpoint.capture-failed:${run.id}`);
+      yield* eventSink.commitCommand({
+        commandId,
+        threadId: input.threadId,
+        commandType: "checkpoint.capture",
+        acceptedAt: completedAt,
+        effects: [],
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId: input.threadId, commandId }),
+            type: "run.updated",
+            threadId: input.threadId,
+            runId: run.id,
+            nodeId: rootNode.id,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: completedAt,
+            payload: {
+              ...runWithoutDelegatedCompletion,
+              status: "completed",
+              completedAt: run.completedAt ?? completedAt,
+            },
+          },
+          {
+            id: yield* ids.allocate.event({ threadId: input.threadId, commandId }),
+            type: "node.updated",
+            threadId: input.threadId,
+            runId: run.id,
+            nodeId: rootNode.id,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: completedAt,
+            payload: {
+              ...rootNode,
+              status: "completed",
+              completedAt: rootNode.completedAt ?? completedAt,
+            },
+          },
+        ],
+      });
+    });
+
+    const withExecutionError =
+      <A, E, R>(
+        operation: (input: {
+          readonly threadId: ThreadId;
+          readonly runId: RunId;
+          readonly scopeId: CheckpointScopeId;
+        }) => Effect.Effect<A, E, R>,
+      ) =>
+      (input: {
+        readonly threadId: ThreadId;
+        readonly runId: RunId;
+        readonly scopeId: CheckpointScopeId;
+      }) =>
+        operation(input).pipe(
           Effect.mapError((cause) =>
             isCheckpointCaptureExecutionError(cause)
               ? cause
               : new CheckpointCaptureExecutionError({ ...input, cause }),
           ),
-        ),
+        );
+
+    return CheckpointCaptureServiceV2.of({
+      execute: withExecutionError(execute),
+      completeWithoutCheckpoint: withExecutionError(completeWithoutCheckpoint),
     });
   }),
 );
 
 function makeCheckpointTurnItem(input: {
-  readonly idAllocator: IdAllocator.IdAllocatorV2Shape;
+  readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly run: OrchestrationV2Run;
   readonly rootNode: OrchestrationV2ExecutionNode;
   readonly providerThread: OrchestrationV2ProviderThread;
