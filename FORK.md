@@ -755,6 +755,21 @@ successful signed URL. The host-file resource is memoized by value so streaming 
 
 **Last updated:** 2026-10-15
 
+### DL046 — Worktree submodules initialize local file URLs safely
+
+New worktree setup now reports the submodule stage through the launch progress tracker, including
+the command output that explains a failed checkout. T3 allows the `file` transport only on its
+scoped `git submodule update --init` invocation, so local submodule URLs inherited by a worktree
+can initialize without weakening the host or repository's default Git protocol policy. Repositories
+without submodules and projects that disable initialization are marked as skipped; unreachable
+submodules remain best-effort failures and do not prevent worktree creation.
+
+**Implementation evidence:** `apps/server/src/orchestration-v2/ThreadLaunchService.ts`,
+`apps/server/src/vcs/GitVcsDriver.ts`, `apps/server/src/vcs/GitVcsDriverCore.ts`, and the focused
+Git driver regression test.
+
+**Last updated:** 2026-10-16
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

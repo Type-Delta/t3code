@@ -327,7 +327,7 @@ const make = Effect.gen(function* () {
         threadId,
         branch: input.workspaceStrategy.branch ?? null,
         baseRef: input.workspaceStrategy.baseRef,
-        stages: ["fetch", "checkout", "setup-script", "agent"],
+        stages: ["fetch", "checkout", "submodules", "setup-script", "agent"],
         fiber: yield* Effect.fiber,
       });
     } else if (reused !== undefined) {
@@ -471,6 +471,20 @@ const make = Effect.gen(function* () {
                   }),
                 onCheckoutProgress: (progress) =>
                   setupTracker.stage(threadId, "checkout", { percent: progress.percent }),
+                onSubmodulesStarted: () =>
+                  setupTracker.stageStatus(threadId, "submodules", "running"),
+                onSubmodulesDisabled: ({ source }) =>
+                  setupTracker.stage(threadId, "submodules", {
+                    status: "skipped",
+                    detail:
+                      source === "environment" ? "no submodules declared" : `disabled by ${source}`,
+                  }),
+                onSubmoduleLine: (line) => setupTracker.appendTail(threadId, "submodules", line),
+                onSubmodulesFinished: ({ ok, detail }) =>
+                  setupTracker.stage(threadId, "submodules", {
+                    status: ok ? "done" : "failed",
+                    ...(detail === null ? {} : { detail }),
+                  }),
               },
             },
           )

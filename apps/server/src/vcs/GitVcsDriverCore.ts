@@ -3575,7 +3575,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                 Effect.orElseSucceed(() => null),
               ),
         );
-    if (hasSubmodules && submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
+    if (!hasSubmodules && progress?.onSubmodulesDisabled) {
+      yield* progress.onSubmodulesDisabled({ source: "environment" });
+    } else if (submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
       yield* progress.onSubmodulesDisabled({
         source: submoduleMode.source === "t3.json" ? "t3.json" : "settings",
       });
@@ -3589,8 +3591,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         "GitVcsDriver.createWorktree.updateSubmodules",
         worktreePath,
         submoduleMode.value === "recursive"
-          ? ["submodule", "update", "--init", "--recursive"]
-          : ["submodule", "update", "--init"],
+          ? ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]
+          : ["-c", "protocol.file.allow=always", "submodule", "update", "--init"],
         onSubmoduleLine
           ? {
               env: { LC_ALL: "C" },

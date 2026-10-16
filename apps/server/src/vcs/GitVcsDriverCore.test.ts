@@ -3153,21 +3153,6 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const fileSystem = yield* FileSystem.FileSystem;
         const pathService = yield* Path.Path;
 
-        // Git refuses `file:` submodule transports by default (CVE-2022-39253)
-        // and ignores repo-level config for it, so a local fixture needs the
-        // env allowance. Real submodules are https/ssh and need none of this.
-        const previousAllowedProtocol = process.env.GIT_ALLOW_PROTOCOL;
-        process.env.GIT_ALLOW_PROTOCOL = "file";
-        yield* Effect.addFinalizer(() =>
-          Effect.sync(() => {
-            if (previousAllowedProtocol === undefined) {
-              delete process.env.GIT_ALLOW_PROTOCOL;
-            } else {
-              process.env.GIT_ALLOW_PROTOCOL = previousAllowedProtocol;
-            }
-          }),
-        );
-
         // A real submodule: `git worktree add` leaves these empty, which is
         // what silently strips shared tooling out of every new worktree.
         const submoduleRepo = yield* makeTmpDir("git-submodule-");
@@ -3178,7 +3163,14 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
 
         const cwd = yield* makeTmpDir();
         const { initialBranch } = yield* initRepoWithCommit(cwd);
-        yield* git(cwd, ["submodule", "add", submoduleRepo, "shared"]);
+        yield* git(cwd, [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          submoduleRepo,
+          "shared",
+        ]);
         yield* git(cwd, ["commit", "-m", "add submodule"]);
 
         const worktreePath = pathService.join(
@@ -3234,6 +3226,61 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("initializes file submodules with a scoped protocol allowance", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const pathService = yield* Path.Path;
+
+        const submoduleRepo = yield* makeTmpDir("git-file-submodule-");
+        yield* initRepoWithCommit(submoduleRepo);
+        yield* writeTextFile(submoduleRepo, "SHARED.md", "# shared\n");
+        yield* git(submoduleRepo, ["add", "."]);
+        yield* git(submoduleRepo, ["commit", "-m", "shared"]);
+
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          `file://${submoduleRepo}`,
+          "shared",
+        ]);
+        yield* git(cwd, ["commit", "-m", "add file submodule"]);
+
+        const result = yield* Ref.make<{
+          readonly ok: boolean;
+          readonly detail: string | null;
+        } | null>(null);
+        const worktreePath = pathService.join(
+          yield* makeTmpDir("git-worktrees-"),
+          "file-submodule-worktree",
+        );
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.createWorktree(
+          {
+            cwd,
+            path: worktreePath,
+            refName: initialBranch,
+            newRefName: "feature/file-submodule",
+          },
+          {
+            progress: {
+              onSubmodulesFinished: (input) => Ref.set(result, input),
+            },
+          },
+        );
+
+        const finished = yield* Ref.get(result);
+        assert.deepEqual(finished, { ok: true, detail: null });
+        assert.equal(
+          yield* fileSystem.exists(pathService.join(worktreePath, "shared", "SHARED.md")),
+          true,
+        );
+      }),
+    );
+
     it.effect("creates worktrees under the configured worktrees directory", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -3278,18 +3325,6 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const fileSystem = yield* FileSystem.FileSystem;
         const pathService = yield* Path.Path;
 
-        const previousAllowedProtocol = process.env.GIT_ALLOW_PROTOCOL;
-        process.env.GIT_ALLOW_PROTOCOL = "file";
-        yield* Effect.addFinalizer(() =>
-          Effect.sync(() => {
-            if (previousAllowedProtocol === undefined) {
-              delete process.env.GIT_ALLOW_PROTOCOL;
-            } else {
-              process.env.GIT_ALLOW_PROTOCOL = previousAllowedProtocol;
-            }
-          }),
-        );
-
         // inner -> nested, so a recursive init populates nested/NESTED.md and
         // a top-level init leaves it empty.
         const nestedRepo = yield* makeTmpDir("git-nested-");
@@ -3300,13 +3335,27 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const innerRepo = yield* makeTmpDir("git-inner-");
         yield* initRepoWithCommit(innerRepo);
         yield* writeTextFile(innerRepo, "INNER.md", "# inner\n");
-        yield* git(innerRepo, ["submodule", "add", nestedRepo, "nested"]);
+        yield* git(innerRepo, [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          nestedRepo,
+          "nested",
+        ]);
         yield* git(innerRepo, ["add", "."]);
         yield* git(innerRepo, ["commit", "-m", "inner"]);
 
         const cwd = yield* makeTmpDir();
         const { initialBranch } = yield* initRepoWithCommit(cwd);
-        yield* git(cwd, ["submodule", "add", innerRepo, "inner"]);
+        yield* git(cwd, [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          innerRepo,
+          "inner",
+        ]);
         yield* git(cwd, ["commit", "-m", "add submodule"]);
         const driver = yield* GitVcsDriver.GitVcsDriver;
         const worktreesDir = yield* makeTmpDir("git-worktrees-");
@@ -3321,7 +3370,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           // Consecutive cases may reuse a file mode to test the option alone.
           yield* git(cwd, ["commit", "--allow-empty", "-m", `submodules: ${fileMode}`]);
           const worktreePath = pathService.join(worktreesDir, branch);
-          const disabled = yield* Ref.make<"settings" | "t3.json" | false>(false);
+          const disabled = yield* Ref.make<"environment" | "settings" | "t3.json" | false>(false);
           yield* driver.createWorktree(
             { cwd, path: worktreePath, refName: initialBranch, newRefName: branch },
             {
