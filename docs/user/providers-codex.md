@@ -107,6 +107,11 @@ URL** empty to derive `/v1/models`, or enter the complete URL. Auto-detection
 accepts Codex `models`, Anthropic `data`, and OpenAI `data` catalog shapes. Choose
 an explicit format if detection selects the wrong one.
 
+Enable **Image generation** if the gateway supports a Codex-compatible Images API.
+This lets Codex use its built-in image generation tool through the gateway and is
+off by default. It works independently of **Let Codex request the model catalog**.
+Ask Codex to generate an image in a new thread after enabling it.
+
 Enter the catalog credential in **API key** and choose bearer or `x-api-key`
 authentication. Marked credentials stay in the provider's sensitive environment
 storage and are not returned to web or mobile clients. A failed refresh keeps the

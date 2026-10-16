@@ -633,6 +633,7 @@ export const ApiGatewaySettings = Schema.Struct({
   baseUrl: TrimmedString,
   catalogUrl: Schema.optionalKey(TrimmedString),
   useCodexCatalog: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  codexImageGeneration: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   catalogFormat: ApiGatewayCatalogFormat.pipe(
     Schema.withDecodingDefault(Effect.succeed("auto" as const)),
   ),

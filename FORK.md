@@ -384,6 +384,12 @@ gateway's `model_catalog_url` and a command-backed bearer token reader, so Codex
 model metadata that its bundled catalog does not contain. x-api-key gateways keep their
 environment-backed header when native discovery is enabled.
 
+A separate, default-off **Image generation** option in Codex gateway settings and the
+add-instance wizard advertises the gateway's Images API to Codex. It adds the static
+`x-openai-actor-authorization` header to `t3_api_gateway`, which Codex requires before
+offering its built-in `image_gen` tool for a custom provider. This option works independently
+of catalog discovery and preserves the existing bearer or x-api-key credential configuration.
+
 **Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
 `apps/server/src/provider/{Drivers/ClaudeDriver.ts,ClaudeProvider.ts,GatewayModelCatalog.ts}`,
 `apps/server/src/textGeneration/ClaudeTextGeneration.ts`,
@@ -399,7 +405,7 @@ section expanded.
 
 Claude adapter and text-generation launches now resolve each selected gateway model through the per-instance catalog, applying `[1m]` model IDs and normalized CLI effort before opening or spawning.
 
-**Last updated:** 2026-09-21
+**Last updated:** 2026-10-16
 
 ### DL027 — Remote editor links select the server account
 

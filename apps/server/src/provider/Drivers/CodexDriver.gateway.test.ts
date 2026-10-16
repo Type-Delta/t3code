@@ -127,4 +127,27 @@ describe("Codex gateway launch arguments", () => {
     expect(environment["T3CODE_CODEX_LAUNCH_ARGS"]).not.toContain("model_catalog_json");
     expect(environment["T3CODE_CODEX_LAUNCH_ARGS"]).toContain("model_catalog_url");
   });
+
+  it("removes the generated image capability header when the option is turned off", () => {
+    const apiGateway = decodeGatewaySettings({
+      enabled: true,
+      baseUrl: "https://gateway.example/v1",
+      codexImageGeneration: true,
+    });
+    const environment: NodeJS.ProcessEnv = {};
+    const input = {
+      environment,
+      baseLaunchArgs: "--strict-config",
+      apiGateway,
+      catalog: { source: "none", models: [] } as const,
+    };
+    syncCodexGatewayLaunchArgs(input);
+    expect(environment["T3CODE_CODEX_LAUNCH_ARGS"]).toContain("x-openai-actor-authorization");
+    syncCodexGatewayLaunchArgs({
+      ...input,
+      apiGateway: { ...apiGateway, codexImageGeneration: false },
+    });
+    expect(environment["T3CODE_CODEX_LAUNCH_ARGS"]).not.toContain("x-openai-actor-authorization");
+    expect(environment["T3CODE_CODEX_LAUNCH_ARGS"]).toContain("--strict-config");
+  });
 });

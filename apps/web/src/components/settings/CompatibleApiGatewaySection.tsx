@@ -18,6 +18,7 @@ export interface ApiGatewayDraft {
   readonly baseUrl: string;
   readonly catalogUrl: string;
   readonly useCodexCatalog: boolean;
+  readonly codexImageGeneration: boolean;
   readonly catalogFormat: ApiGatewayCatalogFormat;
   readonly apiKeyEnvironmentVariable: string;
   readonly authMode: ApiGatewayAuthMode;
@@ -36,6 +37,7 @@ const DEFAULT_GATEWAY: ApiGatewayDraft = {
   baseUrl: "",
   catalogUrl: "",
   useCodexCatalog: false,
+  codexImageGeneration: false,
   catalogFormat: "auto",
   apiKeyEnvironmentVariable: "",
   authMode: "bearer",
@@ -68,6 +70,7 @@ export function readApiGatewayDraft(config: unknown): ApiGatewayDraft {
     baseUrl: typeof gateway.baseUrl === "string" ? gateway.baseUrl : "",
     catalogUrl: typeof gateway.catalogUrl === "string" ? gateway.catalogUrl : "",
     useCodexCatalog: gateway.useCodexCatalog === true,
+    codexImageGeneration: gateway.codexImageGeneration === true,
     catalogFormat:
       catalogFormat === "codex" || catalogFormat === "anthropic" || catalogFormat === "openai"
         ? catalogFormat
@@ -90,6 +93,7 @@ export function configWithApiGateway(
     enabled: gateway.enabled,
     baseUrl: gateway.baseUrl.trim(),
     useCodexCatalog: gateway.useCodexCatalog,
+    codexImageGeneration: gateway.codexImageGeneration,
     catalogFormat: gateway.catalogFormat,
     authMode: gateway.authMode,
     ...(gateway.catalogUrl.trim() ? { catalogUrl: gateway.catalogUrl.trim() } : {}),
@@ -209,7 +213,7 @@ interface CompatibleApiGatewaySectionProps {
   readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly idPrefix: string;
   readonly variant: "card" | "dialog";
-  readonly showCodexCatalogToggle?: boolean;
+  readonly showCodexOptions?: boolean;
   readonly onChange: (
     nextConfig: Record<string, unknown>,
     nextEnvironment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
@@ -269,7 +273,7 @@ export function CompatibleApiGatewaySection({
   environment,
   idPrefix,
   variant,
-  showCodexCatalogToggle = false,
+  showCodexOptions = false,
   onChange,
 }: CompatibleApiGatewaySectionProps) {
   const [gateway, setGateway] = useState(() => readApiGatewayDraft(value));
@@ -366,7 +370,7 @@ export function CompatibleApiGatewaySection({
             onChange={(catalogUrl) => publish({ catalogUrl })}
           />
 
-          {showCodexCatalogToggle ? (
+          {showCodexOptions ? (
             <label className="flex items-start justify-between gap-3 rounded-md border border-border/60 p-2.5">
               <span className="grid gap-0.5">
                 <span className="text-xs font-medium text-foreground">
@@ -381,6 +385,26 @@ export function CompatibleApiGatewaySection({
                 checked={gateway.useCodexCatalog}
                 onCheckedChange={(checked) => publish({ useCodexCatalog: Boolean(checked) })}
                 aria-label="Let Codex request the model catalog"
+              />
+            </label>
+          ) : null}
+
+          {showCodexOptions ? (
+            <label className="flex items-start justify-between gap-3 rounded-md border border-border/60 p-2.5">
+              <span className="grid gap-0.5">
+                <span className="text-xs font-medium text-foreground">Image generation</span>
+                <span
+                  id={`${idPrefix}-gateway-image-generation-description`}
+                  className="text-2xs leading-snug text-muted-foreground"
+                >
+                  Let Codex generate images through this gateway. Requires a compatible Images API.
+                </span>
+              </span>
+              <Switch
+                checked={gateway.codexImageGeneration}
+                onCheckedChange={(checked) => publish({ codexImageGeneration: Boolean(checked) })}
+                aria-label="Image generation"
+                aria-describedby={`${idPrefix}-gateway-image-generation-description`}
               />
             </label>
           ) : null}

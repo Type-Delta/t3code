@@ -60,6 +60,13 @@ export function codexGatewayLaunchArgv(input: {
           "-c",
           'model_providers.t3_api_gateway.wire_api="responses"',
         );
+        if (gateway.codexImageGeneration) {
+          // Codex exposes image_gen for custom providers with a static actor header.
+          args.push(
+            "-c",
+            'model_providers.t3_api_gateway.http_headers={"x-openai-actor-authorization"="t3_api_gateway"}',
+          );
+        }
         if (gateway.useCodexCatalog) {
           const catalogUrl = gateway.catalogUrl?.trim()
             ? new URL(gateway.catalogUrl.trim())

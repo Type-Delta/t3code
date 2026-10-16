@@ -66,6 +66,7 @@ describe("provider API gateway model settings", () => {
       enabled: true,
       baseUrl: "https://gateway.example/v1",
       useCodexCatalog: false,
+      codexImageGeneration: false,
       catalogFormat: "auto",
       apiKeyEnvironmentVariable: "GATEWAY_API_KEY",
       authMode: "bearer",
@@ -89,6 +90,21 @@ describe("provider API gateway model settings", () => {
       }),
     ).toThrow();
   });
+
+  it.each([false, true])(
+    "decodes an explicit image generation preference (%s)",
+    (codexImageGeneration) => {
+      const decoded = decodeCodexSettings({
+        apiGateway: {
+          enabled: true,
+          baseUrl: "https://gateway.example/v1",
+          codexImageGeneration,
+        },
+      });
+      expect(decoded.apiGateway?.codexImageGeneration).toBe(codexImageGeneration);
+      expect(decoded.apiGateway?.useCodexCatalog).toBe(false);
+    },
+  );
 });
 
 describe("ServerSettings response streaming", () => {

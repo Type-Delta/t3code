@@ -76,6 +76,7 @@ describe("CompatibleApiGatewaySection config", () => {
       baseUrl: "",
       catalogUrl: "",
       useCodexCatalog: false,
+      codexImageGeneration: false,
       catalogFormat: "auto",
       apiKeyEnvironmentVariable: "",
       authMode: "bearer",
@@ -91,6 +92,7 @@ describe("CompatibleApiGatewaySection config", () => {
           baseUrl: " https://gateway.example.com/v1 ",
           catalogUrl: " ",
           useCodexCatalog: false,
+          codexImageGeneration: false,
           catalogFormat: "codex",
           apiKeyEnvironmentVariable: " OPENAI_API_KEY ",
           authMode: "bearer",
@@ -103,6 +105,7 @@ describe("CompatibleApiGatewaySection config", () => {
         enabled: true,
         baseUrl: "https://gateway.example.com/v1",
         useCodexCatalog: false,
+        codexImageGeneration: false,
         catalogFormat: "codex",
         apiKeyEnvironmentVariable: "OPENAI_API_KEY",
         authMode: "bearer",
@@ -116,6 +119,7 @@ describe("CompatibleApiGatewaySection config", () => {
       baseUrl: "https://gateway.example.com",
       catalogUrl: "https://gateway.example.com/models",
       useCodexCatalog: false,
+      codexImageGeneration: false,
       catalogFormat: "openai",
       apiKeyEnvironmentVariable: "",
       authMode: "x-api-key",
@@ -126,6 +130,7 @@ describe("CompatibleApiGatewaySection config", () => {
       baseUrl: "https://gateway.example.com",
       catalogUrl: "https://gateway.example.com/models",
       useCodexCatalog: false,
+      codexImageGeneration: false,
       catalogFormat: "openai",
       apiKeyEnvironmentVariable: "",
       authMode: "x-api-key",
@@ -160,5 +165,30 @@ describe("CompatibleApiGatewaySection config", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it("preserves the independent image generation preference when replacing a credential or disabling the gateway", () => {
+    const gateway = {
+      ...readApiGatewayDraft(undefined),
+      enabled: true,
+      baseUrl: "https://gateway.example.com",
+      codexImageGeneration: true,
+    };
+    const saved = configWithApiGateway({ customModels: ["private-model"] }, gateway);
+    const replaced = configAndEnvironmentWithApiGatewayApiKey(saved, [], "replacement-key");
+    expect(readApiGatewayDraft(replaced.config)).toMatchObject({
+      codexImageGeneration: true,
+      useCodexCatalog: false,
+    });
+    const disabled = configWithApiGateway(replaced.config, {
+      ...readApiGatewayDraft(replaced.config),
+      enabled: false,
+    });
+    expect(readApiGatewayDraft(disabled)).toMatchObject({
+      enabled: false,
+      codexImageGeneration: true,
+      useCodexCatalog: false,
+    });
+    expect(disabled.customModels).toEqual(["private-model"]);
   });
 });

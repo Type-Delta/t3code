@@ -73,6 +73,7 @@ describe("Codex API gateway launch configuration", () => {
         enabled: true,
         baseUrl: configured,
         useCodexCatalog: false,
+        codexImageGeneration: false,
         catalogFormat: "auto",
         authMode: "bearer",
       },
@@ -103,6 +104,7 @@ describe("Codex API gateway launch configuration", () => {
         enabled: true,
         baseUrl: "https://proxy.example/v1",
         useCodexCatalog: false,
+        codexImageGeneration: false,
         catalogFormat: "codex",
         apiKeyEnvironmentVariable: "CPA_API_KEY",
         authMode: "bearer",
@@ -134,6 +136,7 @@ describe("Codex API gateway launch configuration", () => {
           enabled: true,
           baseUrl: "https://username:password@proxy.example/v1",
           useCodexCatalog: false,
+          codexImageGeneration: false,
           catalogFormat: "auto",
           authMode: "bearer",
         },
@@ -148,6 +151,7 @@ describe("Codex API gateway launch configuration", () => {
         enabled: true,
         baseUrl: "https://proxy.example/v1",
         useCodexCatalog: false,
+        codexImageGeneration: false,
         catalogFormat: "openai",
         apiKeyEnvironmentVariable: "PROXY_API_KEY",
         authMode: "x-api-key",
@@ -171,6 +175,7 @@ describe("Codex API gateway launch configuration", () => {
         apiKeyEnvironmentVariable: "PROXY_API_KEY",
         authMode: "bearer",
         useCodexCatalog: true,
+        codexImageGeneration: false,
       },
       codexCatalogPath: "/tmp/should-not-be-used.json",
     });
@@ -185,4 +190,31 @@ describe("Codex API gateway launch configuration", () => {
     NodeAssert.ok(!args.join(" ").includes("model_catalog_json"));
     NodeAssert.ok(!args.join(" ").includes("secret-value"));
   });
+
+  it.each([false, true])(
+    "opts into image generation independently of native catalog discovery (%s)",
+    (useCodexCatalog) => {
+      const apiGateway = {
+        enabled: true,
+        baseUrl: "https://gateway.example/v1",
+        catalogFormat: "codex" as const,
+        apiKeyEnvironmentVariable: "GATEWAY_API_KEY",
+        authMode: "bearer" as const,
+        useCodexCatalog,
+        codexImageGeneration: true,
+      };
+      const actorHeader =
+        'model_providers.t3_api_gateway.http_headers={"x-openai-actor-authorization"="t3_api_gateway"}';
+      const args = codexGatewayLaunchArgv({ apiGateway });
+      NodeAssert.ok(args.includes(actorHeader));
+      NodeAssert.deepStrictEqual(codexExecLaunchArgs(appendCodexLaunchArgs(undefined, args)), args);
+      for (const patch of [{ codexImageGeneration: false }, { enabled: false }]) {
+        NodeAssert.ok(
+          !codexGatewayLaunchArgv({ apiGateway: { ...apiGateway, ...patch } }).includes(
+            actorHeader,
+          ),
+        );
+      }
+    },
+  );
 });

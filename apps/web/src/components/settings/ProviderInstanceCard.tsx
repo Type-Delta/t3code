@@ -1393,7 +1393,7 @@ export function ProviderInstanceCard({
               environment={instance.environment ?? []}
               idPrefix={`provider-instance-${instanceId}`}
               variant="card"
-              showCodexCatalogToggle={driverKind === ProviderDriverKind.make("codex")}
+              showCodexOptions={driverKind === ProviderDriverKind.make("codex")}
               onChange={updateGateway}
             />
           </div>
