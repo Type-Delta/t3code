@@ -34,9 +34,9 @@ The upstream draft hero remains the empty-state headline. The fork adds `On <mac
 
 Projectless drafts retain upstream's scratch-project picker beside the machine context.
 
-**Implementation evidence:** `apps/web/src/components/ChatView.tsx`, `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/chat/MessagesTimeline.test.tsx`.
+**Implementation evidence:** `apps/web/src/components/ChatView.tsx`, `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`.
 
-**Recorded validation:** `vp test apps/web/src/components/chat/MessagesTimeline.test.tsx`, `vp check`, and `vp run typecheck`.
+**Recorded validation:** `vp test apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`, `vp check`, and `vp run typecheck`.
 
 **Last updated:** 2026-10-02
 
@@ -52,11 +52,11 @@ Browser development's single-origin Vite proxy behavior, including shared and Ta
 
 **Implementation evidence:** `apps/desktop/src/preview/Manager.ts`, `apps/server/src/preview/ServerBrowser.ts`, `apps/server/src/mcp/PreviewAutomationBroker.ts`, `apps/server/src/mcp/toolkits/preview/handlers.ts`, and `packages/contracts/src/previewAutomation.ts`.
 
-Upstream owns the pinned Electron debugger reference and bounded screenshot retries. Those fixes compose with the fork's stale-session detection and control deadlines; a screenshot that succeeds on retry keeps its debugger session.
+Upstream owns the pinned Electron debugger reference and bounded screenshot retries. Those fixes compose with the fork's stale-session detection and control deadlines; a screenshot that succeeds on retry keeps its debugger session. Upstream #17525 reattaches a tab as soon as Chromium drops its debugger; the fork keeps the lazy detach of a stale or hung session next to it, so both paths reach the same fresh attachment.
 
 **Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage, including same-tab recovery from stalled CDP and capture work, stale-host failover, acknowledged slow-operation recovery, timeout cleanup races, and `LoadFailed`; `vp check` and `vp run typecheck`. An isolated Electron run reproduced a full-load timeout against a page with a never-ending image request, then confirmed same-tab evaluate and snapshot remained available. The 2026-09-01 merge-focused suites reran the affected desktop, server, and web preview recovery paths.
 
-**Last updated:** 2026-09-30
+**Last updated:** 2026-10-20
 
 ### DL005 — Windows portability in CLI fixtures, Git, and tests
 
@@ -80,9 +80,13 @@ V2 turn checkpoints live in a private bare-Git sidecar repository below the serv
 
 Checkpoints captured between the 2026-10-08 redo and this re-port were written as `refs/t3/orchestration-v2/checkpoints/*` refs in the project repository. They still load, diff, and restore: each boundary lookup tries its sidecar snapshot first, then that in-repo ref. New boundaries always go to the sidecar. Upstream's checkpoint rollback locking and the per-workspace capture lock are unchanged.
 
+A rollback leaves the forward checkpoints ready so the user can redo back to them. Upstream #21804 retires those stale checkpoints during rollback; the fork keeps redo, adapts upstream's rollback tests to expect them ready, and removes upstream's unused rollback `staleCheckpoints` query and `CheckpointService.deleteStaleRefs`. The lower `CheckpointStore.deleteCheckpointRefs` chain is kept to match upstream.
+
+Upstream #14892 marks a checkpoint `missing` when its workspace folder is ignored by the repository. Sidecar captures enforce the same rule in `SidecarCheckpointRepository.ts`: an ignored workspace is rejected only when Git lists no tracked or re-included files in it (`CheckpointStore.test.ts` covers rejection, a force-tracked file, and a negated rule).
+
 The SQLite capture-job and navigation-journal tables from fork migrations `036`–`038` remain for schema compatibility. No server code reads them since the V2 cutover; V2 navigation uses upstream's checkpoint rollback.
 
-Fork migrations `036`–`038` establish durable checkpoint state. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
+Fork migrations `036`–`038` establish durable checkpoint state. Fork `037` once declared `checkpoint_legacy_migrations` with a foreign key into `projection_turns`, which upstream migration `063_DropUnusedV1Projections` drops. Startup rebuilds that table without the key before upstream migrations run; fresh databases never had it. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
 
 After history reconciliation, startup repairs any absent migration from the current upstream manifest that falls below the recorded high-water mark before the normal migrator runs. This keeps a remapped historical `ThreadSummaryTimeline` row from suppressing upstream `041_AuthSessionClientConnection`; the repair is idempotent.
 
@@ -114,11 +118,11 @@ The 2026-10-05 completion split passed the focused RunExecutionService, Checkpoi
 
 The 2026-10-15 re-port restored the 16 sidecar characterization tests the redo dropped (32 checkpoint-store tests pass), plus sidecar authored-path filtering, long scope ids, and the V2 real-repository suite.
 
-**Last updated:** 2026-10-16
+**Last updated:** 2026-10-20
 
 ### DL008 — Persistent multi-thread split workspaces
 
-Sidebar pointer drags use the same thread-row component inside and outside the sidebar. The opaque overlay follows the pointer across panels while the hidden source row preserves its gap until release or cancellation. Split-pane drops suppress composer context-drop highlighting and dispatch, and pointer capture keeps release cleanup reliable across panel boundaries.
+Sidebar pointer drags use the same thread-row component inside and outside the sidebar, rendered as a full-row `DragOverlay`; upstream's `ThreadContextDragGhost` is removed in its favour. The opaque overlay follows the pointer across panels while the hidden source row preserves its gap until release or cancellation. Split-pane drops suppress composer context-drop highlighting and dispatch, and pointer capture keeps release cleanup reliable across panel boundaries.
 
 Collapsed Working, snoozed, and settled shelves keep all displayed split panes visible in the sidebar.
 
@@ -134,7 +138,7 @@ Split membership is persisted as multiple ordered local groups with active state
 
 The 2026-10-07 drag update passed 90 focused drag tests, `vp check`, `vp run typecheck`, and `git diff --check`. Remote user verification confirmed the full thread-row overlay follows the pointer and the source gap remains visible outside the sidebar.
 
-**Last updated:** 2026-10-07
+**Last updated:** 2026-10-20
 
 ### DL012 — Prompt preservation during draft promotion
 
@@ -188,16 +192,6 @@ This is a current-state record only. Each entry describes a surviving difference
 
 Keep stable IDs when updating this section; gaps are intentional. When upstream absorbs a difference, remove or rewrite the entry rather than preserving chronology here. Update its behavior, implementation evidence, and validation when the surviving difference changes.
 
-### DL016 — Repository identity for partial clones
-
-Git may append a filter annotation to `git remote -v` fetch lines for partial clones. The repository identity resolver accepts those lines so projects using the same remote can group across environments.
-
-**Implementation evidence:** `apps/server/src/project/RepositoryIdentityResolver.ts` and its focused test.
-
-**Recorded validation:** resolver regression test, `vp check`, and `vp run typecheck`.
-
-**Last updated:** 2026-09-24
-
 ### DL017 — Existing-worktree selection for new threads
 
 The new-thread Workspace controls expose a neighboring Worktree selector in Current checkout mode. It defaults to Git's primary checkout and can pin the draft to any existing branched or detached worktree without switching branches or creating another checkout. When the thread materializes, that control becomes an immutable label using the same compact naming: `Main` for the primary checkout, the branch name for branched worktrees, and the seven-character HEAD hash plus `[detached]` for detached worktrees. Locked-thread label resolution uses a one-shot lookup rather than maintaining worktree polling; while that lookup is pending for a detached checkout, the honest fallback is `[detached]`. Git worktree discovery is environment-scoped, uses NUL-delimited porcelain output for path safety, and distinguishes the primary checkout independently of its branch name.
@@ -231,20 +225,22 @@ reopened work, and the task publishes once, after the last of them settles. The 
 its id, so the result already delivered to the parent is never delivered again, recovery adds
 nothing, and automatic monitor wakes on the child never reopen it. Upstream's
 `DelegatedCompletionDelivery` follow-up cases keep their exactly-once checks, with their task
-identity assertions rewritten for this reopen behavior.
+identity assertions rewritten for this reopen behavior; upstream's held-queue pause/resume case
+passes unchanged.
 
 The task reports the latest of its runs that actually started. A follow-up cancelled before it
 started, or one waiting in a held queue (after Stop or a provider failure), does not count, so
 cancelling a queued follow-up restores the earlier result without a second transfer or wake.
-A held follow-up that the user later resumes publishes its own result once. `task_cancel` cancels
-the task's queued or held follow-ups, so a reopened task with nothing running can still be
-cancelled. The delegation's first run is identified by the spawn transfer's target run. A user
+While a stopped queue holds a follow-up, the task shows idle with no result; resuming the queue
+returns it to running, and it publishes the follow-up's result once (upstream #21487). Upstream's
+`cancelTask` covers held follow-ups, so `task_cancel` uses it and a reopened task with nothing
+running can still be cancelled. The delegation's first run is identified by the spawn transfer's target run. A user
 follow-up also reopens a task the parent had cancelled, re-arming its completion wake.
 
 Implementation evidence: orchestrationV2 contracts and server layers; ChatView, Sidebar,
 ThreadRelationshipsControl, ComposerSubagents, V2LifecycleRow, V2ItemInspector, rightPanelStore,
 and session-logic. Reopen edge cases: `DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
-follow-up never starts") and `OrchestratorMcpService.test.ts` (held follow-up cancel).
+follow-up never starts", including "pauses a reopened task behind a held follow-up") and `OrchestratorMcpService.test.ts` (held follow-up cancel).
 
 Recorded validation: focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
 and composer tests; vp check; vp run typecheck; and an isolated paired web-app smoke test that
@@ -253,13 +249,13 @@ composer rendered. The preview client's accessibility snapshot and click calls f
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
 
-Last updated: 2026-10-15
+Last updated: 2026-10-20
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
 Closing the last desktop window leaves Electron's main process and local T3 backend running. A native OS tray or status item keeps the app discoverable, opens or activates the window, and shows a live count of threads with active foreground or background work. Launching the desktop app again activates or recreates the window against that existing backend, while explicit quit terminates the backend through the owned lifecycle and update and signal shutdown paths retain their normal cleanup semantics. Explicit quit now ignores activation while shutdown is underway and destroys renderer windows before backend cleanup, adopting upstream's cleanup ordering without changing the fork's last-window policy. This is intentionally process-local continuity rather than a detached provider daemon: an Electron main-process crash or OS-forced termination still ends the backend.
 
-The desktop main process owns one shared bearer session per local backend for the window, tray polling, and parallel WSL connections. This preserves upstream's replacement of stale desktop sessions without allowing a tray refresh or another renderer to revoke the active window's login. Closing and reopening the window reuses the backend's shared session.
+The desktop main process owns one shared bearer session per local backend for the window, tray polling, and parallel WSL connections. This preserves upstream's replacement of stale desktop sessions without allowing a tray refresh or another renderer to revoke the active window's login. Closing and reopening the window reuses the backend's shared session. The per-backend token cache sits on top of upstream's rotating desktop bootstrap secret and its retry of 502–504 and dropped connections during bootstrap.
 
 Tray refresh waits for backend readiness before requesting a bearer session or thread counts. An early tray token exchange therefore cannot delay renderer authentication. Failed count requests retain the last known count and recover without replacing the shared session.
 
@@ -275,7 +271,7 @@ The 2026-09-05 authentication fix passed 48 focused tests, including a tray inte
 
 The 2026-10-02 readiness guard passed 12 focused tests. An isolated source startup exchanged its token after readiness and completed 16 count polls without errors. Renderer bearer acquisition took 0.21 ms. The final packaged startup completed 17 count polls without errors. The integration test also verifies recovery from a failed count request without another token exchange.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-10-20
 
 ### DL020 — Provider turns survive stalled checkpoint captures
 
@@ -297,7 +293,7 @@ Workspaces without a Git repository do no VCS work for checkpoints. VCS detectio
 
 Thread Markdown preserves local Windows drive-letter destinations through URL sanitization and resolves the encoded backslash form emitted by the Markdown parser. These links open through the existing file chip behavior instead of rendering as inert anchors. Sanitization also preserves validated `t3-context` references in both link and image destinations so structured context records render as chips instead of inert Markdown. This coexists with upstream workspace images, spaced-folder command-click handling, contrast-aware annotation styling, and full-path link tooltips.
 
-**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx`, `apps/web/src/components/ChatMarkdown.test.tsx`, `apps/web/src/components/chat/MessagesTimeline.test.tsx`, and `apps/web/src/markdown-links.test.ts`.
+**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx`, `apps/web/src/components/ChatMarkdown.browser.test.tsx`, `apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`, and `apps/web/src/markdown-links.test.ts`.
 
 **Recorded validation:** focused Markdown link tests, ChatMarkdown and MessagesTimeline context-reference tests, an isolated paired web-client pass with a drive-letter link in both user and assistant messages, `vp check`, and `vp run typecheck`.
 
@@ -584,7 +580,7 @@ next prompt. The agent writes it from its real context (repository instructions,
 conversation so far); no separate model call, provider session, or transcript summary is made.
 `ProviderRuntimeIngestion` withholds any partial or open tag from streamed and buffered deltas,
 strips every tagged block at completion, and carries the sanitized text as `suggestion` on the
-assistant message through the decider, projector, client reducer, and SQLite projection. Persistence keeps upstream migrations 1–62 in `effect_sql_migrations` and fork migrations 1–15 in the independent `fork_sql_migrations` ledger. The web composer shows it as ghost text once the thread is idle and the
+assistant message through the decider, projector, client reducer, and SQLite projection. Persistence keeps upstream migrations 1–64 in `effect_sql_migrations` and fork migrations 1–15 in the independent `fork_sql_migrations` ledger. The web composer shows it as ghost text once the thread is idle and the
 composer is empty; Tab accepts it, typing dismisses it for that message, and a new message or
 thread resets it. Cursor, Grok, OpenCode, and Antigravity receive no instruction. Mobile has no
 toggle or ghost text. An optional `promptSuggestionInstructions` setting appends extra guidance to
@@ -632,23 +628,23 @@ The web router ignores `.test.ts` files in the routes directory so route tests d
 
 ### DL037 — Forgiving CLIProxyAPI usage and redemption
 
-Hub requests pause after management HTTP 401/403 until the URL or management key changes. Each ChatGPT account publishes its `id_token.chatgpt_account_id` as `workspaceId`, so one email signed into multiple workspaces remains distinct. Optional malformed quota fields and array entries no longer discard usable windows; Codex plan fallback accepts both field names and relative reset times. Credit redemption sends only a stable `redeem_request_id`, preserves known outcomes, and reports unfamiliar successful responses as accepted before refreshing usage. T3 leaves cooldown clearing to CPA instead of resetting the entire account. Web, desktop, and mobile display the accepted result.
+Hub requests pause after management HTTP 401/403 until the URL or management key changes. Each ChatGPT account publishes its `id_token.chatgpt_account_id` as `workspaceId`, so one email signed into multiple workspaces remains distinct. Optional malformed quota fields and array entries no longer discard usable windows; Codex plan fallback accepts both field names and relative reset times. Upstream's subpath-safe hub URLs (#19336) apply, so a hub served under a path keeps it. Credit redemption sends only a stable `redeem_request_id`, preserves known outcomes, and reports unfamiliar successful responses as accepted before refreshing usage. T3 leaves cooldown clearing to CPA instead of resetting the entire account. Web, desktop, and mobile display the accepted result.
 
 **Implementation evidence:** `apps/server/src/usage/cliproxyApi.ts`, its focused tests, `packages/contracts/src/providerUsageLimits.ts`, and the web/mobile usage components.
 
 **Recorded validation:** 26 focused adapter and source-refresh tests, `vp check`, `vp run typecheck`, and `vp run lint:mobile`. Integrated web verification is blocked by `PreviewAutomationNoAvailableHostError`; native mobile verification is blocked by disabled device access.
 
-**Last updated:** 2026-09-30
+**Last updated:** 2026-10-20
 
 ### DL038 — Precise transcript identity checks on Windows
 
-Session scanning skips parsing completed history from matching file metadata only when the inode is present and a safe JavaScript integer. Windows can omit inode values or round NTFS file IDs, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts, 4 GiB, and 100,000 records per scan. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
+Session scanning skips parsing completed history from matching file metadata only when the inode is present. Effect 4.0.5 reports inodes as bigints, which import sources store as exact decimal strings; legacy numeric inodes that are not safe integers never match because they may already have lost NTFS file ID precision. Windows can omit inode values, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts, 4 GiB, and 100,000 records per scan. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
 
-**Implementation evidence:** `apps/server/src/project/AgentSessionScanner.ts`, its replacement identity tests, and bounded retry tests in `AgentSessionImporter.test.ts`.
+**Implementation evidence:** `apps/server/src/project/AgentSessionScanner.ts`, its replacement identity tests, and bounded retry tests in `AgentSessionImporter.test.ts`. `packages/shared/src/nodeRuntime.ts` falls back to native bigint file IDs when Effect stats report a missing or zero inode; `nodeRuntime.test.ts` covers native, missing, and zero identities.
 
-**Recorded validation:** 100 scanner/importer tests, including 201-history imports across three attempts with missing or unsafe inodes. Server typecheck, scoped lint, and formatting passed.
+**Recorded validation:** 100 scanner/importer tests, including 201-history imports across three attempts with missing inodes and exact-string versus rounded legacy inodes. Server typecheck, scoped lint, and formatting passed.
 
-**Last updated:** 2026-10-02
+**Last updated:** 2026-10-20
 
 ### DL039 — Graceful Codex shutdown before Windows tree termination
 
@@ -749,7 +745,7 @@ refreshes it. Retries require the filesystem read permission and stop after the 
 successful signed URL. The host-file resource is memoized by value so streaming renders do not restart the retry budget.
 
 **Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx` and
-`apps/web/src/components/ChatMarkdown.assets.test.tsx`.
+`apps/web/src/components/ChatMarkdown.assets.browser.test.tsx`.
 
 **Recorded validation:** focused ChatMarkdown asset tests.
 
@@ -775,6 +771,50 @@ Git driver regression test.
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-10-20 — Merge upstream/main through `6a049d0ea1`
+
+**Merge commit:** this commit
+**Parents:** `900a0ea28f` (fork) and `6a049d0ea1` (upstream/main); 1,223 upstream commits since `7d5a42912a`
+
+Upstream added migrations 063–064 (063 drops unused V1 projections) and new lint rules requiring
+`Effect.fn` for reusable generator wrappers and React Compiler-safe components; fork code was
+converted to both.
+
+Decisions:
+
+- DL006 keeps redo: forward checkpoints stay ready after a rollback, overriding upstream #21804's
+  stale-checkpoint retirement. Upstream's rollback tests were adapted.
+- DL006 `checkpoint_legacy_migrations` is rebuilt without its foreign key to `projection_turns`
+  before upstream 063 drops that table.
+- DL018 keeps reopening the original task over upstream's fresh task per follow-up. Upstream's
+  `cancelTask` is adopted because it covers held follow-ups. A reopened task held by a stopped queue
+  now pauses and resumes, so upstream #21487's test passes unchanged.
+- DL008 keeps the full-row `DragOverlay`; upstream's `ThreadContextDragGhost` was deleted.
+- `ChatHeader` keeps upstream's rename blur guard.
+- `DesktopLocalEnvironmentAuth` keeps upstream's rotating desktop secret and 502–504 retry under the
+  fork's per-backend cache (DL019).
+- CDP detach combines upstream #17525's proactive reattach with DL004's stale-session lazy detach.
+- DL037 merges with upstream's subpath-safe hub URLs.
+- DL018 and DL020 required editing seven upstream tests. DL032's `autoResumeLimitedThreads=true`
+  default also required `SettingsPanels.restore.browser.test.tsx` to toggle the setting from its
+  default rather than setting it to `true`.
+- Retired DL016: upstream #16316 recognizes the same partial-clone remote annotations.
+- Upstream #14892's ignored-workspace `missing` checkpoint did not reach sidecar captures, which
+  published ready checkpoints with empty diffs. Sidecar capture now raises the same
+  `VcsUnsupportedOperationError` when the workspace is ignored and Git lists no tracked or
+  re-included files in it.
+- Adopted upstream's thread transfer budget caps and `thread-transfer-v2` scenario id; the merged
+  tree passes them.
+
+**Validation:** `vp check` and `vp run typecheck` pass. Per-package suites match the pre-merge
+fork except known pre-existing failures (persistence migration fixtures, ProviderRegistry probe
+timeout, CodexDriver shared-home updater, CursorSdk, `chatCanvasLayout`/`settingsSearch`, desktop
+artifact script). A copy of a real 3 GB fork database upgraded through 063–064 with a clean
+`foreign_key_check`, and a fresh database migrates idempotently. Web dev smoke on seeded data
+paired, loaded threads and settings, and completed a live Codex turn. The desktop build and the
+Linux AppImage/deb installers build. Two independent reviews (Claude Opus 5.5, GPT-6 Astra) audited
+every DL entry.
 
 ### 2026-10-16 — Merge upstream/main through `7d5a42912a`
 

@@ -8,7 +8,8 @@ export default Effect.gen(function* () {
   yield* sql`
     CREATE TABLE IF NOT EXISTS checkpoint_legacy_migrations (
       candidate_id TEXT PRIMARY KEY,
-      projection_turn_row_id INTEGER NOT NULL UNIQUE REFERENCES projection_turns(row_id),
+      -- No foreign key: upstream migration 063 drops projection_turns.
+      projection_turn_row_id INTEGER NOT NULL UNIQUE,
       thread_id TEXT NOT NULL,
       turn_id TEXT NOT NULL,
       legacy_ref TEXT NOT NULL UNIQUE,

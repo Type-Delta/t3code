@@ -8,8 +8,9 @@ import {
   RotateCwIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { FormEvent } from "react";
+import { useStableCallback } from "../../hooks/useStableCallback";
 import { EnvironmentId } from "@t3tools/contracts";
 import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import * as Option from "effect/Option";
@@ -247,13 +248,17 @@ function CreateManagementApiKeyDialog({
   );
   const formId = useId();
 
-  useEffect(() => {
-    if (!open) return;
-    setName("");
-    setExpiration(DEFAULT_EXPIRATION);
-    setPreset(DEFAULT_PRESET);
-    setCustomScopes(scopesForManagementApiKeyPreset(DEFAULT_PRESET));
-  }, [open]);
+  // Each opening starts a fresh form.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (open) {
+      setName("");
+      setExpiration(DEFAULT_EXPIRATION);
+      setPreset(DEFAULT_PRESET);
+      setCustomScopes(scopesForManagementApiKeyPreset(DEFAULT_PRESET));
+    }
+  }
 
   const selectedScopes = scopesForManagementApiKeyPreset(preset, customScopes);
   const toggleScope = (scope: ManagementApiKeyScope, checked: boolean) => {
@@ -433,14 +438,8 @@ function SecretRevealDialog({
   const { copyToClipboard, isCopied } = useCopyToClipboard<{ readonly value: string }>({
     target: "management API key",
   });
-  const jsonExample = useMemo(
-    () => buildManagementApiKeyJsonExample(result.mcpEndpoint),
-    [result.mcpEndpoint],
-  );
-  const codexExample = useMemo(
-    () => buildManagementApiKeyCodexExample(result.mcpEndpoint),
-    [result.mcpEndpoint],
-  );
+  const jsonExample = buildManagementApiKeyJsonExample(result.mcpEndpoint);
+  const codexExample = buildManagementApiKeyCodexExample(result.mcpEndpoint);
 
   return (
     <Dialog
@@ -580,9 +579,9 @@ const EMPTY_ENVIRONMENT_STATE: ManagementApiKeyEnvironmentState = {
 export function ManagementApiKeysSettings() {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const environmentOptions = useMemo(
-    () => buildManagementApiKeyEnvironmentOptions(environments, primaryEnvironmentId),
-    [environments, primaryEnvironmentId],
+  const environmentOptions = buildManagementApiKeyEnvironmentOptions(
+    environments,
+    primaryEnvironmentId,
   );
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<EnvironmentId | null>(
     primaryEnvironmentId,
@@ -622,7 +621,7 @@ export function ManagementApiKeysSettings() {
   const activeEnvironmentId = useRef<EnvironmentId | null>(null);
   const nowMs = useRelativeTimeTick(60_000);
 
-  const refreshKeys = useCallback(
+  const refreshKeys = useStableCallback(
     async (environmentId: EnvironmentId, environmentPrepared: PreparedConnection) => {
       const expectedConnection = connectionGeneration.current.get(environmentId);
       if (expectedConnection?.prepared !== environmentPrepared) return;
@@ -656,7 +655,6 @@ export function ManagementApiKeysSettings() {
         }));
       }
     },
-    [],
   );
 
   useEffect(() => {
@@ -684,6 +682,7 @@ export function ManagementApiKeysSettings() {
         generation: (previousConnection?.generation ?? 0) + 1,
       });
     }
+    // oxlint-disable-next-line react/set-state-in-effect -- Switching environment or connection resets its list before the fetch that the connection generation guards.
     setStateByEnvironment((current) => ({
       ...current,
       [effectiveEnvironmentId]: EMPTY_ENVIRONMENT_STATE,
@@ -759,10 +758,9 @@ export function ManagementApiKeysSettings() {
           error: readErrorMessage(cause),
         },
       }));
-    } finally {
-      mutationInFlightRef.current = false;
-      setIsMutating(false);
     }
+    mutationInFlightRef.current = false;
+    setIsMutating(false);
   };
 
   const handlePendingAction = async () => {
@@ -804,10 +802,9 @@ export function ManagementApiKeysSettings() {
           error: readErrorMessage(cause),
         },
       }));
-    } finally {
-      mutationInFlightRef.current = false;
-      setBusyKey(null);
     }
+    mutationInFlightRef.current = false;
+    setBusyKey(null);
   };
 
   return (

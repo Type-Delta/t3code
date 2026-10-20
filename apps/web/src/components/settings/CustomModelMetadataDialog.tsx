@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ModelMetadataOverride } from "@t3tools/contracts";
 
 import { Button } from "../ui/button";
@@ -154,11 +154,19 @@ export function CustomModelMetadataDialog({
   );
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    setDraft(draftFromOverride(initialValue));
-    setError(null);
-  }, [initialValue, open, slug]);
+  // Each opening (or a different model or value while open) starts from the saved metadata.
+  const [resetInputs, setResetInputs] = useState({ initialValue, open, slug });
+  if (
+    resetInputs.initialValue !== initialValue ||
+    resetInputs.open !== open ||
+    resetInputs.slug !== slug
+  ) {
+    setResetInputs({ initialValue, open, slug });
+    if (open) {
+      setDraft(draftFromOverride(initialValue));
+      setError(null);
+    }
+  }
 
   const update = (patch: Partial<CustomModelMetadataDraft>) => {
     setDraft((current) => ({ ...current, ...patch }));

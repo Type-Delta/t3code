@@ -3,7 +3,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { ServerSettings } from "@t3tools/contracts";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
 import { useEnvironments } from "../../state/environments";
@@ -41,19 +41,14 @@ export function ProjectMcpToolScopeSettings({
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, "MCP tool scope update");
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const environmentById = useMemo(
-    () => new Map(environments.map((environment) => [environment.environmentId, environment])),
-    [environments],
+  const environmentById = new Map(
+    environments.map((environment) => [environment.environmentId, environment]),
   );
-  const rows = useMemo(
-    () =>
-      members.flatMap((member) => {
-        const environment = environmentById.get(member.environmentId);
-        const settings = environment?.serverConfig?.settings;
-        return settings === undefined ? [] : [{ member, environment, settings }];
-      }),
-    [environmentById, members],
-  );
+  const rows = members.flatMap((member) => {
+    const environment = environmentById.get(member.environmentId);
+    const settings = environment?.serverConfig?.settings;
+    return settings === undefined ? [] : [{ member, environment, settings }];
+  });
   const choices = rows.map(({ member, settings }) => projectScopeOverride(settings, member.id));
   const choice =
     choices.length > 0 && choices.every((value) => value === choices[0]) ? choices[0]! : null;
@@ -75,45 +70,38 @@ export function ProjectMcpToolScopeSettings({
     );
   const hasOverride = choices.some((value) => value !== "automatic");
 
-  const persist = useCallback(
-    async (next: ScopeChoice) => {
-      if (savingRef.current || !allAvailable) return;
-      savingRef.current = true;
-      setSaving(true);
-      try {
-        for (const { member, environment, settings } of rows) {
-          if (!environment) continue;
-          const result = await updateSettings({
-            environmentId: member.environmentId,
-            input: {
-              patch: {
-                projectSettingsOverrides: {
-                  [member.id]: {
-                    ...settings.projectSettingsOverrides[member.id],
-                    mcpToolScope: next === "automatic" ? null : next,
-                  },
-                },
+  const persist = async (next: ScopeChoice) => {
+    if (savingRef.current || !allAvailable) return;
+    savingRef.current = true;
+    setSaving(true);
+    for (const { member, environment, settings } of rows) {
+      if (!environment) continue;
+      const result = await updateSettings({
+        environmentId: member.environmentId,
+        input: {
+          patch: {
+            projectSettingsOverrides: {
+              [member.id]: {
+                ...settings.projectSettingsOverrides[member.id],
+                mcpToolScope: next === "automatic" ? null : next,
               },
             },
-          });
-          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-            const error = squashAtomCommandFailure(result);
-            toastManager.add({
-              type: "error",
-              title: "MCP tool scope was not saved",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            });
-            return;
-          }
-          if (result._tag === "Failure") return;
-        }
-      } finally {
-        savingRef.current = false;
-        setSaving(false);
+          },
+        },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add({
+          type: "error",
+          title: "MCP tool scope was not saved",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        });
       }
-    },
-    [allAvailable, rows, updateSettings],
-  );
+      if (result._tag === "Failure") break;
+    }
+    savingRef.current = false;
+    setSaving(false);
+  };
 
   const automaticDescription =
     defaults.length > 0 && defaults.every((value) => value === defaults[0])

@@ -1,17 +1,40 @@
 import { bootstrapRemoteBearerSession } from "@t3tools/client-runtime/authorization";
-import { currentDesktopBootstrapToken } from "@t3tools/shared/desktopBootstrapToken";
+import type { RemoteEnvironmentRequestError } from "@t3tools/client-runtime/rpc";
 import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
+import { currentDesktopBootstrapToken } from "@t3tools/shared/desktopBootstrapToken";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as HttpClient from "effect/http/HttpClient";
 
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
+
+// A loopback /oauth/token exchange can fail transiently while the backend
+// settles (a 502-504, a refused or reset connection, a timeout). Retry those
+// for as long as the renderer's own bootstrap does; a rejected credential or a
+// server error is final.
+const BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT = Duration.seconds(15);
+const BOOTSTRAP_TRANSIENT_RETRY_INTERVAL = Duration.millis(500);
+const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
+
+const isTransientBearerBootstrapError = (error: RemoteEnvironmentRequestError): boolean => {
+  switch (error._tag) {
+    case "RemoteEnvironmentAuthFetchError":
+    case "RemoteEnvironmentAuthTimeoutError":
+      return true;
+    case "RemoteEnvironmentAuthUndeclaredStatusError":
+      return TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status);
+    default:
+      return false;
+  }
+};
 
 export class DesktopLocalEnvironmentAuthBackendNotConfiguredError extends Schema.TaggedError<DesktopLocalEnvironmentAuthBackendNotConfiguredError>()(
   "DesktopLocalEnvironmentAuthBackendNotConfiguredError",
@@ -41,7 +64,8 @@ const BEARER_TOKEN_REFRESH_SKEW_MS = 5_000;
 
 interface CachedBearerToken {
   readonly httpBaseUrl: string;
-  readonly credential: string;
+  /** The launch secret, or the fixed launch token for backends without one. */
+  readonly launchCredential: string;
   readonly runningDistro: string | null;
   readonly token: string;
   readonly expiresAtEpochMs: number;
@@ -89,18 +113,24 @@ export const make = Effect.gen(function* () {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
         }
         const config = configOption.value;
-        const credential = config.bootstrap.desktopBootstrapToken;
-        if (!credential) {
+        const now = yield* Clock.currentTimeMillis;
+        // A backend launched with the desktop secret accepts the current
+        // window's token, not the one frozen into its launch config; this
+        // exchange can run long after launch (e.g. after a suspend).
+        const secret = config.bootstrap.desktopBootstrapSecret;
+        const launchCredential = secret ?? config.bootstrap.desktopBootstrapToken;
+        if (!launchCredential) {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
         }
+        const credential =
+          secret === undefined ? launchCredential : currentDesktopBootstrapToken(secret, now);
 
         const httpBaseUrl = config.httpBaseUrl.href;
-        const now = yield* Clock.currentTimeMillis;
         const cached = (yield* Ref.get(tokenRef)).get(instance.id);
         if (
           cached !== undefined &&
           cached.httpBaseUrl === httpBaseUrl &&
-          cached.credential === credential &&
+          cached.launchCredential === launchCredential &&
           cached.runningDistro === (config.runningDistro ?? null) &&
           cached.expiresAtEpochMs > now + BEARER_TOKEN_REFRESH_SKEW_MS
         ) {
@@ -119,6 +149,11 @@ export const make = Effect.gen(function* () {
           },
         }).pipe(
           Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.retry({
+            while: isTransientBearerBootstrapError,
+            schedule: Schedule.spaced(BOOTSTRAP_TRANSIENT_RETRY_INTERVAL),
+          }),
+          Effect.timeout(BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT),
           Effect.mapError(
             (cause) =>
               new DesktopLocalEnvironmentAuthSessionBootstrapError({
@@ -133,7 +168,7 @@ export const make = Effect.gen(function* () {
           const next = new Map(current);
           next.set(instance.id, {
             httpBaseUrl,
-            credential,
+            launchCredential,
             runningDistro: config.runningDistro ?? null,
             token: session.access_token,
             expiresAtEpochMs: issuedAtEpochMs + expiresInMs,

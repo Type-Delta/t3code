@@ -1,27 +1,5 @@
 import * as Schema from "effect/Schema";
 
-/** Provider driver is known to the server but cannot perform this operation. */
-export class ProviderUnsupportedError extends Schema.TaggedError<ProviderUnsupportedError>()(
-  "ProviderUnsupportedError",
-  {
-    provider: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
-  override get message(): string {
-    return `Provider '${this.provider}' is not implemented`;
-  }
-}
-
-/**
- * ProviderInstanceNotFoundError - Lookup against the instance registry failed.
- *
- * The driver may be registered, but no instance with the requested id has
- * been bootstrapped — typically because
- * the persisted instance id refers to an instance the user removed from
- * settings, or because routing is asked for an instance before the registry
- * has finished its first reload.
- */
 export class ProviderInstanceNotFoundError extends Schema.TaggedError<ProviderInstanceNotFoundError>()(
   "ProviderInstanceNotFoundError",
   {
@@ -36,10 +14,6 @@ export class ProviderInstanceNotFoundError extends Schema.TaggedError<ProviderIn
 
 export { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 
-/**
- * ProviderWorkspaceMissingError - The session's working directory no longer
- * exists on disk, so no provider process can start in it.
- */
 export class ProviderWorkspaceMissingError extends Schema.TaggedError<ProviderWorkspaceMissingError>()(
   "ProviderWorkspaceMissingError",
   {

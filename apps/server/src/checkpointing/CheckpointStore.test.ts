@@ -570,7 +570,6 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
         yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: refs.toCheckpointRef });
         expect(yield* checkpointStore.listAuthoredPaths(refs)).toBeNull();
 
-        // The turn merges upstream, fixes the conflict by taking upstream, and edits one more file.
         yield* git(tmp, ["merge", "upstream", "--no-edit"], { allowNonZeroExit: true });
         yield* writeTextFile(NodePath.join(tmp, "shared.txt"), "upstream\n");
         yield* git(tmp, ["commit", "-am", "merge upstream"]);
@@ -728,6 +727,66 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
           ).toBe("# test\n");
           expect(yield* fileSystem.readFile(NodePath.join(tmp, ".git/index"))).toEqual(userIndex);
         }),
+    );
+
+    it.effect("rejects a sidecar capture from a workspace its repository ignores", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir("checkpoint-sidecar-ignored-");
+        yield* initRepoWithCommit(tmp);
+        yield* writeTextFile(NodePath.join(tmp, ".gitignore"), "ignored/\n");
+        const fileSystem = yield* FileSystem.FileSystem;
+        const cwd = NodePath.join(tmp, "ignored");
+        yield* fileSystem.makeDirectory(cwd);
+        yield* writeTextFile(NodePath.join(cwd, "work.txt"), "baseline\n");
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const baseline = yield* makeSidecarRef(cwd, "ignored-baseline");
+        const turn = yield* makeSidecarRef(cwd, "ignored-turn");
+
+        const error = yield* Effect.flip(
+          checkpointStore.captureCheckpoint({ cwd, checkpointRef: baseline }),
+        );
+        expect(error._tag).toBe("VcsUnsupportedOperationError");
+        expect(error.message).toContain("ignored by its Git repository");
+
+        // A tracked file keeps the ignored workspace capturable.
+        yield* git(tmp, ["add", "-f", "ignored/work.txt"]);
+        yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: baseline });
+        yield* writeTextFile(NodePath.join(cwd, "work.txt"), "changed\n");
+        yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: turn });
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd,
+          fromCheckpointRef: baseline,
+          toCheckpointRef: turn,
+          ignoreWhitespace: false,
+        });
+        expect(diff).toContain("+changed");
+      }),
+    );
+
+    it.effect("captures an ignored workspace whose files a negated rule re-includes", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir("checkpoint-sidecar-reincluded-");
+        yield* initRepoWithCommit(tmp);
+        yield* writeTextFile(NodePath.join(tmp, ".gitignore"), "build/*\n!build/keep.txt\n");
+        const fileSystem = yield* FileSystem.FileSystem;
+        const cwd = NodePath.join(tmp, "build");
+        yield* fileSystem.makeDirectory(cwd);
+        yield* writeTextFile(NodePath.join(cwd, "keep.txt"), "baseline\n");
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const baseline = yield* makeSidecarRef(cwd, "reincluded-baseline");
+        const turn = yield* makeSidecarRef(cwd, "reincluded-turn");
+
+        yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: baseline });
+        yield* writeTextFile(NodePath.join(cwd, "keep.txt"), "changed\n");
+        yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: turn });
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd,
+          fromCheckpointRef: baseline,
+          toCheckpointRef: turn,
+          ignoreWhitespace: false,
+        });
+        expect(diff).toContain("+changed");
+      }),
     );
 
     it.effect("captures and restores an unborn repository without creating project objects", () =>

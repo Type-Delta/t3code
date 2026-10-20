@@ -89,6 +89,7 @@ const make = Effect.gen(function* () {
         checkpoint.status === "missing",
     );
     if (cwd !== undefined) {
+      // Retrying a display refresh after the checkpoint is durable blocks the next turn.
       yield* observer
         .refresh({
           cwd,
@@ -97,10 +98,13 @@ const make = Effect.gen(function* () {
           ...(nonRepository ? { vcs: false } : {}),
         })
         .pipe(
-          Effect.mapError(
-            (cause) =>
-              new RunFinalizationError({ ...input, operation: "refresh-workspace", cause }),
-          ),
+          Effect.catchTags({
+            RunFinalizationRefreshError: (cause) =>
+              Effect.logWarning("Failed to refresh workspace after checkpoint capture", {
+                ...input,
+                cause,
+              }),
+          }),
         );
     }
   });
@@ -126,8 +130,8 @@ export const layerObserver = Layer.effect(
     const pullRequests = yield* PullRequestService.PullRequestService;
     return {
       refreshAfterTurn: pullRequests.refreshAfterTurn,
-      refresh: ({ cwd, threadId, runId, vcs = true }) =>
-        Effect.gen(function* () {
+      refresh: Effect.fn("RunFinalizationService.refresh")(
+        function* ({ cwd, threadId, runId, vcs = true }) {
           if (!vcs) return yield* workspaceEntries.refresh(cwd);
           const [, local] = yield* Effect.all(
             [workspaceEntries.refresh(cwd), vcsStatus.refreshLocalStatus(cwd)],
@@ -146,7 +150,10 @@ export const layerObserver = Layer.effect(
               }),
             ),
           );
-        }).pipe(Effect.mapError((cause) => new RunFinalizationRefreshError({ cwd, cause }))),
+        },
+        (effect, { cwd }) =>
+          effect.pipe(Effect.mapError((cause) => new RunFinalizationRefreshError({ cwd, cause }))),
+      ),
     };
   }),
 );

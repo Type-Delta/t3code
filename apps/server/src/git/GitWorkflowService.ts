@@ -42,11 +42,6 @@ export class GitWorkflowService extends Context.Service<
       readonly cwd: string;
       readonly refName: string;
     }) => Effect.Effect<boolean, GitCommandError>;
-    /**
-     * Whether a ref in any namespace ends in this name: a local branch, a
-     * remote-tracking branch of any remote, a tag. Git falls back to these
-     * when a branch name is not a revision by itself.
-     */
     readonly hasRefNamed: (input: {
       readonly cwd: string;
       readonly refName: string;
@@ -106,6 +101,14 @@ export class GitWorkflowService extends Context.Service<
       readonly fallbackRemoteName: string;
     }) => Effect.Effect<
       { readonly commitSha: string; readonly remoteRefName: string },
+      GitCommandError
+    >;
+    readonly resolveWorktreeBaseRemote: GitVcsDriver.GitVcsDriver["Service"]["resolveWorktreeBaseRemote"];
+    readonly fetchWorktreeBaseCommit: (input: {
+      readonly cwd: string;
+      readonly refName: string;
+    }) => Effect.Effect<
+      { readonly commitSha: string; readonly remoteRefName: string } | null,
       GitCommandError
     >;
     readonly removeWorktree: (
@@ -175,7 +178,7 @@ function nonRepositoryListWorktrees(): VcsListWorktreesResult {
   return { worktrees: [], isRepo: false };
 }
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const git = yield* GitVcsDriver.GitVcsDriver;
@@ -414,6 +417,14 @@ export const make = Effect.gen(function* () {
     resolveRemoteTrackingCommit: (input) =>
       ensureGitCommand("GitWorkflowService.resolveRemoteTrackingCommit", input.cwd).pipe(
         Effect.andThen(git.resolveRemoteTrackingCommit(input)),
+      ),
+    resolveWorktreeBaseRemote: (input) =>
+      ensureGitCommand("GitWorkflowService.resolveWorktreeBaseRemote", input.cwd).pipe(
+        Effect.andThen(git.resolveWorktreeBaseRemote(input)),
+      ),
+    fetchWorktreeBaseCommit: (input) =>
+      ensureGitCommand("GitWorkflowService.fetchWorktreeBaseCommit", input.cwd).pipe(
+        Effect.andThen(git.fetchWorktreeBaseCommit(input)),
       ),
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(

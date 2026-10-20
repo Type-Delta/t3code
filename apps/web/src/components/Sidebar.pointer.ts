@@ -23,8 +23,6 @@ type Options = {
   onDrop?: (point: { x: number; y: number }) => boolean;
 };
 
-/** A sidebar gesture ends on release, cancellation, or loss of its window.
- * Own the listeners so unmounting the list can cancel the sensor too. */
 export class SidebarPointerSensor {
   static activators = [
     {
@@ -40,8 +38,6 @@ export class SidebarPointerSensor {
   private readonly window: Window;
   private readonly captureTarget: Element | null;
 
-  // The settle sweep constructs this sensor directly, outside dnd-kit, so it
-  // takes only the props the gesture reads.
   constructor(private readonly props: Omit<SensorProps<Options>, "activeNode" | "context">) {
     this.pointer = props.event as PointerEvent;
     this.document = getOwnerDocument(this.pointer.target);
@@ -116,8 +112,6 @@ export class SidebarPointerSensor {
       }
       return;
     }
-    // The move that starts a drag also moves it, so a release before the
-    // next pointermove still lands where the pointer is.
     if (this.phase === "dragging") {
       if (event.cancelable) event.preventDefault();
       // External destinations use this callback to suspend sidebar sorting,
@@ -176,9 +170,9 @@ export class SidebarPointerSensor {
     ) {
       this.captureTarget.releasePointerCapture(this.pointer.pointerId);
     }
-    // Cancellation can precede release by an arbitrary amount of time. Consume
-    // that release click, or let a fresh pointerdown end suppression if release
-    // happened outside the document. Ordinary clicks never install this guard.
+    // Cancellation can precede release by an arbitrary amount of time. Consume that release
+    // click, or let a fresh pointerdown end suppression if release happened outside the
+    // document.
     if (!aborted || cancelled) {
       this.document.addEventListener("click", this.suppressClick, { capture: true });
       this.document.addEventListener("pointerdown", this.clearClickSuppression, { capture: true });

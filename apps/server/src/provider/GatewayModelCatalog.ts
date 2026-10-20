@@ -577,12 +577,14 @@ const cacheFileFromUnknown = (
   };
 };
 
-const readCache = (filePath: string, settingsFingerprint: string) =>
-  Effect.gen(function* () {
+const readCache = Effect.fn("GatewayModelCatalog.readCache")(
+  function* (filePath: string, settingsFingerprint: string) {
     const fileSystem = yield* FileSystem.FileSystem;
     const raw = yield* fileSystem.readFileString(filePath);
     return cacheFileFromUnknown(yield* decodeUnknownJson(raw), settingsFingerprint);
-  }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
+  },
+  Effect.catchCause(() => Effect.succeed(undefined)),
+);
 
 const writeJsonFile = (filePath: string, value: unknown) =>
   encodeUnknownJson(value).pipe(
@@ -659,13 +661,15 @@ export function mergeCodexCatalog(input: {
     : deepMergeJson(input.base ?? {}, { models: additions });
 }
 
-const readJsonFile = (filePath: string) =>
-  Effect.gen(function* () {
+const readJsonFile = Effect.fn("GatewayModelCatalog.readJsonFile")(
+  function* (filePath: string) {
     const fileSystem = yield* FileSystem.FileSystem;
     return yield* fileSystem
       .readFileString(filePath)
       .pipe(Effect.flatMap((contents) => decodeUnknownJson(contents)));
-  }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
+  },
+  Effect.catchCause(() => Effect.succeed(undefined)),
+);
 
 const requestCatalog = Effect.fn("GatewayModelCatalog.request")(function* (input: {
   readonly url: string;

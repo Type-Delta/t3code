@@ -148,10 +148,12 @@ it.effect("converts every deployed 59-67 fork collision before upstream migratio
       [60, "ThreadSnapshotWindowIndexes"],
       [61, "PullRequestReviewGuides"],
       [62, "ThreadFailureLookupIndex"],
+      [63, "DropUnusedV1Projections"],
+      [64, "CanonicalizeThreadPullRequestLinks"],
     ]);
     const effectRows = yield* sql<{ migration_id: number; name: string }>`
       SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 48 ORDER BY migration_id`;
-    assert.deepEqual(effectRows.slice(-15), [
+    assert.deepEqual(effectRows.slice(-17), [
       { migration_id: 48, name: "ProjectionThreadBranchPullRequest" },
       { migration_id: 49, name: "ProjectionThreadsActiveOrderKey" },
       { migration_id: 50, name: "ProjectionThreadPullRequests" },
@@ -167,6 +169,8 @@ it.effect("converts every deployed 59-67 fork collision before upstream migratio
       { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
       { migration_id: 61, name: "PullRequestReviewGuides" },
       { migration_id: 62, name: "ThreadFailureLookupIndex" },
+      { migration_id: 63, name: "DropUnusedV1Projections" },
+      { migration_id: 64, name: "CanonicalizeThreadPullRequestLinks" },
     ]);
     const forkRows = yield* sql<{ migration_id: number; name: string }>`
       SELECT migration_id, name FROM fork_sql_migrations WHERE migration_id >= 59 ORDER BY migration_id`;
@@ -264,6 +268,75 @@ it.effect("repairs a lower upstream gap created by reconciliation once", () =>
         filename: NodePath.join(
           NodeOS.tmpdir(),
           `t3-fork-migrations-gap-${NodeCrypto.randomUUID()}.sqlite`,
+        ),
+      }),
+    ),
+  ),
+);
+
+it.effect("drops V1 turns with legacy checkpoint rows that still reference them", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`PRAGMA foreign_keys = ON`;
+    yield* runMigrations({ toMigrationInclusive: 62 });
+    yield* runForkMigrations();
+    // Deployed fork databases created this table with a key into projection_turns.
+    yield* sql`DROP TABLE checkpoint_legacy_migrations`;
+    yield* sql`CREATE TABLE checkpoint_legacy_migrations (
+      candidate_id TEXT PRIMARY KEY,
+      projection_turn_row_id INTEGER NOT NULL UNIQUE REFERENCES projection_turns(row_id),
+      thread_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      legacy_ref TEXT NOT NULL UNIQUE,
+      snapshot_id TEXT NOT NULL UNIQUE REFERENCES checkpoint_snapshots(snapshot_id),
+      repository_key TEXT NOT NULL REFERENCES checkpoint_repositories(repository_key),
+      worktree_key TEXT NOT NULL,
+      state TEXT NOT NULL,
+      failure_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      verified_at TEXT,
+      cleanup_after TEXT,
+      cleaned_at TEXT
+    )`;
+    yield* sql`INSERT INTO projection_turns
+      (row_id, thread_id, turn_id, state, requested_at, checkpoint_files_json)
+      VALUES (7, 'thread', 'turn', 'completed', '2026-08-01', '[]')`;
+    yield* sql`INSERT INTO checkpoint_repositories
+      (repository_key, common_dir_fingerprint, object_format, sidecar_relative_path, created_at, last_used_at)
+      VALUES ('repo', 'fingerprint', 'sha1', 'sidecar', '2026-08-01', '2026-08-01')`;
+    yield* sql`INSERT INTO checkpoint_snapshots
+      (snapshot_id, repository_key, worktree_key, kind, state, created_at)
+      VALUES ('snapshot', 'repo', 'worktree', 'legacy-import', 'pending', '2026-08-01')`;
+    yield* sql`INSERT INTO checkpoint_legacy_migrations
+      (candidate_id, projection_turn_row_id, thread_id, turn_id, legacy_ref, snapshot_id,
+       repository_key, worktree_key, state, created_at, updated_at)
+      VALUES ('candidate', 7, 'thread', 'turn', 'ref', 'snapshot', 'repo', 'worktree',
+              'pending', '2026-08-01', '2026-08-01')`;
+
+    yield* runMigrations();
+
+    const turns = yield* sql`SELECT name FROM sqlite_master WHERE name = 'projection_turns'`;
+    assert.deepEqual(turns, []);
+    const keys = yield* sql<{ readonly table: string }>`
+      SELECT "table" FROM pragma_foreign_key_list('checkpoint_legacy_migrations')`;
+    assert.deepEqual(keys.map((key) => key.table).toSorted(), [
+      "checkpoint_repositories",
+      "checkpoint_snapshots",
+    ]);
+    const rows = yield* sql<{ readonly candidate_id: string }>`
+      SELECT candidate_id FROM checkpoint_legacy_migrations`;
+    assert.deepEqual(
+      rows.map((row) => row.candidate_id),
+      ["candidate"],
+    );
+    yield* sql`DELETE FROM checkpoint_legacy_migrations`;
+  }).pipe(
+    Effect.provide(
+      NodeSqliteClient.layer({
+        filename: NodePath.join(
+          NodeOS.tmpdir(),
+          `t3-fork-legacy-turn-key-${NodeCrypto.randomUUID()}.sqlite`,
         ),
       }),
     ),

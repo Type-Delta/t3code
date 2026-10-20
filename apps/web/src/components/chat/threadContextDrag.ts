@@ -1,4 +1,5 @@
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import { type RefObject, useEffect, useEffectEvent } from "react";
 
 /**
  * Dragging a sidebar thread past the list edge turns the sort gesture into a context drop.
@@ -8,6 +9,33 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
  */
 
 export const THREAD_CONTEXT_DROP_EVENT = "t3-thread-context-drop";
+
+export function useThreadContextDrop(
+  targetRef: RefObject<EventTarget | null>,
+  environmentId: EnvironmentId,
+  targetKey: string,
+  onDrop: (refs: ReadonlyArray<ScopedThreadRef>, isActive: () => boolean) => void,
+) {
+  const handleDrop = useEffectEvent(onDrop);
+  useEffect(() => {
+    const target = targetRef.current;
+    if (!target) return;
+    let active = true;
+    const listener = (event: Event) =>
+      handleDrop((event as CustomEvent<ReadonlyArray<ScopedThreadRef>>).detail, () => active);
+    target.addEventListener(THREAD_CONTEXT_DROP_EVENT, listener);
+    return () => {
+      active = false;
+      target.removeEventListener(THREAD_CONTEXT_DROP_EVENT, listener);
+    };
+  }, [
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A new environment or target ends the previous listener, so isActive reports false to drops still in flight for it.
+    environmentId,
+    targetKey,
+    targetRef,
+  ]);
+}
+
 const DROP_TARGET_ATTRIBUTE = "data-thread-context-drop";
 const DROP_OVER_ATTRIBUTE = "data-thread-context-over";
 
@@ -39,7 +67,6 @@ export function endThreadContextDrag() {
   overTarget = null;
 }
 
-/** True when a composer accepted the drop. */
 export function dropThreadContext(
   point: { x: number; y: number },
   threads: ReadonlyArray<ScopedThreadRef>,

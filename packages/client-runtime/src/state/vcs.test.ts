@@ -352,7 +352,7 @@ describe("cached VCS refs", () => {
         yield* Effect.promise(() =>
           atoms.createWorktree.run(registry, {
             environmentId: TARGET.environmentId,
-            input: { cwd: "/repo", refName: "main", newRefName: "feature", path: "/worktree" },
+            input: { cwd: "/repo", refName: "main", newRefName: "feature", path: null },
           }),
         );
         expect(yield* Ref.get(clears)).toBe(3);
@@ -730,3 +730,21 @@ describe("VCS worktrees", () => {
     ),
   );
 });
+
+vi.mock("./session.ts", () => ({
+  createEnvironmentSessionAtoms: () => ({ sessionStateAtom: grantedSessions }),
+}));
+const grantedSessions = Atom.family((_id: EnvironmentId) =>
+  Atom.make(
+    AsyncResult.success({
+      authenticated: true,
+      auth: {
+        policy: "remote-reachable",
+        bootstrapMethods: [],
+        sessionMethods: [],
+        sessionCookieName: "test",
+      },
+      scopes: [AuthSourceControlWriteScope],
+    }),
+  ),
+);

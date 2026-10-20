@@ -7,7 +7,7 @@ import {
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { autoAnimate } from "@formkit/auto-animate";
 import { GripVerticalIcon, PanelLeftCloseIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 
 import {
   DraftId,
@@ -206,10 +206,8 @@ function SplitThreadPane(props: {
     shellExists: serverThreadShell !== null,
     status: serverThreadStatus,
   });
-  const projectRef = useMemo(() => {
-    const projectId = serverThreadShell?.projectId ?? draftPane?.projectId;
-    return projectId ? scopeProjectRef(threadRef.environmentId, projectId) : null;
-  }, [draftPane?.projectId, serverThreadShell?.projectId, threadRef.environmentId]);
+  const projectId = serverThreadShell?.projectId ?? draftPane?.projectId;
+  const projectRef = projectId ? scopeProjectRef(threadRef.environmentId, projectId) : null;
   const project = useProject(projectRef);
   const serverThreadStarted = threadShellHasStarted(serverThreadShell);
   const threadKey = scopedThreadKey(threadRef);
@@ -230,88 +228,59 @@ function SplitThreadPane(props: {
     finalizePromotedDraftThreadByRef(threadRef);
   }, [active, draftPane, navigate, serverThreadStarted, threadRef]);
 
-  const handleDragStart = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      beginSplitThreadDrag(event.dataTransfer, threadRef);
-    },
-    [threadRef],
-  );
-  const handleDragEnd = useCallback(() => {
+  const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
+    beginSplitThreadDrag(event.dataTransfer, threadRef);
+  };
+  const handleDragEnd = () => {
     endSplitThreadDrag();
     onDropTargetChange(null);
-  }, [onDropTargetChange]);
-  const handleDragOver = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      if (!hasSplitThreadDrag(event.dataTransfer)) return;
-      const draggedRef = readSplitThreadDrag(event.dataTransfer);
-      if (!canPlaceThread(draggedRef)) {
-        onDropTargetChange(null);
-        return;
-      }
-      const position = resolveSplitPaneDropPosition(event, event.currentTarget, {
-        canStackVertically,
-        canInsertColumn: canInsertColumn || isExistingPane(draggedRef),
-      });
-      if (!position) {
-        onDropTargetChange(null);
-        return;
-      }
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      onDropTargetChange({ paneKey: threadKey, position });
-    },
-    [
-      canPlaceThread,
-      canStackVertically,
-      canInsertColumn,
-      isExistingPane,
-      onDropTargetChange,
-      threadKey,
-    ],
-  );
-  const handleDragLeave = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      const nextTarget = event.relatedTarget;
-      if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+  };
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const draggedRef = readSplitThreadDrag(event.dataTransfer);
+    if (!canPlaceThread(draggedRef)) {
       onDropTargetChange(null);
-    },
-    [onDropTargetChange],
-  );
-  const handleDrop = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      if (!hasSplitThreadDrag(event.dataTransfer)) return;
-      const draggedRef = readSplitThreadDrag(event.dataTransfer);
-      const position = resolveSplitPaneDropPosition(event, event.currentTarget, {
-        canStackVertically,
-        canInsertColumn: canInsertColumn || isExistingPane(draggedRef),
-      });
-      if (!position) return;
-      event.preventDefault();
-      event.stopPropagation();
-      onDropTargetChange(null);
-      if (!draggedRef || !canPlaceThread(draggedRef)) return;
-      onPlaceThread(
-        draggedRef,
-        splitPaneInsertionIndex(paneColumns, paneIndex, position),
-        position === "above"
-          ? threadKey
-          : position === "below"
-            ? scopedThreadKey(draggedRef)
-            : undefined,
-      );
-    },
-    [
-      canPlaceThread,
+      return;
+    }
+    const position = resolveSplitPaneDropPosition(event, event.currentTarget, {
       canStackVertically,
-      canInsertColumn,
-      isExistingPane,
-      onDropTargetChange,
-      onPlaceThread,
-      paneColumns,
-      paneIndex,
-      threadKey,
-    ],
-  );
+      canInsertColumn: canInsertColumn || isExistingPane(draggedRef),
+    });
+    if (!position) {
+      onDropTargetChange(null);
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    onDropTargetChange({ paneKey: threadKey, position });
+  };
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    onDropTargetChange(null);
+  };
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const draggedRef = readSplitThreadDrag(event.dataTransfer);
+    const position = resolveSplitPaneDropPosition(event, event.currentTarget, {
+      canStackVertically,
+      canInsertColumn: canInsertColumn || isExistingPane(draggedRef),
+    });
+    if (!position) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onDropTargetChange(null);
+    if (!draggedRef || !canPlaceThread(draggedRef)) return;
+    onPlaceThread(
+      draggedRef,
+      splitPaneInsertionIndex(paneColumns, paneIndex, position),
+      position === "above"
+        ? threadKey
+        : position === "below"
+          ? scopedThreadKey(draggedRef)
+          : undefined,
+    );
+  };
 
   if (!serverThreadShell && !draftPane) {
     return null;
@@ -432,11 +401,8 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   const [rightPanelOwnerThreadKey, setRightPanelOwnerThreadKey] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<SplitPaneDropTarget | null>(null);
   const bottomPaneKeys = activeGroup?.bottomPaneKeys ?? [];
-  const paneSlots = useMemo(
-    () => resolveSplitPaneSlots(paneRefs, bottomPaneKeys),
-    [bottomPaneKeys, paneRefs],
-  );
-  const paneColumns = useMemo(() => paneSlots.map((slot) => slot.column), [paneSlots]);
+  const paneSlots = resolveSplitPaneSlots(paneRefs, bottomPaneKeys);
+  const paneColumns = paneSlots.map((slot) => slot.column);
   const canInsertColumn = new Set(paneColumns).size < SPLIT_VIEW_MAX_COLUMNS;
   const gridHasTwoRows = paneSlots.some((slot) => slot.row === 1);
   const dropHintSlot =
@@ -456,7 +422,7 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
     node: HTMLElement;
     controller: ReturnType<typeof autoAnimate>;
   } | null>(null);
-  const attachPaneGridAutoAnimateRef = useCallback((node: HTMLElement | null) => {
+  const attachPaneGridAutoAnimateRef = (node: HTMLElement | null) => {
     if (paneGridAnimationRef.current?.node === node) {
       return;
     }
@@ -464,38 +430,30 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
     paneGridAnimationRef.current = node
       ? { node, controller: autoAnimate(node, SPLIT_PANE_ANIMATION_OPTIONS) }
       : null;
-  }, []);
+  };
 
-  const draftPaneByThreadKey = useMemo(() => {
-    const entries = new Map<string, DraftPane>();
-    for (const [rawDraftId, draft] of Object.entries(draftThreadsById)) {
-      const threadRef = scopeThreadRef(draft.environmentId, draft.threadId);
-      entries.set(scopedThreadKey(threadRef), {
-        draftId: DraftId.make(rawDraftId),
-        projectId: draft.projectId,
-        threadRef,
-      });
-    }
-    return entries;
-  }, [draftThreadsById]);
+  const draftPaneByThreadKey = new Map<string, DraftPane>();
+  for (const [rawDraftId, draft] of Object.entries(draftThreadsById)) {
+    const threadRef = scopeThreadRef(draft.environmentId, draft.threadId);
+    draftPaneByThreadKey.set(scopedThreadKey(threadRef), {
+      draftId: DraftId.make(rawDraftId),
+      projectId: draft.projectId,
+      threadRef,
+    });
+  }
 
-  const availablePaneRefs = useMemo(() => {
-    const available = new Map<string, ScopedThreadRef>();
-    for (const threadRef of serverThreadRefs) {
-      available.set(scopedThreadKey(threadRef), threadRef);
-    }
-    for (const draftPane of draftPaneByThreadKey.values()) {
-      available.set(scopedThreadKey(draftPane.threadRef), draftPane.threadRef);
-    }
-    return [...available.values()];
-  }, [draftPaneByThreadKey, serverThreadRefs]);
+  const availablePaneRefsByKey = new Map<string, ScopedThreadRef>();
+  for (const threadRef of serverThreadRefs) {
+    availablePaneRefsByKey.set(scopedThreadKey(threadRef), threadRef);
+  }
+  for (const draftPane of draftPaneByThreadKey.values()) {
+    availablePaneRefsByKey.set(scopedThreadKey(draftPane.threadRef), draftPane.threadRef);
+  }
+  const availablePaneRefs = [...availablePaneRefsByKey.values()];
 
-  const navigateToPane = useCallback(
-    (threadRef: ScopedThreadRef) => {
-      routeToPane(navigate, threadRef, draftPaneByThreadKey.get(scopedThreadKey(threadRef)));
-    },
-    [draftPaneByThreadKey, navigate],
-  );
+  const navigateToPane = (threadRef: ScopedThreadRef) => {
+    routeToPane(navigate, threadRef, draftPaneByThreadKey.get(scopedThreadKey(threadRef)));
+  };
 
   useEffect(() => {
     // A partially loaded environment list cannot prove that a saved pane is gone.
@@ -510,7 +468,7 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   const rightPanelOpen = paneRefs.some(
     (paneRef) => rightPanelStateByThreadKey[scopedThreadKey(paneRef)]?.isOpen === true,
   );
-  const toggleRightPanel = useCallback(() => {
+  const toggleRightPanel = () => {
     const state = useRightPanelStore.getState();
     const openPaneRefs = paneRefs.filter(
       (paneRef) => state.byThreadKey[scopedThreadKey(paneRef)]?.isOpen === true,
@@ -551,24 +509,22 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
     }
     const targetRef = activePane ?? paneRefs[0];
     if (targetRef) state.toggleVisibility(targetRef);
-  }, [activePane, activePaneKey, paneRefs, rightPanelOwnerThreadKey]);
-  useEffect(() => {
-    const paneKeys = paneRefs.map(scopedThreadKey);
-    const openPanelKeys = new Set(
+  };
+  // The owner is sticky: it only moves when the active pane opens its panel or the owner closes.
+  const resolvedRightPanelOwnerThreadKey = resolveSplitRightPanelOwner({
+    paneKeys: paneRefs.map(scopedThreadKey),
+    activePaneKey,
+    currentOwnerKey: rightPanelOwnerThreadKey,
+    openPanelKeys: new Set(
       paneRefs.flatMap((paneRef) => {
         const paneKey = scopedThreadKey(paneRef);
         return rightPanelStateByThreadKey[paneKey]?.isOpen ? [paneKey] : [];
       }),
-    );
-    setRightPanelOwnerThreadKey((currentOwnerKey) =>
-      resolveSplitRightPanelOwner({
-        paneKeys,
-        activePaneKey,
-        currentOwnerKey,
-        openPanelKeys,
-      }),
-    );
-  }, [activePaneKey, paneRefs, rightPanelStateByThreadKey]);
+    ),
+  });
+  if (resolvedRightPanelOwnerThreadKey !== rightPanelOwnerThreadKey) {
+    setRightPanelOwnerThreadKey(resolvedRightPanelOwnerThreadKey);
+  }
   const currentRouteKey = currentRouteRef ? scopedThreadKey(currentRouteRef) : null;
   useEffect(() => {
     const state = useSplitViewStore.getState();
@@ -607,96 +563,80 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
       return;
     }
     navigateToPane(currentActivePane);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- The effect reads the active pane from the store, so an activation must rerun it to route there.
   }, [activePane, activePaneKey, currentRouteKey, currentRouteRef, navigateToPane, paneRefs]);
 
-  const activatePane = useCallback(
-    (threadRef: ScopedThreadRef) => {
-      const threadKey = scopedThreadKey(threadRef);
-      if (
-        useSplitViewStore.getState().activeThreadKey === threadKey &&
-        currentRouteKey === threadKey
-      ) {
-        return;
-      }
-      useSplitViewStore.getState().activatePane(threadRef);
-      navigateToPane(threadRef);
-    },
-    [currentRouteKey, navigateToPane],
-  );
+  const activatePane = (threadRef: ScopedThreadRef) => {
+    const threadKey = scopedThreadKey(threadRef);
+    if (
+      useSplitViewStore.getState().activeThreadKey === threadKey &&
+      currentRouteKey === threadKey
+    ) {
+      return;
+    }
+    useSplitViewStore.getState().activatePane(threadRef);
+    navigateToPane(threadRef);
+  };
 
-  const canPlaceThread = useCallback(
-    (threadRef: ScopedThreadRef | null) => {
-      if (!threadRef) return paneRefs.length < MAX_SPLIT_VIEW_PANES;
-      return (
-        paneRefs.some((paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef)) ||
-        paneRefs.length < MAX_SPLIT_VIEW_PANES
-      );
-    },
-    [paneRefs],
-  );
-  const isExistingPane = useCallback(
-    (threadRef: ScopedThreadRef | null) =>
-      threadRef !== null &&
-      paneRefs.some((paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef)),
-    [paneRefs],
-  );
-  const placeThread = useCallback(
-    (threadRef: ScopedThreadRef, insertionIndex: number, bottomPaneKey?: string) => {
-      const state = useSplitViewStore.getState();
-      const activePaneRefs = selectSplitPaneRefs(state);
-      const isExistingPane = activePaneRefs.some(
-        (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
-      );
-      if (isExistingPane) {
-        state.movePane(threadRef, insertionIndex, bottomPaneKey);
-        return;
-      }
-      const anchor = currentRouteRef ?? activePaneRefs[0];
-      if (!anchor) return;
-      state.placePane(anchor, threadRef, insertionIndex, bottomPaneKey);
-    },
-    [currentRouteRef],
-  );
-  const detachPane = useCallback(
-    (threadRef: ScopedThreadRef) => {
-      const state = useSplitViewStore.getState();
-      const wasActive = state.activeThreadKey === scopedThreadKey(threadRef);
-      const fallback = state.detachPane(threadRef);
-      if (fallback) {
-        navigateToPane(fallback);
-      } else if (wasActive) {
-        const nextActivePane = selectActiveSplitPane(useSplitViewStore.getState());
-        if (nextActivePane) navigateToPane(nextActivePane);
-      }
-    },
-    [navigateToPane],
-  );
-  const handleGridDragOver = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      if (!hasSplitThreadDrag(event.dataTransfer)) return;
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest("[data-split-thread-pane]")) return;
-      const draggedRef = readSplitThreadDrag(event.dataTransfer);
-      if (!canPlaceThread(draggedRef)) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      setDropTarget(null);
-    },
-    [canPlaceThread],
-  );
-  const handleGridDrop = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      if (!hasSplitThreadDrag(event.dataTransfer)) return;
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest("[data-split-thread-pane]")) return;
-      const draggedRef = readSplitThreadDrag(event.dataTransfer);
-      event.preventDefault();
-      setDropTarget(null);
-      if (!draggedRef || !canPlaceThread(draggedRef)) return;
-      placeThread(draggedRef, paneRefs.length);
-    },
-    [canPlaceThread, paneRefs.length, placeThread],
-  );
+  const canPlaceThread = (threadRef: ScopedThreadRef | null) => {
+    if (!threadRef) return paneRefs.length < MAX_SPLIT_VIEW_PANES;
+    return (
+      paneRefs.some((paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef)) ||
+      paneRefs.length < MAX_SPLIT_VIEW_PANES
+    );
+  };
+  const isExistingPane = (threadRef: ScopedThreadRef | null) =>
+    threadRef !== null &&
+    paneRefs.some((paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef));
+  const placeThread = (
+    threadRef: ScopedThreadRef,
+    insertionIndex: number,
+    bottomPaneKey?: string,
+  ) => {
+    const state = useSplitViewStore.getState();
+    const activePaneRefs = selectSplitPaneRefs(state);
+    const isExistingPane = activePaneRefs.some(
+      (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
+    );
+    if (isExistingPane) {
+      state.movePane(threadRef, insertionIndex, bottomPaneKey);
+      return;
+    }
+    const anchor = currentRouteRef ?? activePaneRefs[0];
+    if (!anchor) return;
+    state.placePane(anchor, threadRef, insertionIndex, bottomPaneKey);
+  };
+  const detachPane = (threadRef: ScopedThreadRef) => {
+    const state = useSplitViewStore.getState();
+    const wasActive = state.activeThreadKey === scopedThreadKey(threadRef);
+    const fallback = state.detachPane(threadRef);
+    if (fallback) {
+      navigateToPane(fallback);
+    } else if (wasActive) {
+      const nextActivePane = selectActiveSplitPane(useSplitViewStore.getState());
+      if (nextActivePane) navigateToPane(nextActivePane);
+    }
+  };
+  const handleGridDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("[data-split-thread-pane]")) return;
+    const draggedRef = readSplitThreadDrag(event.dataTransfer);
+    if (!canPlaceThread(draggedRef)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropTarget(null);
+  };
+  const handleGridDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!hasSplitThreadDrag(event.dataTransfer)) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("[data-split-thread-pane]")) return;
+    const draggedRef = readSplitThreadDrag(event.dataTransfer);
+    event.preventDefault();
+    setDropTarget(null);
+    if (!draggedRef || !canPlaceThread(draggedRef)) return;
+    placeThread(draggedRef, paneRefs.length);
+  };
 
   // The route switches back to its standalone ChatView as soon as the store
   // falls below two panes during reconciliation.

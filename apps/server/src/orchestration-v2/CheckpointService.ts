@@ -90,26 +90,12 @@ export class CheckpointRestoreError extends Schema.TaggedError<CheckpointRestore
   }
 }
 
-export class CheckpointDeleteStaleRefsError extends Schema.TaggedError<CheckpointDeleteStaleRefsError>()(
-  "CheckpointDeleteStaleRefsError",
-  {
-    scopeId: CheckpointScopeId,
-    checkpointIds: Schema.Array(CheckpointId),
-    cause: Schema.Defect(),
-  },
-) {
-  override get message(): string {
-    return `Failed to delete stale checkpoint refs for scope ${this.scopeId}.`;
-  }
-}
-
 export const CheckpointServiceV2Error = Schema.Union([
   CheckpointRootScopePrepareError,
   CheckpointScopeEnsureError,
   CheckpointBaselineCaptureError,
   CheckpointCaptureError,
   CheckpointRestoreError,
-  CheckpointDeleteStaleRefsError,
 ]);
 export type CheckpointServiceV2Error = typeof CheckpointServiceV2Error.Type;
 
@@ -146,10 +132,6 @@ export interface CheckpointServiceV2Shape {
   readonly restore: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoint: OrchestrationV2Checkpoint;
-  }) => Effect.Effect<void, CheckpointServiceV2Error>;
-  readonly deleteStaleRefs: (input: {
-    readonly scope: OrchestrationV2CheckpointScope;
-    readonly checkpoints: ReadonlyArray<OrchestrationV2Checkpoint>;
   }) => Effect.Effect<void, CheckpointServiceV2Error>;
 }
 
@@ -201,7 +183,7 @@ function checkpointIdForScopeOrdinal(
   });
 }
 
-function makeRootRunScope(input: {
+const makeRootRunScope = Effect.fn("CheckpointService.makeRootRunScope")(function* (input: {
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly threadId: ThreadId;
   readonly runId: RunId;
@@ -210,26 +192,24 @@ function makeRootRunScope(input: {
   readonly cwd: string;
   readonly createdAt: DateTime.Utc;
 }) {
-  return Effect.gen(function* () {
-    const scopeId = yield* input.idAllocator.allocate.checkpointScope({
-      threadId: input.threadId,
-      name: ROOT_CHECKPOINT_SCOPE_NAME,
-    });
-    return {
-      id: scopeId,
-      threadId: input.threadId,
-      runId: input.runId,
-      nodeId: input.rootNodeId,
-      parentScopeId: null,
-      providerThreadId: input.providerThreadId,
-      kind: "root_run",
-      ordinalWithinParent: 0,
-      advancesAppRunCount: true,
-      cwd: input.cwd,
-      createdAt: input.createdAt,
-    } satisfies OrchestrationV2CheckpointScope;
+  const scopeId = yield* input.idAllocator.allocate.checkpointScope({
+    threadId: input.threadId,
+    name: ROOT_CHECKPOINT_SCOPE_NAME,
   });
-}
+  return {
+    id: scopeId,
+    threadId: input.threadId,
+    runId: input.runId,
+    nodeId: input.rootNodeId,
+    parentScopeId: null,
+    providerThreadId: input.providerThreadId,
+    kind: "root_run",
+    ordinalWithinParent: 0,
+    advancesAppRunCount: true,
+    cwd: input.cwd,
+    createdAt: input.createdAt,
+  } satisfies OrchestrationV2CheckpointScope;
+});
 
 function makeCheckpoint(input: {
   readonly id: CheckpointId;
@@ -284,22 +264,22 @@ export const layer: Layer.Layer<
       );
     // The stored ref for a boundary: its sidecar snapshot, or an in-repo ref
     // captured while V2 wrote checkpoints into the project repository.
-    const findBoundaryRef = (scope: OrchestrationV2CheckpointScope, ordinalWithinScope: number) =>
-      Effect.gen(function* () {
-        const sidecarRef = yield* sidecarRefFor(scope, ordinalWithinScope);
-        if (
-          yield* checkpointStore.hasCheckpointRef({ cwd: scope.cwd, checkpointRef: sidecarRef })
-        ) {
-          return sidecarRef;
-        }
-        const legacyRef = yield* legacyRefFor(scope, ordinalWithinScope);
-        return (yield* checkpointStore.hasCheckpointRef({
-          cwd: scope.cwd,
-          checkpointRef: legacyRef,
-        }))
-          ? legacyRef
-          : null;
-      });
+    const findBoundaryRef = Effect.fn("CheckpointService.findBoundaryRef")(function* (
+      scope: OrchestrationV2CheckpointScope,
+      ordinalWithinScope: number,
+    ) {
+      const sidecarRef = yield* sidecarRefFor(scope, ordinalWithinScope);
+      if (yield* checkpointStore.hasCheckpointRef({ cwd: scope.cwd, checkpointRef: sidecarRef })) {
+        return sidecarRef;
+      }
+      const legacyRef = yield* legacyRefFor(scope, ordinalWithinScope);
+      return (yield* checkpointStore.hasCheckpointRef({
+        cwd: scope.cwd,
+        checkpointRef: legacyRef,
+      }))
+        ? legacyRef
+        : null;
+    });
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const workspaceLocks = yield* KeyedLock.make<string>();
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
@@ -318,8 +298,10 @@ export const layer: Layer.Layer<
 
     // The next run starts after its baseline. A capture writing the same
     // boundary already is that baseline, so the run never waits behind it.
-    const captureBaseline: CheckpointServiceV2Shape["captureBaseline"] = (input) =>
-      Effect.gen(function* () {
+    const captureBaseline: CheckpointServiceV2Shape["captureBaseline"] = Effect.fn(
+      "CheckpointService.captureBaseline",
+    )(
+      function* (input) {
         const key = boundaryKey(input.scope, input.ordinalWithinScope);
         const baselineExists = Effect.gen(function* () {
           return (
@@ -334,22 +316,27 @@ export const layer: Layer.Layer<
           input.scope.cwd,
           Effect.gen(function* () {
             if (yield* baselineExists) return;
-            yield* checkpointStore.captureCheckpoint({
-              cwd: input.scope.cwd,
-              checkpointRef: yield* sidecarRefFor(input.scope, input.ordinalWithinScope),
-            });
+            yield* checkpointStore
+              .captureCheckpoint({
+                cwd: input.scope.cwd,
+                checkpointRef: yield* sidecarRefFor(input.scope, input.ordinalWithinScope),
+              })
+              .pipe(Effect.catchTags({ VcsUnsupportedOperationError: () => Effect.void }));
           }),
         );
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new CheckpointBaselineCaptureError({
-              scopeId: input.scope.id,
-              ordinalWithinScope: input.ordinalWithinScope,
-              cause,
-            }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError(
+            (cause) =>
+              new CheckpointBaselineCaptureError({
+                scopeId: input.scope.id,
+                ordinalWithinScope: input.ordinalWithinScope,
+                cause,
+              }),
+          ),
         ),
-      );
+    );
 
     const materializeBaselineCheckpoint: CheckpointServiceV2Shape["materializeBaselineCheckpoint"] =
       (input) =>
@@ -430,20 +417,26 @@ export const layer: Layer.Layer<
             });
           }
 
-          const capturedRef = yield* sidecarRefFor(input.scope, input.ordinalWithinScope).pipe(
+          // A workspace its parent repository ignores cannot be captured and
+          // records a missing checkpoint instead of an error.
+          const captured = yield* sidecarRefFor(input.scope, input.ordinalWithinScope).pipe(
             Effect.tap((checkpointRef) =>
               checkpointStore.captureCheckpoint({ cwd: input.scope.cwd, checkpointRef }),
             ),
+            Effect.map((checkpointRef) => ({ status: "ready" as const, checkpointRef })),
+            Effect.catchTags({
+              VcsUnsupportedOperationError: () => Effect.succeed({ status: "missing" as const }),
+            }),
             Effect.catch((cause) =>
               Effect.logWarning("orchestration V2 checkpoint capture failed", {
                 scopeId: input.scope.id,
                 ordinalWithinScope: input.ordinalWithinScope,
                 cause: String(cause),
-              }).pipe(Effect.as(null)),
+              }).pipe(Effect.as({ status: "error" as const })),
             ),
           );
 
-          if (capturedRef === null) {
+          if (captured.status !== "ready") {
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,
@@ -453,13 +446,13 @@ export const layer: Layer.Layer<
               ordinalWithinScope: input.ordinalWithinScope,
               appRunOrdinal: input.appRunOrdinal,
               ref: yield* legacyRefFor(input.scope, input.ordinalWithinScope),
-              status: "error",
+              status: captured.status,
               files: [],
               capturedAt: input.capturedAt,
             });
           }
 
-          const checkpointRef = capturedRef;
+          const checkpointRef = captured.checkpointRef;
           const previousCheckpointRef = yield* findBoundaryRef(
             input.scope,
             Math.max(0, input.ordinalWithinScope - 1),
@@ -479,7 +472,6 @@ export const layer: Layer.Layer<
             toCheckpointRef: checkpointRef,
           };
           // A pull or rebase can change thousands of files the turn did not write.
-          // Keep only the files the turn's own work touched.
           const files = previousExists
             ? yield* Effect.all([
                 checkpointStore.diffCheckpoints({
@@ -590,24 +582,6 @@ export const layer: Layer.Layer<
         ),
       );
 
-    const deleteStaleRefs: CheckpointServiceV2Shape["deleteStaleRefs"] = (input) =>
-      withWorkspaceLock(
-        input.scope.cwd,
-        checkpointStore.deleteCheckpointRefs({
-          cwd: input.scope.cwd,
-          checkpointRefs: input.checkpoints.map((checkpoint) => checkpoint.ref),
-        }),
-      ).pipe(
-        Effect.mapError(
-          (cause) =>
-            new CheckpointDeleteStaleRefsError({
-              scopeId: input.scope.id,
-              checkpointIds: input.checkpoints.map((checkpoint) => checkpoint.id),
-              cause,
-            }),
-        ),
-      );
-
     return CheckpointServiceV2.of({
       prepareRootRunScope: (input) =>
         makeRootRunScope({ ...input, idAllocator }).pipe(
@@ -625,7 +599,6 @@ export const layer: Layer.Layer<
       materializeBaselineCheckpoint,
       capture,
       restore,
-      deleteStaleRefs,
     } satisfies CheckpointServiceV2Shape);
   }),
 );

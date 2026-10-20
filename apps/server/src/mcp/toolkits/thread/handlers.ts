@@ -72,7 +72,6 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
     });
   return { ...context, request, item };
 });
-/** A tool that changes `threadId`, or the caller's own thread when it is omitted. */
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
@@ -115,8 +114,6 @@ export const ThreadToolkitHandlersLive = McpToolAccess.toLayer(ThreadToolkit, {
       const { caller } = yield* readCaller();
       const invocation = yield* McpInvocationContext.McpInvocationContext;
       const { projectId: requested, ...query } = input;
-      // Like the other project tools, an omitted project means the caller's own; a client
-      // outside a thread searches every project.
       if (requested !== undefined) yield* assertProjectAllowed(invocation, caller, requested);
       const projectId =
         requested ?? (invocation.mcpToolScope === "global" ? undefined : caller?.projectId);

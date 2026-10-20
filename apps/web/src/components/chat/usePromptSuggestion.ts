@@ -1,5 +1,5 @@
 import type { MessageId, ThreadId } from "@t3tools/contracts";
-import { useCallback, useEffect, useRef } from "react";
+import { useState } from "react";
 
 import type { ComposerTrigger } from "../../composer-logic";
 import {
@@ -29,7 +29,7 @@ export function usePromptSuggestion(input: {
   prompt: string;
   trigger: ComposerTrigger | null;
 }): { ghostText: string | null; accept: () => string | null } {
-  const dismissedKeyRef = useRef<string | null>(null);
+  const [storedDismissedKey, setDismissedKey] = useState<string | null>(null);
 
   const key =
     input.threadId && input.lastMessage
@@ -39,16 +39,16 @@ export function usePromptSuggestion(input: {
         })
       : null;
 
-  // The dismissal is a ref rather than state: every input that can change it
-  // already re-renders the composer, so tracking it separately would only add
-  // a render.
-  useEffect(() => {
-    dismissedKeyRef.current = resolveDismissedPromptSuggestionKey({
-      currentKey: key,
-      dismissedKey: dismissedKeyRef.current,
-      prompt: input.prompt,
-    });
-  }, [key, input.prompt]);
+  // Typing dismisses the current suggestion and a new key clears it, so the
+  // stored dismissal is reconciled during render rather than in an effect.
+  const dismissedKey = resolveDismissedPromptSuggestionKey({
+    currentKey: key,
+    dismissedKey: storedDismissedKey,
+    prompt: input.prompt,
+  });
+  if (dismissedKey !== storedDismissedKey) {
+    setDismissedKey(dismissedKey);
+  }
 
   const settledAssistantMessage =
     input.lastMessage?.role === "assistant" && !input.lastMessage.streaming
@@ -59,7 +59,7 @@ export function usePromptSuggestion(input: {
   const visible =
     key !== null &&
     suggestion !== null &&
-    dismissedKeyRef.current !== key &&
+    dismissedKey !== key &&
     shouldShowPromptSuggestion({
       enabled: input.enabled,
       disabled: input.disabled,
@@ -68,11 +68,11 @@ export function usePromptSuggestion(input: {
       trigger: input.trigger,
     });
 
-  const accept = useCallback((): string | null => {
+  const accept = (): string | null => {
     if (!visible || key === null || suggestion === null) return null;
-    dismissedKeyRef.current = key;
+    setDismissedKey(key);
     return suggestion;
-  }, [visible, key, suggestion]);
+  };
 
   return { ghostText: visible ? suggestion : null, accept };
 }

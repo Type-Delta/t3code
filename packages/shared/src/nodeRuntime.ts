@@ -1,4 +1,4 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off - Native bigint file IDs retain NTFS identities omitted by Effect numeric inode stats.
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Native bigint file IDs retain NTFS identities omitted by Effect inode stats.
 import * as NodeFSP from "node:fs/promises";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -29,7 +29,6 @@ export class NodeRuntimeUnavailableError extends Schema.TaggedError<NodeRuntimeU
 }
 
 export interface SelfInvocation {
-  /** The binary to spawn: Node, Electron (with `ELECTRON_RUN_AS_NODE`), or the packaged T3. */
   readonly command: string;
   /**
    * The absolute entrypoint script to place before the subcommand, or
@@ -40,11 +39,9 @@ export interface SelfInvocation {
 }
 
 /**
- * How another process runs this T3 install's CLI, for hidden subcommands the
- * server hands to children such as `acp-mcp-bridge`. `process.execPath` plus
- * `argv[1]` only works for a script run by Node; the single-executable has no
- * entrypoint script (Node repeats the binary at argv[1]), so callers must not
- * assemble the pair themselves.
+ * `process.execPath` plus `argv[1]` only works for a script run by Node; the
+ * single-executable has no entrypoint script (Node repeats the binary at
+ * argv[1]), so callers must not assemble the pair themselves.
  */
 export const resolveSelfInvocation = Effect.fn("nodeRuntime.resolveSelfInvocation")(function* () {
   const command = yield* HostProcess.ExecutablePath;
@@ -59,14 +56,12 @@ export const resolveSelfInvocation = Effect.fn("nodeRuntime.resolveSelfInvocatio
   } satisfies SelfInvocation;
 });
 
-/** `[entrypoint?, ...args]`: the argv that runs `args` against this T3 install. */
 export const selfInvocationArgs = (
   invocation: SelfInvocation,
   args: ReadonlyArray<string>,
 ): ReadonlyArray<string> =>
   invocation.entrypoint === undefined ? args : [invocation.entrypoint, ...args];
 
-/** A standalone T3 binary runs its embedded CLI, regardless of script arguments. */
 export const resolveNodeExecutable = Effect.fn("nodeRuntime.resolveNodeExecutable")(function* (
   feature: typeof NodeRuntimeFeature.Type,
   environment?: NodeJS.ProcessEnv,
@@ -79,15 +74,10 @@ export const resolveNodeExecutable = Effect.fn("nodeRuntime.resolveNodeExecutabl
   const platform = yield* HostProcess.Platform;
   const env = environment ?? (yield* HostProcess.Environment);
   const resolvedNodePath = yield* resolveCommandPath(platform === "win32" ? "node.exe" : "node", {
-    // Batch wrappers require a shell; helper callers launch the runtime directly.
     env: platform === "win32" ? { ...env, PATHEXT: ".EXE" } : env,
-  }).pipe(
-    // Refresh immediately after the user installs Node and retries setup.
-    Effect.provideService(CommandResolutionCache, new Map()),
-  );
+  }).pipe(Effect.provideService(CommandResolutionCache, new Map()));
   if (resolvedNodePath === null) return yield* new NodeRuntimeUnavailableError({ feature });
   const nodePath = path.resolve(resolvedNodePath);
-  // A launcher or symlink named node must not point back at the standalone app.
   const resolvedPath = yield* fs
     .realPath(nodePath)
     .pipe(Effect.mapError((cause) => new NodeRuntimeUnavailableError({ feature, cause })));
@@ -99,26 +89,21 @@ export const resolveNodeExecutable = Effect.fn("nodeRuntime.resolveNodeExecutabl
   if (Option.isSome(hostInfo) && Option.isSome(nodeInfo)) {
     const hostInode = Option.getOrNull(hostInfo.value.ino);
     const nodeInode = Option.getOrNull(nodeInfo.value.ino);
-    const reliableNumericIdentity =
-      hostInode !== null &&
-      nodeInode !== null &&
-      Number.isSafeInteger(hostInode) &&
-      Number.isSafeInteger(nodeInode) &&
-      hostInode > 0 &&
-      nodeInode > 0;
-    const sameFile = reliableNumericIdentity
-      ? hostInfo.value.dev === nodeInfo.value.dev && hostInode === nodeInode
-      : yield* Effect.tryPromise(() =>
-          Promise.all([
-            NodeFSP.stat(executablePath, { bigint: true }),
-            NodeFSP.stat(nodePath, { bigint: true }),
-          ]),
-        ).pipe(
-          Effect.map(
-            ([host, node]) => host.dev === node.dev && host.ino > 0n && host.ino === node.ino,
-          ),
-          Effect.orElseSucceed(() => false),
-        );
+    // Stats without a usable inode (some NTFS paths) fall back to native bigint file IDs.
+    const sameFile =
+      hostInode !== null && nodeInode !== null && hostInode > 0n && nodeInode > 0n
+        ? hostInfo.value.dev === nodeInfo.value.dev && hostInode === nodeInode
+        : yield* Effect.tryPromise(() =>
+            Promise.all([
+              NodeFSP.stat(executablePath, { bigint: true }),
+              NodeFSP.stat(nodePath, { bigint: true }),
+            ]),
+          ).pipe(
+            Effect.map(
+              ([host, node]) => host.dev === node.dev && host.ino > 0n && host.ino === node.ino,
+            ),
+            Effect.orElseSucceed(() => false),
+          );
     if (sameFile) return yield* new NodeRuntimeUnavailableError({ feature });
   }
   // Launchers such as Vite+ dispatch by argv[0]; keep the node name intact.

@@ -1,11 +1,3 @@
-/**
- * CheckpointDiffQuery - Query interface for computed checkpoint diffs.
- *
- * Provides read-only diff operations across checkpoint snapshots used by
- * orchestration APIs.
- *
- * @module CheckpointDiffQuery
- */
 import {
   type CheckpointScopeId,
   OrchestrationGetTurnDiffResult,
@@ -21,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import { CHECKPOINT_DIFF_MAX_OUTPUT_BYTES } from "../vcs/VcsDriver.ts";
 import {
   checkpointRefForScopeOrdinal,
   sidecarSnapshotIdForScopeOrdinal,
@@ -39,15 +32,14 @@ import { isGitImport, parseTurnDiffFilesFromNumstat, type TurnDiffFileSummary } 
 
 // Windows limits a command line to 32,767 characters. Leave room for the rest of git's arguments.
 const MAX_PATHSPEC_CHARS = 24_000;
+const DIFF_TRUNCATED_MARKER = "\n\n[truncated]";
 
-/** Splits files into pathspec lists that each fit on one git command line. Renames keep both paths together. */
 function batchFilePaths(files: ReadonlyArray<TurnDiffFileSummary>) {
   const batches: string[][] = [];
   let batch: string[] = [];
   let length = 0;
   for (const file of files) {
     const paths = file.previousPath === undefined ? [file.path] : [file.previousPath, file.path];
-    // Each pathspec also carries a `:(top,literal)` prefix and a separator.
     const size = paths.reduce((total, path) => total + path.length + 16, 0);
     if (batch.length > 0 && length + size > MAX_PATHSPEC_CHARS) {
       batches.push(batch);
@@ -61,24 +53,13 @@ function batchFilePaths(files: ReadonlyArray<TurnDiffFileSummary>) {
   return batches;
 }
 
-/** Service tag for checkpoint diff queries. */
 export class CheckpointDiffQuery extends Context.Service<
   CheckpointDiffQuery,
   {
-    /**
-     * Read the patch diff for a single turn checkpoint transition.
-     *
-     * Verifies checkpoint availability in both projection state and filesystem.
-     */
     readonly getTurnDiff: (
       input: OrchestrationGetTurnDiffInput,
     ) => Effect.Effect<OrchestrationGetTurnDiffResultType, CheckpointServiceError>;
 
-    /**
-     * Read the full patch diff across a thread range of checkpoints.
-     *
-     * Uses turn-diff semantics with `fromTurnCount = 0`.
-     */
     readonly getFullThreadDiff: (
       input: OrchestrationGetFullThreadDiffInput,
     ) => Effect.Effect<OrchestrationGetFullThreadDiffResult, CheckpointServiceError>;
@@ -111,28 +92,30 @@ export const make = Effect.gen(function* () {
 
   // The thread-start boundary: its sidecar snapshot, else the in-repo ref an
   // older thread recorded. A missing ref is left to the HEAD fallback.
-  const threadBaselineRef = (scope: { readonly id: CheckpointScopeId; readonly cwd: string }) =>
-    Effect.gen(function* () {
-      const boundary = { scopeId: scope.id, ordinalWithinScope: 0 };
-      const sidecarRef = yield* sidecarSnapshotIdForScopeOrdinal(boundary).pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
-        Effect.flatMap((snapshotId) =>
-          checkpointStore.allocateCheckpointRef({ cwd: scope.cwd, snapshotId }),
-        ),
-        Effect.orElseSucceed(() => null),
-      );
-      if (
-        sidecarRef !== null &&
-        (yield* checkpointStore
-          .hasCheckpointRef({ cwd: scope.cwd, checkpointRef: sidecarRef })
-          .pipe(Effect.orElseSucceed(() => false)))
-      ) {
-        return sidecarRef;
-      }
-      return yield* checkpointRefForScopeOrdinal(boundary).pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
-      );
-    });
+  const threadBaselineRef = Effect.fn("CheckpointDiffQuery.threadBaselineRef")(function* (scope: {
+    readonly id: CheckpointScopeId;
+    readonly cwd: string;
+  }) {
+    const boundary = { scopeId: scope.id, ordinalWithinScope: 0 };
+    const sidecarRef = yield* sidecarSnapshotIdForScopeOrdinal(boundary).pipe(
+      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.flatMap((snapshotId) =>
+        checkpointStore.allocateCheckpointRef({ cwd: scope.cwd, snapshotId }),
+      ),
+      Effect.orElseSucceed(() => null),
+    );
+    if (
+      sidecarRef !== null &&
+      (yield* checkpointStore
+        .hasCheckpointRef({ cwd: scope.cwd, checkpointRef: sidecarRef })
+        .pipe(Effect.orElseSucceed(() => false)))
+    ) {
+      return sidecarRef;
+    }
+    return yield* checkpointRefForScopeOrdinal(boundary).pipe(
+      Effect.provideService(Crypto.Crypto, crypto),
+    );
+  });
 
   const getTurnDiff: CheckpointDiffQuery["Service"]["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
@@ -211,8 +194,18 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      // The root scope is shared by every run in this thread. Its runId
-      // tracks the latest owner, while ordinal zero stays the baseline.
+      // Capture compares against the preceding scope ordinal, even when that
+      // checkpoint belongs to a stopped run or has no run.
+      const parentCheckpoint =
+        input.fromTurnCount === input.toTurnCount - 1
+          ? projection.checkpoints.find(
+              (checkpoint) =>
+                checkpoint.status === "ready" &&
+                checkpoint.scopeId === toCheckpoint.scopeId &&
+                checkpoint.ordinalWithinScope === toCheckpoint.ordinalWithinScope - 1,
+            )
+          : undefined;
+
       const firstScope =
         input.fromTurnCount === 0
           ? projection.checkpointScopes.find((scope) => scope.kind === "root_run")
@@ -222,8 +215,12 @@ export const make = Effect.gen(function* () {
           ? firstScope === undefined
             ? undefined
             : yield* threadBaselineRef(firstScope)
-          : readyCheckpoints.find((checkpoint) => checkpoint.appRunOrdinal === input.fromTurnCount)
-              ?.ref;
+          : (
+              parentCheckpoint ??
+              readyCheckpoints.find(
+                (checkpoint) => checkpoint.appRunOrdinal === input.fromTurnCount,
+              )
+            )?.ref;
       if (fromCheckpointRef === undefined) {
         return yield* new CheckpointRefUnavailableError({
           operation,
@@ -242,8 +239,6 @@ export const make = Effect.gen(function* () {
         fallbackFromToHead: input.fromTurnCount === 0,
         ignoreWhitespace,
       };
-      // Leave out files that a pull, merge, or rebase brought in, matching the turn's file summary.
-      // Filtering is optional: when it cannot run, the complete diff still loads.
       const authoredPaths = yield* checkpointStore
         .listAuthoredPaths(comparison)
         .pipe(Effect.orElseSucceed(() => null));
@@ -256,19 +251,36 @@ export const make = Effect.gen(function* () {
             );
       const retainedFiles = files.filter((file) => !isGitImport(file, authoredPaths));
       // Select retained paths before generating a patch, so imported bulk cannot exhaust its output limit.
-      const diff =
-        retainedFiles.length === files.length
-          ? yield* checkpointStore
-              .diffCheckpoints(comparison)
-              .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"))
-          : (yield* Effect.forEach(
-              batchFilePaths(retainedFiles),
-              (filePaths) =>
-                checkpointStore
-                  .diffCheckpoints({ ...comparison, filePaths })
-                  .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints")),
-              { concurrency: 4 },
-            )).join("");
+      const pathBatches =
+        retainedFiles.length === files.length ? [undefined] : batchFilePaths(retainedFiles);
+      let diff = "";
+      let remainingBytes = CHECKPOINT_DIFF_MAX_OUTPUT_BYTES;
+      for (const filePaths of pathBatches) {
+        const patch = yield* checkpointStore
+          .diffCheckpoints({
+            ...comparison,
+            ...(filePaths === undefined ? {} : { filePaths }),
+            // One extra byte distinguishes an exact fit from a truncated patch.
+            maxOutputBytes: remainingBytes + 1,
+          })
+          .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
+        const patchBytes = Buffer.byteLength(patch);
+        diff += patch;
+        if (patchBytes > remainingBytes) {
+          // Reserve marker space only on overflow, which may trim an earlier batch.
+          // Streaming decode drops an incomplete final UTF-8 character at the byte boundary.
+          diff =
+            new TextDecoder().decode(
+              Buffer.from(diff).subarray(
+                0,
+                CHECKPOINT_DIFF_MAX_OUTPUT_BYTES - Buffer.byteLength(DIFF_TRUNCATED_MARKER),
+              ),
+              { stream: true },
+            ) + DIFF_TRUNCATED_MARKER;
+          break;
+        }
+        remainingBytes -= patchBytes;
+      }
 
       const turnDiff = buildTurnDiffResult(input, diff);
       if (!isTurnDiffResult(turnDiff)) {

@@ -279,12 +279,13 @@ export function CompatibleApiGatewaySection({
   const [gateway, setGateway] = useState(() => readApiGatewayDraft(value));
   const [apiKey, setApiKey] = useState("");
   const gatewayMigrationFingerprint = useRef<string | undefined>(undefined);
-  useEffect(() => {
+  // A new instance or saved value replaces the draft; a new instance also clears the typed key.
+  const [syncedInputs, setSyncedInputs] = useState({ idPrefix, value });
+  if (syncedInputs.idPrefix !== idPrefix || syncedInputs.value !== value) {
+    setSyncedInputs({ idPrefix, value });
     setGateway(readApiGatewayDraft(value));
-  }, [idPrefix, value]);
-  useEffect(() => {
-    setApiKey("");
-  }, [idPrefix]);
+    if (syncedInputs.idPrefix !== idPrefix) setApiKey("");
+  }
   useEffect(() => {
     const configured = readApiGatewayDraft(value).apiKeyEnvironmentVariable;
     const fingerprint = `${idPrefix}\0${configured}`;
@@ -292,6 +293,7 @@ export function CompatibleApiGatewaySection({
     gatewayMigrationFingerprint.current = fingerprint;
     const migrated = migrateLegacyApiGatewayApiKey(value, environment);
     if (!migrated) return;
+    // oxlint-disable-next-line react/set-state-in-effect -- The legacy key migration publishes through onChange, which must not run during render.
     setGateway(readApiGatewayDraft(migrated.config));
     onChange(migrated.config, migrated.environment);
   }, [environment, idPrefix, onChange, value]);

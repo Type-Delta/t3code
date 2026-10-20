@@ -8,7 +8,12 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 
-import { CheckpointRef, VcsProcessExitError, type VcsError } from "@t3tools/contracts";
+import {
+  CheckpointRef,
+  VcsProcessExitError,
+  VcsUnsupportedOperationError,
+  type VcsError,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -623,6 +628,47 @@ export const make = Effect.gen(function* () {
         );
         const gitDir = yield* ensureRepository(input.cwd, identity);
         if (yield* resolveCommit(input.cwd, gitDir, identity.worktreeRoot, locator)) return;
+        // Captures cover the whole worktree without ignored paths, so an ignored
+        // workspace with no capturable files would publish snapshots that miss its
+        // edits. Negated rules can still re-include files below an ignored folder.
+        const ignored = yield* git(
+          "SidecarCheckpointRepository.capture.ignoredWorkspace",
+          input.cwd,
+          ["-C", input.cwd, "check-ignore", "--no-index", "-q", "."],
+          { allowNonZeroExit: true },
+        );
+        if (ignored.exitCode !== 0 && ignored.exitCode !== 1) {
+          return yield* checkpointError(
+            "SidecarCheckpointRepository.capture.ignoredWorkspace",
+            input.cwd,
+            ignored.stderr.trim() || "git check-ignore failed",
+          );
+        }
+        if (ignored.exitCode === 0) {
+          const capturable = yield* git(
+            "SidecarCheckpointRepository.capture.ignoredWorkspace",
+            input.cwd,
+            [
+              "-C",
+              input.cwd,
+              "ls-files",
+              "--cached",
+              "--others",
+              "--exclude-standard",
+              "-z",
+              "--",
+              ".",
+            ],
+            { maxOutputBytes: 1 },
+          );
+          if (capturable.stdout.length === 0) {
+            return yield* new VcsUnsupportedOperationError({
+              operation: "SidecarCheckpointRepository.capture",
+              kind: "git",
+              detail: "The workspace directory is ignored by its Git repository.",
+            });
+          }
+        }
 
         // A private index kept per worktree. Its stat cache lets update-index hash
         // only files changed since the last capture, as the project's own index

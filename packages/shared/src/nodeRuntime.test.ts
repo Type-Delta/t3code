@@ -158,7 +158,7 @@ describe("Node runtime selection", () => {
     ),
   );
 
-  it.effect.each(["native", "missing", "unsafe"] as const)(
+  it.effect.each(["native", "missing", "zero"] as const)(
     "rejects a hard-linked node alias pointing back at the standalone app with %s file identity",
     (identity) =>
       Effect.gen(function* () {
@@ -180,10 +180,7 @@ describe("Node runtime selection", () => {
                   fs.stat(target).pipe(
                     Effect.map((info) => ({
                       ...info,
-                      ino:
-                        identity === "missing"
-                          ? Option.none<number>()
-                          : Option.some(Number.MAX_SAFE_INTEGER + 1),
+                      ino: identity === "missing" ? Option.none<bigint>() : Option.some(0n),
                     })),
                   ),
               };

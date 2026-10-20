@@ -113,7 +113,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --command-shell-inset: 0.5rem;
   --command-content-inset: 1rem;
   --floating-content-inset: 0.75rem;
-  /* App layer order: docked sheets, then the floating preview player (47–49, see
+  /* App layer order: the bottom terminal drawer (45, above the timeline minimap),
+     docked sheets, then the floating preview player (47–49, see
      previewMiniPlayerLayout.ts), then dialogs and popovers (50 and up). */
   --z-sheet: 46;
   --glass-blur: 12px;
@@ -152,6 +153,7 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 .wco {
+  --native-titlebar-height: env(titlebar-area-height, 0px);
   --workspace-topbar-height: max(40px, env(titlebar-area-height, 52px));
   --workspace-controls-top: env(titlebar-area-y, 0px);
   --workspace-controls-left: calc(env(titlebar-area-x, 0px) + 0.75rem);
@@ -196,6 +198,8 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
      by the composer, its context strip and attached banners. */
   --shadow-composer: 0 12px 28px -18px rgb(0 0 0 / 40%);
   --shadow-composer-dark: 0 14px 32px -18px rgb(0 0 0 / 75%);
+  /* Overlap the lower toolbar backdrop by one pixel to cover the composer seam. */
+  --spacing-composer-seam: calc(var(--spacing) * 4 - 1px);
   /* Dark-mode shade where an attached surface meets the composer: 10px of
      shadow fading away from the seam. Inline, so the offsets resolve on the
      element. below: the context strip under the composer (1rem seam, faint
@@ -542,6 +546,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   mask-size:
     calc(100% - var(--app-scrollbar-width)) 100%,
     var(--app-scrollbar-width) 100%;
+}
+
+@utility timeline-scroll-bottom-fade {
+  --virtualized-scroll-fade-mask: linear-gradient(
+    to bottom,
+    black 0,
+    black calc(100% - var(--timeline-composer-overlay-height) - 0.75rem),
+    transparent calc(100% - var(--timeline-composer-overlay-height)),
+    transparent 100%
+  );
 }
 
 /* Stage-channel art needs a mask and pseudo-element gradient, so keep the
@@ -1735,7 +1749,7 @@ body {
    card) must opt in via the surface-grain utility, or they lose the
    grain's subtle brightening and stand out against the body. */
 :root {
-  --surface-grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  --surface-grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url%28%23n%29' opacity='0.035'/%3E%3C/svg%3E");
   --surface-grain-size: 256px 256px;
 }
 
@@ -1743,7 +1757,7 @@ body {
    alpha. Keep our procedural texture cheap while matching that scale and
    strength for the branded preset. */
 html[data-theme-id="t3-chat"] {
-  --surface-grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 128 128' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.02745'/%3E%3C/svg%3E");
+  --surface-grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 128 128' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url%28%23n%29' opacity='0.02745'/%3E%3C/svg%3E");
   --surface-grain-size: 128px 128px;
 }
 
@@ -1764,6 +1778,7 @@ code {
    Inline code stays relative to its sentence so it never towers over prose;
    diffs and file previews take the size through --diffs-font-size. */
 .chat-markdown .chat-markdown-shiki .shiki,
+.chat-markdown .chat-markdown-codeblock pre,
 :is(.chat-markdown, .composer-tiptap) pre code {
   font-size: var(--font-size-code, inherit);
 }
@@ -1953,6 +1968,10 @@ label:has(> select#reasoning-effort) select {
   margin: 0.65rem 0;
 }
 
+.chat-markdown-math-display .katex-display {
+  margin: 0;
+}
+
 :is(.chat-markdown, .composer-tiptap) h1,
 :is(.chat-markdown, .composer-tiptap) h2,
 :is(.chat-markdown, .composer-tiptap) h3,
@@ -2015,6 +2034,48 @@ label:has(> select#reasoning-effort) select {
    browser counter. Browsers without ::marker content fall back to `start`. */
 .composer-tiptap ol > li[data-marker]::marker {
   content: attr(data-marker) " ";
+}
+
+/* The prompt font and size can differ from the interface, so its gutter must
+   also follow the prompt's font metrics. */
+.composer-tiptap ol {
+  --list-gutter: max(1.25rem, 3ch);
+}
+
+.composer-tiptap ol:has(> li[data-marker-width="3"]) {
+  --list-gutter: max(1.25rem, 4ch);
+}
+
+.composer-tiptap ol:has(> li[data-marker-width="4"]) {
+  --list-gutter: max(1.25rem, 5ch);
+}
+
+.composer-tiptap ol:has(> li[data-marker-width="5"]) {
+  --list-gutter: max(1.25rem, 6ch);
+}
+
+.composer-tiptap ol:has(> li[data-marker-width="6"]) {
+  --list-gutter: max(1.25rem, 7ch);
+}
+
+.composer-tiptap ol:has(> li[data-marker-width="7"]) {
+  --list-gutter: max(1.25rem, 8ch);
+}
+
+.composer-tiptap ol:has(> li[data-marker-width="8"]) {
+  --list-gutter: max(1.25rem, 9ch);
+}
+
+.composer-tiptap ol:has(> li[data-marker-width="9"]) {
+  --list-gutter: max(1.25rem, 10ch);
+}
+
+.composer-tiptap ol:has(> li[data-marker-width="10"]) {
+  --list-gutter: max(1.25rem, 11ch);
+}
+
+.composer-tiptap ul {
+  padding-left: max(1.25rem, 2ch);
 }
 
 :is(.chat-markdown, .composer-tiptap) ul ul {
@@ -2087,6 +2148,17 @@ label:has(> select#reasoning-effort) select {
    spacing needs to match. */
 .composer-tiptap hr {
   margin: 0.65rem 0;
+}
+
+/* Block spacing separates blocks, not the draft from the composer edge. A
+   leading list or quote would otherwise push the first line down, and the
+   one-line resting composer clips it. */
+.composer-tiptap > :first-child {
+  margin-top: 0;
+}
+
+.composer-tiptap > :last-child {
+  margin-bottom: 0;
 }
 
 /* A heading at the top of a draft should not push the first line down. */
@@ -2186,7 +2258,8 @@ label:has(> select#reasoning-effort) select {
    shot, no layout change. */
 @media (prefers-reduced-motion: no-preference) {
   .chat-markdown[data-streaming] > *,
-  .chat-markdown[data-streaming] .chat-markdown-shiki {
+  .chat-markdown[data-streaming] .chat-markdown-shiki,
+  .chat-markdown[data-streaming] .chat-markdown-mermaid {
     transition: opacity 600ms ease-out;
 
     @starting-style {
@@ -2241,39 +2314,10 @@ label:has(> select#reasoning-effort) select {
   overflow-wrap: anywhere;
 }
 
-/* Prompt-stash save acknowledgement: the new count fades up from just below
-   its resting position, once, then stops. One-shot and event-driven (React
-   remounts the element by key on each stash) — no continuous animation. */
-@keyframes prompt-stash-count-enter {
-  from {
-    opacity: 0;
-    transform: translateY(2px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* Expanded capture preview swaps between the screenshot and its extracted text.
-   One-shot fade on whichever panel mounts, so nothing repaints continuously. */
-@keyframes snap-shot-contents-enter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes provider-update-pill-countdown {
-  from {
-    transform: scaleX(1);
-  }
-
-  to {
-    transform: scaleX(0);
-  }
+/* Formula cells keep their natural width and scroll with the table. */
+.chat-markdown .chat-markdown-table-container td:has([data-markdown-math]) {
+  max-width: none;
+  overflow: visible;
 }
 
 :root {
@@ -2421,7 +2465,7 @@ label:has(> select#reasoning-effort) select {
   pointer-events: none;
   /* Desaturated so the grain never shifts the group hue. `stitchTiles` keeps
      the 140px repeat seamless across wide rows. */
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='splitViewGroupRowGrain'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.89' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23splitViewGroupRowGrain)' opacity='0.14'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='splitViewGroupRowGrain'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.89' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url%28%23splitViewGroupRowGrain%29' opacity='0.14'/%3E%3C/svg%3E");
   -webkit-mask-image: linear-gradient(
     var(--split-view-group-fade-angle),
     black 0%,
