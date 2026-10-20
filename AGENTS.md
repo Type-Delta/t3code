@@ -36,7 +36,7 @@ If you are tasked with syncing this fork with the upstream T3 Code repository, p
 - After all the code related changes are done (merged, fixed, verified, finalized/cleanup), do the following:
   - Update "Divergence Log" and "Merge History" sections in FORK.md with the latest changes.
   - Commit merge changes in a single commit with a clear message describing the merge decisions made.
-  - Move the "base" tag to the fork parent commit before the merge commit. Force pushing this tag is fine since its only used for reference. (if `gdx` are available, you can use `gdx tag mv base ~0` to move "base" to the latest commit)
+  - Move the "base" tag to the commit you just created. Force pushing this tag is fine since its only used for reference. (if `gdx` are available, you can use `gdx tag mv base ~0` to move "base" to the latest commit)
 
 ## What makes T3 Code special?
 
