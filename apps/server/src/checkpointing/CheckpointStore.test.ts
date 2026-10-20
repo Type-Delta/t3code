@@ -911,6 +911,127 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
       }),
     );
 
+    it.effect("captures when the server runs from a folder inside the worktree", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir("checkpoint-sidecar-server-cwd-");
+        yield* initRepoWithCommit(tmp);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const serverCwd = NodePath.join(tmp, "apps", "server");
+        yield* fileSystem.makeDirectory(serverCwd, { recursive: true });
+        yield* writeTextFile(NodePath.join(serverCwd, "bin.ts"), "server\n");
+        yield* git(tmp, ["add", "."]);
+        yield* git(tmp, ["commit", "-m", "add server"]);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const baseline = yield* makeSidecarRef(tmp, "server-cwd-baseline");
+        const turn = yield* makeSidecarRef(tmp, "server-cwd-turn");
+        const originalCwd = process.cwd();
+        yield* Effect.acquireRelease(
+          Effect.sync(() => process.chdir(serverCwd)),
+          () => Effect.sync(() => process.chdir(originalCwd)),
+        );
+
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: baseline });
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "edited\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: turn });
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd: tmp,
+          fromCheckpointRef: baseline,
+          toCheckpointRef: turn,
+          ignoreWhitespace: false,
+        });
+        expect(diff).toContain("+edited");
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect("captures an uninitialized submodule as its recorded gitlink", () =>
+      Effect.gen(function* () {
+        const root = yield* makeTmpDir("checkpoint-sidecar-empty-gitlink-");
+        const parent = NodePath.join(root, "parent");
+        const submoduleSource = NodePath.join(root, "submodule-source");
+        const submodule = NodePath.join(parent, "deps", "submodule");
+        const fileSystem = yield* FileSystem.FileSystem;
+        yield* fileSystem.makeDirectory(parent, { recursive: true });
+        yield* fileSystem.makeDirectory(submoduleSource, { recursive: true });
+        yield* initRepoWithCommit(parent);
+        yield* initRepoWithCommit(submoduleSource);
+        yield* git(parent, [
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          submoduleSource,
+          "deps/submodule",
+        ]);
+        yield* git(parent, ["commit", "-m", "add tracked submodule"]);
+        const recordedOid = (yield* git(parent, ["rev-parse", "HEAD:deps/submodule"])).trim();
+        // A clone without `git submodule update` leaves an empty folder.
+        yield* fileSystem.remove(submodule, { recursive: true });
+        yield* fileSystem.makeDirectory(submodule);
+
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const baseline = yield* makeSidecarRef(parent, "empty-gitlink-baseline");
+        const turn = yield* makeSidecarRef(parent, "empty-gitlink-turn");
+        const metadata = yield* checkpointStore.captureCheckpointWithMetadata({
+          cwd: parent,
+          checkpointRef: baseline,
+        });
+        const config = yield* ServerConfig.ServerConfig;
+        const identities = yield* CheckpointRepositoryIdentity.CheckpointRepositoryIdentityResolver;
+        const identity = yield* identities.resolve(parent);
+        const sidecarGitDir = NodePath.join(
+          config.checkpointsDir,
+          "repositories",
+          `${identity.repositoryKey}.git`,
+        );
+        expect(
+          yield* git(parent, [
+            `--git-dir=${sidecarGitDir}`,
+            "ls-tree",
+            metadata.treeOid,
+            "deps/submodule",
+          ]),
+        ).toBe(`160000 commit ${recordedOid}\tdeps/submodule`);
+
+        yield* writeTextFile(NodePath.join(parent, "README.md"), "edited\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: parent, checkpointRef: turn });
+        const diff = yield* checkpointStore.diffCheckpoints({
+          cwd: parent,
+          fromCheckpointRef: baseline,
+          toCheckpointRef: turn,
+          ignoreWhitespace: false,
+        });
+        expect(diff).toContain("+edited");
+        expect(diff).not.toContain("deps/submodule");
+
+        expect(
+          yield* checkpointStore.restoreCheckpoint({ cwd: parent, checkpointRef: baseline }),
+        ).toBe(true);
+        expect(
+          (yield* fileSystem.readFileString(NodePath.join(parent, "README.md"))).replaceAll(
+            "\r\n",
+            "\n",
+          ),
+        ).toBe("# test\n");
+        expect(yield* fileSystem.readDirectory(submodule)).toEqual([]);
+
+        // A file written where the submodule was is content, not the old gitlink.
+        yield* fileSystem.remove(submodule, { recursive: true });
+        yield* writeTextFile(submodule, "replaced\n");
+        const replaced = yield* checkpointStore.captureCheckpointWithMetadata({
+          cwd: parent,
+          checkpointRef: yield* makeSidecarRef(parent, "empty-gitlink-replaced"),
+        });
+        expect(
+          yield* git(parent, [
+            `--git-dir=${sidecarGitDir}`,
+            "ls-tree",
+            replaced.treeOid,
+            "deps/submodule",
+          ]),
+        ).toMatch(/^100644 blob [a-f0-9]{40,64}\tdeps\/submodule$/u);
+      }),
+    );
+
     it.effect("serializes concurrent captures from linked worktrees within a bounded wait", () =>
       Effect.gen(function* () {
         const root = yield* makeTmpDir("checkpoint-sidecar-concurrent-worktrees-");

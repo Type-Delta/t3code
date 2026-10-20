@@ -269,7 +269,11 @@ export const make = Effect.gen(function* () {
       outputMode: options?.outputMode ?? "truncate",
     });
 
+  // `-C` keeps worktree-relative paths from gaining a prefix when the server's
+  // own working directory is inside the worktree.
   const sidecarGitArgs = (gitDir: string, worktree: string, args: ReadonlyArray<string>) => [
+    "-C",
+    worktree,
     `--git-dir=${gitDir}`,
     `--work-tree=${worktree}`,
     ...args,
@@ -767,7 +771,58 @@ export const make = Effect.gen(function* () {
                   }),
                 { concurrency: 16, discard: true },
               );
+              // An uninitialized submodule is an empty folder at a tracked gitlink.
+              // Git reports it unmodified but update-index cannot add a folder
+              // without its repository, so its recorded commit is staged instead.
+              // Entries read `<mode> <oid> <stage>\t<path>`.
+              const staged = yield* git(
+                "SidecarCheckpointRepository.capture.gitlinks",
+                input.cwd,
+                ["-C", identity.worktreeRoot, "ls-files", "--stage", "-z"],
+                { maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES },
+              );
+              const uninitializedGitlinks = new Map<string, string>();
+              yield* Effect.forEach(
+                staged.stdout.split("\0").filter((entry) => entry.startsWith("160000 ")),
+                (entry) => {
+                  const tab = entry.indexOf("\t");
+                  const oid = entry.slice(7, entry.indexOf(" ", 7));
+                  const relativePath = entry.slice(tab + 1);
+                  if (removedPaths.has(relativePath)) return Effect.void;
+                  const absolutePath = path.join(identity.worktreeRoot, relativePath);
+                  return Effect.tryPromise({
+                    // Only a real folder qualifies: a file or symlink in its place is
+                    // ordinary content that update-index captures itself.
+                    try: async () => {
+                      const info = await NodeFSP.lstat(absolutePath).catch(
+                        (error: NodeJS.ErrnoException) =>
+                          error.code === "ENOENT" || error.code === "ENOTDIR"
+                            ? undefined
+                            : Promise.reject(error),
+                      );
+                      if (info === undefined || !info.isDirectory()) return;
+                      await NodeFSP.lstat(path.join(absolutePath, ".git")).then(
+                        () => undefined,
+                        (error: NodeJS.ErrnoException) => {
+                          if (error.code !== "ENOENT") throw error;
+                          uninitializedGitlinks.set(relativePath, oid);
+                        },
+                      );
+                    },
+                    catch: () =>
+                      checkpointError(
+                        "SidecarCheckpointRepository.capture.gitlinks",
+                        input.cwd,
+                        "Unable to inspect a submodule path.",
+                      ),
+                  });
+                },
+                { concurrency: 16, discard: true },
+              );
               const paths = workspace.filter((relativePath) => !removedPaths.has(relativePath));
+              const addedPaths = paths.filter(
+                (relativePath) => !uninitializedGitlinks.has(relativePath),
+              );
               const indexKey = yield* persistedIndexKey(paths);
               const storedIndexKey = yield* fileSystem
                 .readFileString(indexKeyPath)
@@ -819,7 +874,7 @@ export const make = Effect.gen(function* () {
               }
               // update-index skips entries whose stat is unchanged, and unlike
               // `git add` it does not match every path against every pathspec.
-              if (paths.length > 0) {
+              if (addedPaths.length > 0) {
                 yield* git(
                   `SidecarCheckpointRepository.capture.add.${operationSuffix}`,
                   input.cwd,
@@ -830,7 +885,25 @@ export const make = Effect.gen(function* () {
                     "-z",
                     "--stdin",
                   ]),
-                  { env: environment, stdin: `${paths.join("\0")}\0` },
+                  { env: environment, stdin: `${addedPaths.join("\0")}\0` },
+                );
+              }
+              if (uninitializedGitlinks.size > 0) {
+                yield* git(
+                  `SidecarCheckpointRepository.capture.addGitlinks.${operationSuffix}`,
+                  input.cwd,
+                  sidecarGitArgs(gitDir, identity.worktreeRoot, [
+                    "update-index",
+                    "--add",
+                    "-z",
+                    "--index-info",
+                  ]),
+                  {
+                    env: environment,
+                    stdin: [...uninitializedGitlinks]
+                      .map(([relativePath, oid]) => `160000 ${oid}\t${relativePath}\0`)
+                      .join(""),
+                  },
                 );
               }
               const tree = yield* git(

@@ -84,6 +84,8 @@ A rollback leaves the forward checkpoints ready so the user can redo back to the
 
 Upstream #14892 marks a checkpoint `missing` when its workspace folder is ignored by the repository. Sidecar captures enforce the same rule in `SidecarCheckpointRepository.ts`: an ignored workspace is rejected only when Git lists no tracked or re-included files in it (`CheckpointStore.test.ts` covers rejection, a force-tracked file, and a negated rule).
 
+Sidecar capture runs Git with `-C` at the worktree root, so paths stay worktree-relative when the server's own working directory is inside the project, as when T3 Code develops itself. An uninitialized submodule, an empty folder at a tracked gitlink, is captured as the gitlink commit the project index records rather than failing the whole capture.
+
 The SQLite capture-job and navigation-journal tables from fork migrations `036`–`038` remain for schema compatibility. No server code reads them since the V2 cutover; V2 navigation uses upstream's checkpoint rollback.
 
 Fork migrations `036`–`038` establish durable checkpoint state. Fork `037` once declared `checkpoint_legacy_migrations` with a foreign key into `projection_turns`, which upstream migration `063_DropUnusedV1Projections` drops. Startup rebuilds that table without the key before upstream migrations run; fresh databases never had it. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
