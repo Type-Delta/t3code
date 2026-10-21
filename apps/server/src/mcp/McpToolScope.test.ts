@@ -13,6 +13,11 @@ it("defaults to project scope for repository projects and global scope without r
   expect(McpToolScope.effectiveMcpToolScope(null, false)).toBe("global");
 });
 
+it("uses the environment default when a project has no override", () => {
+  expect(McpToolScope.effectiveMcpToolScope(undefined, false, "project")).toBe("project");
+  expect(McpToolScope.effectiveMcpToolScope(undefined, true, "global")).toBe("global");
+});
+
 it.effect(
   "uses explicit scope overrides and falls back to project scope for missing projects",
   () =>

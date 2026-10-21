@@ -10,8 +10,14 @@ export type McpToolScope = "global" | "project";
 export function effectiveMcpToolScope(
   override: McpToolScope | null | undefined,
   hasRepositoryIdentity: boolean,
+  defaultScope: "automatic" | McpToolScope = "automatic",
 ): McpToolScope {
-  return override ?? (hasRepositoryIdentity ? "project" : "global");
+  if (override !== undefined && override !== null) return override;
+  return defaultScope === "automatic"
+    ? hasRepositoryIdentity
+      ? "project"
+      : "global"
+    : defaultScope;
 }
 
 export const resolveProjectMcpToolScope = Effect.fn("McpToolScope.resolveProject")(function* (
@@ -29,6 +35,7 @@ export const resolveProjectMcpToolScope = Effect.fn("McpToolScope.resolveProject
     onSome: (service) => service.getSettings.pipe(Effect.catch(() => Effect.succeed(undefined))),
   });
   const override = settings?.projectSettingsOverrides[projectId]?.mcpToolScope;
+  const defaultScope = settings?.defaultMcpToolScope ?? "automatic";
   if (override !== undefined && override !== null) return override;
 
   const shell = yield* Option.match(projects, {
@@ -42,5 +49,5 @@ export const resolveProjectMcpToolScope = Effect.fn("McpToolScope.resolveProject
   // A missing project must not grant environment-wide access.
   return shell === undefined
     ? "project"
-    : effectiveMcpToolScope(undefined, shell.repositoryIdentity !== null);
+    : effectiveMcpToolScope(override, shell.repositoryIdentity !== null, defaultScope);
 });

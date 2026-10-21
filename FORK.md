@@ -1108,3 +1108,11 @@ The merge reconciled the following textual conflict surfaces and made these sema
 - **Root helpers:** retained both sets of root helper configuration instead of treating either as a replacement.
 - **Cross-platform test coverage:** merged `/userdata` and Windows portability coverage so desktop, server, and shared tests use platform-correct paths and fixtures.
 - **QA reconciliation:** merged command, schema, and test-fixture changes and fixed Claude/Codex cleanup issues discovered during post-merge validation.
+
+### DL009 — Global default for agent tool access
+
+Agent MCP tool scope now has an environment-level default with Automatic, Project, and Global choices. Project settings display Default when no override is stored and resolve that choice through the global default; Automatic retains repository-aware behavior.
+
+**Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/server/src/mcp/McpToolScope.ts`, `apps/web/src/components/settings/IntegrationsSettings.tsx`, and `apps/web/src/components/settings/ProjectMcpToolScopeSettings.tsx`.
+
+**Recorded validation:** focused MCP scope tests, `vp check`, and `vp run typecheck`.

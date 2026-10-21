@@ -1101,6 +1101,51 @@ function AgentBrowserAccessSetting() {
   );
 }
 
+function DefaultAgentToolAccessSetting() {
+  const { scope } = useSettingsScope();
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  if (scope.kind === "project" || scope.kind === "checkout") return null;
+  const value = settings.defaultMcpToolScope;
+  const label = value === "automatic" ? "Automatic" : value === "project" ? "Project" : "Global";
+  return (
+    <SettingsRow
+      serverScoped
+      settingKeys={["defaultMcpToolScope"]}
+      title="Default agent tool access"
+      description="Choose the default MCP tool scope for new projects. Projects can override it."
+      resetAction={
+        value !== DEFAULT_SERVER_SETTINGS.defaultMcpToolScope ? (
+          <SettingResetButton
+            label="default agent tool access"
+            onClick={() =>
+              updateSettings({ defaultMcpToolScope: DEFAULT_SERVER_SETTINGS.defaultMcpToolScope })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={value}
+          onValueChange={(next) => {
+            if (next === "automatic" || next === "project" || next === "global")
+              updateSettings({ defaultMcpToolScope: next });
+          }}
+        >
+          <SelectTrigger size="sm" aria-label="Default agent tool access">
+            <SelectValue>{label}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            <SelectItem value="automatic">Automatic</SelectItem>
+            <SelectItem value="project">Project</SelectItem>
+            <SelectItem value="global">Global</SelectItem>
+          </SelectPopup>
+        </Select>
+      }
+    />
+  );
+}
+
 function BrowserAutoShowFloatingPreviewSetting({ disabled }: { readonly disabled: boolean }) {
   const autoShow = useClientSettings((settings) => settings.browserAutoShowFloatingPreview);
   const updateSettings = useUpdatePrimarySettings();
@@ -1616,6 +1661,7 @@ export function IntegrationsSettingsPanel() {
   return (
     <SettingsPageContainer>
       <SettingsSection id="browser" title="Browser">
+        <DefaultAgentToolAccessSetting />
         <AgentBrowserAccessSetting />
         {previewDefaultsDisabled ? (
           <SettingsUnavailableGroup message="Only available in the desktop app.">

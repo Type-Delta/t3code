@@ -52,10 +52,14 @@ export function ProjectMcpToolScopeSettings({
   const choices = rows.map(({ member, settings }) => projectScopeOverride(settings, member.id));
   const choice =
     choices.length > 0 && choices.every((value) => value === choices[0]) ? choices[0]! : null;
-  const defaults = rows.map(({ member }) => defaultScopeForProject(member.repositoryIdentity));
   const effectiveScopes = rows.map(({ member, settings }) => {
     const override = projectScopeOverride(settings, member.id);
-    return override === "automatic" ? defaultScopeForProject(member.repositoryIdentity) : override;
+    const defaultScope = settings.defaultMcpToolScope ?? "automatic";
+    return override === "automatic"
+      ? defaultScope === "automatic"
+        ? defaultScopeForProject(member.repositoryIdentity)
+        : defaultScope
+      : override;
   });
   const effectiveScope =
     effectiveScopes.length > 0 && effectiveScopes.every((value) => value === effectiveScopes[0])
@@ -103,10 +107,15 @@ export function ProjectMcpToolScopeSettings({
     setSaving(false);
   };
 
+  const globalDefaults = rows.map(({ settings }) => settings.defaultMcpToolScope ?? "automatic");
   const automaticDescription =
-    defaults.length > 0 && defaults.every((value) => value === defaults[0])
-      ? `Automatic · ${scopeLabel(defaults[0]!)} for this project`
-      : "Automatic · based on whether this project is version-controlled";
+    globalDefaults.length > 0 && globalDefaults.every((value) => value === globalDefaults[0])
+      ? `Default · ${
+          globalDefaults[0] === "automatic"
+            ? "Automatic"
+            : scopeLabel(globalDefaults[0] as McpToolScope)
+        }`
+      : "Default · based on the global setting";
 
   return (
     <SettingsRow
@@ -144,14 +153,14 @@ export function ProjectMcpToolScopeSettings({
           >
             <SelectValue>
               {(value: string | null) => {
-                if (value === "automatic") return "Automatic";
+                if (value === "automatic") return "Default";
                 if (value === "project" || value === "global") return scopeLabel(value);
                 return rows.length === 0 ? "Unavailable" : "Mixed";
               }}
             </SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
-            <SelectItem value="automatic">Automatic</SelectItem>
+            <SelectItem value="automatic">Default</SelectItem>
             <SelectItem value="project">Project</SelectItem>
             <SelectItem value="global">Global</SelectItem>
           </SelectPopup>
