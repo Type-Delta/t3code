@@ -461,6 +461,7 @@ import type { ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { ThreadStatusLine } from "./chat/ThreadStatusLine";
 import { formatRelativeTimeLabel, formatRelativeTimeUntilLabel } from "../timestampFormat";
 import { ComposerSurface } from "./chat/ComposerSurface";
+import { readAutoRetryDisabledMetadata } from "./chat/autoRetryDisabledBanner";
 import { resolveThreadSyncPhase } from "../threadSync";
 import type { ThreadSyncPhase } from "../threadSync";
 import {
@@ -1663,6 +1664,8 @@ export default function ChatView(props: ChatViewProps) {
     widthStorageKey: `t3code:preview-panel-width:${activeThreadKey}`,
   });
   const activeThreadShell = useQuietThreadShell(isServerThread ? activeThreadRef : null);
+  const autoRetryDisabledMetadata = readAutoRetryDisabledMetadata(activeThreadShell);
+  const [resumingAutoRetry, setResumingAutoRetry] = useState(false);
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -2316,6 +2319,41 @@ export default function ChatView(props: ChatViewProps) {
   });
   const systemComposerBannerItems = (() => {
     const items: ComposerBannerStackItem[] = [];
+    if (autoRetryDisabledMetadata !== null) {
+      items.push({
+        id: "auto-retry-disabled",
+        variant: "warning",
+        icon: <AlarmClockIcon aria-hidden="true" />,
+        title: "Auto retry paused for this thread",
+        description:
+          autoRetryDisabledMetadata.reason === null
+            ? "Automatic retries are temporarily paused for this thread."
+            : `${autoRetryDisabledMetadata.reason} Automatic retries are temporarily paused for this thread.`,
+        actions: (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={resumingAutoRetry || activeThreadRef === null}
+            onClick={() => {
+              if (activeThreadRef === null) return;
+              setResumingAutoRetry(true);
+              void updateThreadMetadata({
+                environmentId: activeThreadRef.environmentId,
+                input: {
+                  threadId: activeThreadRef.threadId,
+                  autoRetryDisabledUntil: null,
+                  autoRetryDisabledReason: null,
+                  autoRetryLastAttemptKey: null,
+                  autoRetryFailureTimestamps: [],
+                },
+              }).finally(() => setResumingAutoRetry(false));
+            }}
+          >
+            {resumingAutoRetry ? "Resuming..." : "Resume auto retry"}
+          </Button>
+        ),
+      });
+    }
     const updateRunning = serverUpdateState.status === "running";
     const unavailableConnection = activeEnvironmentUnavailableState?.connection ?? null;
     const disconnectAction =

@@ -130,6 +130,10 @@ export interface UpdateThreadMetadataInput extends ThreadCommandInput {
   readonly regenerateTitle?: boolean;
   readonly linkedPullRequest?: ThreadLinkedPullRequest | null;
   readonly expectedEmpty?: boolean;
+  readonly autoRetryDisabledUntil?: import("@t3tools/contracts").OrchestrationV2AppThread["autoRetryDisabledUntil"];
+  readonly autoRetryDisabledReason?: import("@t3tools/contracts").OrchestrationV2AppThread["autoRetryDisabledReason"];
+  readonly autoRetryLastAttemptKey?: import("@t3tools/contracts").OrchestrationV2AppThread["autoRetryLastAttemptKey"];
+  readonly autoRetryFailureTimestamps?: import("@t3tools/contracts").OrchestrationV2AppThread["autoRetryFailureTimestamps"];
 }
 
 export interface SetThreadRuntimeModeInput extends ThreadCommandInput {
@@ -598,7 +602,11 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
       input.worktreePath !== undefined ||
       input.regenerateTitle !== undefined ||
       input.linkedPullRequest !== undefined ||
-      input.limitRecovery !== undefined
+      input.limitRecovery !== undefined ||
+      input.autoRetryDisabledUntil !== undefined ||
+      input.autoRetryDisabledReason !== undefined ||
+      input.autoRetryLastAttemptKey !== undefined ||
+      input.autoRetryFailureTimestamps !== undefined
     ) {
       result = yield* dispatch({
         type: "thread.metadata.update",
@@ -613,6 +621,18 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
         ...(input.linkedPullRequest === undefined
           ? {}
           : { linkedPullRequest: input.linkedPullRequest }),
+        ...(input.autoRetryDisabledUntil === undefined
+          ? {}
+          : { autoRetryDisabledUntil: input.autoRetryDisabledUntil }),
+        ...(input.autoRetryDisabledReason === undefined
+          ? {}
+          : { autoRetryDisabledReason: input.autoRetryDisabledReason }),
+        ...(input.autoRetryLastAttemptKey === undefined
+          ? {}
+          : { autoRetryLastAttemptKey: input.autoRetryLastAttemptKey }),
+        ...(input.autoRetryFailureTimestamps === undefined
+          ? {}
+          : { autoRetryFailureTimestamps: input.autoRetryFailureTimestamps }),
       });
     }
     if (input.modelSelection !== undefined) {

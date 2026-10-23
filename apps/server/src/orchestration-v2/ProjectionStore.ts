@@ -1713,6 +1713,10 @@ export function threadShellFromProjection(
     lastVisitedAt: projection.thread.lastVisitedAt,
     titleRegeneration: projection.thread.titleRegeneration ?? null,
     limitRecovery: projection.thread.limitRecovery ?? null,
+    autoRetryDisabledUntil: projection.thread.autoRetryDisabledUntil ?? null,
+    autoRetryDisabledReason: projection.thread.autoRetryDisabledReason ?? null,
+    autoRetryLastAttemptKey: projection.thread.autoRetryLastAttemptKey ?? null,
+    autoRetryFailureTimestamps: projection.thread.autoRetryFailureTimestamps ?? [],
     deletedAt: projection.thread.deletedAt,
   };
 }

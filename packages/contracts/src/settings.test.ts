@@ -1398,3 +1398,31 @@ describe("server model preferences", () => {
     });
   });
 });
+
+describe("automatic retry settings", () => {
+  it("defaults to disabled with no triggers", () => {
+    expect(decodeServerSettings({}).autoRetry).toEqual({ enabled: false, triggers: [] });
+  });
+
+  it("round trips nested trigger conditions", () => {
+    const autoRetry = {
+      enabled: true,
+      triggers: [
+        {
+          id: "timeout",
+          name: "Timeouts",
+          enabled: true,
+          message: "Continue where you left off",
+          condition: {
+            kind: "and",
+            children: [
+              { kind: "error_message", value: "timeout" },
+              { kind: "not", child: { kind: "model", value: "legacy" } },
+            ],
+          },
+        },
+      ],
+    } as const;
+    expect(encodeServerSettings(decodeServerSettings({ autoRetry }))).toMatchObject({ autoRetry });
+  });
+});

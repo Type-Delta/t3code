@@ -768,6 +768,26 @@ Git driver regression test.
 
 **Last updated:** 2026-10-16
 
+### DL047 — Configurable automatic retry for matched failures
+
+The fork adds an opt-in server setting for automatic retries. Users can define enabled or disabled
+triggers with nested all/any/not conditions over error-message substrings, backend type, and model
+substrings, plus a message to send for a matched failure. Failed workspace preparation retries
+through the existing preparation path; failures after provider start send the configured message.
+Repeated matched failures are bounded per thread and pause automatic retry for ten minutes, with a
+composer notice while the pause is active. The notice can clear the pause and reset that thread's
+retry guard immediately.
+
+**Implementation evidence:** `packages/contracts/src/settings.ts`,
+`apps/server/src/orchestration-v2/{AutoRetry,AutoRetryWorker}.ts`,
+`apps/web/src/components/settings/AutoRetrySettings.tsx`, and
+`apps/web/src/components/chat/autoRetryDisabledBanner.ts`.
+
+**Recorded validation:** focused matcher, settings, and composer-banner tests; server and web
+typechecks; formatting and lint checks.
+
+**Last updated:** 2026-10-23
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.

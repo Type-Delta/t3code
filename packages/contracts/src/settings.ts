@@ -1139,7 +1139,60 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+export const AutoRetryPredicateKind = Schema.Literals(["error_message", "backend", "model"]);
+export type AutoRetryPredicateKind = typeof AutoRetryPredicateKind.Type;
+
+export interface AutoRetryCondition {
+  readonly kind: AutoRetryPredicateKind;
+  readonly value: string;
+}
+
+export interface AutoRetryGroupCondition {
+  readonly kind: "and" | "or";
+  readonly children: ReadonlyArray<AutoRetryConditionNode>;
+}
+
+export interface AutoRetryNotCondition {
+  readonly kind: "not";
+  readonly child: AutoRetryConditionNode;
+}
+
+export type AutoRetryConditionNode =
+  | AutoRetryCondition
+  | AutoRetryGroupCondition
+  | AutoRetryNotCondition;
+
+const AutoRetryConditionNodeRef = Schema.suspend(
+  (): Schema.Codec<AutoRetryConditionNode> => AutoRetryConditionNode,
+);
+export const AutoRetryConditionNode = Schema.Union([
+  Schema.Struct({ kind: AutoRetryPredicateKind, value: TrimmedString }),
+  Schema.Struct({
+    kind: Schema.Literals(["and", "or"]),
+    children: Schema.Array(AutoRetryConditionNodeRef),
+  }),
+  Schema.Struct({ kind: Schema.Literal("not"), child: AutoRetryConditionNodeRef }),
+]);
+
+export const AutoRetryTrigger = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  name: TrimmedString,
+  enabled: Schema.Boolean,
+  message: TrimmedString,
+  condition: AutoRetryConditionNode,
+});
+export type AutoRetryTrigger = typeof AutoRetryTrigger.Type;
+
+export const AutoRetrySettings = Schema.Struct({
+  enabled: Schema.Boolean,
+  triggers: Schema.Array(AutoRetryTrigger),
+});
+export type AutoRetrySettings = typeof AutoRetrySettings.Type;
+
 export const ServerSettings = Schema.Struct({
+  autoRetry: AutoRetrySettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ enabled: false, triggers: [] })),
+  ),
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1496,6 +1549,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  autoRetry: Schema.optionalKey(AutoRetrySettings),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),

@@ -34,6 +34,7 @@ import {
   ScheduledTaskId,
   ThreadId,
   TrimmedNonEmptyString,
+  TrimmedString,
   TurnItemId,
 } from "./baseSchemas.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
@@ -417,6 +418,10 @@ export const OrchestrationV2AppThread = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
+  autoRetryDisabledUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  autoRetryDisabledReason: Schema.optional(Schema.NullOr(TrimmedString)),
+  autoRetryLastAttemptKey: Schema.optional(Schema.NullOr(TrimmedString)),
+  autoRetryFailureTimestamps: Schema.optional(Schema.Array(Schema.DateTimeUtc)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -1910,6 +1915,10 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
+  autoRetryDisabledUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  autoRetryDisabledReason: Schema.optional(Schema.NullOr(TrimmedString)),
+  autoRetryLastAttemptKey: Schema.optional(Schema.NullOr(TrimmedString)),
+  autoRetryFailureTimestamps: Schema.optional(Schema.Array(Schema.DateTimeUtc)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -1996,6 +2005,8 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  autoRetryDisabledUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  autoRetryFailureTimestamps: Schema.optional(Schema.Array(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -2425,6 +2436,8 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  autoRetryDisabledUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  autoRetryFailureTimestamps: Schema.optional(Schema.Array(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   titleRegeneration: Schema.optional(
     Schema.NullOr(
@@ -2746,6 +2759,10 @@ export const OrchestrationV2Command = Schema.Union([
     /** Reject unless no message or run has landed on this thread. */
     expectedEmpty: Schema.optional(Schema.Boolean),
     limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecoveryUpdate)),
+    autoRetryDisabledUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+    autoRetryDisabledReason: Schema.optional(Schema.NullOr(TrimmedString)),
+    autoRetryLastAttemptKey: Schema.optional(Schema.NullOr(TrimmedString)),
+    autoRetryFailureTimestamps: Schema.optional(Schema.Array(Schema.DateTimeUtc)),
     /** Link (object) or unlink (null) a pull request (#8160); absent leaves it unchanged. */
     linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   }),

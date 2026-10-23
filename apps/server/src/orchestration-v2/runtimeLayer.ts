@@ -1,4 +1,5 @@
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
+import * as AutoRetryWorker from "./AutoRetryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -369,6 +370,15 @@ export const layerProduction = Layer.mergeAll(
   layerSecretRequestsProvided,
   UsageLimitRecoveryWorker.layer.pipe(
     Layer.provide(Layer.mergeAll(ProjectionStore.layer, layerThreadManagementProvided)),
+  ),
+  AutoRetryWorker.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        ProjectionStore.layer,
+        layerThreadManagementProvided,
+        layerThreadLaunchProvided,
+      ),
+    ),
   ),
   layerProviderContinuationWorkerProvided,
   layerAgentSessionImporterProvided,
