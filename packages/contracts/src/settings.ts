@@ -1549,7 +1549,12 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
-  autoRetry: Schema.optionalKey(AutoRetrySettings),
+  autoRetry: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      triggers: Schema.optionalKey(Schema.Array(AutoRetryTrigger)),
+    }),
+  ),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),

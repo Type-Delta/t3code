@@ -52,6 +52,17 @@ describe("fallbackTextGenerationModelSelection", () => {
 });
 
 describe("serverSettings helpers", () => {
+  it("merges partial automatic retry patches", () => {
+    const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      autoRetry: { enabled: true },
+    });
+    expect(enabled.autoRetry).toEqual({ enabled: true, triggers: [] });
+    expect(applyServerSettingsPatch(enabled, { autoRetry: { triggers: [] } }).autoRetry).toEqual({
+      enabled: true,
+      triggers: [],
+    });
+  });
+
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },

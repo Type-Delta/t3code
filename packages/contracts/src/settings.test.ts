@@ -1425,4 +1425,11 @@ describe("automatic retry settings", () => {
     } as const;
     expect(encodeServerSettings(decodeServerSettings({ autoRetry }))).toMatchObject({ autoRetry });
   });
+
+  it.each([{ autoRetry: { enabled: true } }, { autoRetry: { triggers: [] } }])(
+    "accepts partial setting patches %#",
+    (patch) => {
+      expect(decodeServerSettingsPatch(patch)).toEqual(patch);
+    },
+  );
 });

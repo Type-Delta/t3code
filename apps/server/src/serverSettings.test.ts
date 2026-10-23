@@ -102,6 +102,26 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("persists partial automatic retry updates", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+
+      yield* service.updateSettings({ autoRetry: { enabled: true } });
+      const enabled = JSON.parse(yield* fs.readFileString(config.settingsPath)) as {
+        readonly autoRetry?: { readonly enabled?: boolean; readonly triggers?: unknown };
+      };
+      assert.deepEqual(enabled.autoRetry, { enabled: true, triggers: [] });
+
+      yield* service.updateSettings({ autoRetry: { triggers: [] } });
+      const triggersOnly = JSON.parse(yield* fs.readFileString(config.settingsPath)) as {
+        readonly autoRetry?: { readonly enabled?: boolean; readonly triggers?: unknown };
+      };
+      assert.deepEqual(triggersOnly.autoRetry, { enabled: true, triggers: [] });
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect.each([
     [{}, true],
     [{ autoResumeOnUsageLimit: true }, true],

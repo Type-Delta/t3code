@@ -381,6 +381,7 @@ export function applyServerSettingsPatch(
     sourceControlHosts: sourceControlHostsPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
     usageModelAliases: usageModelAliasesPatch,
+    autoRetry: autoRetryPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
@@ -472,6 +473,14 @@ export function applyServerSettingsPatch(
   const next = deepMerge(current, patchForMerge);
   const nextWithReplacementsBase = {
     ...next,
+    ...(autoRetryPatch === undefined
+      ? {}
+      : {
+          autoRetry: {
+            enabled: autoRetryPatch.enabled ?? current.autoRetry?.enabled ?? false,
+            triggers: autoRetryPatch.triggers ?? current.autoRetry?.triggers ?? [],
+          },
+        }),
     favorites,
     providerModelPreferences: nextModelPreferences,
     ...(worktreeCleanupPatch === undefined
