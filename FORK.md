@@ -60,6 +60,10 @@ Upstream owns the pinned Electron debugger reference and bounded screenshot retr
 
 ### DL005 — Windows portability in CLI fixtures, Git, and tests
 
+The server pins `node-pty` to the version targeted by its Windows terminal patch. Installer and
+CLI archive staging resolve dependencies without the repository lockfile; a version range could
+select a newer beta and fail installation because the version-specific patch is unused.
+
 The shared fixture launcher dispatches by shebang: shell fixtures use Git for Windows `sh.exe` and Node fixtures use the current Node executable. These dispatch rules and the remaining platform-specific test expectations compose with upstream's broader Windows fixture portability fixes.
 
 Git fixtures set repository-local `core.autocrlf=false` when exact LF content is part of an assertion, preserving the tested reset and restore behavior across Windows installations.
