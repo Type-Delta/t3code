@@ -1088,6 +1088,10 @@ export default function ChatView(props: ChatViewProps) {
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const resumeAutoRetry = useAtomCommand(threadEnvironment.resumeAutoRetry, "resume auto retry");
+  const canResumeAutoRetry = useAtomValue(
+    threadEnvironment.resumeAutoRetry.permissionAtom(environmentId),
+  );
   const canWriteSourceControl = useEnvironmentScope(environmentId, AuthSourceControlWriteScope);
   const switchGitRef = useAtomCommand(vcsEnvironment.switchRef, { reportFailure: false });
   const setThreadRuntimeMode = useOrchestrationCommand(threadEnvironment.setRuntimeMode, {
@@ -2333,18 +2337,16 @@ export default function ChatView(props: ChatViewProps) {
           <Button
             size="xs"
             variant="ghost"
-            disabled={resumingAutoRetry || activeThreadRef === null}
+            disabled={!canResumeAutoRetry || resumingAutoRetry || activeThreadRef === null}
             onClick={() => {
               if (activeThreadRef === null) return;
               setResumingAutoRetry(true);
-              void updateThreadMetadata({
+              void resumeAutoRetry({
                 environmentId: activeThreadRef.environmentId,
                 input: {
+                  type: "auto-retry.resume",
+                  commandId: CommandId.make(randomUUID()),
                   threadId: activeThreadRef.threadId,
-                  autoRetryDisabledUntil: null,
-                  autoRetryDisabledReason: null,
-                  autoRetryLastAttemptKey: null,
-                  autoRetryFailureTimestamps: [],
                 },
               }).finally(() => setResumingAutoRetry(false));
             }}

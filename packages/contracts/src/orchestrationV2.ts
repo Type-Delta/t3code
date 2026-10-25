@@ -564,6 +564,13 @@ export const OrchestrationV2Run = Schema.Struct({
   completedAt: Schema.NullOr(Schema.DateTimeUtc),
   checkpointId: Schema.NullOr(CheckpointId),
   contextHandoffId: Schema.NullOr(ContextHandoffId),
+  autoRetry: Schema.optional(
+    Schema.Struct({
+      state: Schema.Literals(["pending", "continued", "stopped"]),
+      message: Schema.String,
+      failureAt: Schema.DateTimeUtc,
+    }),
+  ),
   restartContinuationOfRunId: Schema.optional(RunId),
   delegatedTaskId: Schema.optional(NodeId),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
@@ -2028,6 +2035,13 @@ export const OrchestrationV2RunJson = OrchestrationV2Run.mapFields((fields) => (
   startedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   completedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   workStartedAt: Schema.optional(Schema.DateTimeUtcFromString),
+  autoRetry: Schema.optional(
+    Schema.Struct({
+      state: Schema.Literals(["pending", "continued", "stopped"]),
+      message: Schema.String,
+      failureAt: Schema.DateTimeUtcFromString,
+    }),
+  ),
 }));
 export type OrchestrationV2RunJson = typeof OrchestrationV2RunJson.Type;
 
@@ -2922,6 +2936,19 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     runId: RunId,
     failure: OrchestrationV2ProviderFailure,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("auto-retry.resume"),
+    commandId: CommandId,
+    threadId: ThreadId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("auto-retry.resolve"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    failureAt: Schema.DateTimeUtc,
+    stop: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("prepared-run.retry"),

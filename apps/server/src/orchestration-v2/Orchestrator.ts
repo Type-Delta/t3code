@@ -62,6 +62,7 @@ import {
   ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
+import { matchingAutoRetryTrigger } from "./AutoRetry.ts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
   derivePendingBackgroundWork,
@@ -469,6 +470,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "prepared-run.release":
     case "prepared-run.progress":
     case "prepared-run.fail":
+    case "auto-retry.resume":
+    case "auto-retry.resolve":
     case "prepared-run.retry":
     case "subagent.stop":
     case "run.interrupt":
@@ -4731,7 +4734,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const source = projection.runs.find((run) => run.id === command.restartContinuationOfRunId);
       if (
         !source ||
-        !isRestartContinuationSource(source, projection.providerTurns) ||
+        (!isRestartContinuationSource(source, projection.providerTurns) &&
+          source.autoRetry?.state !== "continued") ||
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
         projection.thread.providerInstanceId !== source.providerInstanceId ||
@@ -8277,7 +8281,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         candidate.input === WORKSPACE_PREPARATION_INPUT,
     );
     if (
-      run?.status !== (command.type === "prepared-run.retry" ? "failed" : "preparing") ||
+      run === undefined ||
+      (command.type === "prepared-run.retry"
+        ? run?.status !== "failed" &&
+          !(run?.status === "waiting" && run.autoRetry?.state === "pending")
+        : run?.status !== "preparing") ||
       attempt === undefined ||
       rootNode === undefined ||
       providerThread === undefined ||
@@ -8550,6 +8558,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     const now = yield* DateTime.now;
+    const retryAttempt: OrchestrationV2RunAttempt = {
+      ...state.attempt,
+      id: idAllocator.derive.runAttempt({
+        runId: state.run.id,
+        attemptOrdinal: state.attempt.attemptOrdinal + 1,
+      }),
+      attemptOrdinal: state.attempt.attemptOrdinal + 1,
+      reason: "retry",
+      status: "pending",
+      startedAt: null,
+      completedAt: null,
+    };
     const emitEvent = emit(events, command);
     const scope = {
       threadId: command.threadId,
@@ -8576,8 +8596,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
     yield* emitEvent({
       ...scope,
-      type: "run-attempt.updated",
-      payload: { ...state.attempt, status: "pending", completedAt: null },
+      type: "run-attempt.created",
+      payload: retryAttempt,
     });
     yield* emitEvent({
       ...scope,
@@ -8587,7 +8607,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* emitEvent({
       ...scope,
       type: "run.updated",
-      payload: { ...state.run, status: "preparing", completedAt: null },
+      payload: {
+        ...state.run,
+        autoRetry: undefined,
+        activeAttemptId: retryAttempt.id,
+        status: "preparing",
+        completedAt: null,
+      },
     });
     // Messages held when this preparation failed follow the run again. A hold
     // from a later run (a stop, say) is not this failure's to release.
@@ -8603,6 +8629,127 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: { ...run, queueHeld: false },
       });
     }
+  });
+
+  const dispatchAutoRetryResolve = Effect.fn("Orchestrator.dispatchAutoRetryResolve")(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "auto-retry.resolve" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+  ) {
+    const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    const source = projection.runs.find((run) => run.id === command.runId);
+    const retry = source?.autoRetry;
+    const now = yield* DateTime.now;
+    const emitEvent = emit(events, command);
+    // Even a replayed or cancelled retry needs a receipt so it cannot restart work later.
+    if (
+      source === undefined ||
+      source.status !== "waiting" ||
+      retry?.state !== "pending" ||
+      !DateTime.Equivalence(retry.failureAt, command.failureAt)
+    ) {
+      yield* emitEvent({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        occurredAt: now,
+        payload: projection.thread,
+      });
+      return;
+    }
+    const settings = yield* serverSettings.getSettings.pipe(mapDispatchError(command));
+    const message = projection.messages.find((row) => row.id === source.userMessageId);
+    const failure = latestRootProviderFailure(
+      { ...source, status: "failed" },
+      projection.turnItems,
+    );
+    const currentTrigger = matchingAutoRetryTrigger(settings.autoRetry, {
+      errorMessage: failure?.message ?? "",
+      backend:
+        settings.providerInstances[source.providerInstanceId]?.driver ?? source.providerInstanceId,
+      model: source.modelSelection.model,
+    });
+    const machineInstance = settings.providerInstances[source.providerInstanceId];
+    const projectEnabled =
+      settings.projectSettingsOverrides[projection.thread.projectId]?.providerInstances?.[
+        source.providerInstanceId
+      ]?.enabled;
+    const blocked =
+      command.stop === true ||
+      currentTrigger === null ||
+      message === undefined ||
+      (projectEnabled === undefined
+        ? machineInstance !== undefined && !resolveProviderInstanceEnabled(machineInstance)
+        : !projectEnabled) ||
+      projection.thread.archivedAt !== null ||
+      projection.thread.deletedAt !== null ||
+      projection.thread.settledOverride === "settled" ||
+      projection.thread.providerInstanceId !== source.providerInstanceId ||
+      projection.runs.some((run) => run.id !== source.id && isBlockingRun(run)) ||
+      (yield* stopReachedRun(command, command.threadId, source.id));
+    if (blocked) {
+      yield* emitEvent({
+        type: "run.updated",
+        threadId: command.threadId,
+        runId: source.id,
+        occurredAt: now,
+        payload: {
+          ...source,
+          status: "failed",
+          completedAt: retry.failureAt,
+          autoRetry: { ...retry, state: "stopped" },
+        },
+      });
+      return;
+    }
+    if (
+      source.workspacePreparation !== undefined &&
+      source.startedAt === null &&
+      failure?.code === ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE
+    ) {
+      yield* dispatchPreparedRunRetry({ ...command, type: "prepared-run.retry" }, events);
+      return;
+    }
+    const taskId =
+      source.delegatedTaskId ??
+      (projection.thread.lineage.relationshipToParent === "subagent" &&
+      projection.thread.forkedFrom?.type === "node"
+        ? projection.thread.forkedFrom.nodeId
+        : undefined);
+    yield* emitEvent({
+      type: "run.updated",
+      threadId: command.threadId,
+      runId: source.id,
+      occurredAt: now,
+      payload: {
+        ...source,
+        status: "interrupted",
+        completedAt: retry.failureAt,
+        autoRetry: { ...retry, state: "continued" },
+        ...(taskId === undefined ? {} : { delegatedTaskId: taskId }),
+      },
+    });
+    const resend =
+      source.startedAt === null ||
+      failure?.code === "provider_turn_start_failed" ||
+      failure?.code === "run_preparation_failed";
+    yield* dispatchMessage(
+      {
+        type: "message.dispatch",
+        commandId: command.commandId,
+        threadId: command.threadId,
+        messageId: MessageId.make(`message:${command.commandId}`),
+        text: resend ? message!.text : retry.message,
+        attachments: resend ? message!.attachments : [],
+        ...(resend && message!.context !== undefined ? { context: message!.context } : {}),
+        modelSelection: source.modelSelection,
+        restartContinuationOfRunId: source.id,
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "agent",
+        creationSource: "server",
+      },
+      events,
+      effects,
+    );
   });
 
   const settleBackgroundWork = Effect.fn("Orchestrator.settleBackgroundWork")(function* (input: {
@@ -9539,6 +9686,36 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         });
       }
+    }
+
+    if (run.autoRetry?.state === "pending") {
+      yield* emitEvent({
+        type: "turn-item.updated",
+        threadId: command.threadId,
+        runId: run.id,
+        occurredAt: now,
+        payload: interruptRequestItem,
+      });
+      yield* emitEvent({
+        type: "run.updated",
+        threadId: command.threadId,
+        runId: run.id,
+        occurredAt: now,
+        payload: {
+          ...run,
+          status: "interrupted",
+          completedAt: now,
+          autoRetry: { ...run.autoRetry, state: "stopped" },
+        },
+      });
+      yield* stopRemainingWork();
+      return {
+        effectTypes: ["auto-retry.continue"],
+        reason: "Automatic retry was stopped.",
+      } satisfies {
+        readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
+        readonly reason: string;
+      };
     }
 
     if (
@@ -11396,6 +11573,41 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "prepared-run.fail":
         yield* dispatchPreparedRunFail(command, events);
+        break;
+      case "auto-retry.resume": {
+        const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+        const now = yield* DateTime.now;
+        const emitEvent = emit(events, command);
+        yield* emitEvent({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          occurredAt: now,
+          payload: {
+            ...projection.thread,
+            autoRetryDisabledUntil: null,
+            autoRetryDisabledReason: null,
+            autoRetryLastAttemptKey: null,
+            autoRetryFailureTimestamps: [],
+          },
+        });
+        const run = latestExecutedRun(projection.runs);
+        if (
+          run?.status === "failed" &&
+          !(yield* stopReachedRun(command, command.threadId, run.id))
+        ) {
+          const { autoRetry: _autoRetry, ...retryable } = run;
+          yield* emitEvent({
+            type: "run.updated",
+            threadId: command.threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...retryable, completedAt: now },
+          });
+        }
+        break;
+      }
+      case "auto-retry.resolve":
+        yield* dispatchAutoRetryResolve(command, events, effects);
         break;
       case "prepared-run.retry":
         yield* dispatchPreparedRunRetry(command, events);

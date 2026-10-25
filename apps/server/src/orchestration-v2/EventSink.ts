@@ -1,5 +1,6 @@
 import {
   CommandId,
+  EventId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
@@ -12,6 +13,7 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import { latestRootProviderFailure } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -26,6 +28,9 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
+
+import * as ServerSettings from "../serverSettings.ts";
+import { matchingAutoRetryTrigger, recordAutoRetryFailure } from "./AutoRetry.ts";
 
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -228,6 +233,7 @@ const layerBase: Layer.Layer<
 > = Layer.effect(
   EventSinkV2,
   Effect.gen(function* () {
+    const settingsService = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
     const sql = yield* SqlClient.SqlClient;
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
@@ -252,7 +258,20 @@ const layerBase: Layer.Layer<
         }
       });
     const publishStoredEvents = (events: ReadonlyArray<OrchestrationV2StoredEvent>) =>
-      eventStore.publishCommitted(events).pipe(Effect.andThen(publishLiveEvents(events)));
+      eventStore
+        .publishCommitted(events)
+        .pipe(
+          Effect.andThen(
+            events.some(
+              (stored) =>
+                stored.event.type === "run.updated" &&
+                stored.event.payload.autoRetry?.state === "pending",
+            )
+              ? effectOutbox.notifyAvailable()
+              : Effect.void,
+          ),
+          Effect.andThen(publishLiveEvents(events)),
+        );
 
     // Transactions commit one at a time, but each writer publishes after its
     // commit. If a writer is descheduled in between, a later commit reaches
@@ -329,7 +348,147 @@ const layerBase: Layer.Layer<
         });
       });
 
-    const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
+    // Recovery is decided in the terminal write transaction, before any waiter can see failure.
+    const decideAutoRetry = Effect.fn("EventSink.decideAutoRetry")(function* (
+      input: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) {
+      if (Option.isNone(settingsService)) return input;
+      const events = [...input];
+      for (let index = 0; index < events.length; index++) {
+        const event = events[index];
+        if (
+          event?.type !== "run.updated" ||
+          event.payload.status !== "failed" ||
+          event.payload.autoRetry !== undefined
+        )
+          continue;
+        const run = event.payload;
+        const current = yield* projectionStore.getThreadRecords(
+          event.threadId,
+          ["runs", "turnItems", "providerSessions"],
+          { turnItemTypes: ["error"], turnItemRunId: run.id },
+        );
+        const previous = current.runs.find((row) => row.id === run.id);
+        const resumed = input.some(
+          (row) =>
+            row.threadId === event.threadId &&
+            row.type === "thread.metadata-updated" &&
+            row.payload.autoRetryLastAttemptKey === null &&
+            row.payload.autoRetryDisabledUntil === null &&
+            row.payload.autoRetryFailureTimestamps?.length === 0,
+        );
+        if (
+          previous?.autoRetry !== undefined &&
+          !resumed &&
+          previous.activeAttemptId === run.activeAttemptId
+        ) {
+          events[index] = { ...event, payload: previous };
+          continue;
+        }
+        const thread =
+          events
+            .flatMap((row) =>
+              row.threadId === event.threadId &&
+              (row.type === "thread.metadata-updated" || row.type === "thread.created")
+                ? [row.payload]
+                : [],
+            )
+            .at(-1) ?? current.thread;
+        const failure = latestRootProviderFailure(run, [
+          ...current.turnItems,
+          ...events.flatMap((row) => (row.type === "turn-item.updated" ? [row.payload] : [])),
+        ]);
+        if (
+          failure === null ||
+          thread.archivedAt !== null ||
+          thread.deletedAt !== null ||
+          thread.settledOverride === "settled"
+        )
+          continue;
+        const settings = yield* settingsService.value.getSettings;
+        const trigger = matchingAutoRetryTrigger(settings.autoRetry, {
+          errorMessage: failure.message,
+          backend:
+            settings.providerInstances[run.providerInstanceId]?.driver ?? run.providerInstanceId,
+          model: run.modelSelection.model,
+        });
+        if (trigger === null) continue;
+        const now = event.occurredAt;
+        const nowMs = DateTime.toEpochMillis(now);
+        const attemptKey = resumed
+          ? `${run.id}:${run.activeAttemptId}:resume:${event.id}`
+          : `${run.id}:${run.activeAttemptId}:${DateTime.formatIso(run.completedAt ?? now)}`;
+        if (thread.autoRetryLastAttemptKey === attemptKey) continue;
+        const guard = recordAutoRetryFailure(
+          {
+            failuresAt: (thread.autoRetryFailureTimestamps ?? []).map(DateTime.toEpochMillis),
+            disabledUntil:
+              thread.autoRetryDisabledUntil == null
+                ? null
+                : DateTime.toEpochMillis(thread.autoRetryDisabledUntil),
+          },
+          nowMs,
+        );
+        const paused = guard.disabledUntil !== null && guard.disabledUntil > nowMs;
+        events.push({
+          id: EventId.make(`event:auto-retry:${attemptKey}:metadata`),
+          type: "thread.metadata-updated",
+          threadId: event.threadId,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            autoRetryLastAttemptKey: attemptKey,
+            autoRetryFailureTimestamps: guard.failuresAt.map(DateTime.makeUnsafe),
+            autoRetryDisabledUntil:
+              guard.disabledUntil === null ? null : DateTime.makeUnsafe(guard.disabledUntil),
+            autoRetryDisabledReason: paused ? "Repeated failures detected." : null,
+          },
+        });
+        if (paused) continue;
+        events[index] = {
+          ...event,
+          payload: {
+            ...run,
+            status: "waiting",
+            completedAt: null,
+            autoRetry: {
+              state: "pending",
+              message: trigger.message,
+              failureAt: run.completedAt ?? now,
+            },
+          },
+        };
+        for (const session of current.providerSessions) {
+          if (session.providerInstanceId !== run.providerInstanceId || session.lastError === null)
+            continue;
+          events.push({
+            id: EventId.make(`event:auto-retry:${attemptKey}:session:${session.id}`),
+            type: "provider-session.updated",
+            threadId: event.threadId,
+            occurredAt: now,
+            payload: { ...session, lastError: null, updatedAt: now },
+          });
+        }
+        yield* effectOutbox.enqueue([
+          {
+            id: `effect:auto-retry:${attemptKey}`,
+            commandId: CommandId.make(`command:auto-retry:${attemptKey}`),
+            threadId: event.threadId,
+            request: {
+              type: "auto-retry.continue",
+              runId: run.id,
+              failureAt: run.completedAt ?? now,
+            },
+          },
+        ]);
+      }
+      return events;
+    });
+
+    const normalizeEvents = Effect.fnUntraced(function* (
+      input: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) {
+      const events = yield* decideAutoRetry(input);
       const runOrdinals = new Map(
         events.flatMap((event) =>
           event.type === "run.created" || event.type === "run.updated"
@@ -337,7 +496,7 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
-      return Effect.forEach(
+      return yield* Effect.forEach(
         events,
         (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
           event.type === "turn-item.updated"
@@ -350,7 +509,7 @@ const layerBase: Layer.Layer<
             : Effect.succeed(event),
         { concurrency: 1 },
       );
-    };
+    });
 
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */

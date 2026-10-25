@@ -983,6 +983,7 @@ export const layer: Layer.Layer<
                   makeProviderFailure({
                     cause: Cause.squash(cause),
                     message: "Run preparation failed.",
+                    code: "run_preparation_failed",
                     class: "unknown",
                   }),
                   input.providerTurnOrdinal * 100 + 1,
@@ -1677,6 +1678,7 @@ export const layer: Layer.Layer<
                             makeProviderFailure({
                               cause: Cause.squash(cause),
                               class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
+                              code: "provider_turn_start_failed",
                             }),
                             latestItemOrdinal + 1,
                           ),

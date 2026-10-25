@@ -39,6 +39,10 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
+import * as Option from "effect/Option";
 import * as Orchestrator from "./Orchestrator.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -107,7 +111,11 @@ const layerTestProviderInstanceRegistry = Layer.succeed(
   },
 );
 
-const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink).pipe(
+const layerTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  EffectOutbox.layer,
+).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({
@@ -139,7 +147,7 @@ const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerPlatformTest),
 );
@@ -1832,6 +1840,525 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
     );
   },
 );
+
+it.layer(layerTest)("delegated auto retry", (it) => {
+  const seedRetry = Effect.fn("test.seedRetry")(function* (name: string, workspace = false) {
+    const settings = yield* ServerSettings.ServerSettingsService;
+    yield* settings.updateSettings({
+      autoRetry: {
+        enabled: true,
+        triggers: [
+          {
+            id: "timeout",
+            name: "Timeout",
+            enabled: true,
+            message: "Continue",
+            condition: { kind: "error_message", value: "timeout" },
+          },
+        ],
+      },
+    });
+    const projects = yield* ProjectService.ProjectService;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projectId = ProjectId.make(`project:${name}`);
+    const parentThreadId = ThreadId.make(`thread:${name}`);
+    yield* projects.create({
+      commandId: CommandId.make(`${name}:project`),
+      projectId,
+      title: name,
+      workspaceRoot: `/workspace/${name}`,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`${name}:thread`),
+      threadId: parentThreadId,
+      projectId,
+      title: name,
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make(`${name}:message`),
+      threadId: parentThreadId,
+      messageId: MessageId.make(`${name}:message`),
+      text: "Parent task",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+    const parentRun = parent.runs[0]!;
+    yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      commandId: CommandId.make(`${name}:delegate`),
+      parentThreadId,
+      parentRunId: parentRun.id,
+      parentNodeId: parentRun.rootNodeId!,
+      task: "Original delegated request",
+      modelSelection,
+      runtimeMode: "full-access",
+      ...(workspace ? { workspaceStrategy: { type: "worktree" as const, baseRef: "main" } } : {}),
+      interactionMode: "default",
+      completionWake: "always",
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    const task = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents[0]!;
+    const threadId = task.childThreadId!;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    return { projectId, parentThreadId, threadId, taskId: task.id, run };
+  });
+  const failRetry = Effect.fn("test.failRetry")(function* (
+    run: OrchestrationV2Run,
+    index: number,
+    code: string = "timeout",
+    started: boolean = true,
+  ) {
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    return yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`error:${run.id}:${index}`),
+          type: "turn-item.updated",
+          threadId: run.threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`error:${run.id}:${index}`),
+            threadId: run.threadId,
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            providerThreadId: run.providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: index + 20,
+            type: "error",
+            status: "failed",
+            title: "Provider error",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            failure: {
+              class: "provider_error",
+              message: `Original timeout ${index}`,
+              code,
+              retryable: true,
+            },
+          },
+        },
+        {
+          id: EventId.make(`failed:${run.id}:${index}`),
+          type: "run.updated",
+          threadId: run.threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: { ...run, startedAt: started ? now : null, status: "failed", completedAt: now },
+        },
+      ],
+    });
+  });
+  const resolveRetry = Effect.fn("test.resolveRetry")(function* (run: OrchestrationV2Run) {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const pending = (yield* orchestrator.getThreadProjection(run.threadId)).runs.find(
+      (row) => row.id === run.id,
+    )!;
+    assert.equal(pending.autoRetry?.state, "pending");
+    return yield* orchestrator.dispatch({
+      type: "auto-retry.resolve",
+      commandId: CommandId.make(`resolve:${run.id}:${pending.activeAttemptId}`),
+      threadId: run.threadId,
+      runId: run.id,
+      failureAt: pending.autoRetry!.failureAt,
+    });
+  });
+  it.effect(
+    "keeps a delegated task and ordinary waiter open through retries and publishes the final provider error",
+    () =>
+      Effect.gen(function* () {
+        const seeded = yield* seedRetry("retry-exhaustion");
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const waiter = yield* threads
+          .waitForThread({
+            projectId: seeded.projectId,
+            threadId: seeded.threadId,
+            runId: seeded.run.id,
+            timeoutMs: 60_000,
+          })
+          .pipe(Effect.forkScoped);
+        let run = seeded.run;
+        for (let index = 1; index <= 3; index++) {
+          const committed = yield* failRetry(run, index, "timeout", index !== 3);
+          if (index < 3) {
+            assert.isFalse(
+              committed.some(
+                (row) => row.event.type === "run.updated" && row.event.payload.status === "failed",
+              ),
+            );
+            yield* orchestrator.recoverDelegatedTasks;
+            const task = (yield* orchestrator.getThreadProjection(
+              seeded.parentThreadId,
+            )).subagents.find((row) => row.id === seeded.taskId)!;
+            assert.equal(task.status, "running");
+            assert.isNull(task.result);
+            assert.isTrue(yield* orchestrator.delegatedTaskResultPending(seeded.threadId));
+            yield* resolveRetry(run);
+            const projection = yield* orchestrator.getThreadProjection(seeded.threadId);
+            const next = projection.runs.at(-1)!;
+            assert.equal(next.restartContinuationOfRunId, run.id);
+            assert.equal(next.delegatedTaskId, seeded.taskId);
+            run = next;
+          }
+        }
+        yield* orchestrator.recoverDelegatedTasks;
+        const parent = yield* orchestrator.getThreadProjection(seeded.parentThreadId);
+        const task = parent.subagents.find((row) => row.id === seeded.taskId)!;
+        assert.equal(task.status, "failed");
+        assert.equal(task.result, "Original timeout 3");
+        assert.equal(parent.subagents.length, 1);
+        const result = yield* Fiber.join(waiter);
+        assert.equal(result.run?.id, run.id);
+        assert.equal(result.run?.status, "failed");
+        assert.isFalse(result.timedOut);
+        const shell = yield* orchestrator.getThreadShell(seeded.threadId);
+        assert.isNotNull(shell?.autoRetryDisabledUntil);
+        assert.equal(shell?.lastError, "Original timeout 3");
+      }),
+  );
+  it.effect.each(["provider_turn_start_failed", "timeout"])(
+    "resends pre-provider input for %s and deduplicates retry decisions",
+    (code) =>
+      Effect.gen(function* () {
+        const seeded = yield* seedRetry(`retry-start-${code}`);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const committed = yield* failRetry(seeded.run, 1, code, code !== "timeout");
+        const pending = (yield* orchestrator.getThreadProjection(seeded.threadId)).runs[0]!;
+        const effectId = `effect:auto-retry:${seeded.run.id}:${seeded.run.activeAttemptId}:${DateTime.formatIso(pending.autoRetry!.failureAt)}`;
+        assert.isTrue(Option.isSome(yield* outbox.get(effectId)));
+        yield* failRetry(seeded.run, 2, code, code !== "timeout");
+        const shell = yield* orchestrator.getThreadShell(seeded.threadId);
+        assert.equal(shell?.autoRetryFailureTimestamps?.length, 1);
+        const resolved = yield* resolveRetry(seeded.run);
+        yield* orchestrator.dispatch({
+          type: "auto-retry.resolve",
+          commandId: CommandId.make(`resolve:${seeded.run.id}:${seeded.run.activeAttemptId}`),
+          threadId: seeded.threadId,
+          runId: seeded.run.id,
+          failureAt: pending.autoRetry!.failureAt,
+        });
+        assert.ok(resolved);
+        const projection = yield* orchestrator.getThreadProjection(seeded.threadId);
+        assert.equal(projection.runs.length, 2);
+        assert.equal(
+          projection.messages.find((row) => row.id === projection.runs.at(-1)?.userMessageId)?.text,
+          "Original delegated request",
+        );
+        assert.isFalse(
+          committed.some(
+            (row) => row.event.type === "run.updated" && row.event.payload.status === "failed",
+          ),
+        );
+      }),
+  );
+
+  it.effect(
+    "counts repeated workspace retries on their own attempts and preserves the initial request",
+    () =>
+      Effect.gen(function* () {
+        const seeded = yield* seedRetry("retry-workspace", true);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const attempts = new Set<string>();
+        for (let index = 1; index <= 3; index++) {
+          const run = (yield* orchestrator.getThreadProjection(seeded.threadId)).runs[0]!;
+          attempts.add(run.activeAttemptId!);
+          yield* orchestrator.dispatch({
+            type: "prepared-run.fail",
+            commandId: CommandId.make(`workspace-fail:${index}`),
+            threadId: seeded.threadId,
+            runId: run.id,
+            failure: {
+              class: "provider_error",
+              code: "timeout",
+              retryable: true,
+              message: `Workspace timeout ${index}`,
+            },
+          });
+          if (index < 3) yield* resolveRetry(run);
+        }
+        const projection = yield* orchestrator.getThreadProjection(seeded.threadId);
+        assert.equal(projection.runs.length, 1);
+        assert.equal(projection.runs[0]?.status, "failed");
+        assert.equal(attempts.size, 3);
+        assert.equal(projection.messages[0]?.text, "Original delegated request");
+        const shell = yield* orchestrator.getThreadShell(seeded.threadId);
+        assert.equal(shell?.autoRetryFailureTimestamps?.length, 3);
+        assert.equal(shell?.lastError, "Workspace timeout 3");
+      }),
+  );
+
+  it.effect("preserves a durable pending retry during runtime restart recovery", () =>
+    Effect.gen(function* () {
+      const seeded = yield* seedRetry("retry-restart");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* failRetry(seeded.run, 1);
+      const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+      yield* recovery.reconcile("startup");
+      const pending = (yield* orchestrator.getThreadProjection(seeded.threadId)).runs[0]!;
+      assert.equal(pending.status, "waiting");
+      assert.equal(pending.autoRetry?.state, "pending");
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const effectId = `effect:auto-retry:${seeded.run.id}:${seeded.run.activeAttemptId}:${DateTime.formatIso(pending.autoRetry!.failureAt)}`;
+      const effect = yield* outbox.get(effectId);
+      assert.equal(Option.getOrThrow(effect).status, "pending");
+      yield* resolveRetry(seeded.run);
+      const continued = (yield* orchestrator.getThreadProjection(seeded.threadId)).runs.at(-1)!;
+      assert.equal(continued.restartContinuationOfRunId, seeded.run.id);
+      assert.equal(continued.delegatedTaskId, seeded.taskId);
+    }),
+  );
+
+  it.effect("delivers only the successful retry result to the original task and waiter", () =>
+    Effect.gen(function* () {
+      const seeded = yield* seedRetry("retry-success");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const waiter = yield* threads
+        .waitForThread({
+          projectId: seeded.projectId,
+          threadId: seeded.threadId,
+          runId: seeded.run.id,
+          timeoutMs: 60_000,
+        })
+        .pipe(Effect.forkScoped);
+      yield* failRetry(seeded.run, 1);
+      yield* resolveRetry(seeded.run);
+      const run = (yield* orchestrator.getThreadProjection(seeded.threadId)).runs.at(-1)!;
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("retry-success:result"),
+            type: "message.updated",
+            threadId: seeded.threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: {
+              id: MessageId.make("retry-success:result"),
+              threadId: seeded.threadId,
+              runId: run.id,
+              nodeId: run.rootNodeId,
+              role: "assistant",
+              text: "Recovered successfully.",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "server",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          {
+            id: EventId.make("retry-success:complete"),
+            type: "run.updated",
+            threadId: seeded.threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+          },
+        ],
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      const task = (yield* orchestrator.getThreadProjection(seeded.parentThreadId)).subagents.find(
+        (row) => row.id === seeded.taskId,
+      )!;
+      assert.equal(task.status, "completed");
+      assert.equal(task.result, "Recovered successfully.");
+      assert.equal((yield* Fiber.join(waiter)).run?.id, run.id);
+    }),
+  );
+  it.effect.each(["settings", "stop"])(
+    "stops pending recovery when %s changes without starting a successor",
+    (reason) =>
+      Effect.gen(function* () {
+        const seeded = yield* seedRetry(`retry-stop-${reason}`);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* failRetry(seeded.run, 1);
+        const pending = (yield* orchestrator.getThreadProjection(seeded.threadId)).runs[0]!;
+        const pendingShell = yield* orchestrator.getThreadShell(seeded.threadId);
+        assert.equal(pendingShell?.activeRunId, seeded.run.id);
+        if (reason === "settings") {
+          yield* (yield* ServerSettings.ServerSettingsService).updateSettings({
+            autoRetry: { enabled: false },
+          });
+        } else {
+          yield* (yield* ThreadManagement.ThreadManagementService).interruptThread({
+            commandId: CommandId.make("retry-stop:interrupt"),
+            projectId: seeded.projectId,
+            threadId: seeded.threadId,
+          });
+        }
+        yield* orchestrator.dispatch({
+          type: "auto-retry.resolve",
+          commandId: CommandId.make(`retry-stop:${reason}:resolve`),
+          threadId: seeded.threadId,
+          runId: seeded.run.id,
+          failureAt: pending.autoRetry!.failureAt,
+        });
+        const child = yield* orchestrator.getThreadProjection(seeded.threadId);
+        assert.equal(child.runs.length, 1);
+        assert.equal(child.runs[0]?.status, reason === "settings" ? "failed" : "interrupted");
+        if (reason === "settings") {
+          yield* orchestrator.recoverDelegatedTasks;
+          const task = (yield* orchestrator.getThreadProjection(
+            seeded.parentThreadId,
+          )).subagents.find((row) => row.id === seeded.taskId)!;
+          assert.equal(task.result, "Original timeout 1");
+        }
+      }),
+  );
+
+  it.effect("rearms Resume with a fresh effect identity even when the clock has not advanced", () =>
+    Effect.gen(function* () {
+      const seeded = yield* seedRetry("retry-resume");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      yield* failRetry(seeded.run, 1);
+      yield* settings.updateSettings({ autoRetry: { enabled: false } });
+      yield* resolveRetry(seeded.run);
+      while (true) {
+        const claimed = yield* outbox.claimNext({
+          workerId: "resume-test",
+          leaseDurationMs: 30_000,
+        });
+        if (Option.isNone(claimed)) break;
+        yield* outbox.succeed({ effectId: claimed.value.id, workerId: "resume-test" });
+      }
+      yield* settings.updateSettings({ autoRetry: { enabled: true } });
+      yield* orchestrator.dispatch({
+        type: "auto-retry.resume",
+        commandId: CommandId.make("retry-resume:resume"),
+        threadId: seeded.threadId,
+      });
+      const shell = yield* orchestrator.getThreadShell(seeded.threadId);
+      const effect = yield* outbox.get(`effect:auto-retry:${shell!.autoRetryLastAttemptKey}`);
+      assert.equal(Option.getOrThrow(effect).status, "pending");
+    }),
+  );
+
+  it.effect("holds a matching provider failure before publishing a delegated result", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({
+        autoRetry: {
+          enabled: true,
+          triggers: [
+            {
+              id: "timeout",
+              name: "Timeout",
+              enabled: true,
+              message: "Continue",
+              condition: { kind: "error_message", value: "timeout" },
+            },
+          ],
+        },
+      });
+      const now = yield* DateTime.now;
+      const parentThreadId = ThreadId.make("thread:auto-retry-parent");
+      const projectId = ProjectId.make("project:auto-retry-parent");
+      const parentRunId = RunId.make("run:auto-retry-parent");
+      const rootNodeId = NodeId.make("node:auto-retry-parent");
+      yield* seedParentWithTerminalTask({
+        threadId: parentThreadId,
+        projectId,
+        runId: parentRunId,
+        rootNodeId,
+        taskId: NodeId.make("node:auto-retry-seed"),
+        deliveryState: "acknowledged",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId,
+        projectId,
+        parentRunId,
+        rootNodeId,
+        name: "auto-retry-child",
+        completionWake: "always",
+        continuationPending: false,
+        runStatus: "completed",
+        now,
+      });
+      const failed = runEvent({
+        threadId: child.childThreadId,
+        runId: child.childRunId,
+        ordinal: 1,
+        status: "failed",
+        now,
+      });
+      const committed = yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:auto-retry-error"),
+            type: "turn-item.updated",
+            threadId: child.childThreadId,
+            runId: child.childRunId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make("item:auto-retry-error"),
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 1,
+              status: "failed",
+              title: "Provider error",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "error",
+              failure: {
+                class: "provider_error",
+                message: "Original timeout",
+                code: "timeout",
+                retryable: true,
+                resetAt: null,
+              },
+            },
+          },
+          failed,
+        ],
+      });
+      const committedRunEvent = committed.find((row) => row.event.type === "run.updated")?.event;
+      assert.equal(
+        committedRunEvent?.type === "run.updated" ? committedRunEvent.payload.status : undefined,
+        "waiting",
+      );
+      yield* orchestrator.recoverDelegatedTasks;
+      const task = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+        (row) => row.id === child.taskId,
+      );
+      assert.equal(task?.status, "running");
+      assert.isNull(task?.result);
+      assert.isTrue(yield* orchestrator.delegatedTaskResultPending(child.childThreadId));
+    }),
+  );
+});
 
 it.layer(layerTest)("delegated tasks across a server restart", (it) => {
   it.effect("holds a restart-cancelled child for its continuation's result", () =>

@@ -116,6 +116,84 @@ describe("thread execution presentation", () => {
     ).toBe("2026-07-28T10:00:00.000Z");
   });
 
+  it("keeps a retry pending without exposing the failed provider session as an error", () => {
+    const retrying = {
+      ...run("retrying", 1, "waiting"),
+      autoRetry: { state: "pending" as const, message: "Provider overloaded", failureAt: now },
+    };
+    const projection = {
+      ...v2Projection,
+      runs: [retrying],
+      providerSessions: [
+        {
+          id: ProviderSessionId.make("retry-session"),
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId: v2Projection.thread.providerInstanceId,
+          status: "error" as const,
+          cwd: "/workspace/project",
+          model: null,
+          capabilities: {} as (typeof v2Projection.providerSessions)[number]["capabilities"],
+          createdAt: now,
+          updatedAt: now,
+          lastError: "Provider overloaded",
+        },
+      ],
+    };
+    expect(deriveThreadRuntime(projection)).toMatchObject({
+      status: "waiting",
+      lastError: null,
+      lastErrorClass: null,
+    });
+    expect(
+      deriveThreadRuntime({
+        ...projection,
+        runs: [retrying, run("queued-after-retry", 2, "queued")],
+      }),
+    ).toMatchObject({ status: "waiting", lastError: null });
+    const continued = {
+      ...retrying,
+      status: "interrupted" as const,
+      completedAt: now,
+      autoRetry: { ...retrying.autoRetry, state: "continued" as const },
+    };
+    const successor = {
+      ...run("retry-successor", 2, "starting"),
+      restartContinuationOfRunId: continued.id,
+    };
+    expect(deriveThreadRuntime({ ...projection, runs: [continued, successor] })).toMatchObject({
+      status: "starting",
+      lastError: null,
+    });
+    expect(
+      deriveThreadRuntime({
+        ...projection,
+        runs: [
+          continued,
+          { ...successor, status: "interrupted" as const },
+          { ...run("restarted-successor", 3, "running"), restartContinuationOfRunId: successor.id },
+        ],
+      }),
+    ).toMatchObject({ status: "running", lastError: null });
+    expect(
+      deriveThreadRuntime({
+        ...projection,
+        runs: [continued, { ...successor, status: "failed" as const }],
+      }),
+    ).toMatchObject({ status: "failed", lastError: "Provider overloaded" });
+    expect(
+      deriveThreadRuntime({
+        ...projection,
+        runs: [
+          {
+            ...retrying,
+            autoRetry: { ...retrying.autoRetry, state: "stopped" as const },
+            status: "failed" as const,
+          },
+        ],
+      }),
+    ).toMatchObject({ status: "failed", lastError: "Provider overloaded" });
+  });
+
   it("keeps a subscription limit visible while later messages stay queued", () => {
     const failed = {
       ...run("limited", 1, "failed"),
@@ -277,6 +355,30 @@ describe("thread execution presentation", () => {
       activeRunId: null,
     });
     expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(false);
+  });
+
+  it("keeps a pending automatic retry interruptible when later work is queued", () => {
+    const retrying = {
+      ...run("pending-retry", 1, "waiting"),
+      autoRetry: { state: "pending" as const, message: "Provider overloaded", failureAt: now },
+    };
+    const projection = { ...v2Projection, runs: [retrying, run("queued-followup", 2, "queued")] };
+    const runtime = deriveThreadRuntime(projection);
+    expect(runtime).toMatchObject({ status: "waiting", activeRunId: retrying.id });
+    expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(true);
+
+    const finished = deriveThreadRuntime({
+      ...projection,
+      runs: [
+        {
+          ...retrying,
+          status: "failed" as const,
+          autoRetry: { ...retrying.autoRetry, state: "stopped" as const },
+        },
+      ],
+    });
+    expect(finished?.activeRunId).toBeNull();
+    expect(threadRuntimeHasInterruptibleRun(finished)).toBe(false);
   });
 
   it("does not expose a stale active run after the runtime parks at idle", () => {

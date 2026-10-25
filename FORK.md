@@ -782,15 +782,23 @@ Repeated matched failures are bounded per thread and pause automatic retry for t
 composer notice while the pause is active. The notice can clear the pause and reset that thread's
 retry guard immediately.
 
+Retryable attempts remain pending for thread waiters, delegated-task observers, and notifications.
+App-owned delegates retain their task identity through recovery. A successful retry reports the
+completed result; when recovery stops, observers receive the last provider failure. The temporary
+auto-retry pause is separate thread metadata and does not replace that error. Provider-native
+subagents remain under their provider's control.
+
 **Implementation evidence:** `packages/contracts/src/settings.ts`,
-`apps/server/src/orchestration-v2/{AutoRetry,AutoRetryWorker}.ts`,
+`apps/server/src/orchestration-v2/{AutoRetry,EventSink,Orchestrator,EffectWorker}.ts`,
 `apps/web/src/components/settings/AutoRetrySettings.tsx`, and
 `apps/web/src/components/chat/autoRetryDisabledBanner.ts`.
 
-**Recorded validation:** focused matcher, settings, and composer-banner tests; server and web
-typechecks; formatting and lint checks.
+**Recorded validation:** focused matcher, settings, composer-banner, delegated-completion,
+thread-wait, restart-recovery, MCP-result, and notification tests. An isolated web run verified
+repeated startup failures reach the pause banner and manual resume starts recovery again.
+Repository formatting, lint, and type checks passed.
 
-**Last updated:** 2026-10-23
+**Last updated:** 2026-10-25
 
 ## Merge History
 

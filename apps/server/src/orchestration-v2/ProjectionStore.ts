@@ -1130,6 +1130,7 @@ type ShellThreadRow = {
   readonly latest_run_started_at: string | null;
   readonly latest_run_completed_at: string | null;
   readonly active_run_id: string | null;
+  readonly auto_retry_pending: number;
   readonly activity_run_status: string | null;
   readonly activity_run_started_at: string | null;
   readonly last_error: string | null;
@@ -1675,7 +1676,7 @@ export function threadShellFromProjection(
     status: latestRun?.status ?? "idle",
     ...threadErrorSummary(
       latestRootProviderFailure(latestRun, projection.turnItems),
-      providerSession?.lastError ?? null,
+      activityRun?.autoRetry?.state === "pending" ? null : (providerSession?.lastError ?? null),
     ),
     pendingRuntimeRequest,
     // Thread detail owns message bodies. Keeping them out of shell rows makes
@@ -1750,7 +1751,12 @@ function activeProviderGoalForShell(
 }
 
 function isInterruptibleRunForShell(run: OrchestrationV2ThreadProjection["runs"][number]): boolean {
-  return run.status === "preparing" || run.status === "starting" || run.status === "running";
+  return (
+    run.status === "preparing" ||
+    run.status === "starting" ||
+    run.status === "running" ||
+    (run.status === "waiting" && run.autoRetry?.state === "pending")
+  );
 }
 
 type ShellActivityRunStatus = "preparing" | "running" | "starting" | "waiting";
@@ -1954,6 +1960,10 @@ function shellFromState(input: {
     lastVisitedAt: input.state.thread.lastVisitedAt,
     titleRegeneration: input.state.thread.titleRegeneration ?? null,
     limitRecovery: input.state.thread.limitRecovery ?? null,
+    autoRetryDisabledUntil: input.state.thread.autoRetryDisabledUntil ?? null,
+    autoRetryDisabledReason: input.state.thread.autoRetryDisabledReason ?? null,
+    autoRetryLastAttemptKey: input.state.thread.autoRetryLastAttemptKey ?? null,
+    autoRetryFailureTimestamps: input.state.thread.autoRetryFailureTimestamps ?? [],
     deletedAt: input.state.thread.deletedAt,
   };
 }
@@ -5638,6 +5648,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   THEN json_extract(t.payload_json, '$.forkedFrom.threadId')
                 ELSE NULL
               END AS forked_from_run_source_thread_id,
+              EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_runs retry
+                WHERE retry.thread_id = t.thread_id AND retry.status = 'waiting'
+                  AND json_extract(retry.payload_json, '$.autoRetry.state') = 'pending'
+              ) AS auto_retry_pending,
               presented.run_id AS latest_run_id,
               presented.status AS latest_run_status,
               presented.requested_at AS latest_run_requested_at,
@@ -5647,7 +5662,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT r.run_id
                 FROM orchestration_v2_projection_runs r
                 WHERE r.thread_id = t.thread_id
-                  AND r.status IN ('preparing', 'starting', 'running')
+                  AND (r.status IN ('preparing', 'starting', 'running')
+                    OR (r.status = 'waiting' AND json_extract(r.payload_json, '$.autoRetry.state') = 'pending'))
                 ORDER BY r.ordinal DESC, r.run_id DESC
                 LIMIT 1
               ) AS active_run_id,
@@ -6228,7 +6244,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               : null,
           ...threadErrorSummary(
             terminalFailureItem?.type === "error" ? terminalFailureItem.failure : null,
-            row.last_error,
+            row.auto_retry_pending ? null : row.last_error,
           ),
           pendingRuntimeRequest,
           latestUserMessageAt:

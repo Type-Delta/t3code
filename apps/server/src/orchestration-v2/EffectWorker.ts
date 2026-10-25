@@ -29,6 +29,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
 /**
@@ -110,10 +111,55 @@ export const layerExecutor: Layer.Layer<
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const launches = yield* Effect.serviceOption(ThreadLaunchService.ThreadLaunchService);
     return OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "auto-retry.continue": {
+            const request = effect.request;
+            const resolve = (stop: boolean) =>
+              threads.dispatch({
+                type: "auto-retry.resolve",
+                commandId: stop ? CommandId.make(`${effect.commandId}:stop`) : effect.commandId,
+                threadId: effect.threadId,
+                runId: request.runId,
+                failureAt: request.failureAt,
+                ...(stop ? { stop: true } : {}),
+              });
+            return resolve(false).pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  const projection = yield* threads.getThreadRecords(effect.threadId, ["runs"]);
+                  const run = projection.runs.find((row) => row.id === request.runId);
+                  if (run?.status === "preparing") {
+                    if (Option.isNone(launches))
+                      return yield* Effect.fail(
+                        new OrchestrationEffectExecutionError({
+                          effectId: effect.id,
+                          effectType: request.type,
+                          cause: "Workspace preparation service is unavailable.",
+                        }),
+                      );
+                    yield* launches.value.prepareRun({
+                      commandId: effect.commandId,
+                      threadId: effect.threadId,
+                      runId: request.runId,
+                    });
+                  }
+                }),
+              ),
+              Effect.tapError(() => (willRetry ? Effect.void : resolve(true).pipe(Effect.ignore))),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: request.type,
+                    cause,
+                  }),
+              ),
+            );
+          }
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(

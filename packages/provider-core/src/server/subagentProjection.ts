@@ -236,7 +236,7 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set([
 export function delegatedTaskCurrentRun<
   R extends Pick<
     OrchestrationV2ThreadProjection["runs"][number],
-    "ordinal" | "status" | "startedAt" | "queueHeld"
+    "ordinal" | "status" | "startedAt" | "queueHeld" | "restartContinuationOfRunId"
   >,
 >(taskRuns: ReadonlyArray<R>): R | undefined {
   const sorted = taskRuns.toSorted((a, b) => a.ordinal - b.ordinal);
@@ -245,7 +245,11 @@ export function delegatedTaskCurrentRun<
     (run) =>
       run === first ||
       (!(run.status === "queued" && run.queueHeld === true) &&
-        !(run.startedAt === null && TERMINAL_RUN_STATUSES.has(run.status))),
+        !(
+          run.startedAt === null &&
+          TERMINAL_RUN_STATUSES.has(run.status) &&
+          run.restartContinuationOfRunId === undefined
+        )),
   );
 }
 

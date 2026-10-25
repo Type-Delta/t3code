@@ -221,6 +221,15 @@ export function deriveThreadRuntime(
   const liveActivityRun = latestMatchingRun(projection, (run) =>
     ACTIVITY_RUN_STATUSES.has(run.status),
   );
+  let retryInProgress =
+    liveActivityRun?.status === "waiting" && liveActivityRun.autoRetry?.state === "pending";
+  let retryRun = liveActivityRun;
+  while (!retryInProgress && retryRun?.restartContinuationOfRunId !== undefined) {
+    const previous = projection.runs.find((run) => run.id === retryRun?.restartContinuationOfRunId);
+    if (previous === undefined || previous.ordinal >= retryRun.ordinal) break;
+    retryInProgress = previous.autoRetry?.state === "continued";
+    retryRun = previous;
+  }
   const backgroundWorkHoldsRun = backgroundWorkHoldsCompletion(
     derivePendingBackgroundWork({
       latestRun: latestRunProjection,
@@ -240,7 +249,12 @@ export function deriveThreadRuntime(
     return null;
   }
   const activeRunId =
-    latestMatchingRun(projection, (run) => INTERRUPTIBLE_RUN_STATUSES.has(run.status))?.id ?? null;
+    latestMatchingRun(
+      projection,
+      (run) =>
+        INTERRUPTIBLE_RUN_STATUSES.has(run.status) ||
+        (run.status === "waiting" && run.autoRetry?.state === "pending"),
+    )?.id ?? null;
   return {
     status: usageLimitedRun
       ? "failed"
@@ -256,7 +270,7 @@ export function deriveThreadRuntime(
     providerName: providerSession?.driver ?? null,
     ...threadErrorSummary(
       latestRootProviderFailure(latestRunProjection, projection.turnItems),
-      providerSession?.lastError ?? null,
+      retryInProgress ? null : (providerSession?.lastError ?? null),
     ),
     updatedAt: DateTime.formatIso(projection.updatedAt),
   };

@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import {
   WS_METHODS,
+  ORCHESTRATION_V2_WS_METHODS,
   type EnvironmentId,
   type OrchestrationV2ShellSnapshot,
 } from "@t3tools/contracts";
@@ -368,6 +369,12 @@ export function createThreadEnvironmentAtoms<R, E>(
       execute: (input: ThreadCommandInput) => resumeThreadQueue(input),
       scheduler,
       concurrency,
+    }),
+    resumeAutoRetry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:resume-auto-retry",
+      tag: ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+      scheduler,
+      concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
     }),
     reorderQueuedRun: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:reorder-queued-run",

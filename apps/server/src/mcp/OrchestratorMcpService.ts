@@ -547,6 +547,7 @@ function latestTerminalResultRun(
     .filter(
       (run) =>
         ThreadManagementService.isTerminalRunStatus(run.status) &&
+        run.autoRetry?.state !== "continued" &&
         !monitorRunIds.has(run.id) &&
         run.status !== "rolled_back" &&
         (run.id === delegatedRun?.id || run.startedAt !== null),
@@ -559,7 +560,10 @@ function latestTerminalResultRun(
 
 function canExposeTaskRunResult(run: OrchestrationV2Run | undefined): run is OrchestrationV2Run {
   return (
-    run !== undefined && run.status !== "rolled_back" && isTerminalTaskStatus(taskStatusForRun(run))
+    run !== undefined &&
+    run.status !== "rolled_back" &&
+    run.autoRetry?.state !== "continued" &&
+    isTerminalTaskStatus(taskStatusForRun(run))
   );
 }
 

@@ -19,6 +19,7 @@ const state = vi.hoisted(() => ({
   sessionError: false,
   turnError: false,
   limited: false,
+  retrying: false,
   subagent: false,
   background: [] as Array<{ taskId: string; kind: "command" | "monitor" }>,
   delegatedChild: null as "running" | "approval" | null,
@@ -60,9 +61,12 @@ function mockThreadShell() {
     activeRunId: null,
     status: state.completedAt
       ? "completed"
-      : state.sessionError || state.turnError || state.limited
-        ? "failed"
-        : "running",
+      : state.retrying
+        ? "waiting"
+        : state.sessionError || state.turnError || state.limited
+          ? "failed"
+          : "running",
+    lastError: state.sessionError ? "Provider overloaded" : null,
     lastErrorClass: state.limited ? "usage_limit" : null,
     pendingRuntimeRequest: state.input
       ? { id: "request-1", kind: "user_input", createdAt: SHELL_NOW }
@@ -177,6 +181,7 @@ beforeEach(() => {
     sessionError: false,
     turnError: false,
     limited: false,
+    retrying: false,
     subagent: false,
     background: [],
     delegatedChild: null,
@@ -198,6 +203,57 @@ afterEach(async () => {
 });
 
 describe("thread notifications", () => {
+  it.each([true, false])(
+    "waits for retry success before alerting with focus=%s",
+    async (focused) => {
+      state.focused = focused;
+      state.mode = "notifications-and-sound";
+      await render();
+      state.retrying = true;
+      state.sessionError = true;
+      await render();
+      await render();
+      expect(state.add).not.toHaveBeenCalled();
+      expect(state.sound).not.toHaveBeenCalled();
+      expect(state.notification).not.toHaveBeenCalled();
+
+      state.retrying = false;
+      state.sessionError = false;
+      await complete();
+      await render();
+      expect(state.sound).toHaveBeenCalledTimes(1);
+      expect(state.sound).toHaveBeenCalledWith("completion", expect.any(Function));
+      if (focused) {
+        expect(state.add).toHaveBeenCalledTimes(1);
+        expect(state.add).toHaveBeenCalledWith(
+          expect.objectContaining({ title: "Thread completed" }),
+        );
+        expect(state.notification).not.toHaveBeenCalled();
+      } else {
+        expect(state.notification).toHaveBeenCalledTimes(1);
+        expect(state.notification).toHaveBeenCalledWith("Thread completed", expect.any(Object));
+        expect(state.add).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("alerts once when automatic retries stop at the provider failure", async () => {
+    state.mode = "notifications-and-sound";
+    await render();
+    state.retrying = true;
+    state.sessionError = true;
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+
+    state.retrying = false;
+    await render();
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
+    expect(state.add).toHaveBeenCalledWith(expect.objectContaining({ title: "Thread failed" }));
+    expect(state.sound).toHaveBeenCalledTimes(1);
+    expect(state.sound).toHaveBeenCalledWith("input", expect.any(Function));
+  });
+
   it.each([true, false])("keeps subagents silent with focus=%s", async (focused) => {
     state.subagent = true;
     state.focused = focused;
