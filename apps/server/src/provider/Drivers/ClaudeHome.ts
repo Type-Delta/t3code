@@ -38,12 +38,7 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   };
   if (homePath.length > 0) {
     const resolvedHomePath = yield* resolveClaudeHomePath(config);
-    // Isolate this instance's config via CLAUDE_CONFIG_DIR rather than HOME.
-    // Overriding HOME also relocates the macOS login keychain lookup
-    // ($HOME/Library/Keychains), so the spawned CLI can't find its stored
-    // OAuth credentials and reports "Not logged in". CLAUDE_CONFIG_DIR points
-    // Claude Code at its config dir directly while leaving HOME (and the
-    // keychain) intact.
+    // CLAUDE_CONFIG_DIR isolates config without moving HOME and its macOS OAuth keychain.
     environment["CLAUDE_CONFIG_DIR"] = resolvedHomePath;
   }
 
@@ -65,12 +60,7 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
   return environment;
 });
 
-/**
- * While it exists Claude refuses `--strict-mcp-config` and exits before
- * initializing, but it already ignores user, project and `--mcp-config` servers
- * on its own, so callers that pass the flag for isolation can drop it. Paths
- * match the ones Claude Code checks.
- */
+/** managed-mcp.json excludes other MCP config and forbids --strict-mcp-config; omit the flag when present. */
 export const hasClaudeManagedMcpConfig = Effect.fn("hasClaudeManagedMcpConfig")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const platform = yield* HostProcess.Platform;
@@ -104,10 +94,7 @@ export const makeClaudeCapabilitiesCacheKey = Effect.fn("makeClaudeCapabilitiesC
   },
 );
 
-/**
- * Describe the spawned CLI's environment separately from the login command so
- * paths remain literal on every shell, including relative inherited values.
- */
+/** Separate spawn env from login commands to preserve literal paths, including relative inherited values. */
 export const claudeSignedOutMessage = (input: {
   readonly configDir: string | undefined;
   readonly cwd: string;

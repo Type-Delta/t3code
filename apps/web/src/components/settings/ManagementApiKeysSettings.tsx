@@ -533,7 +533,7 @@ function SecretRevealDialog({
         </DialogPanel>
         <DialogFooter variant="bare">
           <Button variant="outline" onClick={onClose}>
-            Done — clear secret
+            Done and clear secret
           </Button>
           <Button onClick={() => copyToClipboard(result.secret, { value: result.secret })}>
             {isCopied ? <CheckIcon aria-hidden /> : <ClipboardIcon aria-hidden />}

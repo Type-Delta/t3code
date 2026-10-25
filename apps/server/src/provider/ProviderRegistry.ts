@@ -55,11 +55,7 @@ export class ProviderRegistry extends Context.Service<
       provider?: ProviderDriverKind,
     ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
-    /**
-     * When the instance id is unknown the call resolves with the currently
-     * cached list (no error) — matching the legacy `refresh` shim behaviour so
-     * transport layers don't have to special-case unknowns.
-     */
+    /** Unknown instance ids return the cached list without error. */
     readonly refreshInstance: (
       instanceId: ProviderInstanceId,
     ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
@@ -154,9 +150,7 @@ export function upsertProviderWorkspaceSnapshot(
 
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
   if (provider.driver === ProviderDriverKind.make("pi")) {
-    // Pi reports known auth only after RPC inventory discovery completes.
-    // An empty inventory is warning/unauthenticated; failed or interactive
-    // discovery stays ready/unknown and must keep the last known models.
+    // Pi auth becomes known only after inventory discovery: empty means unauthenticated; failed/interactive discovery preserves unknown auth and cached models.
     return !(
       provider.installed &&
       (provider.status === "ready" || provider.status === "warning") &&
@@ -165,13 +159,7 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
   }
 
   if (provider.driver === ProviderDriverKind.make("acpRegistry")) {
-    // ACP Registry discovery probes return the agent's complete inventory, so
-    // a completed probe replaces the model list — otherwise agents that rename
-    // or collapse models leave stale entries pinned forever through the
-    // snapshot cache. Only a completed probe reports `nativeSessions`;
-    // readiness-only and failed probe snapshots only know the "default"
-    // placeholder and stay partial. Auth is no signal here: agents without
-    // sign-in stay "unknown" after every probe.
+    // Only completed ACP discovery provides nativeSessions and inventory; placeholder probes cannot establish auth for agents without sign-in.
     return !(
       provider.installed &&
       provider.status === "ready" &&
@@ -197,10 +185,10 @@ const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean =>
     isAntigravity && provider.status === "warning" && provider.auth.status === "unknown";
   const isPendingInitialProbe =
     provider.enabled && !provider.installed && provider.status === "warning";
-  const didInstalledProviderProbeFail = provider.installed && provider.status === "error";
-  return (
-    isPendingAntigravityAuthentication || isPendingInitialProbe || didInstalledProviderProbeFail
-  );
+  const isIncompleteInstalledProbe =
+    provider.installed &&
+    (provider.status === "error" || (isCodex && provider.status === "warning"));
+  return isPendingAntigravityAuthentication || isPendingInitialProbe || isIncompleteInstalledProbe;
 };
 
 const shouldRetainMissingOpenCodeMetadata = (provider: ServerProvider): boolean =>
@@ -243,11 +231,7 @@ const mergeProviderModels = (
     : mergedModels;
 };
 
-/**
- * Antigravity's health check only initializes the agent, so after a server
- * restart it reports the account as unchecked. The saved Google login still
- * works, and the previous snapshot proves it.
- */
+/** Antigravity health checks only initialize; preserve previously verified Google auth across restarts. */
 const carrySavedAntigravityAccount = (
   previousProvider: ServerProvider,
   nextProvider: ServerProvider,
@@ -300,30 +284,6 @@ export const mergeProviderSnapshot = (
   };
 };
 
-export const mergeProviderSnapshots = (
-  previousProviders: ReadonlyArray<ServerProvider>,
-  nextProviders: ReadonlyArray<ServerProvider>,
-): ReadonlyArray<ServerProvider> => {
-  const mergedProviders = new Map(
-    previousProviders.map((provider) => [snapshotInstanceKey(provider), provider] as const),
-  );
-
-  for (const provider of nextProviders) {
-    mergedProviders.set(
-      snapshotInstanceKey(provider),
-      mergeProviderSnapshot(mergedProviders.get(snapshotInstanceKey(provider)), provider),
-    );
-  }
-
-  return orderProviderSnapshots([...mergedProviders.values()]);
-};
-
-export const selectProvidersByKind = (
-  providers: ReadonlyArray<ServerProvider>,
-  providerKinds: ReadonlySet<ProviderDriverKind>,
-): ReadonlyArray<ServerProvider> =>
-  providers.filter((provider) => providerKinds.has(provider.driver));
-
 const haveProvidersChanged = (
   previousProviders: ReadonlyArray<ServerProvider>,
   nextProviders: ReadonlyArray<ServerProvider>,
@@ -354,9 +314,7 @@ const snapshotInstanceKey = (provider: ServerProvider): ProviderInstanceId => {
   return provider.instanceId;
 };
 
-// Each call re-captures the instance's `snapshot` closures, so after
-// `ProviderInstanceRegistry` rebuilds an instance (e.g. because its settings
-// changed), a fresh source rides the new PubSub instead of a closed one.
+// Rebuilt instances have new PubSubs; capture their fresh closures instead of a closed source.
 const buildSnapshotSource = (instance: ProviderInstance): ProviderSnapshotSource => ({
   instanceId: instance.instanceId,
   driverKind: instance.driverKind,
@@ -451,7 +409,7 @@ export const layer = Layer.effect(
       cachedProviders.map((provider) => classifyCompatibility(provider, initialManifest)),
     );
     const workspaceRefreshesRef = yield* Ref.make<
-      ReadonlyMap<ProviderInstance, ReadonlySet<string>>
+      ReadonlyMap<ProviderInstance, ReadonlyMap<string, symbol>>
     >(new Map());
     const maintenanceActionStatesRef = yield* Ref.make<
       ReadonlyMap<ProviderInstanceId, { readonly update?: ServerProviderUpdateState | undefined }>
@@ -568,8 +526,7 @@ export const layer = Layer.effect(
       },
     ) {
       const providers = yield* upsertProviders([provider], options);
-      // Reclassify the current read model after fetching. Never republish the
-      // probe captured before the fetch: a newer health result may have landed.
+      // Reclassify the current model after fetch; republishing the old probe could overwrite newer health results.
       if (!(yield* Ref.getAndSet(compatibilityRefreshRunning, true))) {
         yield* manifestService.refresh.pipe(
           Effect.andThen(upsertProviders([], { persist: false })),
@@ -653,8 +610,7 @@ export const layer = Layer.effect(
         },
       );
       if (claimed.owner) {
-        // Detached so an interrupted first caller cannot cancel the pass that
-        // other callers are already awaiting.
+        // Detach shared passes so the first caller's interruption cannot cancel other callers' work.
         yield* getLiveSources.pipe(
           Effect.flatMap((sources) =>
             Effect.forEach(sources, (source) => refreshOneSource(source), {
@@ -771,9 +727,7 @@ export const layer = Layer.effect(
       provider: ProviderDriverKind,
       options?: { readonly fresh?: boolean },
     ) {
-      // Read the instance registry, not `liveSubsRef`: the latter trails
-      // reconciliation, and an update must never run a retired instance's
-      // command against a freshly configured executable.
+      // liveSubsRef trails reconciliation and could run a retired instance's command; read the registry.
       const instance = yield* instanceRegistry.getInstance(instanceId);
       if (!instance || instance.driverKind !== provider) {
         return makeManualProviderMaintenanceCapabilities(provider);
@@ -832,10 +786,7 @@ export const layer = Layer.effect(
           }
         }
 
-        // Fork long-lived subscriptions to each new/rebuilt instance's
-        // change stream before reading its current snapshot. If the
-        // driver's own initial probe finishes during this sync, either
-        // the current read or the active subscriber observes the result.
+        // Subscribe before reading so a probe completing mid-sync is observed by at least one path.
         for (const [, instance] of newlyAdded) {
           const source = buildSnapshotSource(instance);
           yield* Stream.runForEach(source.streamChanges, (provider) =>
@@ -970,19 +921,19 @@ export const layer = Layer.effect(
       ) {
         return providers;
       }
-      // Drivers spread their machine snapshot, whose `checkedAt` is the last
-      // health check. The TTL needs the time this scan started reading files.
+      // Use scan start for TTL, not checkedAt inherited from the machine health check.
       const scannedAt = DateTime.formatIso(now);
       const instance = yield* instanceRegistry.getInstance(input.instanceId);
       if (!instance?.snapshotForCwd) return providers;
+      const token = Symbol();
       const claimed = yield* Ref.modify(workspaceRefreshesRef, (refreshes) => {
         const current = refreshes.get(instance);
-        if (current?.has(input.cwd)) return [false, refreshes] as const;
+        if (!input.fresh && current?.has(input.cwd)) return [false, refreshes] as const;
         const next = new Map(refreshes);
-        next.set(instance, new Set(current).add(input.cwd));
+        next.set(instance, new Map(current).set(input.cwd, token));
         return [true, next] as const;
       });
-      if (!claimed && !input.fresh) return yield* Ref.get(providersRef);
+      if (!claimed) return yield* Ref.get(providersRef);
       const refreshMachineSnapshot = input.fresh
         ? (instance.invalidateCaches ?? Effect.void).pipe(
             Effect.andThen(refreshInstance(input.instanceId)),
@@ -990,42 +941,43 @@ export const layer = Layer.effect(
         : Effect.void;
       return yield* refreshMachineSnapshot.pipe(
         Effect.andThen(instance.snapshotForCwd(input.cwd)),
-        // A failed scan fails this effect, so a returned snapshot is a real
-        // inventory even while the provider's health check reports an error.
+        // Scans fail on error; returned inventory remains valid even when provider health reports an error.
         Effect.flatMap((scopedSnapshot) =>
           instanceRegistry.getInstance(input.instanceId).pipe(
             Effect.flatMap((currentInstance) => {
               if (currentInstance !== instance) return Ref.get(providersRef);
-              return updateProviders((currentProviders) =>
-                currentProviders.map((candidate) =>
+              return updateProviders((currentProviders) => {
+                // Read ownership inside the update so a newer claim cannot race publication.
+                if (Ref.getUnsafe(workspaceRefreshesRef).get(instance)?.get(input.cwd) !== token) {
+                  return currentProviders;
+                }
+                return currentProviders.map((candidate) =>
                   candidate.instanceId === input.instanceId &&
                   Equal.equals(workspaceSnapshotOf(candidate), scannedFrom)
                     ? upsertProviderWorkspaceSnapshot(candidate, input.cwd, {
                         ...scopedSnapshot,
                         checkedAt: scannedAt,
-                        // Unless the driver reports its own command discovery,
-                        // commands come from the health check. A failed check
-                        // leaves them unknown, so keep the last ones and retry.
+                        // Without driver command discovery, retain previous commands after failed health checks and retry.
                         slashCommandsPending:
                           scopedSnapshot.slashCommandsPending ?? scopedSnapshot.status === "error",
                       })
                     : candidate,
-                ),
-              );
+                );
+              });
             }),
           ),
         ),
         Effect.ensuring(
-          claimed
-            ? Ref.update(workspaceRefreshesRef, (refreshes) => {
-                const next = new Map(refreshes);
-                const current = new Set(next.get(instance));
-                current.delete(input.cwd);
-                if (current.size) next.set(instance, current);
-                else next.delete(instance);
-                return next;
-              })
-            : Effect.void,
+          Ref.update(workspaceRefreshesRef, (refreshes) => {
+            const current = refreshes.get(instance);
+            if (current?.get(input.cwd) !== token) return refreshes;
+            const next = new Map(refreshes);
+            const nextCwds = new Map(current);
+            nextCwds.delete(input.cwd);
+            if (nextCwds.size) next.set(instance, nextCwds);
+            else next.delete(instance);
+            return next;
+          }),
         ),
       );
     });

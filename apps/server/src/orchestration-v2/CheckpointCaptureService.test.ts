@@ -52,9 +52,14 @@ const modelSelection = {
 } as const;
 
 it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
-  it.effect.each([false, true])(
-    "captures without decoding history or losing newer delegated completion, ref lookup fails=%s",
-    (refLookupFails) =>
+  it.effect.each([
+    { refLookupFails: false, diverged: false, missingCheckpoint: false },
+    { refLookupFails: true, diverged: false, missingCheckpoint: false },
+    { refLookupFails: false, diverged: true, missingCheckpoint: false },
+    { refLookupFails: false, diverged: true, missingCheckpoint: true },
+  ])(
+    "captures without history decoding or lost cohorts, lookup failure=$refLookupFails, diverged=$diverged",
+    ({ refLookupFails, diverged, missingCheckpoint }) =>
       Effect.gen(function* () {
         const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
         const now = yield* DateTime.now;
@@ -77,7 +82,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
         const staleRun: OrchestrationV2Run = {
           id: runId,
           threadId,
-          ordinal: 1,
+          ordinal: diverged ? 3 : 1,
           providerInstanceId,
           modelSelection,
           providerThreadId,
@@ -129,7 +134,11 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           providerSessionId: null,
           appThreadId: threadId,
           ownerNodeId: rootNodeId,
-          nativeThreadRef: null,
+          nativeThreadRef: {
+            driver,
+            nativeId: "checkpoint-capture-native-source",
+            strength: "strong" as const,
+          },
           nativeConversationHeadRef: null,
           status: "idle" as const,
           firstRunOrdinal: 1,
@@ -160,8 +169,8 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           runId,
           nodeId: rootNodeId,
           parentCheckpointId: readyBaseline.id,
-          ordinalWithinScope: 1,
-          appRunOrdinal: 1,
+          ordinalWithinScope: diverged ? 3 : 1,
+          appRunOrdinal: diverged ? 3 : 1,
           ref: CheckpointRef.make("checkpoint-ref:captured-1"),
           status: "ready" as const,
           files: [],
@@ -250,6 +259,37 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           occurredAt: now,
           payload: readyBaseline,
         });
+        if (diverged) {
+          for (const ordinal of missingCheckpoint ? [1] : [1, 2])
+            yield* projectionStore.apply({
+              id: EventId.make(`event:checkpoint-capture:branch-${ordinal}`),
+              type: "checkpoint.captured",
+              threadId,
+              occurredAt: now,
+              payload: {
+                ...readyBaseline,
+                id: CheckpointId.make(`checkpoint:branch-${ordinal}`),
+                ordinalWithinScope: ordinal,
+                appRunOrdinal: ordinal,
+                status: ordinal === 1 ? "ready" : "stale",
+              },
+            });
+          if (missingCheckpoint)
+            yield* projectionStore.apply({
+              id: EventId.make("event:checkpoint-capture:abandoned-no-checkpoint"),
+              type: "run.created",
+              threadId,
+              occurredAt: now,
+              payload: {
+                ...staleRun,
+                id: RunId.make("run:abandoned-no-checkpoint"),
+                ordinal: 2,
+                status: "rolled_back",
+                checkpointAbandoned: true,
+                checkpointId: null,
+              },
+            });
+        }
         const sql = yield* SqlClient.SqlClient;
         yield* sql`INSERT OR REPLACE INTO orchestration_v2_projection_turn_items
           (turn_item_id, thread_id, run_id, node_id, provider_thread_id, provider_turn_id,
@@ -265,6 +305,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
         );
 
         const committed = yield* Ref.make<ReadonlyArray<OrchestrationV2DomainEvent>>([]);
+        let requestedBaseline: number | undefined;
         const layerCapture = CheckpointCaptureService.layer.pipe(
           Layer.provide(
             Layer.mergeAll(
@@ -299,7 +340,11 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
                       Effect.die(
                         "baseline materialization must be skipped when ordinal 0 is ready",
                       ),
-                    capture: () => Effect.succeed(captured),
+                    capture: (input) =>
+                      Effect.sync(() => {
+                        requestedBaseline = input.baselineOrdinalWithinScope;
+                        return captured;
+                      }),
                   }),
               Layer.mock(EventSink.EventSinkV2)({
                 commitCommand: (input) =>
@@ -326,6 +371,15 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           yield* service.execute({ threadId, runId, scopeId });
 
           const events = yield* Ref.get(committed);
+          if (!refLookupFails) assert.equal(requestedBaseline, diverged ? 1 : 0);
+          assert.isFalse(
+            events.some(
+              (event) =>
+                event.type === "checkpoint.captured" &&
+                event.payload.ordinalWithinScope === 2 &&
+                event.payload.status === "ready",
+            ),
+          );
           const runUpdated = events.find((event) => event.type === "run.updated");
           assert.isDefined(runUpdated);
           if (runUpdated?.type !== "run.updated") {
@@ -333,6 +387,14 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
           }
           assert.equal(runUpdated.payload.status, "completed");
           const capturedEvent = events.find((event) => event.type === "checkpoint.captured");
+          assert.isTrue(
+            events
+              .filter((event) => event.type === "checkpoint.captured")
+              .every(
+                (event) =>
+                  event.payload.nativeThreadRef?.nativeId === "checkpoint-capture-native-source",
+              ),
+          );
           assert.equal(
             runUpdated.payload.checkpointId,
             refLookupFails ? capturedEvent?.payload.id : captured.id,

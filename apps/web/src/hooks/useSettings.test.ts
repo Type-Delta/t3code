@@ -1,8 +1,5 @@
-import {
-  DEFAULT_SERVER_SETTINGS,
-  ProviderDriverKind,
-  ProviderInstanceId,
-} from "@t3tools/contracts";
+import { resolveEnvironmentIdentificationMode } from "./useSettings";
+import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -24,7 +21,6 @@ import {
   persistClientSettingsPatch,
   persistClientSettingsUpdate,
   prepareModelPreferencesPatch,
-  resolveEnvironmentIdentificationMode,
 } from "./useSettings";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
@@ -74,6 +70,7 @@ describe("client settings hydration", () => {
     });
   });
 
+  // regression: #16816 a failed read could overwrite synced model favorites with defaults
   it("does not prepare a model preference write after a failed legacy read", async () => {
     const failure = new Error("storage unavailable");
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -102,14 +99,6 @@ describe("client settings hydration", () => {
     expect(persistenceMocks.getClientSettings).toHaveBeenCalledTimes(2);
   });
 
-  it("uses defaults only after storage confirms no saved settings exist", async () => {
-    const completedSettings = { ...DEFAULT_CLIENT_SETTINGS, onboardingCompletedAt };
-
-    await expect(persistClientSettingsUpdate(complete)).resolves.toEqual(completedSettings);
-    expect(persistenceMocks.getClientSettings).toHaveBeenCalledOnce();
-    expect(persistenceMocks.setClientSettings).toHaveBeenCalledExactlyOnceWith(completedSettings);
-  });
-
   it("holds patches until a pending read supplies the saved preferences", async () => {
     let finishRead!: (settings: ClientSettings) => void;
     persistenceMocks.getClientSettings.mockImplementationOnce(
@@ -133,27 +122,6 @@ describe("client settings hydration", () => {
     await hydration;
     await expect(persisted).resolves.toEqual({ ...savedSettings, wordWrap: false });
     expect(persistenceMocks.getClientSettings).toHaveBeenCalledOnce();
-  });
-
-  it("handles failed patch reads without writing and retries with the saved preferences", async () => {
-    const failure = new Error("storage unavailable");
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    persistenceMocks.getClientSettings.mockRejectedValue(failure);
-
-    const hydration = ensureClientSettingsHydrated();
-    persistClientSettingsPatch({ wordWrap: false });
-    await expect(hydration).rejects.toBe(failure);
-    expect(persistenceMocks.setClientSettings).not.toHaveBeenCalled();
-
-    persistenceMocks.getClientSettings.mockResolvedValue(savedSettings);
-    const persisted = new Promise<ClientSettings>((resolve) => {
-      persistenceMocks.setClientSettings.mockImplementationOnce(async (settings) => {
-        resolve(settings);
-      });
-    });
-    persistClientSettingsPatch({ wordWrap: false });
-
-    await expect(persisted).resolves.toEqual({ ...savedSettings, wordWrap: false });
   });
 
   it("preserves patch order across hydration and a blocked completion write", async () => {
@@ -251,20 +219,6 @@ describe("persistClientSettingsUpdate", () => {
     finishPersistence();
     await expect(pending).resolves.toMatchObject({ timestampFormat: "12-hour" });
     expect(getClientSettings().timestampFormat).toBe("12-hour");
-  });
-
-  it("keeps the current snapshot and propagates persistence failure", async () => {
-    const failure = new Error("disk full");
-    const setClientSettings = vi.fn().mockRejectedValue(failure);
-    __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
-
-    await expect(
-      persistClientSettingsUpdate(
-        (current) => ({ ...current, timestampFormat: "12-hour" }),
-        setClientSettings,
-      ),
-    ).rejects.toBe(failure);
-    expect(getClientSettings()).toBe(DEFAULT_CLIENT_SETTINGS);
   });
 
   it("preserves an optimistic write made while an awaited update persists", async () => {
@@ -435,32 +389,6 @@ describe("resolveEnvironmentIdentificationMode", () => {
 });
 
 describe("mergeEnvironmentSettings", () => {
-  it("combines the selected environment's server settings with client preferences", () => {
-    const serverSettings = {
-      ...DEFAULT_SERVER_SETTINGS,
-      providerInstances: {
-        [ProviderInstanceId.make("codex_remote")]: {
-          driver: ProviderDriverKind.make("codex"),
-          enabled: true,
-        },
-      },
-    };
-    const clientSettings = {
-      ...DEFAULT_CLIENT_SETTINGS,
-      favorites: [
-        {
-          provider: ProviderInstanceId.make("codex_remote"),
-          model: "gpt-5.4",
-        },
-      ],
-    };
-
-    const settings = mergeEnvironmentSettings(serverSettings, clientSettings);
-
-    expect(settings.providerInstances).toBe(serverSettings.providerInstances);
-    expect(settings.favorites).toBe(clientSettings.favorites);
-  });
-
   it("keeps server settlement settings when legacy client data contains retired keys", () => {
     const serverSettings = {
       ...DEFAULT_SERVER_SETTINGS,

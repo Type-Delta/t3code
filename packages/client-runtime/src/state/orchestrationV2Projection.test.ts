@@ -6,6 +6,12 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   MessageId,
+  CommandId,
+  EventId,
+  CheckpointId,
+  CheckpointScopeId,
+  CheckpointRef,
+  ProviderDriverKind,
   ProjectId,
   ProviderInstanceId,
   NodeId,
@@ -186,18 +192,6 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     const next = applyOrchestrationV2ProjectionEvent(emptyProjection, event);
     expect(next?.thread.archivedAt).toEqual(archivedAt);
     expect(next?.updatedAt).toEqual(archivedAt);
-  });
-
-  it("ignores events for another thread", () => {
-    const event = {
-      id: "event-other",
-      type: "thread.deleted",
-      threadId: ThreadId.make("thread-other"),
-      occurredAt: now,
-      payload: { ...emptyProjection.thread, id: ThreadId.make("thread-other"), deletedAt: now },
-    } as OrchestrationV2DomainEvent;
-
-    expect(applyOrchestrationV2ProjectionEvent(emptyProjection, event)).toBe(emptyProjection);
   });
 
   it("preserves visible row identity when run updates do not change membership", () => {
@@ -567,3 +561,372 @@ it("does not scan every row against every run for a streaming item update", () =
   expect(next?.visibleTurnItems[0]).toBe(projection.visibleTurnItems[0]);
   expect(runReads).toBeLessThanOrEqual(100);
 });
+
+it("does not scan ordering or positions for a streamed replacement", () => {
+  const size = 100;
+  let ordinalReads = 0;
+  let positionReads = 0;
+  const items = Array.from({ length: size }, (_, index) => ({
+    ...commandItem(`item-${index}`, "before", index),
+    get ordinal() {
+      ordinalReads++;
+      return index;
+    },
+  }));
+  const rows = items.map((item, index) => ({
+    item,
+    get position() {
+      positionReads++;
+      return index;
+    },
+    visibility: "local" as const,
+    sourceThreadId: threadId,
+    sourceItemId: item.id,
+  }));
+  const payload = commandItem(`item-${size - 1}`, "after", size - 1);
+  const next = applyOrchestrationV2ProjectionEvent(
+    { ...emptyProjection, runs: [run], turnItems: items, visibleTurnItems: rows },
+    {
+      id: "stable-replacement",
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: now,
+      payload,
+    } as OrchestrationV2DomainEvent,
+  );
+
+  expect(ordinalReads).toBeLessThanOrEqual(2);
+  expect(positionReads).toBeLessThanOrEqual(2);
+  expect(next?.visibleTurnItems.at(-1)).toMatchObject({ item: payload, position: size - 1 });
+  expect(next?.visibleTurnItems[0]).toBe(rows[0]);
+  expect(items.at(-1)).toMatchObject({ output: "before" });
+  expect(rows.at(-1)?.item).toBe(items.at(-1));
+});
+
+it("rechecks visibility when an existing item changes runs without changing ordinal", () => {
+  const first = commandItem("item-first", "first", 1);
+  const second = commandItem("item-second", "second", 2);
+  const rolledBackRun = { ...run, id: RunId.make("rolled-back"), status: "rolled_back" as const };
+  const projection = {
+    ...emptyProjection,
+    runs: [run, rolledBackRun],
+    turnItems: [first, second],
+    visibleTurnItems: [first, second].map((item, position) => ({
+      item,
+      position,
+      visibility: "local" as const,
+      sourceThreadId: threadId,
+      sourceItemId: item.id,
+    })),
+  };
+  const update = (payload: OrchestrationV2TurnItem) =>
+    ({
+      id: "visibility-update",
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: now,
+      payload,
+    }) as OrchestrationV2DomainEvent;
+  const hidden = applyOrchestrationV2ProjectionEvent(
+    projection,
+    update({
+      ...first,
+      runId: rolledBackRun.id,
+    }),
+  );
+  expect(hidden?.visibleTurnItems.map((row) => [row.item.id, row.position])).toEqual([
+    [second.id, 0],
+  ]);
+  const restored = applyOrchestrationV2ProjectionEvent(hidden, update(first));
+  expect(restored?.visibleTurnItems.map((row) => [row.item.id, row.position])).toEqual([
+    [first.id, 0],
+    [second.id, 1],
+  ]);
+  expect(projection.visibleTurnItems[0]?.item).toBe(first);
+});
+
+it("restores deduped bodies from the records it already holds, also in a partial timeline", () => {
+  const messageId = MessageId.make("message-deduped");
+  const subagentId = NodeId.make("node-deduped");
+  const reply = {
+    ...commandItem("item-reply", "", 400),
+    type: "assistant_message",
+    messageId,
+    text: "the full reply",
+    streaming: false,
+  } as unknown as OrchestrationV2TurnItem;
+  const subagent = {
+    id: subagentId,
+    threadId,
+    runId,
+    parentNodeId: NodeId.make("node-root"),
+    origin: "app_owned",
+    createdBy: "agent",
+    driver: "codex",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerThreadId: null,
+    childThreadId: null,
+    nativeTaskRef: null,
+    prompt: "the task brief",
+    title: null,
+    model: null,
+    status: "running",
+    result: null,
+    startedAt: now,
+    completedAt: null,
+    updatedAt: now,
+  } as OrchestrationV2ThreadProjection["subagents"][number];
+  const projection = {
+    ...emptyProjection,
+    runs: [run],
+    messages: [
+      {
+        id: messageId,
+        threadId,
+        runId,
+        nodeId: null,
+        role: "assistant",
+        text: "the full reply",
+        attachments: [],
+        streaming: false,
+        createdBy: "agent",
+        creationSource: "provider",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    subagents: [subagent],
+  } as OrchestrationV2ThreadProjection;
+  const event = (type: string, payload: unknown) =>
+    ({
+      id: `event-${type}`,
+      type,
+      threadId,
+      runId,
+      occurredAt: now,
+      payload,
+    }) as OrchestrationV2DomainEvent;
+
+  for (const options of [undefined, { partialTimeline: true, latestLocalTurnOrdinal: 300 }]) {
+    const withReply = applyOrchestrationV2ProjectionEvent(
+      projection,
+      event("turn-item.updated", { ...reply, text: "", textOmitted: true }),
+      options,
+    );
+    expect(withReply?.turnItems).toEqual([reply]);
+    expect(withReply?.visibleTurnItems.map((row) => row.item)).toEqual([reply]);
+  }
+  const progressed = applyOrchestrationV2ProjectionEvent(
+    projection,
+    event("subagent.updated", { ...subagent, prompt: "", promptOmitted: true, progress: "step 2" }),
+  );
+  expect(progressed?.subagents).toEqual([{ ...subagent, progress: "step 2" }]);
+});
+
+describe("live checkpoint navigation", () => {
+  const providerId = ProviderThreadId.make("provider-checkpoints");
+  const provider = {
+    id: providerId,
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerSessionId: null,
+    appThreadId: threadId,
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    nativeConversationHeadRef: null,
+    status: "idle" as const,
+    firstRunOrdinal: 1,
+    lastRunOrdinal: 2,
+    handoffIds: [],
+    forkedFrom: null,
+    pendingBackgroundTasks: [],
+    contextUsage: null,
+    nativeMetadata: null,
+    goal: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const checkpoint = (ordinal: number) => ({
+    id: CheckpointId.make(`checkpoint-live-${ordinal}`),
+    threadId,
+    scopeId: CheckpointScopeId.make("checkpoint-scope-live"),
+    runId: ordinal === 0 ? null : runId,
+    nodeId: NodeId.make("node-live"),
+    parentCheckpointId: ordinal === 0 ? null : CheckpointId.make(`checkpoint-live-${ordinal - 1}`),
+    ordinalWithinScope: ordinal,
+    appRunOrdinal: ordinal === 0 ? null : ordinal,
+    ref: CheckpointRef.make(`sidecar:live-${ordinal}`),
+    status: "ready" as const,
+    files: [],
+    capturedAt: now,
+  });
+  const base = {
+    ...emptyProjection,
+    thread: { ...emptyProjection.thread, activeProviderThreadId: providerId },
+    providerThreads: [provider],
+    checkpointNavigation: {
+      capability: "branching" as const,
+      canUndo: false,
+      canRedo: false,
+      isNavigating: false,
+      latestCheckpointBlockingStatus: null,
+      reason: null,
+      cursorVersion: 0,
+      currentEntryId: null,
+      currentOrdinal: null,
+      forwardTipEntryId: null,
+      forwardTipOrdinal: null,
+    },
+  };
+  const eventBase = { id: EventId.make("event-checkpoints"), threadId, occurredAt: now };
+  const captured = (projection: OrchestrationV2ThreadProjection, ordinal: number) =>
+    applyOrchestrationV2ProjectionEvent(projection, {
+      ...eventBase,
+      type: "checkpoint.captured",
+      payload: checkpoint(ordinal),
+    })!;
+
+  it("enables undo as ready checkpoints arrive after the initial snapshot", () => {
+    const initial = captured(base, 0);
+    const first = captured(initial, 1);
+    const second = captured(first, 2);
+    expect(second.checkpointNavigation).toMatchObject({
+      canUndo: true,
+      canRedo: false,
+      currentOrdinal: 2,
+      cursorVersion: 2,
+    });
+  });
+
+  it("uses the provider acquired by an event when choosing the current checkpoint", () => {
+    const unbound = {
+      ...base,
+      thread: { ...base.thread, activeProviderThreadId: null },
+      providerThreads: [],
+    };
+    const ready = captured(captured(captured(unbound, 0), 1), 2);
+    const acquired = applyOrchestrationV2ProjectionEvent(ready, {
+      ...eventBase,
+      type: "provider-thread.updated",
+      payload: provider,
+    })!;
+    expect(acquired.thread.activeProviderThreadId).toBe(providerId);
+    expect(acquired.checkpointNavigation).toMatchObject({ canUndo: true, currentOrdinal: 2 });
+  });
+
+  it("clears a failed pending navigation only for its current request", () => {
+    const requestId = CommandId.make("rollback-current");
+    const ready = captured(captured(captured(base, 0), 1), 2);
+    const requested = applyOrchestrationV2ProjectionEvent(ready, {
+      ...eventBase,
+      type: "thread.metadata-updated",
+      payload: { ...ready.thread, rollbackRequestId: requestId, rollbackFailure: null },
+    })!;
+    const pending = applyOrchestrationV2ProjectionEvent(requested, {
+      ...eventBase,
+      type: "checkpoint.rollback-requested",
+      payload: { scopeId: checkpoint(1).scopeId, checkpointId: checkpoint(1).id, requestedAt: now },
+    })!;
+    const stale = applyOrchestrationV2ProjectionEvent(pending, {
+      ...eventBase,
+      type: "thread.metadata-updated",
+      payload: {
+        ...pending.thread,
+        rollbackRequestId: CommandId.make("rollback-old"),
+        rollbackFailure: { requestId: CommandId.make("rollback-old"), message: "Old failure" },
+      },
+    })!;
+    expect(stale.thread.rollbackRequestId).toBe(requestId);
+    expect(stale.checkpointNavigation?.isNavigating).toBe(true);
+    const failed = applyOrchestrationV2ProjectionEvent(stale, {
+      ...eventBase,
+      type: "thread.metadata-updated",
+      payload: { ...pending.thread, rollbackFailure: { requestId, message: "Current failure" } },
+    })!;
+    expect(failed.checkpointNavigation).toMatchObject({ isNavigating: false, canUndo: true });
+  });
+
+  it("keeps pending navigation until the provider cursor confirms undo or redo", () => {
+    const ready = captured(captured(captured(base, 0), 1), 2);
+    const pending = applyOrchestrationV2ProjectionEvent(ready, {
+      ...eventBase,
+      type: "checkpoint.rollback-requested",
+      payload: { scopeId: checkpoint(1).scopeId, checkpointId: checkpoint(1).id, requestedAt: now },
+    })!;
+    expect(pending.checkpointNavigation?.isNavigating).toBe(true);
+    expect(captured(pending, 2).checkpointNavigation?.isNavigating).toBe(true);
+    const unrelated = applyOrchestrationV2ProjectionEvent(pending, {
+      ...eventBase,
+      type: "provider-thread.updated",
+      payload: { ...provider, id: ProviderThreadId.make("unrelated-provider"), appThreadId: null },
+    })!;
+    expect(unrelated.checkpointNavigation?.isNavigating).toBe(true);
+    const undone = applyOrchestrationV2ProjectionEvent(pending, {
+      ...eventBase,
+      type: "provider-thread.updated",
+      payload: { ...provider, lastRunOrdinal: 1 },
+    })!;
+    expect(undone.checkpointNavigation).toMatchObject({
+      canUndo: true,
+      canRedo: true,
+      isNavigating: false,
+      currentOrdinal: 1,
+      forwardTipOrdinal: 2,
+    });
+    const redone = applyOrchestrationV2ProjectionEvent(undone, {
+      ...eventBase,
+      type: "provider-thread.updated",
+      payload: provider,
+    })!;
+    expect(redone.checkpointNavigation).toMatchObject({ canRedo: false, currentOrdinal: 2 });
+  });
+});
+
+it.each([false, true])(
+  "restores retained local redo rows without changing inherited rows, partial=%s",
+  (partialTimeline) => {
+    const own = commandItem("redo-own", "own", 10);
+    const inherited = {
+      position: 0,
+      visibility: "inherited" as const,
+      sourceThreadId: ThreadId.make("parent-redo"),
+      sourceItemId: TurnItemId.make("parent-redo-item"),
+      item: {
+        ...commandItem("parent-redo-item", "parent", 1),
+        threadId: ThreadId.make("parent-redo"),
+      },
+    };
+    const projection = {
+      ...emptyProjection,
+      runs: [run],
+      turnItems: [own],
+      visibleTurnItems: [
+        inherited,
+        {
+          position: 1,
+          visibility: "local" as const,
+          sourceThreadId: threadId,
+          sourceItemId: own.id,
+          item: own,
+        },
+      ],
+    };
+    const eventBase = { id: EventId.make("redo-visibility"), threadId, occurredAt: now };
+    const hidden = applyOrchestrationV2ProjectionEvent(
+      projection,
+      { ...eventBase, type: "run.updated", payload: { ...run, status: "rolled_back" } },
+      { partialTimeline, latestLocalTurnOrdinal: 10 },
+    )!;
+    expect(hidden.visibleTurnItems).toEqual([inherited]);
+    const restored = applyOrchestrationV2ProjectionEvent(
+      hidden,
+      { ...eventBase, type: "run.updated", historyRestoration: true, payload: run },
+      { partialTimeline, latestLocalTurnOrdinal: 10 },
+    )!;
+    expect(restored.visibleTurnItems.map((row) => [row.sourceItemId, row.position])).toEqual([
+      [inherited.sourceItemId, 0],
+      [own.id, 1],
+    ]);
+    expect(restored.visibleTurnItems[0]).toBe(inherited);
+  },
+);

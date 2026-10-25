@@ -127,6 +127,7 @@ export interface CheckpointServiceV2Shape {
     readonly nodeId: NodeId;
     readonly ordinalWithinScope: number;
     readonly appRunOrdinal: number | null;
+    readonly baselineOrdinalWithinScope?: number;
     readonly capturedAt: DateTime.Utc;
   }) => Effect.Effect<OrchestrationV2Checkpoint, CheckpointServiceV2Error>;
   readonly restore: (input: {
@@ -394,11 +395,13 @@ export const layer: Layer.Layer<
             scopeId: input.scope.id,
             ordinalWithinScope: input.ordinalWithinScope,
           });
+          const baselineOrdinal =
+            input.baselineOrdinalWithinScope ?? Math.max(0, input.ordinalWithinScope - 1);
           const parentCheckpointId =
             input.ordinalWithinScope > 0
               ? yield* checkpointIdForScopeOrdinal(idAllocator, {
                   scopeId: input.scope.id,
-                  ordinalWithinScope: input.ordinalWithinScope - 1,
+                  ordinalWithinScope: baselineOrdinal,
                 })
               : null;
           if (!(yield* isGitCheckpointable(input.scope.cwd))) {
@@ -453,10 +456,7 @@ export const layer: Layer.Layer<
           }
 
           const checkpointRef = captured.checkpointRef;
-          const previousCheckpointRef = yield* findBoundaryRef(
-            input.scope,
-            Math.max(0, input.ordinalWithinScope - 1),
-          ).pipe(
+          const previousCheckpointRef = yield* findBoundaryRef(input.scope, baselineOrdinal).pipe(
             Effect.catch((cause) =>
               Effect.logWarning("orchestration V2 previous checkpoint ref lookup failed", {
                 scopeId: input.scope.id,

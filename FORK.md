@@ -90,15 +90,13 @@ Upstream #14892 marks a checkpoint `missing` when its workspace folder is ignore
 
 Sidecar capture runs Git with `-C` at the worktree root, so paths stay worktree-relative when the server's own working directory is inside the project, as when T3 Code develops itself. An uninitialized submodule, an empty folder at a tracked gitlink, is captured as the gitlink commit the project index records rather than failing the whole capture.
 
-The SQLite capture-job and navigation-journal tables from fork migrations `036`–`038` remain for schema compatibility. No server code reads them since the V2 cutover; V2 navigation uses upstream's checkpoint rollback.
+Legacy checkpoint tables remain for schema compatibility. V2 navigation uses upstream's checkpoint rollback with the fork's retained forward checkpoints for redo; no server code reads the former capture-job or navigation-journal tables.
 
-Fork migrations `036`–`038` establish durable checkpoint state. Fork `037` once declared `checkpoint_legacy_migrations` with a foreign key into `projection_turns`, which upstream migration `063_DropUnusedV1Projections` drops. Startup rebuilds that table without the key before upstream migrations run; fresh databases never had it. The reconciliation migrations retain compatibility with databases that used upstream's overlapping migration numbers. Existing fork history through `052_RemoveManagementApiKeyRuntimeModes` remains unchanged.
+Persistence keeps canonical upstream migrations `001`–`069` in `effect_sql_migrations` and fork migrations `001`–`015` in the independent `fork_sql_migrations` ledger. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
 
-After history reconciliation, startup repairs any absent migration from the current upstream manifest that falls below the recorded high-water mark before the normal migrator runs. This keeps a remapped historical `ThreadSummaryTimeline` row from suppressing upstream `041_AuthSessionClientConnection`; the repair is idempotent.
+The old ID-58 prompt-suggestion collision is repaired by canonical upstream migration `048_ProjectionThreadBranchPullRequest` and fork migration `009_ProjectionThreadMessageSuggestions`. This preserves both columns even when the original numeric ledger skipped the branch column. Startup also removes the legacy checkpoint table's foreign key to `projection_turns` before upstream `063_DropUnusedV1Projections` drops that table. Incoming upstream migrations `065`–`069` retain their canonical IDs, including webhook deduplication and message-search schema.
 
-Migration 053_ReconcileUpstream47History repairs a database carrying upstream history through 047, restoring fork checkpoint and subagent state skipped by the overlapping numbers. Fork management-key and auto-resume migrations remain at 050-052. Incoming upstream behavior then runs as 054-061, with fork prompt suggestions at 062, and the latest upstream title-state, pull-request-file, auto-settle, and V2 cutover migrations at 063-067. Migration 065_ReconcileBranchPullRequestHistory repairs the known deployed-ID-58 collision idempotently before startup. Migration 067_CoreV2Cutover imports legacy V1 thread shells and messages into V2 projections and removes obsolete V1 runtime state. Schema checks keep these changes safe for both fork and upstream database histories.
-
-Upstream's per-thread auto-settle migration runs at 066, followed by the V2 cutover at 067, preserving the deployed fork ledger. The isolated migration helper accepts documented historical ledger names only after it verifies their reconciliation markers and repaired schema. Codex checkpoint navigation uses the current native thread/revert protocol and retains the fork's conversation cursor safeguards.
+The isolated migration helper verifies known historical ledger aliases against their repaired schema before accepting them. Codex and Claude checkpoint navigation fork the saved native conversation at the selected provider-turn boundary instead of destructively truncating it. Captures retain the native source, and older checkpoints acquire it before their first navigation. Redo restores the original terminal run and root-node states as well as files and conversation context. Restoration events reach clients but do not repeat live completion handling, usage metrics, settlement, or automatic retries. A new message after undo abandons the previous forward branch.
 
 Terminal provider events end the workspace mutation for their exact turn and settle the run before local VCS status refresh or checkpoint capture. Checkpoint capture runs as a follow-up effect and records the checkpoint when it succeeds, so a slow or unavailable VCS backend cannot leave the conversation showing as active. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
@@ -112,7 +110,9 @@ Capture jobs that first lose the workspace-mutation race or fail can be re-enque
 
 Capture keeps one private index per worktree inside the sidecar repository and passes every tracked or unignored path to `git update-index`, so only files whose stat changed since the last capture are hashed again, as for the project's own index. Paths the workspace no longer has leave that index, and a tracked file that was deleted or replaced by a folder is captured as gone. The index starts over empty when `.gitattributes` or the sidecar's copied core settings change, after any failed Git command, and before sidecar gc, so each tree matches one built from an empty index. A second pass over the same index rehashes anything edited during capture and rejects the capture when the trees differ. Deleted and renamed files restore correctly without changing the user's Git index.
 
-**Implementation evidence:** `apps/server/src/checkpointing/{SidecarCheckpointRepository,CheckpointRepositoryIdentity,CheckpointStore}.ts`, `apps/server/src/orchestration-v2/CheckpointService.ts`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,053_ReconcileUpstream47History}.ts`, `apps/server/src/persistence/ForkMigrations.ts`, and their tests. `CheckpointStore.test.ts` holds the sidecar characterization suite, including a comparison of reused-index trees against empty-index `git add` trees across tracked, untracked, deleted, binary, symlinked, ignored, file-to-folder, mode, and attribute changes; `apps/server/src/orchestration-v2/CheckpointService.sidecar.test.ts` runs turns against real temporary repositories and asserts that `git for-each-ref refs/t3` stays empty, that restore works, and that an in-repo checkpoint from the redo period still restores.
+Standalone checkpoint slash commands dispatch locally even when a provider does not expose plan-mode controls. Client event reduction recomputes checkpoint navigation with the same helper as the server. A captured checkpoint, provider cursor change, or rollback updates undo/redo availability immediately. The client cache schema invalidates older snapshots whose navigation metadata never updated. Navigation menus react when availability changes, and matching failures release the pending state. Redo refreshes bounded transcript state for every observer, including clients opened while undone. Authoritative history-page distances preserve expanded and inherited history without searching indefinitely for discarded entries; late history responses cannot revive rolled-back rows.
+
+**Implementation evidence:** `packages/shared/src/orchestrationV2CheckpointNavigation.ts`, `apps/server/src/checkpointing/{SidecarCheckpointRepository,CheckpointRepositoryIdentity,CheckpointStore}.ts`, `apps/server/src/orchestration-v2/CheckpointService.ts`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata,039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,053_ReconcileUpstream47History}.ts`, `apps/server/src/persistence/ForkMigrations.ts`, and their tests. `CheckpointStore.test.ts` holds the sidecar characterization suite, including a comparison of reused-index trees against empty-index `git add` trees across tracked, untracked, deleted, binary, symlinked, ignored, file-to-folder, mode, and attribute changes; `apps/server/src/orchestration-v2/CheckpointService.sidecar.test.ts` runs turns against real temporary repositories and asserts that `git for-each-ref refs/t3` stays empty, that restore works, and that an in-repo checkpoint from the redo period still restores.
 
 **Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated. The deletion/rename regression and all 15 sidecar checkpoint tests passed on Windows with the user-index preservation assertion.
 
@@ -124,7 +124,7 @@ The 2026-10-05 completion split passed the focused RunExecutionService, Checkpoi
 
 The 2026-10-15 re-port restored the 16 sidecar characterization tests the redo dropped (32 checkpoint-store tests pass), plus sidecar authored-path filtering, long scope ids, and the V2 real-repository suite.
 
-**Last updated:** 2026-10-20
+**Last updated:** 2026-10-25
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -145,6 +145,14 @@ Split membership is persisted as multiple ordered local groups with active state
 The 2026-10-07 drag update passed 90 focused drag tests, `vp check`, `vp run typecheck`, and `git diff --check`. Remote user verification confirmed the full thread-row overlay follows the pointer and the source gap remains visible outside the sidebar.
 
 **Last updated:** 2026-10-20
+
+### DL009 — Global default for agent tool access
+
+Agent MCP tool scope now has an environment-level default with Automatic, Project, and Global choices. Project settings display Default when no override is stored and resolve that choice through the global default; Automatic retains repository-aware behavior.
+
+**Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/server/src/mcp/McpToolScope.ts`, `apps/web/src/components/settings/IntegrationsSettings.tsx`, and `apps/web/src/components/settings/ProjectMcpToolScopeSettings.tsx`.
+
+**Recorded validation:** focused MCP scope tests, `vp check`, and `vp run typecheck`.
 
 ### DL012 — Prompt preservation during draft promotion
 
@@ -299,11 +307,11 @@ Workspaces without a Git repository do no VCS work for checkpoints. VCS detectio
 
 Thread Markdown preserves local Windows drive-letter destinations through URL sanitization and resolves the encoded backslash form emitted by the Markdown parser. These links open through the existing file chip behavior instead of rendering as inert anchors. Sanitization also preserves validated `t3-context` references in both link and image destinations so structured context records render as chips instead of inert Markdown. This coexists with upstream workspace images, spaced-folder command-click handling, contrast-aware annotation styling, and full-path link tooltips.
 
-**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx`, `apps/web/src/components/ChatMarkdown.browser.test.tsx`, `apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`, and `apps/web/src/markdown-links.test.ts`.
+**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx`, `apps/web/src/components/chat/MarkdownFileLink.tsx`, `apps/web/src/components/ChatMarkdown.browser.test.tsx`, and `apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`.
 
 **Recorded validation:** focused Markdown link tests, ChatMarkdown and MessagesTimeline context-reference tests, an isolated paired web-client pass with a drive-letter link in both user and assistant messages, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-09-23
+**Last updated:** 2026-10-25
 
 ### DL023 – Scoped V2 MCP thread and project tools
 
@@ -381,6 +389,8 @@ The generated Codex catalog is deep-merged from the configured Codex JSON, or th
 native `models_cache.json` when no Codex JSON is configured, with explicit custom models appended
 by slug so nested native metadata is retained.
 
+Codex adapter setup retains the original shared/shadow-home configuration while adding gateway launch arguments. Resolving an already-substituted shadow home a second time would reject an otherwise valid provider instance.
+
 CLI-managed Codex gateways can opt into native catalog discovery. T3 configures Codex with the
 gateway's `model_catalog_url` and a command-backed bearer token reader, so Codex can use gateway
 model metadata that its bundled catalog does not contain. x-api-key gateways keep their
@@ -407,7 +417,7 @@ section expanded.
 
 Claude adapter and text-generation launches now resolve each selected gateway model through the per-instance catalog, applying `[1m]` model IDs and normalized CLI effort before opening or spawning.
 
-**Last updated:** 2026-10-16
+**Last updated:** 2026-10-25
 
 ### DL027 — Remote editor links select the server account
 
@@ -419,7 +429,7 @@ only when `USERDNSDOMAIN` confirms a domain and the name is not the local
 computer/workgroup. Local accounts use the unqualified username. Systems that
 cannot resolve an account omit the field and retain host-only behavior.
 Desktop-managed SSH aliases remain authoritative and continue to omit the
-advertised account. The username field is optional for compatibility with older
+advertised account. VS Code Remote-SSH links retain the fork's raw `@` separator inside the path authority, with upstream's `:1:1` file-position suffix. The username field is optional for compatibility with older
 server configurations.
 
 **Implementation evidence:** `packages/shared/src/HostProcess.ts`,
@@ -430,7 +440,7 @@ server configurations.
 **Recorded validation:** focused contract, server target discovery, web remote-open,
 and Electron shell tests.
 
-**Last updated:** 2026-09-01
+**Last updated:** 2026-10-25
 
 ### DL028 — Isolated Windows x64 GitHub releases
 
@@ -586,7 +596,7 @@ next prompt. The agent writes it from its real context (repository instructions,
 conversation so far); no separate model call, provider session, or transcript summary is made.
 `ProviderRuntimeIngestion` withholds any partial or open tag from streamed and buffered deltas,
 strips every tagged block at completion, and carries the sanitized text as `suggestion` on the
-assistant message through the decider, projector, client reducer, and SQLite projection. Persistence keeps upstream migrations 1–64 in `effect_sql_migrations` and fork migrations 1–15 in the independent `fork_sql_migrations` ledger. The web composer shows it as ghost text once the thread is idle and the
+assistant message through the decider, projector, client reducer, and SQLite projection. Persistence keeps upstream migrations 1–69 in `effect_sql_migrations` and fork migrations 1–15 in the independent `fork_sql_migrations` ledger. The web composer shows it as ghost text once the thread is idle and the
 composer is empty; Tab accepts it, typing dismisses it for that message, and a new message or
 thread resets it. Cursor, Grok, OpenCode, and Antigravity receive no instruction. Mobile has no
 toggle or ghost text. An optional `promptSuggestionInstructions` setting appends extra guidance to
@@ -698,14 +708,13 @@ the safe context-handoff path.
 
 A fork or rollback request may carry a saved native turn boundary (`nativeBoundaryRef` on the
 adapter fork input). Codex and Claude fork exactly at a strong ref of their own driver and reject a
-weak, foreign, or synthetic one instead of falling back to a guessed turn count. No orchestrator path
-supplies it yet; V1 import records thread cursors only.
+weak, foreign, or synthetic one instead of falling back to a guessed turn count. Checkpoint navigation uses the persisted provider-turn boundary through the existing fork API. No orchestrator path supplies the explicit `nativeBoundaryRef` override yet; V1 import records thread cursors only.
 
 Implementation evidence: LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
 projection, Codex and Claude V2 adapters (`resolveCodexForkBoundary`,
 `resolveClaudeForkUpToMessageId`), and the legacy importer/cutover and Codex adapter tests.
 
-Last updated: 2026-10-15
+Last updated: 2026-10-25
 
 ### DL043 — Codex compaction context usage restored
 
@@ -748,14 +757,14 @@ Inline Markdown images backed by host files retry a bounded number of times afte
 mint fails. Agents can stream a Markdown path before the file is finished writing; the asset query
 otherwise caches the not-found response while opening the same path in the image viewer explicitly
 refreshes it. Retries require the filesystem read permission and stop after the short backoff or a
-successful signed URL. The host-file resource is memoized by value so streaming renders do not restart the retry budget.
+successful signed URL. The retry identity uses the environment and resource value, so streaming renders do not restart the retry budget and a different resource receives its own budget.
 
-**Implementation evidence:** `apps/web/src/components/ChatMarkdown.tsx` and
+**Implementation evidence:** `apps/web/src/components/chat/ChatMarkdownMedia.tsx` and
 `apps/web/src/components/ChatMarkdown.assets.browser.test.tsx`.
 
 **Recorded validation:** focused ChatMarkdown asset tests.
 
-**Last updated:** 2026-10-15
+**Last updated:** 2026-10-25
 
 ### DL046 — Worktree submodules initialize local file URLs safely
 
@@ -805,6 +814,46 @@ Repository formatting, lint, and type checks passed.
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-10-25 — Merge upstream/main through `b808f7fc6d`
+
+**Merge commit:** this commit
+**Parents:** `1c81d6473d7a35cf177ff56495bf22f6e0417b10` (fork) and `b808f7fc6de810aa72b7131acbd3f947c6321b9f` (upstream/main); 769 upstream commits since `6a049d0ea1`.
+
+The sync preserves all 39 current divergence entries, including the global MCP scope default and the latest automatic-retry changes. DL009 now lives in the Divergence Log rather than below Merge History.
+
+Decisions:
+
+- Keep sidecar checkpoints, forward checkpoints for redo, immediate turn completion, exact-owner background-task cleanup, and the bounded independent capture lane. Compose upstream SQLite read routing, durable failure persistence, outcome recording, and cleanup with them.
+- Keep pending automatic retries hidden from terminal waiters and completion notifications. Retain retry guard metadata in contracts and thread summaries alongside upstream guest sharing, idle compaction, feedback, compact snapshots, and model options. Keep usage-limit auto-resume enabled by default and its fork continuation prompt; adopt upstream's steer-by-default follow-ups.
+- Keep reopening the original delegated task on user follow-ups, including held queues, cancellation and exactly-once completion delivery, alongside upstream child-stop handling.
+- Keep management-key principals, scoped project/global MCP access, eight-target waits, provider/model send selection and self-send rejection. Preserve the reviewed management-key allowlist. Adapt the new CLI to multi-target wait responses. Project scope applies before full-text-search ranking and limits on both search APIs.
+- Keep per-instance gateway catalogs, metadata precedence, opaque credentials, and stale-PATH launch recovery. Combine upstream Codex probe deadlines and service-tier enrichment with gateway metadata. ACP recovery registers and stops each launch attempt's scope; OpenCode retains shared server-scope ownership.
+- Keep Claude's separate startup queues, initialization handshake, empty-session recovery, prompt-suggestion pinning, gateway model/effort normalization and partial usage tolerance. Adopt upstream scope cleanup, launch prompts, skill objects, query policy and compaction thresholds. Keep Codex compaction token counts alongside upstream completion timestamps and failure titles.
+- Keep desktop tray-backed backend continuity, shared renderer/tray authentication, readiness gating, Windows stdin/process-tree shutdown, and explicit-quit cleanup. Keep preview receipt acknowledgement, deadlines, stale-session recovery and native-control cleanup alongside upstream screenshot and appearance changes.
+- Keep Windows account/domain selection for remote editors and the raw `@` separator in VS Code Remote-SSH path authorities, composing upstream username normalization and the `:1:1` suffix. Desktop-managed SSH aliases remain authoritative.
+- Keep the full-row sidebar drag overlay, ten-pane split groups, saved colors, focused-pane shortcuts/paste/composer ownership and one shared right panel. Port these into upstream's extracted sidebar, composer and chat modules. Keep Manual/Last input ordering when Working is disabled, with upstream Inbox ordering while enabled.
+- Keep machine context, optimistic prompt preservation, existing-worktree selection, checkpoint slash commands, prompt suggestions, subagent navigation, automatic-retry controls and the project-selecting new-thread shortcut. Keep model-group-scoped search, including query retention during keyboard group changes. Keep Windows/context file links and bounded host-image recovery in upstream's extracted Markdown modules.
+- Keep manual-only release triggers and the separate unsigned Windows/macOS workflows. Retain the patched node-pty pin, Windows test budgets, route-test exclusion and standalone Node-test exclusions.
+- Keep canonical upstream migration IDs through 069 and independent fork IDs 1–15. Preserve name-based historical conversion, lower-gap repair and guarded fork schema changes. Historical fork collisions, including the missing branch column at old ID 58, upgrade without an additional repair migration. Repair stale migration fixtures to exercise the current canonical migrations rather than unrelated reused numbers.
+- Retain meaningful fork characterization when upstream removes tests. Port those cases onto the new fixtures and disposable browser-render helpers. Accept deletion of superseded private-helper and fake-only tests; retain actual launcher, lifecycle, provider, checkpoint and scope behavior checks. Pre-merge canvas and settings-search failures reproduced unchanged; their stale expectations now match the retained behavior.
+
+Integration repairs:
+
+- Restored the project predicate in the retained search wrapper after upstream's full-text-search extraction.
+- Fixed pre-existing checkpoint-client gaps found in live testing: navigation metadata now follows events, old cached metadata is invalidated, and slash commands no longer depend on plan-mode controls.
+- Fixed pre-existing redo gaps found by independent review and a failing regression: preserved native conversation sources, restored transcript run/node states, and distinguished historical restoration from live completion side effects. Existing provider fork APIs remain the protocol boundary.
+- Fixed pre-existing Codex shared/shadow-home double resolution while retaining gateway launch arguments.
+
+Validation:
+
+- Repository-wide `vp check` and `vp run typecheck` pass. Mobile native static checks pass, including SwiftLint, ktlint and detekt.
+- The final full-suite run completed 1,612 files with 17,836 passing tests and nine skips. Its seven remaining failures were old native rollback recordings and an exact history-response expectation. Those test-only mismatches were corrected; all 83 tests in the four affected files pass on rerun. Earlier full-suite fixture and temporary-storage failures were also resolved, with all 558 tests in those 17 files passing together.
+- Focused migration tests cover fresh, canonical upstream and deployed fork ledgers, numeric collisions, retained suggestion data, schema integrity and repeat startup. A read-only copy of real data applied upstream migrations 065–069, passed integrity and foreign-key checks, loaded saved threads, and restarted without additional migrations.
+- Independent reviews checked every current divergence and then rechecked the checkpoint repairs. Focused client, provider, persistence and orchestration regressions cover pending navigation, failed-navigation retry, immutable native sources, inherited baselines, cold resume, abandoned branches, capture gaps, historical-event delivery and bounded history restoration.
+- A paired production web client completed real Codex and Claude turns in selected existing worktrees. Undo and redo restored files and transcript rows in both the original client and a fresh observer. After restarting the isolated server, both providers retained their native session references and correctly recalled the restored conversation without reading files. A Claude fork from an older response also retained its inherited context after rewinding its first own turn and restarting; its discarded child instruction did not return. Sidecar captures left the project's `refs/t3` namespace empty.
+- Integrated checks covered machine/worktree context, gateway catalogs, split creation/restoration/detachment, project-selecting shortcuts, ordering persistence, management-key creation/revocation and phone-width layout. The file-restore isolation guard and retry after refusal were verified.
+- Web, server and desktop production builds pass. Linux AppImage and deb installers build, and an isolated Electron instance created its window and started its backend. Native mobile runtime verification and Windows/macOS installer execution were not performed. No deployment was performed.
 
 ### 2026-10-20 — Merge upstream/main through `6a049d0ea1`
 
@@ -1140,11 +1189,3 @@ The merge reconciled the following textual conflict surfaces and made these sema
 - **Root helpers:** retained both sets of root helper configuration instead of treating either as a replacement.
 - **Cross-platform test coverage:** merged `/userdata` and Windows portability coverage so desktop, server, and shared tests use platform-correct paths and fixtures.
 - **QA reconciliation:** merged command, schema, and test-fixture changes and fixed Claude/Codex cleanup issues discovered during post-merge validation.
-
-### DL009 — Global default for agent tool access
-
-Agent MCP tool scope now has an environment-level default with Automatic, Project, and Global choices. Project settings display Default when no override is stored and resolve that choice through the global default; Automatic retains repository-aware behavior.
-
-**Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/server/src/mcp/McpToolScope.ts`, `apps/web/src/components/settings/IntegrationsSettings.tsx`, and `apps/web/src/components/settings/ProjectMcpToolScopeSettings.tsx`.
-
-**Recorded validation:** focused MCP scope tests, `vp check`, and `vp run typecheck`.

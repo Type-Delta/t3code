@@ -46,7 +46,7 @@ these refs. That reduces the immediate risk but does not fix the storage-boundar
 - Never write checkpoint refs, commits, trees, blobs, temporary indexes, or reflogs into a user's
   `.git` directory for new snapshots.
 - Never make checkpoint content reachable by a project remote, including through `git push
---mirror` executed outside T3.
+  --mirror` executed outside T3.
 - Support normal repositories, the primary worktree, and any linked Git worktree.
 - Resolve and operate on the thread's actual worktree rather than accidentally using the primary
   checkout.

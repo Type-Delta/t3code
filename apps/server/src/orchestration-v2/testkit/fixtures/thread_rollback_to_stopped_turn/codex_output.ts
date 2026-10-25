@@ -37,14 +37,27 @@ export function assertThreadRollbackToStoppedTurnOutput(
   assert.equal(stoppedCheckpoint?.runId, stoppedRun?.id);
   assert.equal(stoppedRun?.checkpointId, stoppedCheckpoint?.id);
 
-  const revert = transcript.entries.find(
+  const fork = transcript.entries.find(
     (entry) =>
       entry.type === "expect_outbound" &&
       typeof entry.frame === "object" &&
       entry.frame !== null &&
-      Reflect.get(entry.frame, "method") === "thread/revert",
+      Reflect.get(entry.frame, "method") === "thread/fork",
   );
-  assert.isDefined(revert, "rollback must revert the Codex thread");
+  assert.isDefined(fork, "rollback must fork the preserved Codex thread");
+  const boundary = projection.providerTurns.find(
+    (turn) => turn.nodeId === stoppedRun?.rootNodeId,
+  )?.nativeTurnRef;
+  assert.equal(boundary?.nativeId, transcript.metadata?.checkpointNativeTurnId);
+  assert.equal(stoppedCheckpoint?.nativeThreadRef?.nativeId, transcript.metadata?.sourceThreadId);
+  assert.equal(
+    projection.providerThreads[0]?.nativeThreadRef?.nativeId,
+    transcript.metadata?.forkThreadId,
+  );
+  assert.notEqual(
+    projection.providerThreads[0]?.nativeThreadRef?.nativeId,
+    stoppedCheckpoint?.nativeThreadRef?.nativeId,
+  );
 
   assertVisibleUserMessagesInclude(projection, [
     THREAD_ROLLBACK_FIRST_PROMPT,

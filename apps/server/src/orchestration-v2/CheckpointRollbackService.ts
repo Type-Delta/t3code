@@ -48,6 +48,7 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
       "provider-turn-unavailable",
       "unexpected-failure",
       "shared-workspace",
+      "background-work-active",
     ]),
     threadId: ThreadId,
     providerThreadId: ProviderThreadId,
@@ -65,6 +66,8 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
         return `Provider turn for rollback target ${this.checkpointId} is unavailable on provider thread ${this.providerThreadId}.`;
       case "shared-workspace":
         return SHARED_WORKSPACE_RESTORE_MESSAGE;
+      case "background-work-active":
+        return "Stop this thread's background work before navigating checkpoints.";
       case "unexpected-failure":
         return ROLLBACK_FAILED_MESSAGE;
     }
@@ -81,6 +84,7 @@ const isCheckpointRestoreError = Schema.is(CheckpointRestoreError);
  * output, so they fall back to the generic message.
  */
 export function rollbackFailureClientMessage(error: CheckpointRollbackExecutionError): string {
+  if (error.reason === "background-work-active") return error.message;
   const restoreCause = isCheckpointRestoreError(error.cause) ? error.cause.cause : undefined;
   return isVcsProcessExitError(restoreCause) && restoreCause.detail === GIT_INDEX_LOCKED_DETAIL
     ? GIT_INDEX_LOCKED_DETAIL
@@ -273,20 +277,125 @@ export const layer: Layer.Layer<
             !rolledBackAttemptIds.has(turn.runAttemptId)),
       );
       const currentOrdinal = providerThread.lastRunOrdinal ?? 0;
-
+      const nativeSource = checkpoint.nativeThreadRef ?? providerThread.nativeThreadRef;
+      const nativeBaselineRef =
+        checkpoint.nativeBaselineRef !== undefined
+          ? checkpoint.nativeBaselineRef
+          : providerThread.nativeMetadata?.forkHeadMessageId === undefined
+            ? null
+            : {
+                driver: providerThread.driver,
+                nativeId: providerThread.nativeMetadata.forkHeadMessageId,
+                strength: "strong" as const,
+              };
+      const preserveNativeSource =
+        (providerThread.driver === "codex" || providerThread.driver === "claudeAgent") &&
+        nativeSource?.driver === providerThread.driver &&
+        nativeSource?.strength === "strong";
+      const historicalSources =
+        preserveNativeSource && checkpoint.nativeThreadRef === undefined
+          ? (yield* projections.getThreadRecords(input.threadId, [
+              "checkpoints",
+            ])).checkpoints.filter(
+              (candidate) =>
+                candidate.scopeId === scope.id && candidate.nativeThreadRef === undefined,
+            )
+          : [];
+      if (preserveNativeSource && (runsToRollback.length > 0 || currentOrdinal !== targetOrdinal)) {
+        if (
+          yield* (
+            session.hasPendingBackgroundWorkForThread?.(providerThread) ?? Effect.succeed(false)
+          )
+        ) {
+          return yield* new CheckpointRollbackExecutionError({
+            reason: "background-work-active",
+            threadId: input.threadId,
+            providerThreadId: input.providerThreadId,
+            checkpointId: input.checkpointId,
+          });
+        }
+        if (providerThread.driver === "claudeAgent" && session.unloadThread !== undefined) {
+          yield* session.unloadThread({ providerThread });
+        }
+      }
       const snapshot =
         runsToRollback.length === 0 && currentOrdinal === targetOrdinal
           ? { providerThread }
-          : yield* session.rollbackThread({
-              providerThread,
-              target: rollbackTarget,
-              providerThreadTurns,
-            });
+          : preserveNativeSource
+            ? yield* Effect.gen(function* () {
+                // Forking retains the complete source for redo; native revert truncates it.
+                const forked =
+                  rollbackTarget.type === "thread_start" &&
+                  providerThread.driver === "claudeAgent" &&
+                  nativeBaselineRef === null
+                    ? yield* session.ensureThread({
+                        threadId: input.threadId,
+                        modelSelection,
+                        runtimePolicy: resolvedRuntimePolicy,
+                      })
+                    : yield* session.forkThread({
+                        sourceProviderThread:
+                          rollbackTarget.type === "thread_start" &&
+                          providerThread.driver === "codex"
+                            ? providerThread
+                            : { ...providerThread, nativeThreadRef: nativeSource },
+                        sourceProviderTurns: context.providerTurns,
+                        ...(rollbackTarget.type === "provider_turn"
+                          ? { providerTurnId: rollbackTarget.providerTurn.id }
+                          : nativeBaselineRef === null || providerThread.driver !== "claudeAgent"
+                            ? {}
+                            : { nativeBoundaryRef: nativeBaselineRef }),
+                        targetThreadId: input.threadId,
+                        ...(providerThread.ownerNodeId === null
+                          ? {}
+                          : { ownerNodeId: providerThread.ownerNodeId }),
+                        modelSelection,
+                        runtimePolicy: resolvedRuntimePolicy,
+                      });
+                const navigated =
+                  rollbackTarget.type === "thread_start" && providerThread.driver === "codex"
+                    ? (yield* session.rollbackThread({
+                        providerThread: {
+                          ...providerThread,
+                          nativeThreadRef: forked.nativeThreadRef,
+                        },
+                        target: rollbackTarget,
+                        providerThreadTurns,
+                      })).providerThread
+                    : forked;
+                const forkHead = navigated.nativeMetadata?.forkHeadMessageId;
+                return {
+                  providerThread: {
+                    ...providerThread,
+                    nativeThreadRef: navigated.nativeThreadRef,
+                    nativeConversationHeadRef:
+                      navigated.nativeConversationHeadRef ??
+                      (providerThread.driver === "claudeAgent" && forkHead !== undefined
+                        ? {
+                            driver: providerThread.driver,
+                            nativeId: forkHead,
+                            strength: "weak" as const,
+                          }
+                        : null),
+                    nativeMetadata: {
+                      ...providerThread.nativeMetadata,
+                      forkHeadMessageId: undefined,
+                      ...navigated.nativeMetadata,
+                    },
+                    pendingBackgroundTasks: [],
+                    contextUsage: navigated.contextUsage,
+                    status: "idle" as const,
+                  },
+                };
+              })
+            : yield* session.rollbackThread({
+                providerThread,
+                target: rollbackTarget,
+                providerThreadTurns,
+              });
       if (input.restoreFiles !== false) yield* checkpoints.restore({ scope, checkpoint });
 
-      // Thread commands write full provider thread rows under this lock. Without
-      // it, a message sent during the rollback can plan against the old native
-      // session and commit after this, undoing the provider's fork.
+      // Lock against full-row thread writes that could restore the old native session after rollback.
       yield* threadCommands.withLock(
         input.threadId,
         Effect.gen(function* () {
@@ -301,6 +410,20 @@ export const layer: Layer.Layer<
                 }) as Event,
             );
           const events: Array<OrchestrationV2DomainEvent> = [];
+          for (const historical of historicalSources) {
+            events.push(
+              yield* makeEvent({
+                type: "checkpoint.captured",
+                threadId: input.threadId,
+                occurredAt: now,
+                payload: {
+                  ...historical,
+                  nativeThreadRef: nativeSource,
+                  ...(historical.ordinalWithinScope === 0 ? { nativeBaselineRef } : {}),
+                },
+              }),
+            );
+          }
           events.push(
             yield* makeEvent({
               type: "provider-thread.updated",
@@ -325,7 +448,12 @@ export const layer: Layer.Layer<
                 ...(rootNode === undefined ? {} : { nodeId: rootNode.id }),
                 providerInstanceId: run.providerInstanceId,
                 occurredAt: now,
-                payload: { ...run, status: "rolled_back", completedAt: now },
+                payload: {
+                  ...run,
+                  checkpointRollbackState: { status: run.status, completedAt: run.completedAt },
+                  status: "rolled_back",
+                  completedAt: now,
+                },
               }),
             );
             if (rootNode !== undefined) {
@@ -337,7 +465,69 @@ export const layer: Layer.Layer<
                   nodeId: rootNode.id,
                   providerInstanceId: run.providerInstanceId,
                   occurredAt: now,
-                  payload: { ...rootNode, status: "rolled_back", completedAt: now },
+                  payload: {
+                    ...rootNode,
+                    checkpointRollbackState: {
+                      status: rootNode.status,
+                      completedAt: rootNode.completedAt,
+                    },
+                    status: "rolled_back",
+                    completedAt: now,
+                  },
+                }),
+              );
+            }
+          }
+          for (const run of context.runsToRestore ?? []) {
+            const rootNode = context.rootNodes.find((candidate) => candidate.id === run.rootNodeId);
+            const terminal = latestProviderTurnForAttempt(
+              context.providerTurns,
+              run.activeAttemptId ?? undefined,
+            );
+            const legacyStatus =
+              terminal?.status === "failed" ||
+              terminal?.status === "interrupted" ||
+              terminal?.status === "cancelled"
+                ? terminal.status
+                : "completed";
+            const { checkpointRollbackState, ...restoredRun } = run;
+            events.push(
+              yield* makeEvent({
+                type: "run.updated",
+                historyRestoration: true,
+                threadId: input.threadId,
+                runId: run.id,
+                providerInstanceId: run.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...restoredRun,
+                  status: checkpointRollbackState?.status ?? legacyStatus,
+                  completedAt:
+                    checkpointRollbackState === undefined
+                      ? (terminal?.completedAt ?? run.completedAt)
+                      : checkpointRollbackState.completedAt,
+                },
+              }),
+            );
+            if (rootNode !== undefined) {
+              const { checkpointRollbackState: nodeState, ...restoredNode } = rootNode;
+              events.push(
+                yield* makeEvent({
+                  type: "node.updated",
+                  historyRestoration: true,
+                  threadId: input.threadId,
+                  runId: run.id,
+                  nodeId: rootNode.id,
+                  providerInstanceId: run.providerInstanceId,
+                  occurredAt: now,
+                  payload: {
+                    ...restoredNode,
+                    status: nodeState?.status ?? legacyStatus,
+                    completedAt:
+                      nodeState === undefined
+                        ? (terminal?.completedAt ?? rootNode.completedAt)
+                        : nodeState.completedAt,
+                  },
                 }),
               );
             }

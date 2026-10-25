@@ -121,12 +121,8 @@ function nextGroupColorHue(groups: readonly SplitViewGroup[]): number {
   return 264;
 }
 
-/** Chroma to pair with a group hue. One chroma across the wheel does not read
-    as one saturation: yellow-green sits well inside sRGB at these lightnesses
-    and renders at full strength, while red and blue are near the gamut edge
-    and get clipped on the way out — so a flat 0.19 leaves the greens shouting
-    over the reds and blues. Easing chroma down around yellow-green evens them
-    up, and hues a quarter-turn away keep the base chroma untouched. */
+// Yellow-green stays inside sRGB while red and blue clip at this chroma. Reduce chroma
+// around yellow-green so group tints have comparable visible saturation.
 export function splitViewGroupChroma(colorHue: number): number {
   const towardYellowGreen = Math.max(
     0,

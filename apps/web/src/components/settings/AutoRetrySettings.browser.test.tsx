@@ -1,7 +1,7 @@
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
-import { act, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { type ReactNode } from "react";
+import { render } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import "../../index.css";
@@ -33,33 +33,23 @@ vi.mock(import("./settingsLayout"), async (original) => ({
 
 import { AutoRetrySettings } from "./AutoRetrySettings";
 
-let root: Root;
-let container: HTMLDivElement;
-const render = () => act(async () => root.render(<AutoRetrySettings />));
 const saved = () => state.autoRetry as AutoRetryValue;
-
-beforeEach(async () => {
+async function setup() {
   state.autoRetry = {
     enabled: true,
     triggers: [{ id: "old", name: "Old", condition: { kind: "future" } }],
   };
+  const screen = await render(<AutoRetrySettings />);
   state.updateSettings.mockReset().mockImplementation((patch) => {
     state.autoRetry = patch.autoRetry;
-    void render();
+    void screen.rerender(<AutoRetrySettings />);
   });
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await render();
-});
-
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-});
+  return screen;
+}
 
 describe("AutoRetrySettings", () => {
   it("edits triggers and nested conditions", async () => {
+    await using screen = await setup();
     await expect
       .element(page.getByRole("textbox", { name: "Error message substring" }))
       .toBeVisible();

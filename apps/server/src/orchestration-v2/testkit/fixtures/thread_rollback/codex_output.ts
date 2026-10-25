@@ -63,6 +63,18 @@ export function assertThreadRollbackOutput(
   const recall = projection.turnItems.findLast((item) => item.type === "assistant_message");
   assert.include(recall?.type === "assistant_message" ? recall.text : "", "first turn complete");
   assert.notInclude(recall?.type === "assistant_message" ? recall.text : "", "second turn");
+  const originalSource = projection.checkpoints.find(
+    (checkpoint) => checkpoint.appRunOrdinal === 1,
+  )?.nativeThreadRef;
+  assert.equal(originalSource?.nativeId, transcript.metadata?.sourceThreadId);
+  assert.equal(
+    projection.providerThreads[0]?.nativeThreadRef?.nativeId,
+    transcript.metadata?.forkThreadId,
+  );
+  assert.notEqual(
+    projection.providerThreads[0]?.nativeThreadRef?.nativeId,
+    originalSource?.nativeId,
+  );
   assert.isAtLeast(projection.checkpoints.length, 2);
   assert.isTrue(
     projection.runs.some((run) => run.status === "rolled_back"),

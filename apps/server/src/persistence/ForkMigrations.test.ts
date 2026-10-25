@@ -16,6 +16,150 @@ import {
 } from "./ForkMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 
+const assertCurrentSchema = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const webhookColumns = yield* sql<{ readonly name: string }>`PRAGMA table_info(scheduled_tasks)`;
+  assert.isTrue(webhookColumns.some((column) => column.name === "last_run_webhook_delivery_id"));
+  const objects = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master WHERE name IN (
+      'orchestration_v2_provider_turns_codex_native_id_idx',
+      'orchestration_v2_projection_turn_items_stop_request_idx',
+      'scheduled_task_webhook_replay_keys',
+      'scheduled_task_webhook_pending',
+      'idx_webhook_pending_key',
+      'orchestration_v2_message_search',
+      'orchestration_v2_message_search_insert',
+      'orchestration_v2_message_search_update',
+      'orchestration_v2_message_search_delete'
+    )`;
+  assert.equal(objects.length, 9);
+  assert.deepStrictEqual(yield* sql`PRAGMA integrity_check`, [{ integrity_check: "ok" }]);
+  assert.deepStrictEqual(yield* sql`PRAGMA foreign_key_check`, []);
+});
+
+it.effect.each([0, 64])(
+  "upgrades schema at upstream migration %s and restarts unchanged",
+  (fromId) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      if (fromId > 0) {
+        yield* runMigrations({ toMigrationInclusive: fromId });
+        const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(scheduled_tasks)`;
+        assert.isFalse(columns.some((column) => column.name === "last_run_webhook_delivery_id"));
+      }
+      assert.deepStrictEqual(
+        yield* runMigrations(),
+        migrationManifest.filter(([id]) => id > fromId),
+      );
+      yield* assertCurrentSchema;
+      const before = yield* sql`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(
+        yield* sql`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`,
+        before,
+      );
+      yield* assertCurrentSchema;
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("repairs the historical 58 suggestion collision before newer upstream schema", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 47 });
+    yield* runForkMigrations();
+    yield* sql`INSERT INTO effect_sql_migrations (migration_id, name)
+      VALUES (58, 'ProjectionThreadMessageSuggestions')`;
+    const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
+    assert.isFalse(columns.some((column) => column.name === "branch_pull_request_json"));
+
+    yield* runMigrations();
+
+    const repaired = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
+    assert.isTrue(repaired.some((column) => column.name === "branch_pull_request_json"));
+    const messages = yield* sql<{
+      readonly name: string;
+    }>`PRAGMA table_info(projection_thread_messages)`;
+    assert.isTrue(messages.some((column) => column.name === "suggestion"));
+    assert.deepStrictEqual(
+      yield* sql`SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id IN (48, 58) ORDER BY migration_id`,
+      [
+        { migration_id: 48, name: "ProjectionThreadBranchPullRequest" },
+        { migration_id: 58, name: "WebhookRelayDeliveries" },
+      ],
+    );
+    yield* assertCurrentSchema;
+    assert.deepStrictEqual(yield* runMigrations(), []);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect.each([false, true])(
+  "upgrades the deployed fork ledger with bad-merge webhooks %s",
+  (withWebhooks) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: withWebhooks ? 58 : 56 });
+      yield* runForkMigrations();
+      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 36`;
+      const names = [
+        "CheckpointDurableState",
+        "CheckpointLegacyMigration",
+        "CheckpointCaptureProviderMetadata",
+        "ReconcileCheckpointAndTitleHistory",
+        "ProjectionSubagentIds",
+        "ProjectionThreadsPinned",
+        "ProjectionTurnsKeysetIndex",
+        "ProjectionThreadsPinOrderKey",
+        "ProjectionProjectsDefaultThreadEnvMode",
+        "ProjectionProjectFaviconPath",
+        "ReconcileUpstream41History",
+        "AuthSessionClientConnection",
+        "ProjectionThreadLinkedPullRequest",
+        "ProjectionThreadsUnsettledAt",
+        "ManagementApiKeys",
+        "AutoResumeJobs",
+        "RemoveManagementApiKeyRuntimeModes",
+        "ReconcileUpstream47History",
+        "ClearAutomaticProjectModelDefaults",
+        "ProjectionProjectsAutoPull",
+        "RepairAutomaticSettlementTimestamps",
+        "ProjectionProjectIcon",
+        "ProjectionThreadBranchPullRequest",
+        "ProjectionThreadsActiveOrderKey",
+        "ProjectionThreadPullRequests",
+        "ProjectionThreadMessageContext",
+        "ProjectionThreadMessageSuggestions",
+        "ProjectionThreadTitleState",
+        "PullRequestFilesViewed",
+        "ReconcileBranchPullRequestHistory",
+        "ProjectionThreadsAutoSettleDisabledAt",
+        "CoreV2Cutover",
+        ...(withWebhooks ? ["ScheduledTaskWebhooks", "WebhookRelayDeliveries"] : []),
+      ];
+      for (const [index, name] of names.entries()) {
+        yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (${index + 36}, ${name})`;
+      }
+      yield* sql`DELETE FROM fork_sql_migrations`;
+      yield* sql`INSERT INTO projection_thread_messages
+      (message_id, thread_id, role, text, is_streaming, created_at, updated_at, suggestion)
+      VALUES ('fork-message', 'fork-thread', 'assistant', 'Retained reply', 0,
+        '2026-10-01', '2026-10-01', 'Retained suggestion')`;
+
+      yield* runMigrations();
+
+      assert.deepStrictEqual(
+        yield* sql`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`,
+        migrationManifest.map(([migration_id, name]) => ({ migration_id, name })),
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT text, suggestion FROM projection_thread_messages WHERE message_id = 'fork-message'`,
+        [{ text: "Retained reply", suggestion: "Retained suggestion" }],
+      );
+      yield* assertCurrentSchema;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      yield* assertCurrentSchema;
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
 const seedSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   // Build the complete shared schema once, then remove ledger rows to model
@@ -88,7 +232,7 @@ it.effect.each([
   "preview-53",
   "preview-54",
   "bad-merge",
-] as const)("converts %s history with schema, integrity, retention, and restart checks", (shape) =>
+] as const)("converts %s ledger records and retains V1 rows", (shape) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* seedShape(shape);
@@ -150,28 +294,18 @@ it.effect("converts every deployed 59-67 fork collision before upstream migratio
       [62, "ThreadFailureLookupIndex"],
       [63, "DropUnusedV1Projections"],
       [64, "CanonicalizeThreadPullRequestLinks"],
+      [65, "CodexUsageNativeTurnIndex"],
+      [66, "RepairClientSettlementTimestamps"],
+      [67, "WebhookDedupe"],
+      [68, "ShellStopRequestIndex"],
+      [69, "ThreadMessageSearch"],
     ]);
     const effectRows = yield* sql<{ migration_id: number; name: string }>`
       SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 48 ORDER BY migration_id`;
-    assert.deepEqual(effectRows.slice(-17), [
-      { migration_id: 48, name: "ProjectionThreadBranchPullRequest" },
-      { migration_id: 49, name: "ProjectionThreadsActiveOrderKey" },
-      { migration_id: 50, name: "ProjectionThreadPullRequests" },
-      { migration_id: 51, name: "ProjectionThreadMessageContext" },
-      { migration_id: 52, name: "ProjectionThreadTitleState" },
-      { migration_id: 53, name: "PullRequestFilesViewed" },
-      { migration_id: 54, name: "ProjectionThreadsAutoSettleDisabledAt" },
-      { migration_id: 55, name: "OrchestrationV2" },
-      { migration_id: 56, name: "RemoveRedundantProjectionIndexes" },
-      { migration_id: 57, name: "ScheduledTaskWebhooks" },
-      { migration_id: 58, name: "WebhookRelayDeliveries" },
-      { migration_id: 59, name: "McpAppModelContext" },
-      { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
-      { migration_id: 61, name: "PullRequestReviewGuides" },
-      { migration_id: 62, name: "ThreadFailureLookupIndex" },
-      { migration_id: 63, name: "DropUnusedV1Projections" },
-      { migration_id: 64, name: "CanonicalizeThreadPullRequestLinks" },
-    ]);
+    assert.deepEqual(
+      effectRows.map((row) => [row.migration_id, row.name] as const),
+      migrationManifest.filter(([id]) => id >= 48),
+    );
     const forkRows = yield* sql<{ migration_id: number; name: string }>`
       SELECT migration_id, name FROM fork_sql_migrations WHERE migration_id >= 59 ORDER BY migration_id`;
     assert.deepEqual(
@@ -188,7 +322,9 @@ it.effect("converts every deployed 59-67 fork collision before upstream migratio
         [67, "CoreV2Cutover"],
       ],
     );
+    yield* assertCurrentSchema;
     assert.deepStrictEqual(yield* runMigrations(), []);
+    yield* assertCurrentSchema;
   }).pipe(
     Effect.provide(
       NodeSqliteClient.layer({

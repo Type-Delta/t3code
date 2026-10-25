@@ -2,7 +2,7 @@ import type {
   OrchestrationV2ProjectedTurnItem,
   OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
-import { isOrchestrationV2TurnItemVisible } from "@t3tools/shared/orchestrationV2Timeline";
+import { createOrchestrationV2TurnItemVisibility } from "@t3tools/shared/orchestrationV2Timeline";
 
 export type ThreadHistoryMeta = {
   readonly historyCursor: string | null;
@@ -57,6 +57,11 @@ export function mergeOlderHistoryIntoProjection(
     return projection;
   }
 
+  const isVisible = createOrchestrationV2TurnItemVisibility({
+    runs: projection.runs,
+    attempts: projection.attempts,
+    items: projection.turnItems,
+  });
   const currentByKey = new Map(
     projection.visibleTurnItems.map((row) => [projectedItemKey(row), row]),
   );
@@ -71,18 +76,10 @@ export function mergeOlderHistoryIntoProjection(
       !currentByKey.has(key) &&
       (row.visibility === "local" || row.sourceThreadId === projection.thread.id)
     ) {
+      if (!isVisible(row.item)) continue;
       const currentItem = turnItemById.get(String(row.sourceItemId));
       if (currentItem !== undefined) {
-        if (
-          currentItem.type !== "run_interrupt_request" ||
-          !isOrchestrationV2TurnItemVisible({
-            item: currentItem,
-            runs: projection.runs,
-            attempts: projection.attempts,
-            items: projection.turnItems,
-          })
-        )
-          continue;
+        if (currentItem.type !== "run_interrupt_request" || !isVisible(currentItem)) continue;
         row = { ...row, item: currentItem };
       }
     }

@@ -23,11 +23,8 @@ export function effectiveMcpToolScope(
 export const resolveProjectMcpToolScope = Effect.fn("McpToolScope.resolveProject")(function* (
   projectId: ProjectId,
 ) {
-  // The HTTP middleware is also used by focused route layers that do not
-  // construct the complete server runtime. Treat these services as optional
-  // and fail closed when the scope cannot be resolved; the production layer
-  // still supplies both services and therefore gets the repository/settings
-  // based default.
+  // Focused HTTP layers may omit these services; unresolved scope fails closed.
+  // Production supplies both for the repository/settings default.
   const settingsService = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
   const projects = yield* Effect.serviceOption(ProjectService.ProjectService);
   const settings = yield* Option.match(settingsService, {

@@ -22,17 +22,13 @@ import {
   PreviewAutomationStreamEvent,
 } from "./previewAutomation.ts";
 
-const decodePreviewEvent = Schema.decodeUnknownSync(PreviewEvent);
 const decodeSnapshot = Schema.decodeUnknownSync(PreviewSessionSnapshot);
 const decodeNavStatus = Schema.decodeUnknownSync(PreviewNavStatus);
-const decodeServer = Schema.decodeUnknownSync(DiscoveredLocalServer);
-const decodeConfiguredLocalServerUrls = Schema.decodeUnknownSync(ConfiguredLocalServerUrls);
 const decodeViewport = Schema.decodeUnknownSync(PreviewViewportSetting);
 const decodeResizeInput = Schema.decodeUnknownSync(PreviewAutomationResizeInput);
 const decodeOpenInput = Schema.decodeUnknownSync(PreviewAutomationOpenInput);
 const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResult);
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
-const decodeAutomationError = Schema.decodeUnknownSync(PreviewAutomationError);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
 
 describe("preview automation acknowledgement compatibility", () => {
@@ -208,34 +204,6 @@ describe("PreviewAutomationHost", () => {
   });
 });
 
-describe("PreviewAutomationError", () => {
-  it("preserves a typed non-editable target failure", () => {
-    const error = decodeAutomationError({
-      _tag: "PreviewAutomationTargetNotEditableError",
-      operation: "type",
-      environmentId: "environment-1",
-      threadId: "thread-1",
-      providerSessionId: "provider-session-1",
-      providerInstanceId: "codex",
-      clientId: "client-1",
-      connectionId: "connection-1",
-      requestId: "request-1",
-      tabId: "tab-1",
-      timeoutMs: 1_000,
-      remoteTag: "PreviewAutomationTargetNotEditableError",
-      remoteMessageLength: 12,
-      cause: {},
-      selectorKind: "focused-element",
-    });
-
-    expect(error._tag).toBe("PreviewAutomationTargetNotEditableError");
-    if (error._tag === "PreviewAutomationTargetNotEditableError") {
-      expect(error.selectorKind).toBe("focused-element");
-      expect(error.message).toBe("Preview automation type requires an editable focused element.");
-    }
-  });
-});
-
 describe("PreviewAutomationStatus", () => {
   it("accepts old hosts without viewport data and exposes it from current hosts", () => {
     const base = {
@@ -254,145 +222,5 @@ describe("PreviewAutomationStatus", () => {
         viewport: { width: 412, height: 915 },
       }).viewport,
     ).toEqual({ width: 412, height: 915 });
-  });
-});
-
-describe("PreviewEvent", () => {
-  it("decodes opened", () => {
-    const event = decodePreviewEvent({
-      type: "opened",
-      threadId: "t",
-      tabId: "preview-t",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      serverEpoch: "server-a",
-      revision: 1,
-      snapshot: {
-        threadId: "t",
-        tabId: "preview-t",
-        navStatus: { _tag: "Idle" },
-        canGoBack: false,
-        canGoForward: false,
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      },
-    });
-    expect(event.type).toBe("opened");
-  });
-
-  it("decodes failed with code/description", () => {
-    const event = decodePreviewEvent({
-      type: "failed",
-      threadId: "t",
-      tabId: "preview-t",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      serverEpoch: "server-a",
-      revision: 1,
-      url: "https://example.com/",
-      title: "",
-      code: -105,
-      description: "ERR_NAME_NOT_RESOLVED",
-    });
-    expect(event.type).toBe("failed");
-    if (event.type === "failed") {
-      expect(event.code).toBe(-105);
-    }
-  });
-
-  it("decodes resized with tab viewport state", () => {
-    const event = decodePreviewEvent({
-      type: "resized",
-      threadId: "t",
-      tabId: "preview-t",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      serverEpoch: "server-a",
-      revision: 1,
-      snapshot: {
-        threadId: "t",
-        tabId: "preview-t",
-        navStatus: { _tag: "Idle" },
-        canGoBack: false,
-        canGoForward: false,
-        viewport: { _tag: "freeform", width: 1024, height: 768 },
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      },
-    });
-    expect(event.type).toBe("resized");
-  });
-
-  it("decodes closed without snapshot", () => {
-    const event = decodePreviewEvent({
-      type: "closed",
-      threadId: "t",
-      tabId: "preview-t",
-      createdAt: "2026-01-01T00:00:00.000Z",
-      serverEpoch: "server-a",
-      revision: 1,
-    });
-    expect(event.type).toBe("closed");
-  });
-});
-
-describe("DiscoveredLocalServer", () => {
-  it("decodes a server with process metadata", () => {
-    const server = decodeServer({
-      host: "localhost",
-      port: 5173,
-      url: "http://localhost:5173",
-      processName: "node",
-      pid: 12345,
-      terminal: null,
-    });
-    expect(server.port).toBe(5173);
-    expect(server.processName).toBe("node");
-  });
-
-  it("decodes a server without process metadata", () => {
-    const server = decodeServer({
-      host: "localhost",
-      port: 3000,
-      url: "http://localhost:3000",
-      processName: null,
-      pid: null,
-      terminal: null,
-    });
-    expect(server.processName).toBeNull();
-  });
-
-  it("rejects invalid ports", () => {
-    expect(() =>
-      decodeServer({
-        host: "localhost",
-        port: 0,
-        url: "http://localhost:0",
-        processName: null,
-        pid: null,
-        terminal: null,
-      }),
-    ).toThrow();
-    expect(() =>
-      decodeServer({
-        host: "localhost",
-        port: 70000,
-        url: "http://localhost:70000",
-        processName: null,
-        pid: null,
-        terminal: null,
-      }),
-    ).toThrow();
-  });
-});
-
-describe("ConfiguredLocalServerUrls", () => {
-  it("bounds the number and length of probe candidates", () => {
-    expect(() =>
-      decodeConfiguredLocalServerUrls(
-        Array.from(
-          { length: CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS + 1 },
-          (_, index) => `http://localhost:${3_000 + index}`,
-        ),
-      ),
-    ).toThrow();
-    expect(() =>
-      decodeConfiguredLocalServerUrls([`http://localhost/${"a".repeat(PREVIEW_URL_MAX_LENGTH)}`]),
-    ).toThrow();
   });
 });

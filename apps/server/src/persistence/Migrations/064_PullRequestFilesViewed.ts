@@ -4,11 +4,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
-  // One row per file a reader has cleared on a host that keeps no record of its own. `revision`
-  // is what the file was when it was cleared, so a push that changes it is reported as changed
-  // rather than silently left ticked, and it is nullable for the reason `PullRequestFileViewedMark`
-  // gives. Unticking deletes the row: absent is the resting state, and a table of "not viewed"
-  // rows would grow with every diff anybody scrolled past.
+  // Store the viewed revision so changed files become unread after a push.
+  // Delete unticked rows rather than accumulating unseen files.
   yield* sql`
     CREATE TABLE IF NOT EXISTS pull_request_files_viewed (
       provider TEXT NOT NULL,

@@ -36,10 +36,7 @@ export interface McpClientCaller {
   readonly access: AuthMcpClientAccess;
 }
 
-/**
- * A read-only client never reaches a write (`McpToolAccess` refuses it first),
- * so it maps to the lowest mode rather than to nothing.
- */
+/** Read-only clients map to the lowest mode because McpToolAccess blocks writes first. */
 export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): RuntimeMode =>
   client === undefined || client.access === "read-only" ? "approval-required" : client.access;
 

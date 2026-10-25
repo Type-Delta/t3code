@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { runForkMigrations } from "../ForkMigrations.ts";
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import projectionThreadsSettled from "./033_ProjectionThreadsSettled.ts";
@@ -60,6 +61,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
       Effect.gen(function* () {
         yield* runMigrations({ toMigrationInclusive: 35 });
         yield* runMigrations({ toMigrationInclusive: 39 });
+        yield* runForkMigrations();
         yield* assertReconciledColumns();
       }),
     );
@@ -100,6 +102,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
       `;
 
         yield* runMigrations({ toMigrationInclusive: 39 });
+        yield* runForkMigrations();
         yield* assertReconciledColumns();
       }),
     );
@@ -131,6 +134,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
         `;
 
         yield* runMigrations({ toMigrationInclusive: 39 });
+        yield* runForkMigrations();
         yield* assertReconciledColumns();
       }),
     );
@@ -157,6 +161,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
         `;
 
         yield* runMigrations({ toMigrationInclusive: 39 });
+        yield* runForkMigrations();
         yield* assertReconciledColumns();
       }),
     );
@@ -183,6 +188,7 @@ it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })))(
         `;
 
         yield* runMigrations({ toMigrationInclusive: 39 });
+        yield* runForkMigrations();
         yield* assertReconciledColumns();
       }),
     );

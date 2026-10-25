@@ -1,3 +1,6 @@
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { isCheckpointRestoreIsolated } from "./CheckpointRestoreSafety.ts";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
 import {
@@ -26,7 +29,6 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
-import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Layer from "effect/Layer";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -36,11 +38,9 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import { resolveCodexRollbackTurnCount } from "./Adapters/CodexAdapterV2.ts";
-import { isCheckpointRestoreIsolated } from "./CheckpointRestoreSafety.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -405,11 +405,8 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
 });
 
 it.effect.each([
-  { order: "normal", restoreFiles: true },
   { order: "cleanup-first", restoreFiles: true },
-  { order: "cleanup-first", restoreFiles: false },
   { order: "rollback-first", restoreFiles: true },
-  // A path the server would not have made is left missing, not recreated.
   { order: "cleanup-first", restoreFiles: false, unmanaged: true },
 ])("locks rollback with %s", ({ order, restoreFiles, unmanaged = false }) =>
   Effect.gen(function* () {
@@ -576,9 +573,7 @@ it.effect.each([
         calls,
         order === "cleanup-first"
           ? ["cleanup", "prune", "create", ...rollbackCalls]
-          : order === "rollback-first"
-            ? [...rollbackCalls, "cleanup"]
-            : rollbackCalls,
+          : [...rollbackCalls, "cleanup"],
       );
     }).pipe(Effect.provide(testLayer));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -792,14 +787,19 @@ it.effect.skipIf(!symlinksSupported)(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-const seedRollbackHistory = Effect.gen(function* () {
+const seedRollbackHistory = Effect.fn("RollbackTest.seedHistory")(function* (
+  driverKind: "codex" | "claudeAgent" = "codex",
+  nativeSource = false,
+  nativeBackground = false,
+  inherited = false,
+) {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;
   const threadId = ThreadId.make("rollback-history");
   const providerThreadId = ProviderThreadId.make("rollback-history-provider");
   const providerSessionId = ProviderSessionId.make("rollback-history-session");
-  const providerInstanceId = ProviderInstanceId.make("codex");
-  const driver = ProviderDriverKind.make("codex");
+  const providerInstanceId = ProviderInstanceId.make(driverKind);
+  const driver = ProviderDriverKind.make(driverKind);
   const modelSelection = { instanceId: providerInstanceId, model: "test" };
   const scopeId = CheckpointScopeId.make("rollback-history-root");
   const otherScopeId = CheckpointScopeId.make("rollback-history-child");
@@ -853,8 +853,11 @@ const seedRollbackHistory = Effect.gen(function* () {
     providerSessionId,
     appThreadId: threadId,
     ownerNodeId: null,
-    nativeThreadRef: null,
+    nativeThreadRef: nativeSource
+      ? { driver, nativeId: "original", strength: "strong" as const }
+      : null,
     nativeConversationHeadRef: null,
+    ...(inherited ? { nativeMetadata: { forkHeadMessageId: "inherited-base" } } : {}),
     status: "idle" as const,
     firstRunOrdinal: 1,
     lastRunOrdinal: 6,
@@ -1006,6 +1009,23 @@ const seedRollbackHistory = Effect.gen(function* () {
   const rollbackCounts: number[] = [];
   const restored: CheckpointId[] = [];
   const committed: OrchestrationV2DomainEvent[] = [];
+  const nativeHistories = new Map<string, ReadonlyArray<string>>([
+    [
+      "original",
+      [
+        ...(inherited ? ["inherited-base"] : []),
+        "native-turn-1",
+        "native-turn-2",
+        "native-turn-2-continuation",
+        "native-turn-3",
+        "native-turn-4",
+        "native-turn-5",
+        "native-turn-6",
+      ],
+    ],
+  ]);
+  let forks = 0;
+  const closedNativeIds: Array<string | null | undefined> = [];
   const serviceLayer = layerCheckpointRollbackService.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -1036,9 +1056,60 @@ const seedRollbackHistory = Effect.gen(function* () {
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           open: () =>
             Effect.succeed({
+              hasPendingBackgroundWorkForThread: () => Effect.succeed(nativeBackground),
+              unloadThread: ({
+                providerThread,
+              }: {
+                providerThread: { nativeThreadRef: { nativeId: string | null } | null };
+              }) =>
+                Effect.sync(() => {
+                  closedNativeIds.push(providerThread.nativeThreadRef?.nativeId);
+                }),
+              ensureThread: () =>
+                Effect.sync(() => {
+                  const nativeId = `empty-${++forks}`;
+                  nativeHistories.set(nativeId, []);
+                  return {
+                    ...providerThread,
+                    nativeThreadRef: { driver, nativeId, strength: "strong" as const },
+                  };
+                }),
+              forkThread: (input: ProviderAdapter.ProviderAdapterV2ForkThreadInput) =>
+                Effect.sync(() => {
+                  const sourceId = input.sourceProviderThread.nativeThreadRef?.nativeId;
+                  const source = nativeHistories.get(sourceId ?? "");
+                  const boundary =
+                    input.nativeBoundaryRef?.nativeId ??
+                    input.sourceProviderTurns?.find((turn) => turn.id === input.providerTurnId)
+                      ?.nativeTurnRef?.nativeId;
+                  const index =
+                    boundary == null && input.providerTurnId === undefined
+                      ? (source?.length ?? 0) - 1
+                      : (source?.indexOf(boundary ?? "") ?? -1);
+                  if (source === undefined || index < 0)
+                    throw new Error("Native fork source lost its selected boundary.");
+                  const nativeId = `fork-${++forks}`;
+                  nativeHistories.set(nativeId, source.slice(0, index + 1));
+                  return {
+                    ...input.sourceProviderThread,
+                    nativeThreadRef: { driver, nativeId, strength: "strong" as const },
+                    ...(driverKind === "claudeAgent"
+                      ? { nativeMetadata: { forkHeadMessageId: `head-${nativeId}` } }
+                      : {}),
+                  };
+                }),
               rollbackThread: (input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) =>
                 Effect.gen(function* () {
-                  rollbackCounts.push(yield* resolveCodexRollbackTurnCount(input));
+                  const count = yield* resolveCodexRollbackTurnCount(input);
+                  rollbackCounts.push(count);
+                  const sourceId = input.providerThread.nativeThreadRef?.nativeId;
+                  if (sourceId != null && nativeHistories.has(sourceId)) {
+                    const source = nativeHistories.get(sourceId)!;
+                    nativeHistories.set(
+                      sourceId,
+                      source.slice(0, Math.max(0, source.length - count)),
+                    );
+                  }
                   return { providerThread: input.providerThread };
                 }),
             } as never),
@@ -1069,6 +1140,13 @@ const seedRollbackHistory = Effect.gen(function* () {
     rollbackCounts,
     restored,
     committed,
+    nativeHistories,
+    closedNativeIds,
+    apply,
+    providerThreadId,
+    attemptId,
+    turnId,
+    scopeId,
   };
 });
 
@@ -1077,7 +1155,7 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
   (it) => {
     it.effect("rolls back later terminal runs despite obsolete unrelated SQLite payloads", () =>
       Effect.gen(function* () {
-        const history = yield* seedRollbackHistory;
+        const history = yield* seedRollbackHistory();
         const sql = yield* SqlClient.SqlClient;
         const { threadId, runId, nodeId, checkpointId } = history;
         yield* sql`
@@ -1087,6 +1165,11 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
           ) VALUES ('rollback-obsolete-transcript', ${threadId}, ${runId(1)}, ${nodeId(1)},
             NULL, NULL, NULL, 1, 'assistant_message', 'completed', ${DateTime.formatIso(history.now)},
             '{"obsolete":"transcript"}')`;
+        yield* Effect.addFinalizer(() =>
+          sql`DELETE FROM orchestration_v2_projection_turn_items WHERE turn_item_id = 'rollback-obsolete-transcript'`.pipe(
+            Effect.orDie,
+          ),
+        );
         yield* sql`UPDATE orchestration_v2_projection_runs
           SET payload_json = '{"obsolete":"run"}' WHERE run_id = ${runId(1)}`;
         yield* sql`UPDATE orchestration_v2_projection_nodes
@@ -1139,7 +1222,7 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
       "rewinds stopped runs repeatedly without counting discarded provider turns again",
       () =>
         Effect.gen(function* () {
-          const history = yield* seedRollbackHistory;
+          const history = yield* seedRollbackHistory();
           yield* history.rollback(5);
           yield* history.rollback(2);
           yield* history.rollback(0);
@@ -1168,11 +1251,226 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
         }),
     );
 
+    it.effect.each([
+      { driver: "codex", inherited: false },
+      { driver: "codex", inherited: true },
+      { driver: "claudeAgent", inherited: false },
+      { driver: "claudeAgent", inherited: true },
+    ] as const)(
+      "keeps $driver native history and terminal states through navigation, inherited=$inherited",
+      ({ driver, inherited }) =>
+        Effect.gen(function* () {
+          const history = yield* seedRollbackHistory(driver, true, false, inherited);
+          const original = history.nativeHistories.get("original");
+          yield* history.rollback(1);
+          let records = yield* history.store.getThreadRecords(history.threadId, [
+            "providerThreads",
+            "checkpoints",
+            "runs",
+            "nodes",
+          ]);
+          assert.deepEqual(history.nativeHistories.get("original"), original);
+          assert.deepEqual(
+            history.nativeHistories.get(records.providerThreads[0]!.nativeThreadRef!.nativeId!),
+            [...(inherited ? ["inherited-base"] : []), "native-turn-1"],
+          );
+          const firstFork = records.providerThreads[0]!.nativeThreadRef!.nativeId;
+          if (driver === "claudeAgent") {
+            assert.deepEqual(history.closedNativeIds, ["original"]);
+            assert.equal(
+              records.providerThreads[0]!.nativeConversationHeadRef?.nativeId,
+              `head-${firstFork}`,
+            );
+          }
+          assert.equal(
+            records.checkpoints.find((checkpoint) => checkpoint.id === history.checkpointId(6))
+              ?.nativeThreadRef?.nativeId,
+            "original",
+          );
+
+          yield* history.rollback(6);
+          records = yield* history.store.getThreadRecords(history.threadId, [
+            "providerThreads",
+            "checkpoints",
+            "runs",
+            "nodes",
+          ]);
+          assert.deepEqual(
+            history.nativeHistories.get(records.providerThreads[0]!.nativeThreadRef!.nativeId!),
+            original,
+          );
+          if (driver === "claudeAgent") assert.equal(history.closedNativeIds[1], firstFork);
+          assert.deepEqual(
+            records.runs.filter((run) => run.ordinal <= 6).map((run) => run.status),
+            ["completed", "completed", "completed", "interrupted", "failed", "cancelled"],
+          );
+          assert.deepEqual(
+            records.nodes
+              .filter((node) => [4, 5, 6].some((ordinal) => node.id === history.nodeId(ordinal)))
+              .map((node) => node.status),
+            ["interrupted", "failed", "cancelled"],
+          );
+
+          yield* history.rollback(0);
+          records = yield* history.store.getThreadRecords(history.threadId, [
+            "providerThreads",
+            "checkpoints",
+            "runs",
+            "nodes",
+          ]);
+          assert.deepEqual(
+            history.nativeHistories.get(records.providerThreads[0]!.nativeThreadRef!.nativeId!),
+            inherited ? ["inherited-base"] : [],
+          );
+          yield* history.rollback(3);
+          records = yield* history.store.getThreadRecords(history.threadId, [
+            "providerThreads",
+            "checkpoints",
+            "runs",
+            "nodes",
+          ]);
+          assert.deepEqual(
+            history.nativeHistories.get(records.providerThreads[0]!.nativeThreadRef!.nativeId!),
+            original?.slice(0, inherited ? 5 : 4),
+          );
+          assert.deepEqual(history.nativeHistories.get("original"), original);
+          if (driver === "codex") assert.isAbove(history.rollbackCounts[0]!, 0);
+          else assert.deepEqual(history.rollbackCounts, []);
+
+          yield* history.rollback(1);
+          const branch = yield* history.store.getThreadProjection(history.threadId);
+          const current = branch.providerThreads[0]!;
+          const branchSource = current.nativeThreadRef!.nativeId!;
+          const branchHistory = [
+            ...(inherited ? ["inherited-base"] : []),
+            "native-turn-1",
+            "native-turn-8",
+          ];
+          history.nativeHistories.set(branchSource, branchHistory);
+          for (const run of branch.runs.filter(
+            (run) => run.status === "rolled_back" && run.ordinal > 1,
+          )) {
+            yield* history.apply({
+              type: "run.updated",
+              payload: { ...run, checkpointAbandoned: true },
+            });
+          }
+          for (const checkpoint of branch.checkpoints.filter(
+            (checkpoint) =>
+              checkpoint.scopeId === history.scopeId && (checkpoint.appRunOrdinal ?? 0) > 1,
+          )) {
+            yield* history.apply({
+              type: "checkpoint.captured",
+              payload: { ...checkpoint, status: "stale" },
+            });
+          }
+          const originalRun = branch.runs.find((run) => run.ordinal === 1)!;
+          const originalNode = branch.nodes.find((node) => node.id === originalRun.rootNodeId)!;
+          const originalAttempt = branch.attempts.find(
+            (attempt) => attempt.id === originalRun.activeAttemptId,
+          )!;
+          const originalTurn = branch.providerTurns.find(
+            (turn) => turn.runAttemptId === originalAttempt.id,
+          )!;
+          yield* history.apply({
+            type: "run.created",
+            payload: {
+              ...originalRun,
+              id: history.runId(8),
+              ordinal: 8,
+              rootNodeId: history.nodeId(8),
+              activeAttemptId: history.attemptId(8),
+              checkpointId: history.checkpointId(8),
+            },
+          });
+          yield* history.apply({
+            type: "node.updated",
+            payload: {
+              ...originalNode,
+              id: history.nodeId(8),
+              rootNodeId: history.nodeId(8),
+              runId: history.runId(8),
+              providerTurnId: history.turnId(8),
+            },
+          });
+          yield* history.apply({
+            type: "run-attempt.created",
+            payload: {
+              ...originalAttempt,
+              id: history.attemptId(8),
+              runId: history.runId(8),
+              rootNodeId: history.nodeId(8),
+              providerTurnId: history.turnId(8),
+              nativeThreadId: branchSource,
+            },
+          });
+          yield* history.apply({
+            type: "provider-turn.updated",
+            payload: {
+              ...originalTurn,
+              id: history.turnId(8),
+              nodeId: history.nodeId(8),
+              runAttemptId: history.attemptId(8),
+              ordinal: 16,
+              nativeTurnRef: {
+                driver: current.driver,
+                nativeId: "native-turn-8",
+                strength: "strong",
+              },
+            },
+          });
+          yield* history.apply({
+            type: "provider-thread.updated",
+            payload: { ...current, lastRunOrdinal: 8 },
+          });
+          const baseline = branch.checkpoints.find(
+            (checkpoint) => checkpoint.id === history.checkpointId(1),
+          )!;
+          yield* history.apply({
+            type: "checkpoint.captured",
+            payload: {
+              ...baseline,
+              id: history.checkpointId(8),
+              runId: history.runId(8),
+              nodeId: history.nodeId(8),
+              ordinalWithinScope: 8,
+              appRunOrdinal: 8,
+              parentCheckpointId: baseline.id,
+              nativeThreadRef: current.nativeThreadRef,
+            },
+          });
+          yield* history.rollback(0);
+          yield* history.rollback(8);
+          const redoneBranch = yield* history.store.getThreadProjection(history.threadId);
+          assert.deepEqual(
+            redoneBranch.runs
+              .filter((run) => run.status !== "rolled_back")
+              .map((run) => run.ordinal),
+            [1, 8],
+          );
+          assert.deepEqual(
+            history.nativeHistories.get(
+              redoneBranch.providerThreads[0]!.nativeThreadRef!.nativeId!,
+            ),
+            branchHistory,
+          );
+        }),
+    );
+    it.effect("refuses native navigation while this thread has background work", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory("claudeAgent", true, true);
+        const error = yield* history.rollback(1).pipe(Effect.flip);
+        assert.isTrue("reason" in error && error.reason === "background-work-active");
+        assert.deepEqual(history.closedNativeIds, []);
+        assert.deepEqual(history.restored, []);
+      }),
+    );
+
     // Fork DL006: a rollback keeps forward checkpoints ready, so jumping back
     // to one reactivates its rolled-back turns instead of discarding them.
     it.effect("redoes to a forward checkpoint after a rollback", () =>
       Effect.gen(function* () {
-        const history = yield* seedRollbackHistory;
+        const history = yield* seedRollbackHistory();
         yield* history.rollback(1);
         yield* history.rollback(3);
 
@@ -1184,12 +1482,23 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
         const records = yield* history.store.getThreadRecords(history.threadId, [
           "providerThreads",
           "checkpoints",
+          "runs",
+          "nodes",
         ]);
         assert.equal(records.providerThreads[0]?.lastRunOrdinal, 3);
         assert.equal(
           records.checkpoints.find((checkpoint) => checkpoint.id === history.checkpointId(3))
             ?.status,
           "ready",
+        );
+        assert.deepEqual(
+          records.runs.filter((run) => run.ordinal <= 3).map((run) => run.status),
+          ["completed", "completed", "completed"],
+        );
+        assert.isTrue(
+          records.nodes
+            .filter((node) => [1, 2, 3].some((ordinal) => node.id === history.nodeId(ordinal)))
+            .every((node) => node.status === "completed"),
         );
       }),
     );

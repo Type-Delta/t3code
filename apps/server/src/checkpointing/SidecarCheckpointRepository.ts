@@ -1246,11 +1246,8 @@ export const make = Effect.gen(function* () {
           const commit = resolved.exitCode === 0 ? resolved.stdout.trim() || undefined : undefined;
           if (!commit) return undefined;
 
-          // Copy the exact worktree revision into T3's object database. An
-          // operation-local project alternate would make this diff depend on the
-          // user's future history and garbage collection, violating sidecar
-          // isolation. The repository lock also prevents sidecar prune-now from
-          // racing this deliberately unreferenced compatibility object.
+          // Copy the revision: a project alternate would depend on later history/GC.
+          // The repository lock protects this unreferenced object from sidecar prune-now.
           yield* git(
             "SidecarCheckpointRepository.copyWorktreeDiffRevision",
             input.cwd,

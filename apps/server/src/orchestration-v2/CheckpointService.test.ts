@@ -1,5 +1,7 @@
+import { vi } from "@effect/vitest";
+import * as Exit from "effect/Exit";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
-import { assert, it, vi } from "@effect/vitest";
+import { assert, it } from "@effect/vitest";
 import {
   CheckpointRef,
   CheckpointScopeId,
@@ -13,7 +15,6 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";

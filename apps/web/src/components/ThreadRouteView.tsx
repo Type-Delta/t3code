@@ -25,6 +25,7 @@ import {
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { useEnvironmentThreadRefs, useThreadRefs, useQuietThreadShell } from "../state/entities";
 import { useEnvironmentShellStatus } from "../state/shell";
+import { useEnvironmentThread } from "../state/threads";
 import {
   buildThreadRouteParams,
   isThreadRouteSnapshotAuthoritative,
@@ -32,11 +33,7 @@ import {
   type ThreadRouteTarget,
 } from "../threadRoutes";
 
-/**
- * Plain server threads are unkeyed, so navigating between them reuses one instance as ChatView
- * expects. Rendered by the `_chat` layout rather than by the two leaf routes, since an element
- * only survives a route swap when the same parent renders it.
- */
+/** Render in the shared layout to retain ChatView across route swaps; plain server threads remain unkeyed. */
 export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   const [splitDropPosition, setSplitDropPosition] = useState<
     Extract<PointerSplitDropTarget, { kind: "single" }>["position"] | null
@@ -97,9 +94,7 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   const promotedDraftId = useComposerDraftStore((store) =>
     target.kind === "server" ? store.getDraftIdByRef(target.threadRef) : null,
   );
-  // The draft record is removed once the promoted thread has started, which
-  // is after the route swap. Latch the key so the element that carried the
-  // draft keeps its identity for as long as this thread stays on screen.
+  // Latch the key through promotion because the draft record disappears after the route swap.
   const [chatViewKey, setChatViewKey] = useState<{ threadKey: string; key: string } | null>(null);
   const serverThreadKey = target.kind === "server" ? scopedThreadKey(target.threadRef) : null;
   const nextChatViewKey =
@@ -116,10 +111,22 @@ export function ThreadRouteView({ target }: { target: ThreadRouteTarget }) {
   const environmentHasDraftThreads = useComposerDraftStore((store) =>
     serverThreadRef ? store.hasDraftThreadsInEnvironment(serverThreadRef.environmentId) : false,
   );
+  // Until the shell lists the thread, its own load (HTTP, then the socket)
+  // decides whether it exists. Read only then: once listed, ChatView keeps
+  // this stream open and its updates need not re-render the route.
+  const unlistedThreadRef =
+    target.kind === "server" && serverThreadShell === null && draftThread === null
+      ? target.threadRef
+      : null;
+  const unlistedThreadDetail = useEnvironmentThread(
+    unlistedThreadRef?.environmentId ?? null,
+    unlistedThreadRef?.threadId ?? null,
+  );
   const renderState = resolveThreadRouteRenderState({
     bootstrapComplete,
     serverThreadExists: serverThreadShell !== null,
     serverThreadDeleted: serverThreadShell?.deletedAt != null,
+    unlistedThreadDetail,
     draftThreadExists: draftThread !== null,
   });
   const serverThreadStarted = threadHasStarted(serverThreadShell);

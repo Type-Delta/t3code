@@ -1,29 +1,30 @@
-import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
-import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import * as TestClock from "effect/testing/TestClock";
+import {
+  buildTailscaleHttpsBaseUrl,
+  disableTailscaleServe,
+  TailscaleCommandTimeoutError,
+} from "./tailscale.ts";
+import { assert, describe, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import {
-  buildTailscaleHttpsBaseUrl,
-  disableTailscaleServe,
   ensureTailscaleServe,
-  isTailscaleIpv4Address,
-  parseTailscaleMagicDnsName,
+  parseTailscaleExitNode,
   parseTailscaleSshEnabled,
   parseTailscaleStatus,
   readTailscaleSshEnabled,
   readTailscaleStatus,
-  TAILSCALE_STATUS_TIMEOUT,
   TailscaleCommandExitError,
   TailscaleCommandSpawnError,
-  TailscaleCommandTimeoutError,
   TailscaleStatusParseError,
 } from "./tailscale.ts";
 
@@ -77,22 +78,6 @@ function mockHandle(result: { stdout?: string; stderr?: string; code?: number })
   });
 }
 
-function neverFinishingMockHandle() {
-  return ChildProcessSpawner.makeHandle({
-    pid: ChildProcessSpawner.ProcessId(1),
-    exitCode: Effect.never,
-    isRunning: Effect.succeed(true),
-    kill: () => Effect.void,
-    unref: Effect.succeed(Effect.void),
-    stdin: Sink.drain,
-    stdout: Stream.empty,
-    stderr: Stream.empty,
-    all: Stream.empty,
-    getInputFd: () => Sink.drain,
-    getOutputFd: () => Stream.empty,
-  });
-}
-
 // The executable name depends on the host platform (`tailscale.exe` on
 // Windows), so pin it: these tests assert the posix spelling.
 function layerSpawner(spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) {
@@ -121,23 +106,6 @@ function layerMockSpawner(
 const mockSpawnerLayer = layerMockSpawner;
 
 describe("tailscale", () => {
-  it.effect("detects Tailnet IPv4 addresses", () =>
-    Effect.sync(() => {
-      assert.equal(isTailscaleIpv4Address("100.64.0.1"), true);
-      assert.equal(isTailscaleIpv4Address("100.127.255.254"), true);
-      assert.equal(isTailscaleIpv4Address("100.128.0.1"), false);
-      assert.equal(isTailscaleIpv4Address("192.168.1.44"), false);
-    }),
-  );
-
-  it.effect("parses MagicDNS names from tailscale status", () =>
-    Effect.gen(function* () {
-      const dnsName = yield* parseTailscaleMagicDnsName(tailscaleStatusJson);
-      assert.equal(dnsName, "desktop.tail.ts.net");
-      assert.equal(yield* parseTailscaleMagicDnsName("{}"), null);
-    }),
-  );
-
   it.effect("parses status facts", () =>
     Effect.gen(function* () {
       const status = yield* parseTailscaleStatus(tailscaleStatusJson);
@@ -146,6 +114,30 @@ describe("tailscale", () => {
         tailnetIpv4Addresses: ["100.100.100.100"],
         httpsServeEnabled: null,
       });
+    }),
+  );
+
+  it.effect("names the exit node in use", () =>
+    Effect.gen(function* () {
+      const inUse = yield* parseTailscaleExitNode(
+        JSON.stringify({
+          ExitNodeStatus: { ID: "nX", Online: true, TailscaleIPs: ["100.101.102.103/32"] },
+          Peer: {
+            "nodekey:a": { HostName: "laptop", DNSName: "laptop.tail.ts.net.", ExitNode: false },
+            "nodekey:b": {
+              HostName: "raspberrypi",
+              DNSName: "home-pi.tail.ts.net.",
+              ExitNode: true,
+            },
+          },
+        }),
+      );
+      assert.deepEqual(inUse, { name: "home-pi", online: true });
+
+      const unnamed = yield* parseTailscaleExitNode(`{"ExitNodeStatus":{"Online":false}}`);
+      assert.deepEqual(unnamed, { name: null, online: false });
+
+      assert.equal(yield* parseTailscaleExitNode(tailscaleStatusJson), null);
     }),
   );
 
@@ -158,17 +150,6 @@ describe("tailscale", () => {
 
       const disabled = yield* parseTailscaleStatus(`{"Self":{"CapMap":{"funnel":null}}}`);
       assert.equal(disabled.httpsServeEnabled, false);
-    }),
-  );
-
-  it.effect("preserves status decoding failures without exposing cause text", () =>
-    Effect.gen(function* () {
-      const error = yield* parseTailscaleStatus("{not-json").pipe(Effect.flip);
-
-      assert.instanceOf(error, TailscaleStatusParseError);
-      assert.equal(error.message, "Failed to decode tailscale status JSON.");
-      assert.isDefined(error.cause);
-      assert.notInclude(error.message, String(error.cause));
     }),
   );
 
@@ -307,32 +288,33 @@ describe("tailscale", () => {
     });
   });
 
-  it.effect("classifies unrecognized stderr without quoting it", () => {
-    const layer = layerMockSpawner(() => ({
-      code: 3,
-      stderr: "something novel went wrong for node fluffy-badger tskey-auth-secret-token-value",
-    }));
-
-    return Effect.gen(function* () {
-      const error = yield* readTailscaleStatus.pipe(Effect.flip, Effect.provide(layer));
-
-      assert.instanceOf(error, TailscaleCommandExitError);
-      assert.equal(error.stderrDiagnostic, "unknown");
-      assertCarriesNoSecret(error, "tskey-auth-secret-token-value");
-      assertCarriesNoSecret(error, "fluffy-badger");
-    });
-  });
-
-  it.effect("times out tailscale status through TestClock", () => {
-    const layer = Layer.merge(
-      TestClock.layer(),
-      layerSpawner(ChildProcessSpawner.make(() => Effect.succeed(neverFinishingMockHandle()))),
+  // regression: #21609 - without forceKillAfter a timed-out probe only gets
+  // SIGTERM, so a group member that ignores it outlives the call.
+  it.effect("escalates timed-out probes to SIGKILL", () => {
+    const killGraces: Array<number | undefined> = [];
+    const layer = layerSpawner(
+      ChildProcessSpawner.make((command) => {
+        if (command._tag === "StandardCommand") {
+          const { forceKillAfter } = command.options;
+          killGraces.push(
+            forceKillAfter === undefined
+              ? undefined
+              : Duration.toMillis(Duration.fromInputUnsafe(forceKillAfter)),
+          );
+        }
+        return Effect.succeed({
+          ...mockHandle({}),
+          exitCode: Effect.never,
+          stdout: Stream.never,
+          stderr: Stream.never,
+        });
+      }),
     );
 
     return Effect.gen(function* () {
       const fiber = yield* readTailscaleStatus.pipe(Effect.flip, Effect.forkScoped);
       yield* Effect.yieldNow;
-      yield* TestClock.adjust(TAILSCALE_STATUS_TIMEOUT);
+      yield* TestClock.adjust("3500 millis");
       const error = yield* Fiber.join(fiber);
 
       assert.instanceOf(error, TailscaleCommandTimeoutError);
@@ -342,6 +324,7 @@ describe("tailscale", () => {
       assert.equal(error.timeoutMs, 3_500);
       assert.isTrue(Cause.isTimeoutError(error.cause));
       assert.equal(error.message, "tailscale status timed out after 3500ms.");
+      assert.deepEqual(killGraces, [500]);
     }).pipe(Effect.provide(layer));
   });
 

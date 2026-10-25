@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
+import { runForkMigrations } from "../ForkMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
@@ -14,7 +15,7 @@ layer("040_ProjectionSubagentIds", (it) => {
       const sql = yield* SqlClient.SqlClient;
 
       yield* runMigrations({ toMigrationInclusive: 39 });
-      yield* runMigrations({ toMigrationInclusive: 40 });
+      yield* runForkMigrations();
 
       const messageColumns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(projection_thread_messages)

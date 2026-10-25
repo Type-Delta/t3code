@@ -1,7 +1,7 @@
+import { act, render as renderClient } from "../../../test/render";
 import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts";
-import { act, useEffect } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { useEffect } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   settings: null as UnifiedSettings | null,
@@ -37,7 +37,6 @@ vi.mock(import("../../localApi"), async (original) => ({
 
 import { useSettingsRestore } from "./SettingsPanels";
 
-let root: Root;
 let restore: ReturnType<typeof useSettingsRestore>;
 
 function Probe() {
@@ -48,19 +47,12 @@ function Probe() {
   return null;
 }
 
-beforeEach(async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+function setup() {
   vi.clearAllMocks();
   state.settings = { ...DEFAULT_UNIFIED_SETTINGS };
   state.confirm.mockResolvedValue(true);
-  root = createRoot(document.createElement("div"));
-});
-afterEach(async () => {
-  await act(async () => root.unmount());
-  vi.unstubAllGlobals();
-});
-
-const render = () => act(async () => root.render(<Probe />));
+}
+const render = () => renderClient(<Probe />);
 
 describe("restoring V2 settings", () => {
   it.each([
@@ -68,8 +60,9 @@ describe("restoring V2 settings", () => {
     ["autoResumeLimitedThreads", "Auto-resume limited threads"],
     ["snoozeLimitedThreads", "Snooze limited threads"],
   ] as const)("restores %s when it is the only changed setting", async (key, label) => {
+    setup();
     state.settings = { ...DEFAULT_UNIFIED_SETTINGS, [key]: !DEFAULT_UNIFIED_SETTINGS[key] };
-    await render();
+    await using screen = await render();
 
     expect(restore.changedSettingLabels).toEqual([label]);
     await act(() => restore.restoreDefaults());
@@ -80,12 +73,13 @@ describe("restoring V2 settings", () => {
   });
 
   it("does not reset settings after cancellation", async () => {
+    setup();
     state.settings = {
       ...DEFAULT_UNIFIED_SETTINGS,
       autoResumeLimitedThreads: !DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
     };
     state.confirm.mockResolvedValue(false);
-    await render();
+    await using screen = await render();
 
     await act(() => restore.restoreDefaults());
 

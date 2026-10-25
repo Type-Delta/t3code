@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { runForkMigrations } from "../ForkMigrations.ts";
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import projectionThreadsPinned from "./041_ProjectionThreadsPinned.ts";
@@ -38,6 +39,7 @@ layer("046_ReconcileUpstream41History", (it) => {
       `;
 
       yield* runMigrations({ toMigrationInclusive: 47 });
+      yield* runForkMigrations();
 
       const checkpointTables = yield* sql<{ readonly name: string }>`
         SELECT name FROM sqlite_master
@@ -81,14 +83,13 @@ layer("046_ReconcileUpstream41History", (it) => {
 
       const ledger = yield* sql<{ readonly migrationId: number; readonly name: string }>`
         SELECT migration_id AS "migrationId", name
-        FROM effect_sql_migrations
-        WHERE migration_id IN (46, 47)
-        ORDER BY migration_id
+        FROM fork_sql_migrations
+        WHERE name = 'ReconcileUpstream41History'
       `;
-      assert.deepEqual(ledger, [
-        { migrationId: 46, name: "ReconcileUpstream41History" },
-        { migrationId: 47, name: "AuthSessionClientConnection" },
-      ]);
+      assert.deepEqual(ledger, [{ migrationId: 13, name: "ReconcileUpstream41History" }]);
+      const authLedger =
+        yield* sql`SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id = 41`;
+      assert.deepEqual(authLedger, [{ migration_id: 41, name: "AuthSessionClientConnection" }]);
     }),
   );
 });

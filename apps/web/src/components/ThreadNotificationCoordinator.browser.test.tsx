@@ -1,9 +1,8 @@
+import { render as renderClient, stubGlobal } from "../../test/render";
 import type { ClientSettings } from "@t3tools/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   mode: "off" as ClientSettings["notificationMode"],
@@ -21,7 +20,7 @@ const state = vi.hoisted(() => ({
   limited: false,
   retrying: false,
   subagent: false,
-  background: [] as Array<{ taskId: string; kind: "command" | "monitor" }>,
+  background: [] as Array<{ taskId: string; kind: "command" | "monitor"; awaited?: boolean }>,
   delegatedChild: null as "running" | "approval" | null,
   add: vi.fn(
     (_toast: { title: string; description: string; actionProps: { onClick: () => void } }) =>
@@ -154,18 +153,11 @@ vi.mock(import("./ui/toast"), async (original) => {
 
 import { ThreadNotificationCoordinator } from "./ThreadNotificationCoordinator";
 
-let root: Root;
-
-async function render() {
-  await act(() => root.render(<ThreadNotificationCoordinator />));
-}
-
-async function complete() {
-  state.completedAt = "2026-09-13T10:00:00.000Z";
-  await render();
-}
-
-beforeEach(() => {
+async function setup() {
+  const stack = new AsyncDisposableStack();
+  stack.defer(() => {
+    vi.restoreAllMocks();
+  });
   vi.clearAllMocks();
   Object.assign(state, {
     mode: "off",
@@ -187,25 +179,31 @@ beforeEach(() => {
     delegatedChild: null,
   });
   stableParent = null;
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.spyOn(document, "visibilityState", "get").mockImplementation(
     () => state.visible as DocumentVisibilityState,
   );
   vi.spyOn(document, "hasFocus").mockImplementation(() => state.focused);
-  vi.stubGlobal("Notification", Object.assign(state.notification, { permission: "granted" }));
-  root = createRoot(document.createElement("div"));
-});
-
-afterEach(async () => {
-  await act(() => root.unmount());
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
-});
+  stack.use(
+    stubGlobal("Notification", Object.assign(state.notification, { permission: "granted" })),
+  );
+  const screen = stack.use(await renderClient(null));
+  const rerender = () => screen.rerender(<ThreadNotificationCoordinator />);
+  return {
+    render: rerender,
+    complete: async () => {
+      state.completedAt = "2026-09-13T10:00:00.000Z";
+      await rerender();
+    },
+    [Symbol.asyncDispose]: () => stack.disposeAsync(),
+  };
+}
 
 describe("thread notifications", () => {
   it.each([true, false])(
     "waits for retry success before alerting with focus=%s",
     async (focused) => {
+      await using screen = await setup();
+      const { render, complete } = screen;
       state.focused = focused;
       state.mode = "notifications-and-sound";
       await render();
@@ -238,6 +236,8 @@ describe("thread notifications", () => {
   );
 
   it("alerts once when automatic retries stop at the provider failure", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.mode = "notifications-and-sound";
     await render();
     state.retrying = true;
@@ -255,6 +255,8 @@ describe("thread notifications", () => {
   });
 
   it.each([true, false])("keeps subagents silent with focus=%s", async (focused) => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.subagent = true;
     state.focused = focused;
     state.mode = "notifications-and-sound";
@@ -268,6 +270,8 @@ describe("thread notifications", () => {
   });
 
   it("alerts on the parent when its delegated subagent asks for approval", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.mode = "notifications-and-sound";
     state.delegatedChild = "running";
     await render();
@@ -281,6 +285,8 @@ describe("thread notifications", () => {
   });
 
   it("alerts once with system alerts off and opens the completed thread", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     await render();
     await complete();
     await render();
@@ -300,6 +306,8 @@ describe("thread notifications", () => {
   it.each(["active", "blurred", "hidden", "archived", "disabled"])(
     "does not show a completion toast for %s threads",
     async (condition) => {
+      await using screen = await setup();
+      const { render, complete } = screen;
       await render();
       if (condition === "active") state.active.threadId = "thread-1";
       if (condition === "blurred") state.focused = false;
@@ -318,6 +326,8 @@ describe("thread notifications", () => {
     ["turnError", "Thread failed"],
     ["limited", "Usage limit reached"],
   ] as const)("uses the same %s event for in-app and desktop alerts", async (event, title) => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.mode = "notifications-and-sound";
     await render();
     state[event] = true;
@@ -343,9 +353,11 @@ describe("thread notifications", () => {
     });
   });
 
-  it("alerts when only a dev server is left running, not while a monitor can wake the agent", async () => {
+  it("alerts when only a dev server is left running, not while an awaited monitor runs", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     await render();
-    state.background = [{ taskId: "watch", kind: "monitor" }];
+    state.background = [{ taskId: "watch", kind: "monitor", awaited: true }];
     await complete();
     expect(state.add).not.toHaveBeenCalled();
     state.background = [{ taskId: "dev", kind: "command" }];
@@ -357,6 +369,8 @@ describe("thread notifications", () => {
   });
 
   it("keeps background desktop alerts when in-app notifications are disabled", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.focused = false;
     state.inApp = false;
     state.mode = "notifications";
@@ -370,6 +384,8 @@ describe("thread notifications", () => {
   });
 
   it("does not replay a completion when opting in from all alerts off", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.inApp = false;
     await render();
     await complete();
@@ -379,6 +395,8 @@ describe("thread notifications", () => {
   });
 
   it("compares the environment as well as the thread", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.active = { environmentId: "env-2", threadId: "thread-1" };
     await render();
     await complete();
@@ -386,6 +404,8 @@ describe("thread notifications", () => {
   });
 
   it("does not replay completed threads on first load or reconnect", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     await complete();
     state.live = false;
     await render();
@@ -395,6 +415,8 @@ describe("thread notifications", () => {
   });
 
   it("keeps sound but replaces the system popup when showing a toast", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.mode = "notifications-and-sound";
     await render();
     await complete();
@@ -404,6 +426,8 @@ describe("thread notifications", () => {
   });
 
   it("keeps system alerts when the app is in the background", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     state.mode = "notifications";
     state.focused = false;
     await render();
@@ -417,6 +441,8 @@ describe("thread notifications", () => {
   });
 
   it("reveals the desktop window and opens the thread when a system alert is clicked", async () => {
+    await using screen = await setup();
+    const { render, complete } = screen;
     const revealWindow = vi.fn(() => Promise.resolve());
     vi.stubGlobal("desktopBridge", { revealWindow });
     state.mode = "notifications";

@@ -82,8 +82,7 @@ export class SidebarPointerSensor {
   private move = (event: PointerEvent) => {
     if (this.phase === "finished" || event.pointerId !== this.pointer.pointerId) return;
     const coordinates = { x: event.clientX, y: event.clientY };
-    // Desktop can report buttons=0 on the final move before pointerup. Let an
-    // active context drag drop there before cancelling the sidebar sort.
+    // Desktop may report buttons=0 before pointerup; drop active context drags before cancelling sort.
     if ((event.buttons & 1) === 0) {
       if (this.phase === "dragging") this.props.options.onDrop?.(coordinates);
       return this.cancel();
@@ -178,8 +177,8 @@ export class SidebarPointerSensor {
       this.document.addEventListener("pointerdown", this.clearClickSuppression, { capture: true });
     }
     try {
-      // Release the sidebar preview before dnd-kit clears its transforms.
-      // Its public end/cancel event can be omitted before its first layout.
+      // Release the preview before dnd-kit clears transforms; end/cancel events may be omitted before first
+      // layout.
       this.props.options.onFinish(!aborted);
     } finally {
       if (aborted) this.props.onAbort(this.props.active);

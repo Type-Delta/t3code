@@ -35,12 +35,7 @@ import { sortModelsForProviderInstance } from "./modelOrdering";
 export const MAX_CUSTOM_MODEL_LENGTH = 256;
 const DEFAULT_TEXT_GENERATION_INSTANCE_ID = ProviderInstanceId.make("codex");
 
-/**
- * Resolve the custom-model list for a given instance from its own
- * `providerInstances[id].config.customModels` blob. Each instance keeps its
- * own list, so a custom model added to `claude_openrouter` never appears on
- * the stock `claudeAgent` instance.
- */
+// Read each instance's custom models from its own config so they never leak into stock instances.
 function readInstanceCustomModels(
   settings: UnifiedSettings,
   instanceId: ProviderInstanceId,
@@ -210,18 +205,8 @@ function getAppModelOptions(
   );
 }
 
-/**
- * Instance-scoped variant of {@link getAppModelOptions}. Built-in models
- * come from the instance's own `entry.models` snapshot (rather than the
- * first-matching-kind fallback in `getProviderModels`), so each custom
- * instance gets the precise model list its driver reported. Custom model
- * slugs come from the instance's own `providerInstances[id].config.customModels`,
- * so two instances of the same kind never leak custom slugs into each other.
- * Gateway rows from an authoritative inventory are included when they are not
- * also represented by a manually configured entry. Other server custom rows
- * remain ignored so a slug removed in Settings disappears without waiting for
- * the next provider probe.
- */
+// Each instance owns its catalog and authored models. Keep authoritative gateway rows,
+// but rebuild manual rows from settings so removals take effect before the next probe.
 export function getAppModelOptionsForInstance(
   settings: UnifiedSettings,
   entry: ProviderInstanceEntry,
@@ -375,9 +360,7 @@ export function resolveAppModelSelectionState(
     selectedEntry ?? entries.find((candidate) => candidate.enabled && candidate.isAvailable);
   if (entry) {
     const selectedModel = selectedEntry ? selection.model : null;
-    // A saved model the catalog no longer lists, or a new fallback instance,
-    // gets the driver's cheap text generation default. The catalog's own
-    // default is the flagship chat model, which is too expensive here.
+    // Use the cheap generation default; the catalog default is the expensive chat flagship.
     const options = getAppModelOptionsForInstance(settings, entry);
     const model =
       resolveSelectableModel(entry.driverKind, selectedModel, options) ??

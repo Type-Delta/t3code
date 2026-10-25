@@ -2,9 +2,9 @@ import { RegistryContext } from "@effect/atom-react";
 import { type AssetCreateUrlResult, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { AtomRegistry } from "effect/reactivity";
-import { act, type ReactNode } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { type ReactNode } from "react";
+import { act, render as renderClient } from "../../test/render";
+import { expect, it, vi } from "vite-plus/test";
 
 const mint = vi.hoisted(() => vi.fn<() => Promise<AssetCreateUrlResult>>());
 const scopes = vi.hoisted(() => ({ filesystemRead: false }));
@@ -48,10 +48,8 @@ vi.mock(import("../state/session"), async (original) => ({
   })) as never,
 }));
 
-import ChatMarkdown, { ChatMarkdownAssetImage } from "./ChatMarkdown";
-
-const roots: Root[] = [];
-let registry: AtomRegistry.AtomRegistry;
+import ChatMarkdown from "./ChatMarkdown";
+import { ChatMarkdownAssetImage } from "./chat/ChatMarkdownMedia";
 
 const imageUrl = (version: string) =>
   `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>#${version}`;
@@ -60,38 +58,37 @@ const assetResult = (version: string): AssetCreateUrlResult => ({
   expiresAt: 1,
 });
 
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  registry = AtomRegistry.make();
+function setup() {
   mint.mockReset().mockResolvedValue(assetResult("updated"));
-});
-afterEach(async () => {
-  for (const root of roots.splice(0)) await act(async () => root.unmount());
-  registry.dispose();
-  document.body.replaceChildren();
-  vi.unstubAllGlobals();
   scopes.filesystemRead = false;
-});
-
-function createTestRoot() {
-  const container = document.body.appendChild(document.createElement("div"));
-  const root = createRoot(container);
-  roots.push(root);
   return {
-    container,
+    [Symbol.dispose]() {
+      scopes.filesystemRead = false;
+    },
+  };
+}
+async function createTestRoot() {
+  const registry = AtomRegistry.make();
+  const screen = await renderClient(null);
+  return {
+    container: screen.container,
     render: (children: ReactNode) =>
-      act(async () => {
-        root.render(
-          <RegistryContext.Provider value={registry}>{children}</RegistryContext.Provider>,
-        );
-      }),
+      screen.rerender(
+        <RegistryContext.Provider value={registry}>{children}</RegistryContext.Provider>,
+      ),
+    async [Symbol.asyncDispose]() {
+      await screen[Symbol.asyncDispose]();
+      registry.dispose();
+    },
   };
 }
 
 it("opens host media through server authorization before the client grant loads", async () => {
+  using _state = setup();
   mint.mockResolvedValue({ relativeUrl: "/api/assets/image.png", expiresAt: 1 });
   const onImageExpand = vi.fn();
-  const { container, render } = createTestRoot();
+  await using screen = await createTestRoot();
+  const { container, render } = screen;
   await render(
     <ChatMarkdown
       cwd="/repo"
@@ -137,7 +134,9 @@ function renderedImage(container: HTMLElement) {
 }
 
 it("ordinary chat keeps its embedded asset URL across renders and reopening", async () => {
-  const { container, render } = createTestRoot();
+  using _state = setup();
+  await using screen = await createTestRoot();
+  const { container, render } = screen;
   await render(markdown());
   expect(renderedImage(container)).toBe(imageUrl("updated"));
   mint.mockResolvedValue(assetResult("changed"));
@@ -153,9 +152,11 @@ it("ordinary chat keeps its embedded asset URL across renders and reopening", as
 it.each(["URL", "failure"] as const)(
   "reopening a file preview with no workspace mutation replaces its cached %s",
   async (cached) => {
+    using _state = setup();
     if (cached === "failure") mint.mockRejectedValueOnce(new Error("Image missing"));
     else mint.mockResolvedValueOnce(assetResult("stale"));
-    const { container, render } = createTestRoot();
+    await using screen = await createTestRoot();
+    const { container, render } = screen;
     await render(markdown(null));
     expect(renderedImage(container)).toBe(cached === "URL" ? imageUrl("stale") : undefined);
     await render(null);
@@ -171,11 +172,13 @@ it.each(["URL", "failure"] as const)(
 it.each(["initial", "refresh"] as const)(
   "shows the latest workspace edit after a pending %s asset request settles",
   async (request) => {
+    using _state = setup();
     let resolvePending!: (value: AssetCreateUrlResult) => void;
     const pending = new Promise<AssetCreateUrlResult>((resolve) => {
       resolvePending = resolve;
     });
-    const { container, render } = createTestRoot();
+    await using screen = await createTestRoot();
+    const { container, render } = screen;
     if (request === "refresh") {
       await render(markdown("m0"));
       expect(renderedImage(container)).toBe(imageUrl("updated"));
@@ -201,6 +204,7 @@ it.each(["initial", "refresh"] as const)(
 );
 
 it("retries a host image after its first asset request fails", async () => {
+  using _state = setup();
   scopes.filesystemRead = true;
   mint.mockRejectedValueOnce(new Error("Image missing"));
   const resource = {
@@ -208,7 +212,8 @@ it("retries a host image after its first asset request fails", async () => {
     threadId: threadRef.threadId,
     path: "/tmp/image.svg",
   };
-  const { container, render } = createTestRoot();
+  await using screen = await createTestRoot();
+  const { container, render } = screen;
   const image = () => (
     <ChatMarkdownAssetImage
       environmentId={threadRef.environmentId}

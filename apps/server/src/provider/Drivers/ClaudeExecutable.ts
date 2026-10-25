@@ -8,20 +8,13 @@ import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-/**
- * Windows launcher-script extensions that Node cannot spawn without a shell
- * (`spawn EINVAL` since Node 20.12) and that the Claude Agent SDK therefore
- * cannot use as `pathToClaudeCodeExecutable`.
- */
+/** Node 20.12+ cannot spawn Windows launcher scripts without a shell; the SDK cannot use these as executables. */
 const WINDOWS_SHIM_EXTENSIONS: ReadonlySet<string> = new Set([".cmd", ".bat", ".ps1"]);
 
 export const isWindowsClaudeLauncherShimPath = (filePath: string): boolean =>
   WINDOWS_SHIM_EXTENSIONS.has(NodePath.win32.extname(filePath).toLowerCase());
 
-/**
- * Newer package versions ship a native `bin/claude.exe`; older versions only ship `cli.js`,
- * which the SDK runs with a JavaScript runtime.
- */
+/** New packages provide bin/claude.exe; older packages need a JavaScript runtime for cli.js. */
 const NPM_PACKAGE_ENTRY_CANDIDATES = [
   ["node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"],
   ["node_modules", "@anthropic-ai", "claude-code", "cli.js"],

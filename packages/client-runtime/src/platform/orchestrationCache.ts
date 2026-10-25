@@ -10,7 +10,9 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 export const ORCHESTRATION_CACHE_SCHEMA_VERSION = 3 as const;
-export const ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION = 4 as const;
+// Older caches can contain unbounded human history or checkpoint navigation that never
+// advanced with live events. Discard them so the server supplies a fresh bounded snapshot.
+export const ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION = 6 as const;
 
 export const StoredOrchestrationShellSnapshot = Schema.Struct({
   schemaVersion: Schema.Literal(ORCHESTRATION_CACHE_SCHEMA_VERSION),

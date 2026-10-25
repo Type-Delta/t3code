@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import { threadNotFound } from "./OrchestratorMcpService.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
   ThreadMetadataMcpService,
@@ -168,7 +169,7 @@ const make = Effect.gen(function* () {
         ),
       );
     if (shell === null || shell.deletedAt !== null) {
-      return yield* failure("thread_not_found", `Thread ${threadId} was not found.`);
+      return yield* threadNotFound(threadManagement, threadId, `Thread ${threadId} was not found.`);
     }
     if (!McpInvocationContext.canCrossProjects(scope) && scope.thread !== undefined) {
       const callingThreadId = scope.thread.threadId;
@@ -219,8 +220,7 @@ const make = Effect.gen(function* () {
     const metadataEvent = dispatched.storedEvents.find(
       (stored) => stored.event.type === "thread.metadata-updated",
     );
-    // A retried commandId replays the stored events of the first dispatch;
-    // compaction may have deleted them by then, so answer from the projection.
+    // Retries may find stored events compacted away; answer from the projection.
     const thread =
       metadataEvent?.event.type === "thread.metadata-updated"
         ? metadataEvent.event.payload

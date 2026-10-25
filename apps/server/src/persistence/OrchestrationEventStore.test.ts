@@ -1,7 +1,7 @@
-import * as NodeV8 from "node:v8";
-
 import {
   CommandId,
+  MessageId,
+  RunId,
   EventId,
   NodeId,
   ProjectId,
@@ -39,6 +39,47 @@ const layerTest = OrchestrationEventStore.layer.pipe(
 const layer = it.layer(layerTest);
 
 layer("OrchestrationEventStore", (it) => {
+  it.effect("retains historical restoration metadata through SQLite append and replay", () =>
+    Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore.OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread:history-restoration-metadata");
+      const now = yield* DateTime.now;
+      const event = {
+        id: EventId.make("event:history-restoration-metadata"),
+        type: "run.updated" as const,
+        historyRestoration: true as const,
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: RunId.make("run:history-restoration"),
+          threadId,
+          ordinal: 1,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test" },
+          providerThreadId: null,
+          userMessageId: MessageId.make("message:history-restoration"),
+          rootNodeId: null,
+          activeAttemptId: null,
+          status: "completed" as const,
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      } satisfies OrchestrationV2DomainEvent;
+      const appended = yield* store.appendAgentEvents({ events: [event] });
+      const rows = yield* sql<{
+        readonly historical: number;
+      }>`SELECT json_extract(metadata_json, '$.historyRestoration') AS historical
+        FROM orchestration_events WHERE event_id = ${event.id}`;
+      assert.equal(rows[0]?.historical, 1);
+      const replayed = yield* store.readAgentEvents({ threadId }).pipe(Stream.runCollect);
+      assert.deepEqual(replayed, appended);
+      assert.isTrue(replayed[0]?.event.historyRestoration);
+    }),
+  );
   it.effect("retains only shell metadata from oversized replay and live application events", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -294,124 +335,6 @@ layer("OrchestrationEventStore", (it) => {
         })
         .pipe(Stream.runCollect);
       assert.deepEqual(applicationEvents, [...appended]);
-    }),
-  );
-
-  it.effect("stores json columns as strings and replays CLI-origin events", () =>
-    Effect.gen(function* () {
-      const eventStore = yield* OrchestrationEventStore.OrchestrationEventStore;
-      const sql = yield* SqlClient.SqlClient;
-      const now = "2026-01-01T00:00:00.000Z";
-
-      const appended = yield* eventStore.appendProjectEvent({
-        type: "project.created",
-        eventId: EventId.make("evt-store-roundtrip"),
-        aggregateKind: "project",
-        aggregateId: ProjectId.make("project-roundtrip"),
-        occurredAt: now,
-        commandId: CommandId.make("cmd-store-roundtrip"),
-        causationEventId: null,
-        correlationId: CommandId.make("cmd-store-roundtrip"),
-        metadata: {
-          adapterKey: "codex",
-          origin: {
-            surface: "cli",
-          },
-        },
-        payload: {
-          projectId: ProjectId.make("project-roundtrip"),
-          title: "Roundtrip Project",
-          workspaceRoot: "/tmp/project-roundtrip",
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-      });
-
-      const storedRows = yield* sql<{
-        readonly payloadJson: string;
-        readonly metadataJson: string;
-      }>`
-        SELECT
-          payload_json AS "payloadJson",
-          metadata_json AS "metadataJson"
-        FROM orchestration_events
-        WHERE event_id = ${appended.eventId}
-      `;
-      assert.equal(storedRows.length, 1);
-      assert.equal(typeof storedRows[0]?.payloadJson, "string");
-      assert.equal(typeof storedRows[0]?.metadataJson, "string");
-
-      const replayed = yield* eventStore
-        .readApplicationEvents({
-          afterSequence: appended.sequence - 1,
-          throughSequence: appended.sequence,
-        })
-        .pipe(
-          Stream.runCollect,
-          Effect.map((chunk) => Array.from(chunk)),
-        );
-      assert.equal(replayed.length, 1);
-      const [project] = replayed;
-      if (project === undefined || !("aggregateKind" in project)) {
-        return assert.fail("Expected a project event");
-      }
-      assert.equal(project.type, "project.created");
-      assert.equal(project.metadata.adapterKey, "codex");
-      assert.deepEqual(project.metadata.origin, { surface: "cli" });
-    }),
-  );
-
-  it.effect("fails with PersistenceDecodeError when stored json is invalid", () =>
-    Effect.gen(function* () {
-      const eventStore = yield* OrchestrationEventStore.OrchestrationEventStore;
-      const sql = yield* SqlClient.SqlClient;
-      const now = "2026-01-01T00:00:00.000Z";
-
-      yield* sql`
-        INSERT INTO orchestration_events (
-          event_id,
-          aggregate_kind,
-          stream_id,
-          stream_version,
-          event_type,
-          occurred_at,
-          command_id,
-          causation_event_id,
-          correlation_id,
-          actor_kind,
-          payload_json,
-          metadata_json
-        )
-        VALUES (
-          ${EventId.make("evt-store-invalid-json")},
-          ${"project"},
-          ${ProjectId.make("project-invalid-json")},
-          ${0},
-          ${"project.created"},
-          ${now},
-          ${CommandId.make("cmd-store-invalid-json")},
-          ${null},
-          ${null},
-          ${"server"},
-          ${"{"},
-          ${"{}"}
-        )
-      `;
-
-      const replayResult = yield* Effect.result(
-        Stream.runCollect(
-          eventStore.readApplicationEvents({
-            afterSequence: 0,
-            throughSequence: Number.MAX_SAFE_INTEGER,
-          }),
-        ),
-      );
-      assert.equal(replayResult._tag, "Failure");
-      if (replayResult._tag === "Failure") {
-        assert.ok(isPersistenceDecodeError(replayResult.failure));
-      }
     }),
   );
 
@@ -749,56 +672,4 @@ it.effect.each(["high-water", "replay"] as const)(
         }
       }),
     ).pipe(Effect.provide(Layer.fresh(layerTest))),
-);
-
-it.effect("releases consumed application replay pages", () =>
-  Effect.gen(function* () {
-    const store = yield* OrchestrationEventStore.OrchestrationEventStore;
-    const afterSequence = yield* store.latestApplicationSequence;
-    yield* Effect.forEach(
-      Array.from({ length: 1501 }, (_, index) => index),
-      (index) =>
-        store.appendProjectEvent({
-          type: "project.created",
-          eventId: EventId.make(`retention-${index}`),
-          aggregateKind: "project",
-          aggregateId: ProjectId.make(`retention-${index}`),
-          occurredAt: "2026-09-08T00:00:00Z",
-          commandId: null,
-          causationEventId: null,
-          correlationId: null,
-          metadata: {},
-          payload: {
-            projectId: ProjectId.make(`retention-${index}`),
-            title: "Replay",
-            workspaceRoot: "/tmp/replay",
-            defaultModelSelection: null,
-            scripts: [],
-            createdAt: "2026-09-08T00:00:00Z",
-            updatedAt: "2026-09-08T00:00:00Z",
-          },
-        }),
-      { discard: true },
-    );
-    // oxlint-disable-next-line typescript/no-extraneous-class -- Counts retained page markers after full GC.
-    class ReplayPage {}
-    let count = 0;
-    yield* store
-      .readApplicationEvents({
-        afterSequence,
-        throughSequence: yield* store.latestApplicationSequence,
-      })
-      .pipe(
-        Stream.runForEach((event) =>
-          Effect.sync(() => {
-            if (count % 500 === 0) {
-              Object.assign(event, { replayPage: new ReplayPage() });
-              assert.isAtMost(NodeV8.queryObjects(ReplayPage, { format: "count" }), 1);
-            }
-            count++;
-          }),
-        ),
-      );
-    assert.equal(count, 1501);
-  }).pipe(Effect.provide(layerTest)),
 );

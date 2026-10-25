@@ -4,10 +4,6 @@ import type { ProviderReplayTranscript } from "@t3tools/contracts";
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import { assertThreadRollbackOutput } from "../thread_rollback/codex_output.ts";
 
-/**
- * Codex only reverts threads loaded in its current app-server process, so the
- * released session's successor must resume the thread before `thread/revert`.
- */
 export function assertThreadRollbackAfterRestartOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
@@ -21,11 +17,12 @@ export function assertThreadRollbackAfterRestartOutput(
       ? [String(entry.frame.method)]
       : [],
   );
-  const revert = methods.indexOf("thread/revert");
-  assert.isAbove(revert, 0, "the rollback must reach thread/revert");
+  const fork = methods.indexOf("thread/fork");
+  assert.isAbove(fork, 0, "rollback must fork the preserved native history");
+  assert.equal(methods.filter((method) => method === "initialize").length, 2);
   assert.equal(
-    methods.lastIndexOf("thread/resume", revert),
-    revert - 2,
-    "the fresh app-server must resume the thread right before listing turns and reverting",
+    methods[fork - 1],
+    "initialized",
+    "the fresh app-server must initialize before forking the saved native source",
   );
 }

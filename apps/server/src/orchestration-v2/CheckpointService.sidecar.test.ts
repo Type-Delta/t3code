@@ -99,6 +99,40 @@ const runTurn = (
   });
 
 it.layer(layerTest)("V2 sidecar checkpoints", (it) => {
+  it.effect("diffs a divergent turn from its selected checkpoint rather than discarded files", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const checkpoints = yield* CheckpointService.CheckpointServiceV2;
+      const cwd = yield* makeRepository;
+      const scope = scopeFor(cwd, "divergent-sidecar");
+      const file = NodePath.join(cwd, "README.md");
+      const first = yield* runTurn(
+        scope,
+        1,
+        fileSystem.writeFileString(file, "# start\nselected\n"),
+      );
+      yield* runTurn(
+        scope,
+        2,
+        fileSystem.writeFileString(file, "# start\nselected\ndiscarded one\ndiscarded two\n"),
+      );
+      yield* checkpoints.restore({ scope, checkpoint: first.checkpoint });
+      yield* fileSystem.writeFileString(file, "# start\nselected\nnew branch\n");
+      const branched = yield* checkpoints.capture({
+        scope,
+        runId: scope.runId,
+        nodeId: scope.nodeId,
+        ordinalWithinScope: 3,
+        appRunOrdinal: 3,
+        baselineOrdinalWithinScope: 1,
+        capturedAt: yield* DateTime.now,
+      });
+      assert.equal(branched.parentCheckpointId, first.checkpoint.id);
+      assert.deepEqual(branched.files, [
+        { path: "README.md", kind: "modified", additions: 1, deletions: 0 },
+      ]);
+    }),
+  );
   it.effect("keep turn snapshots out of the project repository", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

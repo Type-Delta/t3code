@@ -1,8 +1,7 @@
 import { EnvironmentId, UsageDay, USAGE_CONTRACT_VERSION } from "@t3tools/contracts";
 import { mergeUsage } from "@t3tools/shared/usageMerge";
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { act, render as renderClient } from "../../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
@@ -97,7 +96,7 @@ const environments = [
   },
 ];
 
-beforeEach(() => {
+function prepareUsage() {
   testState.metric = "cost";
   testState.useUsage.mockImplementation((window: unknown) => ({
     get shown() {
@@ -129,32 +128,29 @@ beforeEach(() => {
     isPartial: false,
     refresh: vi.fn(),
   }));
-});
+}
 
 describe("UsagePage Escape navigation", () => {
-  let renderer: Root;
-  let container: HTMLDivElement;
-  let back: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(async () => {
-    back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+  async function setup() {
+    prepareUsage();
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
     testState.navigate.mockClear();
     testState.canGoBack = true;
-    container = document.createElement("div");
-    document.body.append(container);
-    renderer = createRoot(container);
-    await act(() => {
-      renderer.render(<UsagePage />);
-    });
-  });
-
-  afterEach(async () => {
-    await act(() => renderer.unmount());
-    container.remove();
-    back.mockRestore();
-  });
+    const screen = await renderClient(<UsagePage />);
+    return {
+      container: screen.container,
+      back,
+      rerender: screen.rerender,
+      async [Symbol.asyncDispose]() {
+        await screen[Symbol.asyncDispose]();
+        back.mockRestore();
+      },
+    };
+  }
 
   it("shows answered usage while another environment is still reporting", async () => {
+    await using screen = await setup();
+    const { container, back } = screen;
     testState.useUsage.mockImplementation((window: unknown) => ({
       get shown() {
         return { window, merged: this.merged };
@@ -181,12 +177,14 @@ describe("UsagePage Escape navigation", () => {
       isPartial: true,
       refresh: vi.fn(),
     }));
-    await act(() => renderer.render(<UsagePage />));
+    await act(() => screen.rerender(<UsagePage />));
     expect(container.textContent).toContain("$42.00");
     expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
   });
 
   it("keeps recent activity first in both cost and token breakdowns", async () => {
+    await using screen = await setup();
+    const { container, back } = screen;
     const hour = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (button) => button.textContent === "Hour",
     )!;
@@ -203,6 +201,8 @@ describe("UsagePage Escape navigation", () => {
   });
 
   it("orders model costs, marks unknown rates, and sorts token totals without mutating data", async () => {
+    await using screen = await setup();
+    const { container, back } = screen;
     const rows = () => [...container.querySelectorAll("tbody tr")].map((row) => row.textContent);
     expect(rows()[0]).toContain("expensive-model");
     expect(rows()[1]).toContain("token-heavy-model");
@@ -228,14 +228,18 @@ describe("UsagePage Escape navigation", () => {
   }
 
   it("returns to the previous page on Escape", async () => {
+    await using screen = await setup();
+    const { container, back } = screen;
     await userEvent.keyboard("{Escape}");
     expect(back).toHaveBeenCalledOnce();
     expect(testState.navigate).not.toHaveBeenCalled();
   });
 
   it("returns home when there is no previous app page", async () => {
+    await using screen = await setup();
+    const { container, back } = screen;
     testState.canGoBack = false;
-    await act(() => renderer.render(<UsagePage />));
+    await act(() => screen.rerender(<UsagePage />));
 
     await userEvent.keyboard("{Escape}");
     expect(testState.navigate).toHaveBeenCalledWith({ to: "/" });
@@ -243,6 +247,8 @@ describe("UsagePage Escape navigation", () => {
   });
 
   it("closes the environment menu before Escape navigates back", async () => {
+    await using screen = await setup();
+    const { container, back } = screen;
     const trigger = container.querySelector<HTMLButtonElement>('[data-slot="menu-trigger"]')!;
     await userEvent.click(trigger);
     await expect.element(page.getByRole("menu")).toBeVisible();
@@ -256,9 +262,14 @@ describe("UsagePage Escape navigation", () => {
     expect(back).toHaveBeenCalledOnce();
   });
 
-  it.each([{ repeat: true }, { isComposing: true }])("ignores Escape with %j", (properties) => {
-    document.body.dispatchEvent(escape(properties));
-    expect(back).not.toHaveBeenCalled();
-    expect(testState.navigate).not.toHaveBeenCalled();
-  });
+  it.each([{ repeat: true }, { isComposing: true }])(
+    "ignores Escape with %j",
+    async (properties) => {
+      await using screen = await setup();
+      const { container, back } = screen;
+      document.body.dispatchEvent(escape(properties));
+      expect(back).not.toHaveBeenCalled();
+      expect(testState.navigate).not.toHaveBeenCalled();
+    },
+  );
 });

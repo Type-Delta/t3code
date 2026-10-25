@@ -58,21 +58,9 @@ export const ProviderSandboxMode = Schema.Literals([
 ]);
 export type ProviderSandboxMode = typeof ProviderSandboxMode.Type;
 
-/**
- * `ModelSelection` — selection of a model on a configured provider instance.
- *
- * The routing key is `instanceId` (a user-defined slug identifying one
- * configured provider instance). Drivers, credentials, working-directory
- * bindings, and any other per-instance state are recovered from the
- * runtime registry via the instance id.
- *
- * Wire legacy: persisted selections produced before the driver/instance
- * split carried a `provider: <driver-id>` field instead. The schema absorbs
- * that shape via a pre-decoding transform — `{provider, model}` is promoted
- * to `{instanceId: defaultInstanceIdForDriver(provider), model}`. No
- * post-decode compatibility code lives in the runtime; the transform is the
- * only compat surface.
- */
+/** Route by instanceId through the runtime registry. Pre-decoding maps legacy
+ * {provider, model} selections to the driver's default instance, so runtime code
+ * only receives the current instance-based shape. */
 const ModelSelectionWire = Schema.Struct({
   instanceId: ProviderInstanceId,
   model: TrimmedNonEmptyString,
@@ -95,11 +83,8 @@ export const ModelSelection = ModelSelectionSource.pipe(
     ModelSelectionWire,
     SchemaTransformation.transformEffect({
       decode: (raw) => {
-        // Resolve the routing key: prefer an explicit `instanceId`; fall
-        // back to promoting the legacy `provider` slug (the canonical
-        // `defaultInstanceIdForDriver` mapping) so persisted rollout-era
-        // payloads decode without data loss. The target schema brands the
-        // string as `ProviderInstanceId`.
+        // Explicit instanceId wins; legacy provider slugs retain persisted routing.
+        // The target schema brands the resolved string as ProviderInstanceId.
         const instanceIdSource =
           raw.instanceId !== undefined
             ? raw.instanceId
@@ -342,16 +327,9 @@ export const ChatFileAttachment = Schema.Struct({
 });
 export type ChatFileAttachment = typeof ChatFileAttachment.Type;
 
-/**
- * Catch-all for attachment types this build does not know. Attachments ride on
- * persisted events and thread streams, so a newer server or client must be able
- * to introduce a type without making older readers fail to decode the whole
- * message. Decoders keep the shared base fields; consumers skip these or render
- * them as unsupported. Mirrors how `OrchestrationThreadActivity` keeps `kind`
- * open. The known discriminators are excluded so a malformed image or file
- * attachment fails its own schema instead of sliding through here with its
- * size and mime constraints unchecked.
- */
+/** Preserve unknown attachment kinds so newer persisted messages remain decodable.
+ * Consumers skip or show them as unsupported. Exclude known discriminators here
+ * so malformed known attachments cannot bypass their own constraints. */
 export const ChatUnknownAttachment = Schema.Struct({
   type: TrimmedNonEmptyString.check(
     Schema.isMaxLength(50),
@@ -440,11 +418,7 @@ export const ProjectScript = Schema.Struct({
   icon: ProjectScriptIcon,
   runOnWorktreeCreate: Schema.Boolean,
   async: Schema.optional(Schema.Boolean),
-  /**
-   * URL to open in the in-app browser preview when this script runs (or
-   * when the user explicitly requests a preview). Optional; only honored on
-   * the desktop build.
-   */
+  /** Optional desktop preview URL, used when the script runs or preview is requested. */
   previewUrl: Schema.optional(TrimmedNonEmptyString),
   /**
    * When true, automatically open the preview panel pointed at `previewUrl`
@@ -679,12 +653,8 @@ export const CheckpointNavigationBlockingStatus = Schema.Literals([
 ]);
 export type CheckpointNavigationBlockingStatus = typeof CheckpointNavigationBlockingStatus.Type;
 
-/**
- * Compact, server-projected checkpoint navigation state. The field is
- * optional on `OrchestrationThread` so cached snapshots from older servers
- * remain valid; clients should use `DEFAULT_CHECKPOINT_NAVIGATION_STATE` when
- * it is absent.
- */
+/** Older cached snapshots may omit navigation; clients then use
+ * DEFAULT_CHECKPOINT_NAVIGATION_STATE. */
 export const OrchestrationCheckpointNavigationState = Schema.Struct({
   capability: CheckpointNavigationCapability,
   canUndo: Schema.Boolean,
@@ -765,11 +735,8 @@ export const ThreadTitleRegeneration = Schema.Struct({
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
-/**
- * Legacy single-PR link. Still emitted as the thread's derived current pull
- * request (see `@t3tools/shared/threadPullRequests`) so clients from before
- * `pullRequests` keep working independently of their release schedule.
- */
+/** Derived current pull request for clients predating pullRequests;
+ * see @t3tools/shared/threadPullRequests. */
 export const ThreadLinkedPullRequest = Schema.Struct({
   projectId: ProjectId,
   repository: TrimmedNonEmptyString,
@@ -790,11 +757,8 @@ export const ThreadPullRequestLinkSource = Schema.Literals([
 ]);
 export type ThreadPullRequestLinkSource = typeof ThreadPullRequestLinkSource.Type;
 
-/**
- * Host state persisted on a link by the sync reactor; null until first sync. The overview
- * fields are optional: a host whose cheap read lacks them leaves them out, and snapshots
- * written before they existed still decode.
- */
+/** Null until first host sync. Missing overview fields remain optional for
+ * cheap host reads and older persisted snapshots. */
 export const ThreadPullRequestSnapshot = Schema.Struct({
   state: PullRequestState,
   title: TrimmedNonEmptyString,
@@ -983,17 +947,11 @@ export const OrchestrationThreadShell = Schema.Struct({
   hasPendingApprovals: Schema.Boolean,
   hasPendingUserInput: Schema.Boolean,
   hasActionableProposedPlan: Schema.Boolean,
-  /**
-   * Native background work alive after the turn settles: "working" while
-   * subagents/workflows run, "monitoring" when watch loops are the only
-   * live work. Optional so old servers/clients interop; absent = none.
-   */
+  /** After-turn background work: working for subagents/workflows, monitoring
+   * for watch loops alone. Absent on older peers means none. */
   backgroundLiveness: Schema.optional(Schema.NullOr(Schema.Literals(["working", "monitoring"]))),
-  /**
-   * Current plan step while a turn runs, for the Working indicators
-   * (sidebar row, in-chat working line). Cleared when the turn settles —
-   * never persists as stale UI. Optional so old servers/clients interop.
-   */
+  /** Live plan step for Working indicators; clear on settlement to avoid stale UI.
+   * Optional for older peers. */
   planProgress: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -1051,14 +1009,8 @@ export const OrchestrationShellStreamItem = Schema.Union([
 export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.Type;
 
 export const OrchestrationSubscribeShellInput = Schema.Struct({
-  /**
-   * When provided, the server skips the initial full shell snapshot and instead
-   * replays shell events after this sequence before streaming live events.
-   * Clients that already hold a cached (or HTTP-loaded) shell snapshot pass its
-   * sequence here so the subscription resumes without re-sending the entire
-   * projects/threads list (overlapping events are deduped by sequence on the
-   * client).
-   */
+  /** Resume shell events after this cached/HTTP snapshot sequence instead of
+   * resending the project/thread list. Clients deduplicate overlapping events. */
   afterSequence: Schema.optionalKey(NonNegativeInt),
   /**
    * Requests an explicit marker after the subscription has emitted its initial
@@ -1072,67 +1024,40 @@ export const OrchestrationSubscribeThreadInput = Schema.Struct({
   threadId: ThreadId,
   /** Opt in to reasoning roles; older clients receive system messages instead. */
   reasoningMessages: Schema.optionalKey(Schema.Boolean),
-  /**
-   * When provided, the server skips the initial snapshot frame and instead
-   * replays events after this sequence before streaming live events. Clients
-   * that load the snapshot over HTTP pass the snapshot's sequence here so the
-   * live subscription resumes without a gap (overlapping events are deduped by
-   * sequence on the client).
-   */
+  /** Resume events after the HTTP/cached snapshot sequence without a gap.
+   * Clients deduplicate overlapping events by sequence. */
   afterSequence: Schema.optionalKey(NonNegativeInt),
   /**
    * Requests an explicit marker after the subscription has emitted its initial
    * snapshot or catch-up replay and before it begins emitting live events.
    */
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
-  /**
-   * When provided, the fallback snapshot frame (sent when `afterSequence` is
-   * missing or the catch-up gap is too large) is windowed to the last
-   * `turnLimit` user-anchored turns and carries `page` metadata. Absent means
-   * the fallback snapshot is the full thread, preserving pre-pagination client
-   * behavior. Live events are unaffected either way.
-   */
+  /** Window fallback snapshots to the last turnLimit user-anchored turns.
+   * Absent preserves full snapshots for older clients. Live events are unaffected. */
   turnLimit: Schema.optionalKey(PositiveInt),
 });
 export type OrchestrationSubscribeThreadInput = typeof OrchestrationSubscribeThreadInput.Type;
 
-/**
- * Bounds a thread detail read to a window of recent turns. `turnLimit` counts
- * turns with a user pending message (subagent/fan-out turns between them ride
- * along), so the window always contains the last N user prompts. `beforeCursor`
- * requests the disjoint page of older turns strictly before a previously
- * returned cursor. Requests without a window get the full thread; pagination is
- * strictly opt-in so older clients keep today's behavior on both HTTP and the
- * WebSocket fallback snapshot.
- */
+/** Opt-in history window containing the last N user prompts and intervening work.
+ * beforeCursor selects the disjoint older page; unwindowed requests retain full
+ * history for older HTTP/WebSocket clients. */
 export const OrchestrationThreadDetailWindow = Schema.Struct({
   turnLimit: Schema.optionalKey(PositiveInt),
   beforeCursor: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type OrchestrationThreadDetailWindow = typeof OrchestrationThreadDetailWindow.Type;
 
-/**
- * Page metadata for a windowed thread detail read. `beforeCursor` is opaque and
- * exclusive: passing it back returns the adjacent disjoint slice of older
- * turns. `null` means the thread is fully loaded below this page. The
- * `snapshotSequence` mirrors the top-level snapshot sequence so history pages
- * can be sequence-checked against live state before merging.
- */
+/** Opaque exclusive cursor for the adjacent older page; null means no older data.
+ * snapshotSequence lets clients check history pages against live state. */
 export const OrchestrationThreadDetailPage = Schema.Struct({
   beforeCursor: Schema.NullOr(TrimmedNonEmptyString),
   hasMore: Schema.Boolean,
   snapshotSequence: NonNegativeInt,
   /** User-turn width requested for this page; persisted clients reuse it on refresh. */
   turnLimit: Schema.optionalKey(PositiveInt),
-  /**
-   * Highest event sequence applied to THIS thread at page read time. The
-   * global `snapshotSequence` advances with every thread's events, so a
-   * client cannot wait for it via its per-thread subscription; this
-   * thread-scoped watermark is reachable. A client merging an older page
-   * must first have applied live events up to it — otherwise a streaming
-   * turn outside the loaded window could have deltas replayed on top of
-   * page content that already includes them, duplicating text.
-   */
+  /** Thread-scoped watermark, unlike the environment-wide snapshotSequence.
+   * Apply live events through this value before merging an older page, or deltas
+   * for an unloaded streaming turn may duplicate text already in the page. */
   threadSequence: Schema.optionalKey(NonNegativeInt),
 });
 export type OrchestrationThreadDetailPage = typeof OrchestrationThreadDetailPage.Type;
@@ -1473,11 +1398,8 @@ const ThreadCheckpointRevertCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
-/**
- * Legacy clients dispatch `thread.checkpoint.revert`. New clients use jump so
- * all checkpoint navigation goes through the same server-side saga while the
- * legacy command remains decodable for persisted events and older clients.
- */
+/** Keep legacy thread.checkpoint.revert decodable; new clients jump through
+ * the shared server-side checkpoint navigation saga. */
 const ThreadCheckpointJumpCommand = Schema.Struct({
   type: Schema.Literal("thread.checkpoint.jump"),
   commandId: CommandId,
@@ -1513,11 +1435,8 @@ const ThreadSessionStopCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   createdAt: IsoDateTime,
-  // Settle-cleanup stops are conditional: the decider drops the stop if the
-  // thread was re-engaged (unsettled, session starting/running, or a queued
-  // turn start) between the settle and this command. Guarding in the decider
-  // closes the race a post-settle snapshot read cannot: commands are decided
-  // serially against the authoritative read model.
+  // The decider rejects cleanup if the thread was re-engaged after settling.
+  // A snapshot check cannot close that race against later serialized commands.
   onlyIfSettled: Schema.optional(Schema.Boolean),
 });
 
@@ -1753,11 +1672,8 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
-/**
- * Server-owned compare-and-fire command for a due auto-resume schedule.
- * Stable schedule/message ids make a dispatch safely replayable after a
- * process restart; the expected fields let the decider reject stale timers.
- */
+/** Due auto-resume command. Stable schedule/message ids permit restart replay;
+ * expected fields reject stale schedules. */
 export const ThreadAutoResumeFireCommand = Schema.Struct({
   type: Schema.Literal("thread.auto-resume.fire"),
   commandId: CommandId,
@@ -2192,12 +2108,8 @@ export const ThreadActivityAppendedPayload = Schema.Struct({
   activity: OrchestrationThreadActivity,
 });
 
-/**
- * Which client connection dispatched the command that produced an event.
- * Stamped by the orchestration engine on client-dispatched commands; absent on
- * provider/server-originated events and on commands from clients too old to
- * report it.
- */
+/** Client connection behind an event, stamped on client-dispatched commands.
+ * Absent for provider/server events and older clients. */
 export const OrchestrationClientOrigin = Schema.Struct({
   surface: Schema.optional(ClientSurface),
   appVersion: Schema.optional(TrimmedNonEmptyString),

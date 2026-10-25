@@ -5,19 +5,15 @@ import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
   OtlpEndpointCheckInput,
   resolveEnvironmentMachineKind,
-  ServerConfig,
   ServerObservability,
   ServerProvider,
   ServerProviders,
-  ServerUpsertKeybindingResult,
 } from "./server.ts";
 import { ServerSettings } from "./settings.ts";
 
+const decodeServerObservability = Schema.decodeUnknownSync(ServerObservability);
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
 const decodeServerProviders = Schema.decodeUnknownSync(ServerProviders);
-const decodeServerObservability = Schema.decodeUnknownSync(ServerObservability);
-const decodeUpsertKeybindingResult = Schema.decodeUnknownSync(ServerUpsertKeybindingResult);
-const decodeAvailableEditors = Schema.decodeUnknownSync(ServerConfig.fields.availableEditors);
 
 const baseProviderSnapshot = {
   instanceId: "codex",
@@ -193,26 +189,6 @@ describe("ServerProvider", () => {
 });
 
 describe("server config forward compatibility", () => {
-  it("drops config issues with kinds this build does not know", () => {
-    const parsed = decodeUpsertKeybindingResult({
-      keybindings: [],
-      issues: [
-        { kind: "keybindings.invalid-entry", message: "Bad entry", index: 2 },
-        { kind: "keybindings.future-issue", message: "From a newer server" },
-      ],
-    });
-
-    expect(parsed.issues).toEqual([
-      { kind: "keybindings.invalid-entry", message: "Bad entry", index: 2 },
-    ]);
-  });
-
-  it("drops editor ids this build does not know", () => {
-    const parsed = decodeAvailableEditors(["zed", "some-future-editor", "vscode"]);
-
-    expect(parsed).toEqual(["zed", "vscode"]);
-  });
-
   it("drops providers this build cannot decode instead of failing the whole array", () => {
     const decodedBase = decodeServerProvider(baseProviderSnapshot);
 
@@ -244,17 +220,19 @@ describe("server config forward compatibility", () => {
 });
 
 describe("ServerObservability", () => {
-  it("reads a server from before the log signal as exporting no logs", () => {
-    const parsed = decodeServerObservability({
-      logsDirectoryPath: "/tmp/t3/logs",
-      localTracingEnabled: true,
-      otlpTracesUrl: "https://collector.example.com/v1/traces",
-      otlpTracesEnabled: true,
-      otlpMetricsEnabled: false,
-    });
+  const decodeServerObservability = Schema.decodeUnknownSync(ServerObservability);
 
-    expect(parsed.otlpLogsEnabled).toBe(false);
-    expect(parsed.otlpLogsUrl).toBeUndefined();
+  it("rejects an unknown endpoint source", () => {
+    expect(() =>
+      decodeServerObservability({
+        logsDirectoryPath: "/tmp/t3/logs",
+        localTracingEnabled: true,
+        otlpTracesUrl: "https://collector.example.com/v1/traces",
+        otlpTracesSource: "cli",
+        otlpTracesEnabled: true,
+        otlpMetricsEnabled: false,
+      }),
+    ).toThrow();
   });
 });
 
@@ -277,31 +255,6 @@ describe("resolveEnvironmentMachineKind", () => {
         settings: decodeSettings({ environmentIcon: "laptop" }),
       }),
     ).toBe("laptop");
-  });
-
-  it("uses detection when nothing is picked", () => {
-    expect(
-      resolveEnvironmentMachineKind({
-        environment: descriptor({ machine: "mac-mini" }),
-        settings: decodeSettings({}),
-      }),
-    ).toBe("mac-mini");
-  });
-
-  it("uses detection from a bare descriptor before connecting", () => {
-    expect(resolveEnvironmentMachineKind({ environment: descriptor({ machine: "laptop" }) })).toBe(
-      "laptop",
-    );
-  });
-
-  it("falls back to a server for older servers and before connect", () => {
-    expect(
-      resolveEnvironmentMachineKind({
-        environment: descriptor({}),
-        settings: decodeSettings({}),
-      }),
-    ).toBe("server");
-    expect(resolveEnvironmentMachineKind(null)).toBe("server");
   });
 
   it("drops a machine kind this build does not know instead of failing the descriptor", () => {

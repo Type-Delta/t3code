@@ -67,5 +67,16 @@ export function assertClaudeThreadRollbackOutput(
     projection.runs.some((run) => run.status === "rolled_back"),
     "rollback must be visible in run state",
   );
-  assert.equal(projection.providerThreads[0]?.nativeConversationHeadRef, null);
+  const providerThread = projection.providerThreads[0];
+  const originalSource = projection.checkpoints.find(
+    (checkpoint) => checkpoint.appRunOrdinal === 1,
+  )?.nativeThreadRef;
+  assert.exists(originalSource);
+  assert.equal(originalSource.nativeId, transcript.metadata?.nativeSessionId);
+  assert.equal(
+    providerThread?.nativeThreadRef?.nativeId,
+    transcript.metadata?.forkedNativeSessionId,
+  );
+  assert.notEqual(providerThread?.nativeThreadRef?.nativeId, originalSource.nativeId);
+  assert.equal(providerThread?.nativeConversationHeadRef, null);
 }

@@ -16,9 +16,9 @@ vi.mock("electron", () => ({
 import {
   KdeCaptureSetup,
   captureKdeWindow,
+  kdeCapturePaths,
   isKdeCaptureSession,
   kdeCaptureDesktopEntry,
-  kdeCapturePaths,
 } from "./KdeSnapShot.ts";
 
 let directory: string;

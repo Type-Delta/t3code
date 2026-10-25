@@ -1,10 +1,14 @@
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { act, type HTMLAttributes } from "react";
-import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { type HTMLAttributes } from "react";
+import { act, render } from "../../test/render";
+import { describe, expect, it, vi } from "vite-plus/test";
 
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+vi.mock(import("@tanstack/react-router"), async (original) => ({
+  ...(await original()),
+  useNavigate: () => vi.fn(),
+}));
+vi.mock("../state/threads", () => ({ useEnvironmentThread: () => null }));
 vi.mock("./ChatView", () => ({ default: () => null }));
 vi.mock("./ChatView.logic", () => ({
   resolveDraftPromotionNavigationTarget: () => null,
@@ -80,112 +84,107 @@ function dispatchDrag(
 }
 
 describe("ThreadRouteView native split drop", () => {
-  beforeEach(() => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  function setup() {
     useSplitViewStore.setState({
       groups: [],
       activeGroupId: null,
       activeThreadKey: null,
       pendingNavigationThreadKey: null,
     });
-  });
-  afterEach(() => {
-    endSplitThreadDrag();
-    useSplitViewStore.getState().clearSplit();
-    setPointerSplitDropTarget(null);
-    vi.unstubAllGlobals();
-  });
+    return {
+      [Symbol.dispose]() {
+        endSplitThreadDrag();
+        useSplitViewStore.getState().clearSplit();
+        setPointerSplitDropTarget(null);
+      },
+    };
+  }
 
   it("places a legacy sidebar thread on the hinted side and ignores file drops", async () => {
+    using _split = setup();
     const currentRef = scopeThreadRef(EnvironmentId.make("environment-a"), ThreadId.make("a"));
     const draggedRef = scopeThreadRef(EnvironmentId.make("environment-a"), ThreadId.make("b"));
     const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
+    await using screen = await render(
+      <ThreadRouteView target={{ kind: "server", threadRef: currentRef }} />,
+      { container, router: false },
+    );
     const hints = (position: string) =>
       container.querySelectorAll(`[data-drop-hint="${position}"]`).length;
 
-    try {
-      await act(async () =>
-        root.render(<ThreadRouteView target={{ kind: "server", threadRef: currentRef }} />),
-      );
-      const workspace = container.querySelector("[data-thread-route-workspace]")!;
-      const dataTransfer = new DataTransfer();
-      beginSplitThreadDrag(dataTransfer, draggedRef);
+    const workspace = container.querySelector("[data-thread-route-workspace]")!;
+    const dataTransfer = new DataTransfer();
+    beginSplitThreadDrag(dataTransfer, draggedRef);
 
-      await act(async () => {
-        dispatchDrag(workspace, "dragover", dataTransfer, 150, 300);
-      });
-      expect(hints("before")).toBe(1);
-      let drop!: DragEvent;
-      await act(async () => {
-        drop = dispatchDrag(workspace, "drop", dataTransfer, 150, 300);
-      });
-      expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([draggedRef, currentRef]);
-      expect(drop.defaultPrevented).toBe(true);
-      expect(hints("before")).toBe(0);
+    await act(async () => {
+      dispatchDrag(workspace, "dragover", dataTransfer, 150, 300);
+    });
+    expect(hints("before")).toBe(1);
+    let drop!: DragEvent;
+    await act(async () => {
+      drop = dispatchDrag(workspace, "drop", dataTransfer, 150, 300);
+    });
+    expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([draggedRef, currentRef]);
+    expect(drop.defaultPrevented).toBe(true);
+    expect(hints("before")).toBe(0);
 
-      const fileTransfer = new DataTransfer();
-      fileTransfer.items.add(new File(["x"], "file.txt"));
-      await act(async () => {
-        dispatchDrag(workspace, "drop", fileTransfer, 150, 300);
-      });
-      expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([draggedRef, currentRef]);
+    const fileTransfer = new DataTransfer();
+    fileTransfer.items.add(new File(["x"], "file.txt"));
+    await act(async () => {
+      dispatchDrag(workspace, "drop", fileTransfer, 150, 300);
+    });
+    expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([draggedRef, currentRef]);
 
-      useSplitViewStore.getState().clearSplit();
-      beginSplitThreadDrag(dataTransfer, draggedRef);
-      await act(async () => {
-        dispatchDrag(workspace, "dragover", dataTransfer, 250, 300);
-      });
-      expect(hints("after")).toBe(1);
-      await act(async () => {
-        document.dispatchEvent(new Event("dragend"));
-      });
-      expect(hints("after")).toBe(0);
-      await act(async () => {
-        dispatchDrag(workspace, "drop", dataTransfer, 250, 300);
-      });
-      expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([currentRef, draggedRef]);
+    useSplitViewStore.getState().clearSplit();
+    beginSplitThreadDrag(dataTransfer, draggedRef);
+    await act(async () => {
+      dispatchDrag(workspace, "dragover", dataTransfer, 250, 300);
+    });
+    expect(hints("after")).toBe(1);
+    await act(async () => {
+      document.dispatchEvent(new Event("dragend"));
+    });
+    expect(hints("after")).toBe(0);
+    await act(async () => {
+      dispatchDrag(workspace, "drop", dataTransfer, 250, 300);
+    });
+    expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([currentRef, draggedRef]);
 
-      useSplitViewStore.getState().clearSplit();
-      beginSplitThreadDrag(dataTransfer, draggedRef);
-      await act(async () => {
-        dispatchDrag(workspace, "dragover", dataTransfer, 250, 150);
-      });
-      expect(hints("above")).toBe(1);
-      await act(async () => {
-        dispatchDrag(workspace, "drop", dataTransfer, 250, 150);
-      });
-      expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([draggedRef, currentRef]);
-      expect(useSplitViewStore.getState().groups[0]?.bottomPaneKeys).toEqual([
-        scopedThreadKey(currentRef),
-      ]);
+    useSplitViewStore.getState().clearSplit();
+    beginSplitThreadDrag(dataTransfer, draggedRef);
+    await act(async () => {
+      dispatchDrag(workspace, "dragover", dataTransfer, 250, 150);
+    });
+    expect(hints("above")).toBe(1);
+    await act(async () => {
+      dispatchDrag(workspace, "drop", dataTransfer, 250, 150);
+    });
+    expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([draggedRef, currentRef]);
+    expect(useSplitViewStore.getState().groups[0]?.bottomPaneKeys).toEqual([
+      scopedThreadKey(currentRef),
+    ]);
 
-      useSplitViewStore.getState().clearSplit();
-      beginSplitThreadDrag(dataTransfer, draggedRef);
-      await act(async () => {
-        dispatchDrag(workspace, "dragover", dataTransfer, 150, 450);
-      });
-      expect(hints("below")).toBe(1);
-      await act(async () => {
-        dispatchDrag(workspace, "drop", dataTransfer, 150, 450);
-      });
-      expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([currentRef, draggedRef]);
-      expect(useSplitViewStore.getState().groups[0]?.bottomPaneKeys).toEqual([
-        scopedThreadKey(draggedRef),
-      ]);
+    useSplitViewStore.getState().clearSplit();
+    beginSplitThreadDrag(dataTransfer, draggedRef);
+    await act(async () => {
+      dispatchDrag(workspace, "dragover", dataTransfer, 150, 450);
+    });
+    expect(hints("below")).toBe(1);
+    await act(async () => {
+      dispatchDrag(workspace, "drop", dataTransfer, 150, 450);
+    });
+    expect(selectSplitPaneRefs(useSplitViewStore.getState())).toEqual([currentRef, draggedRef]);
+    expect(useSplitViewStore.getState().groups[0]?.bottomPaneKeys).toEqual([
+      scopedThreadKey(draggedRef),
+    ]);
 
-      await act(async () => {
-        setPointerSplitDropTarget({ kind: "single", position: "above" });
-      });
-      expect(hints("above")).toBe(1);
-      await act(async () => {
-        setPointerSplitDropTarget({ kind: "single", position: "below" });
-      });
-      expect(hints("below")).toBe(1);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
+    await act(async () => {
+      setPointerSplitDropTarget({ kind: "single", position: "above" });
+    });
+    expect(hints("above")).toBe(1);
+    await act(async () => {
+      setPointerSplitDropTarget({ kind: "single", position: "below" });
+    });
+    expect(hints("below")).toBe(1);
   });
 });

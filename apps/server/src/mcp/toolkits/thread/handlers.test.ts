@@ -7,7 +7,6 @@ import {
   ProviderInstanceId,
   type ScheduledTask,
   ThreadId,
-  type OrchestrationSearchThreadsResult,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
@@ -60,7 +59,7 @@ const makeToolkit = (
   invocation: McpInvocationContext.McpInvocationScope,
   dispatched: Array<unknown>,
   options: {
-    readonly matches?: OrchestrationSearchThreadsResult["matches"];
+    readonly matches?: ReadonlyArray<ThreadSearch.ThreadSearchHit>;
     readonly caller?: OrchestrationV2ThreadShell | null;
     readonly scheduledTasks?: ReadonlyArray<ScheduledTask>;
     readonly onRunScheduledTask?: () => void;
@@ -83,7 +82,7 @@ const makeToolkit = (
         }),
     }),
     Layer.mock(ThreadSearch.ThreadSearch)({
-      search: (input) =>
+      searchThreads: (input) =>
         Effect.succeed({
           matches: (options.matches ?? [])
             .filter((match) => input.projectId === undefined || match.projectId === input.projectId)
@@ -94,8 +93,10 @@ const makeToolkit = (
       list: () => Effect.succeed({ tasks: options.scheduledTasks ?? [] }),
       runNow: () =>
         Effect.sync(() => {
+          const task = options.scheduledTasks?.[0];
+          if (task === undefined) throw new Error("No scheduled task fixture was provided");
           options.onRunScheduledTask?.();
-          return { task: options.scheduledTasks?.[0] } as never;
+          return { task, threadId: task.threadId };
         }),
     }),
   );
@@ -191,10 +192,11 @@ it.effect("allows global provider search across projects while keeping project s
   Effect.gen(function* () {
     const otherProjectId = ProjectId.make("mcp-thread-tools-other-project");
     const otherThreadId = ThreadId.make("mcp-thread-tools-other-thread");
-    const matches: OrchestrationSearchThreadsResult["matches"] = [
+    const matches: ReadonlyArray<ThreadSearch.ThreadSearchHit> = [
       {
         threadId: otherThreadId,
         projectId: otherProjectId,
+        title: "Another project",
         source: "user",
         snippet: "needle in another project",
         messageCreatedAt: null,
@@ -202,6 +204,7 @@ it.effect("allows global provider search across projects while keeping project s
       {
         threadId: targetThreadId,
         projectId,
+        title: "This project",
         source: "assistant",
         snippet: "needle in this project",
         messageCreatedAt: null,
@@ -215,6 +218,12 @@ it.effect("allows global provider search across projects while keeping project s
     const providerScope = (mcpToolScope: "global" | "project") =>
       ({
         environmentId,
+        principal: {
+          type: "provider-session" as const,
+          threadId: sourceThreadId,
+          providerSessionId: "mcp-thread-tools-provider-session",
+          providerInstanceId,
+        },
         thread: {
           threadId: sourceThreadId,
           providerSessionId: "mcp-thread-tools-provider-session",
@@ -246,6 +255,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const foreignProjectId = ProjectId.make("mcp-thread-tools-foreign-project");
+      let runs = 0;
       const foreignTask = {
         id: "mcp-thread-tools-foreign-task",
         projectId: foreignProjectId,
@@ -286,6 +296,7 @@ it.effect(
         const harness = makeToolkit(invocation, [], {
           caller,
           scheduledTasks: [foreignTask],
+          onRunScheduledTask: () => runs++,
         });
         return Effect.gen(function* () {
           const toolkit = yield* harness.toolkit;
@@ -297,9 +308,12 @@ it.effect(
 
       const denied = yield* run(providerScope("project"));
       expect(denied.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+      expect(runs).toBe(0);
       const global = yield* run(providerScope("global"));
       expect(global.at(-1)?.result).toMatchObject({ taskId: foreignTask.id });
+      expect(runs).toBe(1);
       const management = yield* run(managementInvocation(["threads:message"]));
       expect(management.at(-1)?.result).toMatchObject({ taskId: foreignTask.id });
+      expect(runs).toBe(2);
     }),
 );

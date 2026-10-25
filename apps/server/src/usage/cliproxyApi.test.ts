@@ -1,8 +1,8 @@
+import * as Fiber from "effect/Fiber";
 // oxlint-disable t3code/no-test-in-loop -- These cases intentionally exercise independent API responses.
 import { describe, expect, it } from "@effect/vitest";
 import { UsageLimitSourceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -117,7 +117,6 @@ function fixture(
   };
 }
 
-/** A hub API whose every request fails the way `fail` says. */
 const unreachableHub = (
   fail: (
     request: Parameters<Parameters<typeof HttpClient.make>[0]>[0],
@@ -153,6 +152,7 @@ describe("CLIProxyAPI hub failures", () => {
     }),
   );
 
+  // regression: #18168 Limits hub failures name their TLS, HTTP, or timeout cause
   it.effect("ignores a transport code that is not a short Node error code", () =>
     Effect.gen(function* () {
       const api = yield* unreachableHub(
@@ -341,8 +341,9 @@ describe("CLIProxyAPI built-in management API", () => {
     Effect.gen(function* () {
       const test = fixture({
         accounts: [{ ...accounts[0]!, provider: "claude" }],
-        upstream: () => ({
-          status: 200,
+        // The usage endpoint answers 429 to requests without a Claude Code user agent.
+        upstream: (request) => ({
+          status: request.header?.["User-Agent"]?.startsWith("claude-code/") ? 200 : 429,
           body: {
             five_hour: { utilization: 10, resets_at: null },
             seven_day: { utilization: 50, resets_at: "2099-01-01T00:00:00Z" },

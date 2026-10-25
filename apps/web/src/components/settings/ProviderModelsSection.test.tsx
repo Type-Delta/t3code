@@ -25,6 +25,8 @@ describe("ProviderModelsSection", () => {
       <ProviderModelsSection
         instanceId={ProviderInstanceId.make("codex_test")}
         driverKind={null}
+        canManageCustomModels
+        onToggleFavorite={() => undefined}
         models={models}
         customModels={[{ slug: "custom", name: "Custom", capabilities: null }]}
         modelOverrides={{}}
