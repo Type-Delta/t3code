@@ -144,7 +144,9 @@ Split membership is persisted as multiple ordered local groups with active state
 
 The 2026-10-07 drag update passed 90 focused drag tests, `vp check`, `vp run typecheck`, and `git diff --check`. Remote user verification confirmed the full thread-row overlay follows the pointer and the source gap remains visible outside the sidebar.
 
-**Last updated:** 2026-10-20
+Pinned and Active drag boundaries occupy normal layout rows, including an empty Pinned group. Sorting uses their measured heights so labels keep consistent spacing in Manual and Last input ordering.
+
+**Last updated:** 2026-10-26
 
 ### DL009 — Global default for agent tool access
 

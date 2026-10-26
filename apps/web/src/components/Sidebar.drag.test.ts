@@ -32,6 +32,7 @@ function layout(
   over: string,
   scale = 1,
   cardHeight = 82,
+  boundaryHeight = 0,
 ) {
   let top = 100;
   const rects = items.map((item) => {
@@ -39,7 +40,7 @@ function layout(
       item.kind === "thread"
         ? (item.section === "pinned" || item.section === "active" ? cardHeight : 36) * scale
         : item.marker === "pinned-header" || item.marker === "pinned-divider"
-          ? 0
+          ? boundaryHeight * scale
           : (item.marker.endsWith("placeholder") ? 0 : 32) * scale;
     const rect = { top, height, bottom: top + height, left: 0, right: 260, width: 260 };
     top += height + 1;
@@ -60,9 +61,10 @@ function preview(
   active: string,
   over: string,
   scale = 1,
+  boundaryHeight = 0,
 ) {
   const strategy = createSidebarSortingStrategy(input);
-  const args = layout(input.items, active, over, scale);
+  const args = layout(input.items, active, over, scale, 82, boundaryHeight);
   return new Map(
     input.items.map((item, index) => [sidebarListItemId(item), strategy({ ...args, index })]),
   );
@@ -247,7 +249,6 @@ describe("sidebar drag projection", () => {
       items,
       settledOrder: ["z", "s"],
       settledExpanded: true,
-      boundaryLabelHeight: 24,
       snoozedThreadCount: 1,
     };
     const reordered = preview(input, active, over);
@@ -278,10 +279,9 @@ describe("sidebar drag projection", () => {
       items,
       settledOrder: over === sidebarMarkerId("settled-header") ? ["a1", "s"] : ["s"],
       settledExpanded: true,
-      boundaryLabelHeight: 24,
       snoozedThreadCount: 1,
     });
-    const args = layout(items, active, over);
+    const args = layout(items, active, over, 1, 82, 24);
     for (const rect of args.rects.slice(4)) {
       rect.top += 400;
       rect.bottom += 400;
@@ -357,29 +357,34 @@ describe("sidebar drag projection", () => {
     },
   );
 
-  it("opens label space below each pinned boundary while dragging", () => {
-    const items = [
-      pinnedHeader,
-      thread("p", "pinned"),
-      divider,
-      thread("a1", "active"),
-      thread("a2", "active"),
-      settledHeader,
-      thread("s", "settled"),
-    ];
-    const result = preview(
-      { items, settledOrder: [], settledExpanded: true, boundaryLabelHeight: 16 },
-      "a2",
-      "a1",
-    );
-    expect(result.get(sidebarMarkerId("pinned-header"))).toEqual(stationary);
-    expect(result.get("p")?.y).toBe(16);
-    expect(result.get(sidebarMarkerId("pinned-divider"))?.y).toBe(16);
-    expect(result.get("a2")).toEqual(stationary);
-    expect(result.get("a1")?.y).toBe(32 + 83);
-    expect(result.get(sidebarMarkerId("settled-header"))?.y).toBe(32);
-    expect(result.get("s")?.y).toBe(32);
-  });
+  it.each([0.75, 1, 1.25])(
+    "uses measured boundary rows without double clearance at scale %s",
+    (scale) => {
+      const items = [
+        pinnedHeader,
+        thread("p", "pinned"),
+        divider,
+        thread("a1", "active"),
+        thread("a2", "active"),
+        settledHeader,
+        thread("s", "settled"),
+      ];
+      const result = preview(
+        { items, settledOrder: [], settledExpanded: true },
+        "a2",
+        "a1",
+        scale,
+        16,
+      );
+      expect(result.get(sidebarMarkerId("pinned-header"))).toEqual(stationary);
+      expect(result.get("p")).toEqual(stationary);
+      expect(result.get(sidebarMarkerId("pinned-divider"))).toEqual(stationary);
+      expect(result.get("a2")).toEqual(stationary);
+      expect(result.get("a1")?.y).toBe(82 * scale + 1);
+      expect(result.get(sidebarMarkerId("settled-header"))).toEqual(stationary);
+      expect(result.get("s")).toEqual(stationary);
+    },
+  );
 
   it.each(["s1", "missing-target"])(
     "keeps label clearance when a settled drag is over %s",
@@ -398,15 +403,16 @@ describe("sidebar drag projection", () => {
           items,
           settledOrder: ["s1", "s2"],
           settledExpanded: true,
-          boundaryLabelHeight: 24,
         },
         "s2",
         over,
+        1,
+        24,
       );
-      expect(result.get("p")?.y).toBe(24);
-      expect(result.get(sidebarMarkerId("pinned-divider"))?.y).toBe(24);
-      expect(result.get("a")?.y).toBe(48);
-      expect(result.get("s1")?.y).toBe(48);
+      expect(result.get("p")).toEqual(stationary);
+      expect(result.get(sidebarMarkerId("pinned-divider"))).toEqual(stationary);
+      expect(result.get("a")).toEqual(stationary);
+      expect(result.get("s1")).toEqual(stationary);
       expect(result.get("s2")).toEqual(stationary);
     },
   );

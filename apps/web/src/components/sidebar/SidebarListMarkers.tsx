@@ -74,10 +74,10 @@ export function SidebarDragBoundary(props: {
     <SortableSidebarMarker
       marker={props.marker}
       data-testid={`sidebar-${props.marker}`}
-      className="pointer-events-none relative mx-0.5 -mb-px h-0"
+      className={cn("pointer-events-none mx-0.5", props.visible ? "h-6" : "-mb-px h-0")}
     >
       {props.visible ? (
-        <div className="sidebar-drag-boundary-label absolute inset-x-2 top-1 flex h-4 items-center gap-2">
+        <div data-sidebar-drag-boundary-label className="flex h-full items-center gap-2 px-2">
           <span
             className={cn(
               "shrink-0 text-xs font-medium",
