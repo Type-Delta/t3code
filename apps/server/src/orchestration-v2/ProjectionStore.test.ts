@@ -1418,6 +1418,128 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect.each([
+    ["memory", "user_input", ProjectionStore.layerMemory],
+    ["memory", "command", ProjectionStore.layerMemory],
+    ["SQL", "user_input", layerTest],
+    ["SQL", "command", layerTest],
+  ] as const)(
+    "%s keeps pending %s prompts available outside the history window",
+    ([, kind, layer]) =>
+      Effect.gen(function* () {
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = yield* addRolledBackRecoveryCandidate("pending-question-window");
+        const now = yield* DateTime.now;
+        const projection = yield* store.getThreadProjection(threadId);
+        const run = projection.runs[0]!;
+        const command = projection.turnItems[0]!;
+        if (command.type !== "command_execution") throw new Error("Expected command fixture");
+        yield* store.apply({
+          id: EventId.make("event:pending-question-window:completed"),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...run, status: "completed", completedAt: now },
+        });
+        const requestId = RuntimeRequestId.make("request:pending-question-window");
+        const question = {
+          ...command,
+          id: TurnItemId.make("item:pending-question-window"),
+          ordinal: 2,
+          status: "waiting" as const,
+          requestId,
+          ...(kind === "user_input"
+            ? {
+                type: "user_input_request" as const,
+                questions: [
+                  { id: "mac", header: "Mac", question: "Can you provide a Mac?", options: [] },
+                ],
+                responseMode: "message" as const,
+              }
+            : {
+                type: "approval_request" as const,
+                requestKind: kind,
+                prompt: "Allow the command?",
+              }),
+        };
+        yield* store.apply({
+          id: EventId.make("event:pending-question-window:question"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: question,
+        });
+        const request = {
+          id: requestId,
+          nodeId: run.rootNodeId!,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind,
+          status: "pending" as const,
+          responseCapability:
+            kind === "user_input"
+              ? { type: "message" as const }
+              : { type: "not_resumable" as const, reason: "Provider turn ended" },
+          createdAt: now,
+          resolvedAt: null,
+        };
+        yield* store.apply({
+          id: EventId.make("event:pending-question-window:request"),
+          type: "runtime-request.updated",
+          threadId,
+          occurredAt: now,
+          payload: request,
+        });
+        yield* store.apply({
+          id: EventId.make("event:pending-question-window:newer-item"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...command,
+            id: TurnItemId.make("item:pending-question-window:newer"),
+            ordinal: 3,
+            status: "completed",
+            completedAt: now,
+          },
+        });
+        const snapshot = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
+        assert.isTrue(snapshot.projection.runtimeRequests.some((r) => r.id === requestId));
+        assert.isTrue(
+          snapshot.projection.turnItems.some(
+            (item) => item.type === question.type && item.requestId === requestId,
+          ),
+          "the pending Input status must have an answerable or dismissible prompt",
+        );
+        const bounded = buildBoundedThreadProjection({
+          projection: snapshot.projection,
+          snapshotSequence: snapshot.snapshotSequence,
+          policy: { maxItems: 1, maxEncodedBytes: 100_000 },
+        });
+        assert.isTrue(
+          bounded.projection.turnItems.some(
+            (item) => item.type === question.type && item.requestId === requestId,
+          ),
+          "wire history paging must retain the pending prompt as control state",
+        );
+        assert.lengthOf(bounded.projection.visibleTurnItems, 1);
+        yield* store.apply({
+          id: EventId.make("event:pending-question-window:resolved"),
+          type: "runtime-request.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...request, status: "resolved", resolvedAt: now, decision: "cancel" },
+        });
+        const resolved = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
+        const resolvedPage = buildBoundedThreadProjection({
+          projection: resolved.projection,
+          snapshotSequence: resolved.snapshotSequence,
+          policy: { maxItems: 1, maxEncodedBytes: 100_000 },
+        });
+        assert.isFalse(resolvedPage.projection.turnItems.some((item) => item.id === question.id));
+      }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("reads a fixed SQL turn-item window for long histories and repeated clients", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;

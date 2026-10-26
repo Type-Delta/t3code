@@ -5793,6 +5793,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 : {}),
               ...(historyAnchor === undefined ? {} : { historyAnchor }),
             });
+            const pendingPromptRows =
+              options.anchorItemId === undefined &&
+              projection.runtimeRequests.some((request) => request.status === "pending")
+                ? yield* sql<PayloadRow>`
+                    SELECT item.payload_json
+                    FROM orchestration_v2_projection_runtime_requests AS request
+                    CROSS JOIN orchestration_v2_projection_turn_items AS item
+                      ON item.node_id = request.node_id AND item.thread_id = request.thread_id
+                    WHERE request.thread_id = ${threadId} AND request.status = 'pending'
+                      AND item.type IN ('user_input_request', 'approval_request')
+                      AND json_extract(item.payload_json, '$.requestId') = request.runtime_request_id
+                    ORDER BY item.ordinal ASC, item.turn_item_id ASC
+                  `
+                : [];
+            const turnItems = new Map(projection.turnItems.map((item) => [item.id, item]));
+            for (const item of yield* decodeRows(
+              decodeTurnItemPayload,
+              threadId,
+            )(pendingPromptRows)) {
+              turnItems.set(item.id, item);
+            }
             const rows = yield* sql<{ readonly snapshot_sequence: number | null }>`
               SELECT MAX(sequence) AS snapshot_sequence
               FROM orchestration_events
@@ -5803,7 +5824,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             return {
               schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
               snapshotSequence: rows[0]?.snapshot_sequence ?? 0,
-              projection,
+              projection: { ...projection, turnItems: [...turnItems.values()] },
             };
           }),
         )

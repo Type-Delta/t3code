@@ -809,6 +809,20 @@ Repository formatting, lint, and type checks passed.
 
 **Last updated:** 2026-10-25
 
+### DL048 — Pending prompts survive transcript paging
+
+Pending user questions and approvals remain available to the composer when their original
+transcript rows fall outside the recent history window. SQL snapshots retain their prompts
+separately from the visible timeline, and wire paging preserves them until the request is
+answered or dismissed. This keeps an older async question from leaving a thread marked Input
+with no visible prompt to answer or dismiss.
+
+**Recorded validation:** SQL and memory projection regressions, history paging tests, and an
+isolated web verification using a copied long thread. Answering or dismissing remains the
+existing request response flow.
+
+**Last updated:** 2026-10-26
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
