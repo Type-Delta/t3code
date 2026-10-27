@@ -1093,6 +1093,7 @@ export function sortThreadsForSidebar<
     readonly createdAt: string;
     readonly activeOrderKey?: string | null | undefined;
     readonly latestUserMessageAt?: string | null | undefined;
+    readonly latestUserAuthoredMessageAt?: string | null | undefined;
     readonly unsettledAt?: string | null | undefined;
   },
 >(threads: readonly T[], mode: SidebarThreadOrderingMode = "manual"): T[] {
@@ -1101,7 +1102,11 @@ export function sortThreadsForSidebar<
       threads.map((thread) => [
         thread,
         Math.max(
-          firstValidTimestampMs(thread.latestUserMessageAt),
+          firstValidTimestampMs(
+            thread.latestUserAuthoredMessageAt === undefined
+              ? thread.latestUserMessageAt
+              : thread.latestUserAuthoredMessageAt,
+          ),
           firstValidTimestampMs(thread.unsettledAt),
           firstValidTimestampMs(thread.createdAt),
         ),

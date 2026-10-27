@@ -245,6 +245,80 @@ describe("sortThreads", () => {
 });
 
 describe("sidebar last input sorting", () => {
+  it("ignores agent messages and wakes after the latest user-authored input", () => {
+    const threads = [
+      makeThread({
+        id: ThreadId.make("agent-updated"),
+        latestUserAuthoredMessageAt: "2026-03-09T10:05:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:30:00.000Z",
+      }),
+      makeThread({
+        id: ThreadId.make("user-updated"),
+        latestUserAuthoredMessageAt: "2026-03-09T10:15:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:15:00.000Z",
+      }),
+    ];
+
+    expect(sortThreadsForSidebar(threads, "last_input").map((thread) => thread.id)).toEqual([
+      ThreadId.make("user-updated"),
+      ThreadId.make("agent-updated"),
+    ]);
+
+    const afterUserInput = threads.map((thread) =>
+      thread.id === "agent-updated"
+        ? {
+            ...thread,
+            latestUserAuthoredMessageAt: "2026-03-09T10:35:00.000Z",
+            latestUserMessageAt: "2026-03-09T10:35:00.000Z",
+          }
+        : thread,
+    );
+
+    expect(sortThreadsForSidebar(afterUserInput, "last_input").map((thread) => thread.id)).toEqual([
+      ThreadId.make("agent-updated"),
+      ThreadId.make("user-updated"),
+    ]);
+  });
+
+  it("keeps agent-only threads ordered by creation when no user has sent input", () => {
+    const threads = [
+      makeThread({
+        id: ThreadId.make("agent-only"),
+        createdAt: "2026-03-09T09:00:00.000Z",
+        latestUserAuthoredMessageAt: null,
+        latestUserMessageAt: "2026-03-09T10:30:00.000Z",
+      }),
+      makeThread({
+        id: ThreadId.make("user-updated"),
+        latestUserAuthoredMessageAt: "2026-03-09T10:15:00.000Z",
+        latestUserMessageAt: "2026-03-09T10:15:00.000Z",
+      }),
+    ];
+
+    expect(sortThreadsForSidebar(threads, "last_input").map((thread) => thread.id)).toEqual([
+      ThreadId.make("user-updated"),
+      ThreadId.make("agent-only"),
+    ]);
+  });
+
+  it("uses the available user timestamp for older servers without authored-input timestamps", () => {
+    const threads = [
+      makeThread({
+        id: ThreadId.make("older-input"),
+        latestUserMessageAt: "2026-03-09T10:05:00.000Z",
+      }),
+      makeThread({
+        id: ThreadId.make("newer-input"),
+        latestUserMessageAt: "2026-03-09T10:15:00.000Z",
+      }),
+    ];
+
+    expect(sortThreadsForSidebar(threads, "last_input").map((thread) => thread.id)).toEqual([
+      ThreadId.make("newer-input"),
+      ThreadId.make("older-input"),
+    ]);
+  });
+
   it("keeps creation order when threads without user input receive background updates", () => {
     const threads = [
       makeThread({
