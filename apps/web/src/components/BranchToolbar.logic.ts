@@ -7,7 +7,7 @@ import type {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { sanitizeNewRefName } from "@t3tools/shared/git";
-import { toSortableTimestamp } from "../lib/threadSort";
+import { toSortableTimestamp } from "@t3tools/client-runtime/state/thread-sort";
 import type { SubagentRunSummary } from "../session-logic";
 export {
   dedupeRemoteBranchesWithLocalMatches,

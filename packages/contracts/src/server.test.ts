@@ -220,8 +220,6 @@ describe("server config forward compatibility", () => {
 });
 
 describe("ServerObservability", () => {
-  const decodeServerObservability = Schema.decodeUnknownSync(ServerObservability);
-
   it("rejects an unknown endpoint source", () => {
     expect(() =>
       decodeServerObservability({

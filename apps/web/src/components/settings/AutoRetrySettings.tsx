@@ -58,6 +58,7 @@ export function AutoRetrySettings() {
       <SettingsRow
         serverScoped
         settingKeys={["autoRetry"]}
+        id="auto-retry-setting"
         title="Auto retry"
         description="Send a follow-up message when a failed turn matches a trigger."
         control={

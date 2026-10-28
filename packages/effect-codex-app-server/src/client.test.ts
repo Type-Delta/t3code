@@ -16,6 +16,28 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
+import * as Queue from "effect/Queue";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
+
+it.effect("reports termination to both the caller and awaitTermination", () =>
+  Effect.gen(function* () {
+    const { stdio, input } = yield* makeInMemoryStdio();
+    const calls = yield* Ref.make(0);
+    const notified = yield* Deferred.make<void>();
+    const client = yield* CodexClient.make(stdio, {
+      onTermination: () =>
+        Ref.update(calls, (count) => count + 1).pipe(
+          Effect.andThen(Deferred.succeed(notified, undefined)),
+          Effect.asVoid,
+        ),
+    });
+    yield* Queue.end(input);
+    const error = yield* client.awaitTermination.pipe(Effect.flip);
+    assert.isDefined(error);
+    yield* Deferred.await(notified);
+    assert.equal(yield* Ref.get(calls), 1);
+  }),
+);
 
 it.effect("forces an app-server that ignores EOF only after three seconds", () =>
   Effect.gen(function* () {

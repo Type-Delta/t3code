@@ -13,7 +13,6 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientError, HttpClientRequest } from "effect/http";
@@ -26,7 +25,7 @@ import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageL
 // Optional upstream fields must not discard otherwise usable account/window data.
 const forgivingOptional = <S extends Schema.Constraint>(schema: S) =>
   Schema.NullOr(schema).pipe(
-    Schema.catchDecoding<Schema.NullOr<S>>(() => Effect.succeed(Option.some(null))),
+    Schema.catchDecoding<Schema.NullOr<S>>(() => Effect.succeedSome(null)),
     Schema.optional,
   );
 const UsageNumber = Schema.Union([

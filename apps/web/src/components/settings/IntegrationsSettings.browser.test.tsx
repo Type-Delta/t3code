@@ -47,13 +47,13 @@ vi.mock(import("./SettingsScopeContext"), async (original) => ({
   useOptionalSettingsScope: () => null,
 }));
 
-import { IntegrationsSettingsPanel } from "./IntegrationsSettings";
+import { BrowserSettingsPanel } from "./IntegrationsSettings";
 
 async function openSettings() {
   listBrowserImportSources.mockClear();
   const screen = await render(
     <StrictMode>
-      <IntegrationsSettingsPanel />
+      <BrowserSettingsPanel />
     </StrictMode>,
   );
   await vi.waitFor(() => expect(screen.container.querySelector("section#browser")).not.toBeNull());
@@ -65,31 +65,20 @@ describe("Integrations browser discovery", () => {
     await using screen = await openSettings();
     const { container } = screen;
 
-    expect(page.getByRole("heading", { name: "Browser", exact: true }).elements()).toHaveLength(1);
+    expect(page.getByRole("heading", { name: "Browsing", exact: true }).elements()).toHaveLength(1);
     const access = page.getByRole("switch", { name: "Agent browser access", exact: true });
     await expect.element(access).toBeVisible();
-    expect(access.element().closest("section")).toBe(container.querySelector("section#browser"));
-    expect(access.element().closest("#agent-browser-access")).not.toBeNull();
+    expect(access.element().closest("section")).toBe(
+      container.querySelector("section#browser-agent-access"),
+    );
   });
 
   it("does not scan browser files when entering or revisiting settings", async () => {
     await using screen = await openSettings();
-    const { container } = screen;
     expect(listBrowserImportSources).not.toHaveBeenCalled();
 
     await screen.unmount();
-    await using reopened = await openSettings();
+    await using _reopened = await openSettings();
     expect(listBrowserImportSources).not.toHaveBeenCalled();
-  });
-
-  it("places device settings after browser settings and management keys after devices", async () => {
-    await using screen = await openSettings();
-    const { container } = screen;
-    await vi.waitFor(() =>
-      expect(container.querySelector("section#management-api-keys")).not.toBeNull(),
-    );
-    const sections = Array.from(container.querySelectorAll("section[id]"), (node) => node.id);
-    expect(sections.indexOf("devices")).toBeGreaterThan(sections.indexOf("browser"));
-    expect(sections.indexOf("management-api-keys")).toBeGreaterThan(sections.indexOf("devices"));
   });
 });

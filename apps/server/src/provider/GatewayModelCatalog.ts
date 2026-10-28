@@ -583,7 +583,7 @@ const readCache = Effect.fn("GatewayModelCatalog.readCache")(
     const raw = yield* fileSystem.readFileString(filePath);
     return cacheFileFromUnknown(yield* decodeUnknownJson(raw), settingsFingerprint);
   },
-  Effect.catchCause(() => Effect.succeed(undefined)),
+  Effect.catchCause(() => Effect.void.pipe(Effect.as(undefined))),
 );
 
 const writeJsonFile = (filePath: string, value: unknown) =>
@@ -594,7 +594,7 @@ const writeJsonFile = (filePath: string, value: unknown) =>
         contents: `${contents}\n`,
       }),
     ),
-    Effect.catchCause(() => Effect.void),
+    Effect.ignoreCause,
   );
 
 const writeCodexCatalog = (filePath: string, rawCodexCatalog: unknown) =>
@@ -668,7 +668,7 @@ const readJsonFile = Effect.fn("GatewayModelCatalog.readJsonFile")(
       .readFileString(filePath)
       .pipe(Effect.flatMap((contents) => decodeUnknownJson(contents)));
   },
-  Effect.catchCause(() => Effect.succeed(undefined)),
+  Effect.catchCause(() => Effect.void.pipe(Effect.as(undefined))),
 );
 
 const requestCatalog = Effect.fn("GatewayModelCatalog.request")(function* (input: {
@@ -719,7 +719,7 @@ const fetchCatalog = Effect.fn("GatewayModelCatalog.fetch")(function* (input: {
   let fallback: ParsedGatewayCatalog | undefined;
   for (const format of formats) {
     const parsed = yield* requestCatalog({ ...input, format }).pipe(
-      Effect.catchCause(() => Effect.succeed(undefined)),
+      Effect.catchCause(() => Effect.void.pipe(Effect.as(undefined))),
     );
     if (!parsed) continue;
     if (parsed.models.some((model) => model.metadata || model.reasoningEfforts?.length)) {

@@ -8,12 +8,13 @@ import {
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
-  type ProjectId,
+  type ProviderInteractionMode,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 
 const ALL_MCP_CAPABILITIES = [
   "preview",
@@ -28,17 +29,72 @@ export interface McpThreadCaller {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+  /** A delegated child task; its parent owns the work it hands back. */
+  readonly subagent?: boolean;
 }
 
 export interface McpClientCaller {
   readonly sessionId: string;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
+  /**
+   * Another T3 Code environment's peer link. What it starts here carries its
+   * session as `linkOrigin`, and it changes only that work (`linkOrigin.ts`).
+   */
+  readonly linked?: boolean | undefined;
+  /**
+   * Narrower modes the client asked for on this request (`T3-Mode-Limit`):
+   * another environment passing on the limits of the agent it calls for.
+   */
+  readonly narrowedTo?: ClientModes | undefined;
 }
 
-/** Read-only clients map to the lowest mode because McpToolAccess blocks writes first. */
-export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): RuntimeMode =>
-  client === undefined || client.access === "read-only" ? "approval-required" : client.access;
+/**
+ * `T3-Mode-Limit: <runtimeMode>/<interactionMode>` lets an OAuth client cap
+ * a request below what it was approved with: another environment passes on
+ * the limits of the agent it calls for. It can only narrow (see
+ * `clientModeCeiling`), so a client gains nothing by sending a broad one.
+ */
+export const MODE_LIMIT_HEADER = "t3-mode-limit";
+
+export interface ClientModes {
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+}
+
+const runtimeModeRank: Record<RuntimeMode, number> = {
+  "approval-required": 0,
+  "auto-accept-edits": 1,
+  auto: 2,
+  "full-access": 3,
+};
+const interactionModeRank: Record<ProviderInteractionMode, number> = { plan: 0, default: 1 };
+
+/**
+ * The modes a client caller's writes are capped at: what it was approved
+ * with, narrowed by what it asked for on this request. A read-only client
+ * never reaches a write (`McpToolAccess` refuses it first), so it maps to the
+ * lowest runtime mode rather than to nothing.
+ */
+export const clientModeCeiling = (client: McpClientCaller | undefined): ClientModes => {
+  const approved: ClientModes = {
+    runtimeMode:
+      client === undefined || client.access === "read-only" ? "approval-required" : client.access,
+    interactionMode: "default",
+  };
+  const asked = client?.narrowedTo;
+  if (asked === undefined) return approved;
+  return {
+    runtimeMode:
+      runtimeModeRank[asked.runtimeMode] < runtimeModeRank[approved.runtimeMode]
+        ? asked.runtimeMode
+        : approved.runtimeMode,
+    interactionMode:
+      interactionModeRank[asked.interactionMode] < interactionModeRank[approved.interactionMode]
+        ? asked.interactionMode
+        : approved.interactionMode,
+  };
+};
 
 export type McpPrincipal =
   | {
@@ -64,13 +120,14 @@ export interface McpInvocationScope {
   readonly principal?: McpPrincipal;
   readonly capabilities?: ReadonlySet<McpCapability> | undefined;
   readonly issuedAt: number;
-  readonly requestNamespace?: string | undefined;
+
+  readonly requestNamespace: string;
   readonly thread?: McpThreadCaller | undefined;
   readonly client?: McpClientCaller | undefined;
   readonly threadId?: ThreadId | undefined;
   readonly providerSessionId?: string | undefined;
   readonly providerInstanceId?: ProviderInstanceId | undefined;
-  readonly mcpToolScope?: "global" | "project" | undefined;
+  readonly linkedEnvironments?: boolean;
 }
 
 export class McpInvocationContext extends Context.Service<
@@ -98,23 +155,39 @@ const managementToolScopes: Readonly<Record<string, ManagementApiKeyScope>> = {
   t3_thread_list: "threads:list",
   t3_thread_search: "threads:list",
   t3_thread_read: "threads:read",
-  t3_thread_transfers: "threads:read",
-  t3_thread_configuration: "threads:read",
   t3_thread_wait: "threads:wait",
   t3_thread_send: "threads:message",
   t3_thread_interrupt: "threads:message",
   t3_thread_update: "threads:message",
   t3_thread_organize: "threads:message",
   t3_thread_configure: "threads:message",
-  t3_thread_fork: "threads:message",
-  t3_thread_merge_back: "threads:message",
+  t3_thread_transfer: "threads:message",
   write_pull_request_guides: "pullRequests:review",
   read_pull_request_guide: "pullRequests:review",
 };
-export const managementMcpToolScope = (name: string): ManagementApiKeyScope | undefined =>
-  managementToolScopes[name];
+export const managementToolRequiredScope = (
+  name: string,
+  args?: unknown,
+): ManagementApiKeyScope | undefined => {
+  if (
+    name === "t3_thread_configure" &&
+    typeof args === "object" &&
+    args !== null &&
+    !("modelSelection" in args)
+  )
+    return "threads:read";
+  if (
+    name === "t3_thread_transfer" &&
+    typeof args === "object" &&
+    args !== null &&
+    "action" in args &&
+    args.action === "status"
+  )
+    return "threads:read";
+  return managementToolScopes[name];
+};
 export const isManagementMcpToolAllowed = (name: string) =>
-  managementMcpToolScope(name) !== undefined;
+  managementToolRequiredScope(name) !== undefined;
 const managementToolCapabilities: Readonly<Record<string, McpCapability>> = {
   write_pull_request_guides: "pull-requests",
   read_pull_request_guide: "pull-requests",
@@ -127,34 +200,14 @@ export const isManagementKeyPrincipal = (
 export const isProviderSessionPrincipal = (
   p: McpPrincipal | undefined,
 ): p is Extract<McpPrincipal, { type: "provider-session" }> => p?.type === "provider-session";
-/** Whether this invocation may address records outside its calling project. */
-export const canCrossProjects = (invocation: McpInvocationScope): boolean =>
-  isManagementKeyPrincipal(invocation.principal) ||
-  (isProviderSessionPrincipal(invocation.principal)
-    ? invocation.mcpToolScope === "global"
-    : invocation.mcpToolScope !== "project");
-
-/**
- * Refuse a project target outside a project-scoped provider session. A scoped
- * caller whose own project is unknown can address no project at all.
- */
-export const assertProjectAllowed = (
+export const managementKeyCanUseTool = (
   invocation: McpInvocationScope,
-  caller: { readonly projectId: ProjectId } | undefined,
-  projectId: ProjectId,
-  denied = new OrchestratorMcpFailure({
-    code: "invalid_request",
-    message: "The project was not found.",
-  }),
-): Effect.Effect<void, OrchestratorMcpFailure> =>
-  !canCrossProjects(invocation) && caller?.projectId !== projectId
-    ? Effect.fail(denied)
-    : Effect.void;
-
-export const managementKeyCanUseTool = (invocation: McpInvocationScope, name: string) =>
+  name: string,
+  args?: unknown,
+) =>
   isManagementKeyPrincipal(invocation.principal) &&
   invocation.principal.scopes.has(
-    managementMcpToolScope(name) ?? ("__denied__" as ManagementApiKeyScope),
+    managementToolRequiredScope(name, args) ?? ("__denied__" as ManagementApiKeyScope),
   );
 export const getInvocationThreadId = (invocation: McpInvocationScope) =>
   invocation.thread?.threadId ??
@@ -182,6 +235,23 @@ export const requireThreadMcpOperation = Effect.fn("mcp.requireThreadOperation")
     });
   return invocation;
 });
+
+/**
+ * `McpSchema.EnabledWhen` for tools a delegated child must not see or call.
+ * EnabledWhen only receives the MCP client profile, so read the T3 caller from the request fiber.
+ */
+export const hiddenFromSubagents = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.thread?.subagent !== true;
+};
+
+/** `McpSchema.EnabledWhen` for tools that only serve links, hidden while the beta is off. */
+export const hiddenWhileLinksOff = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.linkedEnvironments !== false;
+};
 
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"
   ? PreviewAutomationUnavailableError

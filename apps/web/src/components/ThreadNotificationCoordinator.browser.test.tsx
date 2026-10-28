@@ -1,4 +1,7 @@
-import { render as renderClient, stubGlobal } from "../../test/render";
+import { fakeTimers, stubGlobal } from "../../test/render";
+import { WORKING_EXIT_GRACE_MS } from "@t3tools/client-runtime/state/thread-inbox";
+import { Atom, AtomRegistry } from "effect/reactivity";
+import type { AnyRouter } from "@tanstack/react-router";
 import type { ClientSettings } from "@t3tools/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
@@ -113,30 +116,42 @@ function mockThreads() {
   return [stableParent, child];
 }
 
-vi.mock(import("@effect/atom-react"), async (original) => ({
+vi.mock(import("../state/shell"), async (original) => ({
   ...(await original()),
-  useAtomValue: (() => ({
-    status: state.live ? "live" : "disconnected",
-    snapshot: Option.some({ threads: mockThreads() }),
-  })) as never,
+  environmentShell: {
+    ...(await original()).environmentShell,
+    stateValueAtom: (() => shellAtom) as never,
+  },
 }));
-vi.mock(import("@tanstack/react-router"), async (original) => ({
+vi.mock(import("../state/presentation"), async (original) => ({
   ...(await original()),
-  useNavigate: (() => state.navigate) as never,
-  useParams: (() => state.active) as never,
+  environmentSummaries: {
+    ...(await original()).environmentSummaries,
+    get environmentIdsAtom() {
+      return idsAtom as never;
+    },
+  },
+}));
+vi.mock(import("../state/threads"), async (original) => ({
+  ...(await original()),
+  environmentThreadShells: {
+    ...(await original()).environmentThreadShells,
+    pendingSubagentRequestsAtom: (() => requestsAtom) as never,
+    get delegatedUnderParentAtom() {
+      return delegatedAtom as never;
+    },
+  },
 }));
 vi.mock(import("../hooks/useSettings"), async (original) => ({
   ...(await original()),
-  useClientSettings: ((
-    select: (
-      settings: Pick<ClientSettings, "notificationMode" | "inAppNotificationsEnabled">,
-    ) => unknown,
-  ) => select({ notificationMode: state.mode, inAppNotificationsEnabled: state.inApp })) as never,
-  getClientSettings: (() => ({ notificationMode: state.mode })) as never,
-}));
-vi.mock(import("../state/environments"), async (original) => ({
-  ...(await original()),
-  useEnvironmentIds: (() => ["env-1"]) as never,
+  getClientSettings: (() => ({
+    notificationMode: state.mode,
+    inAppNotificationsEnabled: state.inApp,
+  })) as never,
+  subscribeClientSettings: ((listener: () => void) => {
+    settingsListeners.add(listener);
+    return () => settingsListeners.delete(listener);
+  }) as never,
 }));
 vi.mock(import("../threadNotifications"), async (original) => ({
   ...(await original()),
@@ -151,7 +166,12 @@ vi.mock(import("./ui/toast"), async (original) => {
   };
 });
 
-import { ThreadNotificationCoordinator } from "./ThreadNotificationCoordinator";
+import { startThreadNotifications } from "./ThreadNotificationCoordinator";
+const shellAtom = Atom.make<unknown>(null);
+const idsAtom = Atom.make<ReadonlyArray<string>>(["env-1"]);
+const requestsAtom = Atom.make(new Map());
+const delegatedAtom = Atom.make<ReadonlySet<string>>(new Set<string>());
+const settingsListeners = new Set<() => void>();
 
 async function setup() {
   const stack = new AsyncDisposableStack();
@@ -186,8 +206,35 @@ async function setup() {
   stack.use(
     stubGlobal("Notification", Object.assign(state.notification, { permission: "granted" })),
   );
-  const screen = stack.use(await renderClient(null));
-  const rerender = () => screen.rerender(<ThreadNotificationCoordinator />);
+  settingsListeners.clear();
+  stack.use(fakeTimers());
+  const registry = AtomRegistry.make();
+  stack.defer(() => registry.dispose());
+  const router = {
+    state: { matches: [{ params: state.active }] },
+    navigate: state.navigate,
+  };
+  const refresh = () =>
+    registry.set(shellAtom, {
+      status: state.live ? "live" : "disconnected",
+      snapshot: Option.some({ threads: mockThreads() }),
+    });
+  let started = false;
+  const rerender = async () => {
+    router.state.matches[0]!.params = state.active;
+    registry.set(
+      requestsAtom,
+      new Map(state.delegatedChild === "approval" ? [["thread-1", "approval"]] : []),
+    );
+    refresh();
+    if (!started) {
+      started = true;
+      stack.defer(startThreadNotifications(registry, router as unknown as AnyRouter));
+    } else {
+      for (const listener of settingsListeners) listener();
+    }
+    await vi.advanceTimersByTimeAsync(WORKING_EXIT_GRACE_MS);
+  };
   return {
     render: rerender,
     complete: async () => {
@@ -237,7 +284,7 @@ describe("thread notifications", () => {
 
   it("alerts once when automatic retries stop at the provider failure", async () => {
     await using screen = await setup();
-    const { render, complete } = screen;
+    const { render } = screen;
     state.mode = "notifications-and-sound";
     await render();
     state.retrying = true;
@@ -271,7 +318,7 @@ describe("thread notifications", () => {
 
   it("alerts on the parent when its delegated subagent asks for approval", async () => {
     await using screen = await setup();
-    const { render, complete } = screen;
+    const { render } = screen;
     state.mode = "notifications-and-sound";
     state.delegatedChild = "running";
     await render();
@@ -327,7 +374,7 @@ describe("thread notifications", () => {
     ["limited", "Usage limit reached"],
   ] as const)("uses the same %s event for in-app and desktop alerts", async (event, title) => {
     await using screen = await setup();
-    const { render, complete } = screen;
+    const { render } = screen;
     state.mode = "notifications-and-sound";
     await render();
     state[event] = true;
@@ -346,11 +393,14 @@ describe("thread notifications", () => {
     await render();
     expect(state.add).toHaveBeenCalledTimes(1);
     expect(state.notification).toHaveBeenCalledTimes(1);
-    expect(state.notification).toHaveBeenCalledWith(title, {
-      body: "Fix the login form",
-      tag: expect.any(String),
-      silent: true,
-    });
+    expect(state.notification).toHaveBeenCalledWith(
+      title,
+      expect.objectContaining({
+        body: "Fix the login form",
+        tag: expect.any(String),
+        silent: true,
+      }),
+    );
   });
 
   it("alerts when only a dev server is left running, not while an awaited monitor runs", async () => {
@@ -433,18 +483,21 @@ describe("thread notifications", () => {
     await render();
     await complete();
     expect(state.add).not.toHaveBeenCalled();
-    expect(state.notification).toHaveBeenCalledWith("Thread completed", {
-      body: "Fix the login form",
-      tag: expect.any(String),
-      silent: true,
-    });
+    expect(state.notification).toHaveBeenCalledWith(
+      "Thread completed",
+      expect.objectContaining({
+        body: "Fix the login form",
+        tag: expect.any(String),
+        silent: true,
+      }),
+    );
   });
 
   it("reveals the desktop window and opens the thread when a system alert is clicked", async () => {
     await using screen = await setup();
     const { render, complete } = screen;
     const revealWindow = vi.fn(() => Promise.resolve());
-    vi.stubGlobal("desktopBridge", { revealWindow });
+    vi.stubGlobal("desktopBridge", { revealWindow, onNotificationBadgeClear: () => () => {} });
     state.mode = "notifications";
     state.focused = false;
     await render();

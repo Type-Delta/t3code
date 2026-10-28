@@ -43,11 +43,8 @@ import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFix
 import {
   archiveThread,
   interruptThreadTurn,
-  mergeThreadBack,
   navigateThreadCheckpoint,
-  promoteQueuedRun,
   reorderActiveThread,
-  reorderQueuedRun,
   revertThreadCheckpoint,
   resumeThreadQueue,
   startThreadTurn,
@@ -136,6 +133,7 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
     subscribeServerConfig: (input) => client.subscribeServerConfig(input),
     ready: Effect.void,
     probe: Effect.void,
+    inboundFrames: Effect.succeed(0),
     closed: Effect.never,
   };
   return EnvironmentSupervisor.EnvironmentSupervisor.of({
@@ -458,71 +456,6 @@ describe("V2 environment commands", () => {
         });
       }
       expect(projectionRequests).toEqual([]);
-    }).pipe(Effect.provide(layerTestCrypto)),
-  );
-
-  it.effect("retains projection-shaped delivery for servers without command context support", () =>
-    Effect.gen(function* () {
-      const activeRunId = RunId.make("legacy-active-run");
-      const projection: OrchestrationV2ThreadProjection = {
-        ...v2Projection,
-        runs: [
-          {
-            id: activeRunId,
-            threadId: v2ThreadId,
-            ordinal: 1,
-            providerInstanceId: v2Projection.thread.providerInstanceId,
-            modelSelection: v2Projection.thread.modelSelection,
-            providerThreadId: null,
-            userMessageId: MessageId.make("legacy-active-message"),
-            rootNodeId: null,
-            activeAttemptId: null,
-            status: "running",
-            requestedAt: v2Now,
-            startedAt: v2Now,
-            completedAt: null,
-            checkpointId: null,
-            contextHandoffId: null,
-          },
-        ],
-      };
-      const commands: OrchestrationV2Command[] = [];
-      const projectionRequests: ThreadId[] = [];
-      const supervisor = yield* makeSupervisor({
-        commands,
-        projects: [],
-        projection,
-        projectionRequests,
-        advertiseServerResolvedCommandContext: false,
-      });
-
-      for (const [mode, expectedMode] of [
-        ["auto", { type: "queue_after_active" }],
-        ["queue", { type: "queue_after_active" }],
-        ["steer", { type: "steer_active", targetRunId: activeRunId }],
-        ["restart", { type: "restart_active", targetRunId: activeRunId }],
-      ] as const) {
-        yield* startThreadTurn({
-          commandId: CommandId.make(`legacy-command-${mode}`),
-          threadId: v2ThreadId,
-          message: {
-            messageId: MessageId.make(`legacy-message-${mode}`),
-            role: "user",
-            text: mode,
-            attachments: [],
-          },
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          dispatchMode: mode,
-        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
-
-        expect(commands.at(-1)).toMatchObject({
-          type: "message.dispatch",
-          dispatchMode: expectedMode,
-        });
-        expect(commands.at(-1)).not.toHaveProperty("deliveryIntent");
-      }
-      expect(projectionRequests).toEqual([v2ThreadId, v2ThreadId, v2ThreadId, v2ThreadId]);
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 

@@ -504,16 +504,14 @@ export const make = Effect.gen(function* () {
       { maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES },
     ).pipe(
       Effect.map((result) => result.stdout.split("\0").filter(Boolean)),
-      Effect.flatMap((paths) =>
-        paths.every(relativePathIsSafe)
-          ? Effect.succeed(paths)
-          : Effect.fail(
-              checkpointError(
-                "SidecarCheckpointRepository.workspacePaths",
-                cwd,
-                "Git returned an unsafe workspace path.",
-              ),
-            ),
+      Effect.filterOrFail(
+        (paths) => paths.every(relativePathIsSafe),
+        () =>
+          checkpointError(
+            "SidecarCheckpointRepository.workspacePaths",
+            cwd,
+            "Git returned an unsafe workspace path.",
+          ),
       ),
     );
 

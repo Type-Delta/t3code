@@ -45,6 +45,17 @@ describe("auto resume on usage limit", () => {
   });
 });
 
+it("decodes settings containing retired agent access options", () => {
+  const oldKey = ["mcp", "ToolScope"].join("");
+  const oldDefaultKey = ["defaultMcp", "ToolScope"].join("");
+  const decoded = decodeServerSettings({
+    [oldDefaultKey]: "project",
+    projectSettingsOverrides: { "project:legacy": { [oldKey]: "global" } },
+  });
+  expect(decoded.projectSettingsOverrides[ProjectId.make("project:legacy")]).toEqual({});
+  expect(Object.hasOwn(decoded, oldDefaultKey)).toBe(false);
+});
+
 describe("provider API gateway model settings", () => {
   it("keeps gateway configuration and manual model metadata per provider instance", () => {
     const decoded = decodeCodexSettings({
@@ -449,10 +460,6 @@ describe("ClientSettings environment identification", () => {
 });
 
 describe("ClientSettings sidebar", () => {
-  it("defaults to the current sidebar", () => {
-    expect(decodeClientSettings({}).legacySidebarEnabled).toBe(false);
-  });
-
   it("defaults thread ordering to manual and round-trips both modes", () => {
     expect(decodeClientSettings({}).sidebarThreadOrderingMode).toBe("manual");
     for (const mode of ["manual", "last_input"] as const) {
@@ -473,7 +480,6 @@ describe("ClientSettings sidebar", () => {
       sidebarV2Enabled: false,
       sidebarV2ConfiguredByUser: true,
     });
-    expect(decoded.legacySidebarEnabled).toBe(false);
     expect(decoded).not.toHaveProperty("sidebarV2Enabled");
     expect(decoded).not.toHaveProperty("sidebarV2ConfiguredByUser");
   });
@@ -484,13 +490,6 @@ describe("ClientSettings sidebar", () => {
     expect(decoded).not.toHaveProperty("compactSidebarEnabled");
     expect(decoded).not.toHaveProperty("sidebarCompactThreadRows");
     expect(decodeClientSettingsPatch(stored)).toEqual({});
-  });
-
-  it("preserves an explicit legacy sidebar opt-in", () => {
-    expect(decodeClientSettings({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(true);
-    expect(decodeClientSettingsPatch({ legacySidebarEnabled: true }).legacySidebarEnabled).toBe(
-      true,
-    );
   });
 
   it("keeps unpin confirmation opt-in and patchable", () => {

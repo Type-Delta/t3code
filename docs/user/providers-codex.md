@@ -38,7 +38,7 @@ When native Codex rejects a turn because of a usage limit and reports an exact
 reset time, T3 Code sends a scoped continuation three seconds after the reset.
 The pending continuation survives a server restart and is discarded if the
 thread is no longer waiting on that turn. Transient dispatch failures retry after
-three seconds. Disable this under **Settings > General > Auto-resume after usage
+three seconds. Disable this under **Settings → Threads → Resume after usage
 limits**.
 
 Compatible API gateways do not expose an authoritative reset through Codex, so

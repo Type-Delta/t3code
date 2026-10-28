@@ -14,7 +14,7 @@ import {
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import type { OrchestrationV2StoredEvent } from "./orchestrationV2.ts";
-import { ProjectIconOverride, ProjectScript, StoredProjectIcon } from "./project.ts";
+import { ProjectScript, StoredProjectIcon } from "./project.ts";
 import { ManagementApiKeyId } from "./managementApiKeys.ts";
 
 export const OrchestrationClientOrigin = Schema.Struct({

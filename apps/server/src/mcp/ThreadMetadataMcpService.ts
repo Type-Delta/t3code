@@ -17,7 +17,7 @@ import * as Layer from "effect/Layer";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
-import { threadNotFound } from "./OrchestratorMcpService.ts";
+import { threadNotFound } from "./threadAccess.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
   ThreadMetadataMcpService,
@@ -35,14 +35,6 @@ function failure(code: OrchestratorMcpFailure["code"], message: string): Orchest
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function threadLookupFailure(
-  error: ThreadManagementService.ThreadManagementError,
-): OrchestratorMcpFailure {
-  return error._tag === "ThreadManagementThreadNotFoundError"
-    ? failure("thread_not_found", error.message)
-    : failure("orchestration_error", error.message);
 }
 
 function stablePart(value: string): string {
@@ -71,7 +63,6 @@ function commandId(input: {
 function metadataCommand(input: {
   readonly commandId: CommandId;
   readonly threadId: ThreadId;
-  readonly projectId: OrchestrationV2AppThread["projectId"];
   readonly update: ThreadMetadataMcpUpdateInput;
 }): Extract<OrchestrationV2Command, { readonly type: "thread.metadata.update" }> {
   switch (input.update.action) {
@@ -88,23 +79,6 @@ function metadataCommand(input: {
         commandId: input.commandId,
         threadId: input.threadId,
         regenerateTitle: true,
-      };
-    case "link_pull_request":
-      return {
-        type: "thread.metadata.update",
-        commandId: input.commandId,
-        threadId: input.threadId,
-        linkedPullRequest: {
-          projectId: input.projectId,
-          ...input.update.pullRequest!,
-        },
-      };
-    case "unlink_pull_request":
-      return {
-        type: "thread.metadata.update",
-        commandId: input.commandId,
-        threadId: input.threadId,
-        linkedPullRequest: null,
       };
   }
 }
@@ -144,7 +118,10 @@ const make = Effect.gen(function* () {
     scope: McpInvocationScope,
     input: ThreadMetadataMcpUpdateInput,
   ) {
-    if (!(scope.capabilities ?? new Set()).has("orchestration")) {
+    if (
+      !(scope.capabilities ?? new Set()).has("orchestration") &&
+      !McpInvocationContext.isManagementKeyPrincipal(scope.principal)
+    ) {
       return yield* failure(
         "capability_denied",
         "This MCP credential does not grant orchestration capabilities.",
@@ -171,25 +148,7 @@ const make = Effect.gen(function* () {
     if (shell === null || shell.deletedAt !== null) {
       return yield* threadNotFound(threadManagement, threadId, `Thread ${threadId} was not found.`);
     }
-    if (!McpInvocationContext.canCrossProjects(scope) && scope.thread !== undefined) {
-      const callingThreadId = scope.thread.threadId;
-      const caller = yield* threadManagement
-        .getThreadShell(callingThreadId)
-        .pipe(
-          Effect.mapError((error) =>
-            failure(
-              "orchestration_error",
-              `Unable to locate calling thread ${callingThreadId}: ${errorMessage(error)}`,
-            ),
-          ),
-        );
-      if (caller === null || caller.deletedAt !== null || caller.projectId !== shell.projectId) {
-        return yield* failure("thread_not_found", `Thread ${threadId} was not found.`);
-      }
-    }
-    const target = yield* threadManagement
-      .getProjectThreadRecords({ projectId: shell.projectId, threadId }, [])
-      .pipe(Effect.mapError(threadLookupFailure));
+
     const requestKey =
       input.clientRequestId === undefined
         ? yield* crypto.randomUUIDv4().pipe(Effect.orDie)
@@ -205,7 +164,6 @@ const make = Effect.gen(function* () {
         metadataCommand({
           commandId: updateCommandId,
           threadId,
-          projectId: target.thread.projectId,
           update: input,
         }),
       )

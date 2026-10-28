@@ -35,6 +35,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import { RunFinalizationObserver } from "./RunFinalizationService.ts";
 
 export const ROLLBACK_FAILED_MESSAGE =
   "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
@@ -126,6 +127,7 @@ export const layer: Layer.Layer<
   CheckpointRollbackServiceV2,
   Effect.gen(function* () {
     const checkpoints = yield* CheckpointServiceV2;
+    const observer = yield* RunFinalizationObserver;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const eventSink = yield* EventSinkV2;
     const ids = yield* IdAllocator.IdAllocatorV2;
@@ -393,7 +395,18 @@ export const layer: Layer.Layer<
                 target: rollbackTarget,
                 providerThreadTurns,
               });
-      if (input.restoreFiles !== false) yield* checkpoints.restore({ scope, checkpoint });
+      if (input.restoreFiles !== false) {
+        yield* checkpoints.restore({ scope, checkpoint });
+        yield* observer.refresh({ cwd: scope.cwd, threadId: input.threadId }).pipe(
+          Effect.catchTags({
+            RunFinalizationRefreshError: (cause) =>
+              Effect.logWarning("Failed to refresh workspace after checkpoint restore", {
+                ...input,
+                cause,
+              }),
+          }),
+        );
+      }
 
       // Lock against full-row thread writes that could restore the old native session after rollback.
       yield* threadCommands.withLock(

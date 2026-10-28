@@ -46,6 +46,7 @@ export function useActiveComposerHandle(options: {
   const [forwarding] = useState(createForwardingComposerHandle);
   const shouldPublish = options.scoped && options.active;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Publish the active composer to the shared imperative handle.
   useLayoutEffect(() => {
     if (!shouldPublish || !globalRef) {
       return;

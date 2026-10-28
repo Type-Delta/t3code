@@ -17,19 +17,21 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
   OrchestratorMcpFailure,
   PreviewAutomationError,
+  ProviderInteractionMode,
   type RunId,
+  RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as HtmlRender from "../htmlRender/HtmlRender.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ManagementApiKeyService from "../auth/ManagementApiKeyService.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import * as McpToolScope from "./McpToolScope.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
 import {
@@ -39,6 +41,7 @@ import {
   MAX_REPORTED_DEPTH,
   toolOutcome,
 } from "../telemetry/ProviderDimensions.ts";
+import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -168,36 +171,57 @@ const deniedManagementToolResponse = (request: Record<PropertyKey, unknown>, mes
         : null,
     error: { code: -32003, message },
   });
+
+const decodeModeLimit = Schema.decodeUnknownOption(
+  Schema.Struct({ runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode }),
+);
+const parseModeLimit = (value: string) => {
+  const [runtimeMode, interactionMode, ...rest] = value.trim().split("/");
+  return rest.length === 0 ? decodeModeLimit({ runtimeMode, interactionMode }) : Option.none();
+};
+
+const invalidModeLimit = HttpServerResponse.jsonUnsafe(
+  {
+    error: "invalid_mode_limit",
+    message: "T3-Mode-Limit must be <runtimeMode>/<interactionMode>, e.g. auto/default.",
+  },
+  { status: 400, headers: { "cache-control": "no-store" } },
+);
+
+/** Applies a client's requested mode limit; undefined when the header is malformed. */
+const withModeLimit = (
+  invocation: McpInvocationContext.McpInvocationScope,
+  request: HttpServerRequest.HttpServerRequest,
+): McpInvocationContext.McpInvocationScope | undefined => {
+  const header = request.headers[McpInvocationContext.MODE_LIMIT_HEADER];
+  if (header === undefined || invocation.client === undefined) return invocation;
+  const limit = parseModeLimit(header);
+  return Option.isNone(limit)
+    ? undefined
+    : { ...invocation, client: { ...invocation.client, narrowedTo: limit.value } };
+};
+
+// The Linked environments beta is off here: links wait until it is on again.
+const linkedEnvironmentsOff = HttpServerResponse.jsonUnsafe(
+  {
+    error: "linked_environments_off",
+    message: "Linked environments is off on this machine. Turn it on in its Settings → Labs.",
+  },
+  { status: 403, headers: { "cache-control": "no-store" } },
+);
+
 const makeMcpAuthMiddleware = Effect.gen(function* () {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const managementKeys = yield* ManagementApiKeyService.ManagementApiKeyService;
   const environment = yield* ServerEnvironment.ServerEnvironment;
-  const threads = yield* Effect.serviceOption(ThreadManagementService.ThreadManagementService);
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
+
   const environmentId = yield* environment.getEnvironmentId;
-  // Management keys keep their explicit-project semantics. OAuth clients
-  // likewise choose an explicit project; only a provider session inherits
-  // the project/global policy of its calling thread.
-  const resolveToolScope = Effect.fn("McpHttpServer.resolveToolScope")(function* (
-    invocation: McpInvocationContext.McpInvocationScope,
-  ) {
-    if (
-      McpInvocationContext.isManagementKeyPrincipal(invocation.principal) ||
-      (!McpInvocationContext.isProviderSessionPrincipal(invocation.principal) &&
-        invocation.thread === undefined)
-    )
-      return invocation;
-    const threadId = McpInvocationContext.getInvocationThreadId(invocation);
-    if (threadId === undefined) return { ...invocation, mcpToolScope: "project" as const };
-    const caller = yield* Option.match(threads, {
-      onNone: () => Effect.succeed(null),
-      onSome: (service) =>
-        service.getThreadShell(threadId).pipe(Effect.catch(() => Effect.succeed(null))),
-    });
-    if (caller === null) return { ...invocation, mcpToolScope: "project" as const };
-    const mcpToolScope = yield* McpToolScope.resolveProjectMcpToolScope(caller.projectId);
-    return { ...invocation, mcpToolScope };
-  });
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const linksEnabled = serverSettings.getSettings.pipe(
+    Effect.map((settings) => settings.linkedEnvironmentsEnabled),
+    Effect.orElseSucceed(() => false),
+  );
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (
     httpEffect: AuthenticatedHttpEffect,
   ) {
@@ -211,7 +235,7 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
     if (!invocation && hasManagementTokenShape(token)) {
       const principal = yield* managementKeys
         .resolveToken(token)
-        .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+        .pipe(Effect.orElseSucceed(() => Option.none()));
       if (Option.isSome(principal))
         invocation = {
           environmentId,
@@ -235,13 +259,13 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
       });
     }
-    invocation = yield* resolveToolScope(invocation);
+
     const authenticatedInvocation = invocation;
     const isManagementKey = McpInvocationContext.isManagementKeyPrincipal(
       authenticatedInvocation.principal,
     );
     const body = isManagementKey
-      ? yield* request.json.pipe(Effect.catch(() => Effect.succeed(undefined)))
+      ? yield* request.json.pipe(Effect.orElseSucceed(() => undefined))
       : undefined;
     const requests = asJsonRpcRequests(body);
     const rejected = requests.find(
@@ -252,6 +276,7 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
           !McpInvocationContext.managementKeyCanUseTool(
             authenticatedInvocation,
             message.params.name,
+            message.params.arguments,
           )),
     );
     if (rejected) {
@@ -278,8 +303,16 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
       }
       requestInvocation = { ...authenticatedInvocation, capabilities };
     }
+    const limited = withModeLimit(requestInvocation, request);
+    if (limited === undefined) return invalidModeLimit;
+    const linkedEnvironments = yield* linksEnabled;
+    if (limited.client?.linked === true && !linkedEnvironments) return linkedEnvironmentsOff;
     return yield* httpEffect.pipe(
-      Effect.provideService(McpInvocationContext.McpInvocationContext, requestInvocation),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, {
+        ...limited,
+        linkedEnvironments,
+      }),
+
       Effect.map(normalizeMcpHttpResponse),
     );
   }) satisfies McpAuthMiddleware;
@@ -504,7 +537,9 @@ const decodeAsAdvertised = <Tools extends Record<string, Tool.Any>>(
 
 const isPreviewAutomationError = Schema.is(PreviewAutomationError);
 
-const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
+const previewSnapshotFailure = Effect.fn("previewSnapshotFailure")(function <E>(
+  cause: Cause.Cause<E>,
+) {
   if (Cause.hasInterrupts(cause) || cause.reasons.some(Cause.isDieReason)) {
     return Effect.failCause(cause).pipe(Effect.orDie);
   }
@@ -537,7 +572,7 @@ const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
     errorTag,
     failureCount: failures.length,
   }).pipe(Effect.as(result));
-};
+});
 
 const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot")(function* () {
   const server = yield* McpServer.McpServer;
@@ -552,7 +587,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
     tool: new McpSchema.Tool({
       name: tool.name,
       description: Tool.getDescription(tool),
-      inputSchema: Tool.getJsonSchema(tool),
+      inputSchema: advertisedJsonSchema(tool),
       annotations: {
         ...Context.getOption(tool.annotations, Tool.Title).pipe(
           Option.map((title) => ({ title })),
@@ -736,7 +771,7 @@ const registerImageTool = Effect.fn("McpHttpServer.registerImageTool")(function*
     tool: new McpSchema.Tool({
       name: tool.name,
       description: Tool.getDescription(tool),
-      inputSchema: Tool.getJsonSchema(tool),
+      inputSchema: advertisedJsonSchema(tool),
       annotations: {
         ...Context.getOption(tool.annotations, Tool.Title).pipe(
           Option.map((title) => ({ title })),
@@ -853,21 +888,31 @@ const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
   "t3_thread_launch",
   "t3_thread_send",
   "t3_thread_send_attachments",
-  "t3_thread_fork",
-  "t3_thread_merge_back",
-  "t3_queue_edit",
-  "t3_queue_promote_to_steer",
-  "t3_pending_request_respond",
   "schedule_task",
   "run_scheduled_task_now",
 ]);
 
-/** Handoff tools whose result is only `{ sequence }`; their input names the receiving thread. */
-const INPUT_TARGET_TOOLS: ReadonlySet<string> = new Set([
-  "t3_queue_edit",
-  "t3_queue_promote_to_steer",
-  "t3_pending_request_respond",
-]);
+/** Tool actions that hand work over with only a `{ sequence }` result; the input names the thread. */
+const INPUT_TARGET_ACTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+  t3_queue: new Set(["edit", "promote_to_steer"]),
+  t3_pending_request: new Set(["respond"]),
+};
+
+/** Tool actions that hand work over and name the receiving thread in their result. */
+const RESULT_TARGET_ACTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+  t3_thread_transfer: new Set(["fork", "merge_back"]),
+};
+
+const hasAction = (
+  actions: Readonly<Record<string, ReadonlySet<string>>>,
+  tool: string,
+  args: unknown,
+) =>
+  actions[tool]?.has(String((args as { readonly action?: unknown } | null | undefined)?.action)) ===
+  true;
+
+const isInputTargetHandoff = (tool: string, args: unknown) =>
+  hasAction(INPUT_TARGET_ACTIONS, tool, args);
 
 const resultThreadKeys = ["childThreadId", "targetThreadId", "boundThreadId", "threadId"] as const;
 
@@ -889,7 +934,7 @@ const handoffTargetIds = (
   args: unknown,
   result: McpSchema.CallToolResult | undefined,
 ): ReadonlyArray<string> => {
-  if (!INPUT_TARGET_TOOLS.has(tool)) return resultThreadIds(result?.structuredContent);
+  if (!isInputTargetHandoff(tool, args)) return resultThreadIds(result?.structuredContent);
   if (result === undefined || toolOutcome(result).outcome !== "ok") return [];
   const threadId = (args as { readonly threadId?: unknown } | null | undefined)?.threadId;
   return typeof threadId === "string" ? [threadId] : [];
@@ -955,7 +1000,10 @@ const withToolAnalytics =
           result: McpSchema.CallToolResult | undefined,
           durationMs: number,
         ) {
-          const handoff = HANDOFF_TOOLS.has(tool);
+          const handoff =
+            HANDOFF_TOOLS.has(tool) ||
+            isInputTargetHandoff(tool, args) ||
+            hasAction(RESULT_TARGET_ACTIONS, tool, args);
           const outcome = toolOutcome(result);
           // Agents call status, read, and preview tools in tight loops, so an
           // event per successful call floods analytics. Only failures count there.
@@ -1007,8 +1055,8 @@ const withToolAnalytics =
       );
     const recordingServer = McpServer.McpServer.of({
       ...server,
-      addTool: (options) =>
-        server.addTool({
+      addTool: Effect.fn("McpServer.addTool")(function (options) {
+        return server.addTool({
           ...options,
           handle:
             /* Request instrumentation already owns the span; keep this helper in that context. */
@@ -1030,10 +1078,40 @@ const withToolAnalytics =
                 }),
               );
             }),
-        }),
+        });
+      }),
     });
     return yield* registration.pipe(Effect.provideService(McpServer.McpServer, recordingServer));
   });
+
+/** `McpServer.registerToolkit` advertises the full codec schema; agents get the compact one. */
+const withAdvertisedSchemas = Effect.fn("McpHttpServer.withAdvertisedSchemas")(function* <
+  Tools extends Record<string, Tool.Any>,
+  A,
+  E,
+  R,
+>(toolkit: Toolkit.Toolkit<Tools>, registration: Effect.Effect<A, E, R>) {
+  const server = yield* McpServer.McpServer;
+  const tools: Record<string, Tool.Any> = toolkit.tools;
+  const advertisingServer = McpServer.McpServer.of({
+    ...server,
+    addTool: Effect.fn("McpServer.addTool")(function (options) {
+      const tool = tools[options.tool.name];
+      return server.addTool(
+        tool === undefined
+          ? options
+          : {
+              ...options,
+              tool: new McpSchema.Tool({
+                ...options.tool,
+                inputSchema: advertisedJsonSchema(tool),
+              }),
+            },
+      );
+    }),
+  });
+  return yield* registration.pipe(Effect.provideService(McpServer.McpServer, advertisingServer));
+});
 
 /**
  * `McpServer.toolkit` asks for every service its tools declare when it
@@ -1046,7 +1124,9 @@ export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, 
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
 ) => {
   const registration = Layer.effectDiscard(
-    withToolAnalytics(McpServer.registerToolkit(decodeAsAdvertised(toolkit))),
+    withToolAnalytics(
+      withAdvertisedSchemas(toolkit, McpServer.registerToolkit(decodeAsAdvertised(toolkit))),
+    ),
   ).pipe(Layer.provide(McpServer.McpServer.layer));
   // @effect-diagnostics-next-line unsafeEffectTypeAssertion:off - the auth middleware provides it per request.
   const registered = registration as Layer.Layer<
@@ -1107,7 +1187,7 @@ const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentHandlers.layer,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
-const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
+export const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
 
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
@@ -1142,7 +1222,8 @@ export const layerMcpTransport = McpServer.layerHttp({
   allowSessionTermination: true,
 }).pipe(Layer.provide(layerMcpAuthMiddleware));
 
-export const layer = Layer.mergeAll(
+/** Every tool the T3 MCP server advertises. AgentContextBudget.test.ts measures this set. */
+export const layerTools = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,
@@ -1154,4 +1235,6 @@ export const layer = Layer.mergeAll(
   layerPullRequestsToolkit,
   layerDeviceToolkit,
   layerHtmlToolkit,
-).pipe(Layer.provideMerge(layerMcpTransport));
+);
+
+export const layer = layerTools.pipe(Layer.provideMerge(layerMcpTransport));

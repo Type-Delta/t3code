@@ -1,4 +1,3 @@
-import { ChildProcessSpawner } from "effect/process";
 import { SourceControlProviderKind, VcsProcessSpawnError } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -20,19 +19,6 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as SourceControlDiscovery from "./SourceControlDiscovery.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 
-const processOutput = (
-  stdout: string,
-  options?: {
-    readonly stderr?: string;
-    readonly exitCode?: ChildProcessSpawner.ExitCode;
-  },
-): VcsProcess.VcsProcessOutput => ({
-  exitCode: options?.exitCode ?? ChildProcessSpawner.ExitCode(0),
-  stdout,
-  stderr: options?.stderr ?? "",
-  stdoutTruncated: false,
-  stderrTruncated: false,
-});
 const kind = SourceControlProviderKind.make;
 
 // Serves both the host's runs and the server's own VCS probes, whose inputs share these fields.

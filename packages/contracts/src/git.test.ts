@@ -1,8 +1,3 @@
-import {
-  GitRunStackedActionResult,
-  GitResolvePullRequestResult,
-  VcsStatusLocalResult,
-} from "./git.ts";
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
@@ -25,11 +20,8 @@ const decodePreparePullRequestThreadResult = Schema.decodeUnknownSync(
   GitPreparePullRequestThreadResult,
 );
 const decodeRunStackedActionInput = Schema.decodeUnknownSync(GitRunStackedActionInput);
-const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
-const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
 const decodeListWorktreesResult = Schema.decodeUnknownSync(VcsListWorktreesResult);
 const decodeListWorktreesInput = Schema.decodeUnknownSync(VcsListWorktreesInput);
-const decodeVcsStatusLocalResult = Schema.decodeUnknownSync(VcsStatusLocalResult);
 
 describe("GitCommandError", () => {
   it("decodes an unknown failure reason as absent", () => {

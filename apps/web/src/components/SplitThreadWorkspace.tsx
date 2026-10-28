@@ -52,6 +52,7 @@ import {
   useThreadStatus,
 } from "../state/entities";
 import ChatView from "./ChatView";
+import { BackgroundThreadContext } from "./chat/backgroundThread";
 import { threadShellHasStarted } from "./ChatView.logic";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { SplitPaneDropHint } from "./SplitPaneDropHint";
@@ -62,6 +63,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 interface SplitThreadWorkspaceProps {
   /** The thread represented by the browser URL before split-mode reconciliation. */
   currentRouteRef: ScopedThreadRef | null;
+  background?: boolean;
 }
 
 interface DraftPane {
@@ -153,6 +155,7 @@ function SplitThreadPane(props: {
   threadRef: ScopedThreadRef;
   draftPane: DraftPane | undefined;
   active: boolean;
+  background: boolean;
   isRightPanelOwner: boolean;
   rightPanelOpen: boolean;
   onToggleRightPanel: () => void;
@@ -177,6 +180,7 @@ function SplitThreadPane(props: {
 }) {
   const {
     active,
+    background,
     canPlaceThread,
     isExistingPane,
     draftPane,
@@ -212,8 +216,9 @@ function SplitThreadPane(props: {
   const serverThreadStarted = threadShellHasStarted(serverThreadShell);
   const threadKey = scopedThreadKey(threadRef);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Promote a draft when its server thread starts and synchronize the route.
   useEffect(() => {
-    if (!draftPane || !serverThreadStarted) {
+    if (background || !draftPane || !serverThreadStarted) {
       return;
     }
 
@@ -226,7 +231,7 @@ function SplitThreadPane(props: {
       return;
     }
     finalizePromotedDraftThreadByRef(threadRef);
-  }, [active, draftPane, navigate, serverThreadStarted, threadRef]);
+  }, [active, background, draftPane, navigate, serverThreadStarted, threadRef]);
 
   const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
     beginSplitThreadDrag(event.dataTransfer, threadRef);
@@ -386,7 +391,10 @@ function SplitThreadPane(props: {
  * Hosts all split panes while keeping the app-level right chrome owned by only
  * the focused pane. The URL remains a normal single-thread URL for that pane.
  */
-export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspaceProps) {
+export function SplitThreadWorkspace({
+  currentRouteRef,
+  background = false,
+}: SplitThreadWorkspaceProps) {
   const navigate = useNavigate();
   const paneRefs = useSplitViewStore(selectSplitPaneRefs);
   const activeGroup = useSplitViewStore(selectActiveSplitGroup);
@@ -407,6 +415,7 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   const gridHasTwoRows = paneSlots.some((slot) => slot.row === 1);
   const dropHintSlot =
     paneSlots[paneRefs.findIndex((paneRef) => scopedThreadKey(paneRef) === dropTarget?.paneKey)];
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribe to external split drag targets.
   useEffect(
     () =>
       subscribePointerSplitDropTarget((target) => {
@@ -455,14 +464,15 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
     routeToPane(navigate, threadRef, draftPaneByThreadKey.get(scopedThreadKey(threadRef)));
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Reconcile saved split panes with loaded environments and the route.
   useEffect(() => {
     // A partially loaded environment list cannot prove that a saved pane is gone.
-    if (!allProjectSnapshotsReady) return;
+    if (background || !allProjectSnapshotsReady) return;
     const fallback = useSplitViewStore.getState().reconcilePanes(availablePaneRefs);
     if (fallback) {
       navigateToPane(fallback);
     }
-  }, [allProjectSnapshotsReady, availablePaneRefs, navigateToPane]);
+  }, [background, allProjectSnapshotsReady, availablePaneRefs, navigateToPane]);
 
   const activePaneKey = activePane ? scopedThreadKey(activePane) : null;
   const rightPanelOpen = paneRefs.some(
@@ -526,7 +536,9 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
     setRightPanelOwnerThreadKey(resolvedRightPanelOwnerThreadKey);
   }
   const currentRouteKey = currentRouteRef ? scopedThreadKey(currentRouteRef) : null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keep split navigation and the router in step.
   useEffect(() => {
+    if (background) return;
     const state = useSplitViewStore.getState();
     const currentActivePane = selectActiveSplitPane(state);
     const pendingThreadKey = state.pendingNavigationThreadKey;
@@ -563,8 +575,16 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
       return;
     }
     navigateToPane(currentActivePane);
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- The effect reads the active pane from the store, so an activation must rerun it to route there.
-  }, [activePane, activePaneKey, currentRouteKey, currentRouteRef, navigateToPane, paneRefs]);
+  }, [
+    background,
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Activation must rerun routing, which reads the active pane from the store.
+    activePane,
+    activePaneKey,
+    currentRouteKey,
+    currentRouteRef,
+    navigateToPane,
+    paneRefs,
+  ]);
 
   const activatePane = (threadRef: ScopedThreadRef) => {
     const threadKey = scopedThreadKey(threadRef);
@@ -645,85 +665,95 @@ export function SplitThreadWorkspace({ currentRouteRef }: SplitThreadWorkspacePr
   }
 
   return (
-    <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh">
-      <DiffWorkerPoolProvider>
-        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <div
-              ref={setHeaderSlot}
-              className="relative z-20 min-w-0 shrink-0"
-              data-split-workspace-header
-            />
-            <div
-              ref={attachPaneGridAutoAnimateRef}
-              className={cn(
-                "relative grid min-h-0 min-w-0 flex-1 gap-px overflow-hidden bg-border",
-                splitThreadGridColumnClassName(paneRefs.length, paneSlots),
-                gridHasTwoRows ? "grid-rows-2" : "grid-rows-1",
-              )}
-              data-split-thread-grid
-              onDragEnd={() => {
-                endSplitThreadDrag();
-                setDropTarget(null);
-              }}
-              onDragOver={handleGridDragOver}
-              onDrop={handleGridDrop}
-            >
-              {paneRefs.map((threadRef, paneIndex) => {
-                const threadKey = scopedThreadKey(threadRef);
-                const slot = paneSlots[paneIndex];
-                if (!slot) return null;
-                return (
-                  <SplitThreadPane
-                    key={threadKey}
-                    threadRef={threadRef}
-                    draftPane={draftPaneByThreadKey.get(threadKey)}
-                    active={threadKey === activePaneKey}
-                    isRightPanelOwner={threadKey === rightPanelOwnerThreadKey}
-                    rightPanelOpen={rightPanelOpen}
-                    onToggleRightPanel={toggleRightPanel}
-                    paneIndex={paneIndex}
-                    slot={slot}
-                    gridHasTwoRows={gridHasTwoRows}
-                    canStackVertically={canStackUnderSplitPane(paneRefs, bottomPaneKeys, paneIndex)}
-                    canInsertColumn={canInsertColumn}
-                    paneColumns={paneColumns}
-                    canPlaceThread={canPlaceThread}
-                    isExistingPane={isExistingPane}
-                    onActivate={() => activatePane(threadRef)}
-                    onDetach={() => detachPane(threadRef)}
-                    onDropTargetChange={setDropTarget}
-                    onPlaceThread={placeThread}
-                    headerSlot={headerSlot}
-                    rightPanelSlot={rightPanelSlot}
+    <SidebarInset
+      inert={background}
+      className="h-svh min-h-0 overflow-hidden overscroll-y-none md:h-dvh"
+    >
+      <BackgroundThreadContext value={background}>
+        <DiffWorkerPoolProvider>
+          <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+              <div
+                ref={setHeaderSlot}
+                className="relative z-20 min-w-0 shrink-0"
+                data-split-workspace-header
+              />
+              <div
+                ref={attachPaneGridAutoAnimateRef}
+                className={cn(
+                  "relative grid min-h-0 min-w-0 flex-1 gap-px overflow-hidden bg-border",
+                  splitThreadGridColumnClassName(paneRefs.length, paneSlots),
+                  gridHasTwoRows ? "grid-rows-2" : "grid-rows-1",
+                )}
+                data-split-thread-grid
+                onDragEnd={() => {
+                  endSplitThreadDrag();
+                  setDropTarget(null);
+                }}
+                onDragOver={handleGridDragOver}
+                onDrop={handleGridDrop}
+              >
+                {paneRefs.map((threadRef, paneIndex) => {
+                  const threadKey = scopedThreadKey(threadRef);
+                  const slot = paneSlots[paneIndex];
+                  if (!slot) return null;
+                  return (
+                    <SplitThreadPane
+                      key={threadKey}
+                      threadRef={threadRef}
+                      draftPane={draftPaneByThreadKey.get(threadKey)}
+                      active={threadKey === activePaneKey}
+                      background={background}
+                      isRightPanelOwner={threadKey === rightPanelOwnerThreadKey}
+                      rightPanelOpen={rightPanelOpen}
+                      onToggleRightPanel={toggleRightPanel}
+                      paneIndex={paneIndex}
+                      slot={slot}
+                      gridHasTwoRows={gridHasTwoRows}
+                      canStackVertically={canStackUnderSplitPane(
+                        paneRefs,
+                        bottomPaneKeys,
+                        paneIndex,
+                      )}
+                      canInsertColumn={canInsertColumn}
+                      paneColumns={paneColumns}
+                      canPlaceThread={canPlaceThread}
+                      isExistingPane={isExistingPane}
+                      onActivate={() => activatePane(threadRef)}
+                      onDetach={() => detachPane(threadRef)}
+                      onDropTargetChange={setDropTarget}
+                      onPlaceThread={placeThread}
+                      headerSlot={headerSlot}
+                      rightPanelSlot={rightPanelSlot}
+                    />
+                  );
+                })}
+                {dropTarget && dropHintSlot ? (
+                  <SplitPaneDropHint
+                    className="inset-0"
+                    position={dropTarget.position}
+                    style={{
+                      gridColumn: `${dropHintSlot.column + 1} / span 1`,
+                      gridRow:
+                        gridHasTwoRows &&
+                        (dropHintSlot.spansBothRows ||
+                          dropTarget.position === "before" ||
+                          dropTarget.position === "after")
+                          ? "1 / span 2"
+                          : dropHintSlot.row + 1,
+                    }}
                   />
-                );
-              })}
-              {dropTarget && dropHintSlot ? (
-                <SplitPaneDropHint
-                  className="inset-0"
-                  position={dropTarget.position}
-                  style={{
-                    gridColumn: `${dropHintSlot.column + 1} / span 1`,
-                    gridRow:
-                      gridHasTwoRows &&
-                      (dropHintSlot.spansBothRows ||
-                        dropTarget.position === "before" ||
-                        dropTarget.position === "after")
-                        ? "1 / span 2"
-                        : dropHintSlot.row + 1,
-                  }}
-                />
-              ) : null}
+                ) : null}
+              </div>
             </div>
+            <div
+              ref={setRightPanelSlot}
+              className="relative flex min-h-0 min-w-0 shrink-0"
+              data-split-workspace-right-panel
+            />
           </div>
-          <div
-            ref={setRightPanelSlot}
-            className="relative flex min-h-0 min-w-0 shrink-0"
-            data-split-workspace-right-panel
-          />
-        </div>
-      </DiffWorkerPoolProvider>
+        </DiffWorkerPoolProvider>
+      </BackgroundThreadContext>
     </SidebarInset>
   );
 }

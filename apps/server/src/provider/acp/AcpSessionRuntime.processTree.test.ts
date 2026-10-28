@@ -9,33 +9,10 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Sink from "effect/Sink";
-import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import {
-  capturePosixOwnershipLedger,
-  isSafeCgroupPath,
-  makeLinuxCgroupController,
-  makePosixProcessTreeController,
-  observePosixOwnershipLedger,
-  parseCgroup2Mount,
-  parseCgroup2Mounts,
-  parseUnifiedCgroupPath,
-  posixProcessIsZombie,
-  resolveLinuxCgroupTargetCommand,
-  signalLinuxCgroupRootTerm,
-  sweepStaleLinuxCgroupSiblings,
-  terminateLinuxCgroupLease,
-  terminatePosixOwnedProcessTree,
-  wrapCommandForLinuxCgroup,
-  type AcpOwnedPosixProcess,
-  type AcpLinuxCgroupLease,
-  type AcpPosixOwnershipRoot,
-  type AcpPosixProcessIdentity,
-  type AcpPosixProcessTreeController,
-} from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 
 const identity = (
@@ -100,15 +77,6 @@ function makeProcessHandle(exitCode = 0) {
   });
 }
 
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 describe("terminatePosixOwnedProcessTree", () => {
   it.effect("suppresses only successful Windows finalizer retries", () =>
     Effect.gen(function* () {
@@ -164,12 +132,12 @@ describe("terminatePosixOwnedProcessTree", () => {
     expect(AcpSessionRuntime.isSafeCgroupPath("/user.slice/../escape")).toBe(false);
     expect(AcpSessionRuntime.isSafeCgroupPath("/user.slice/app.scope (deleted)")).toBe(false);
     expect(
-      AcpSessionRuntime.parseCgroup2Mount(
+      AcpSessionRuntime.parseCgroup2Mounts(
         "42 31 0:37 /user.slice /sys/fs/cgroup/user\\040mount rw - cgroup2 cgroup2 rw\n",
-      ),
+      )[0],
     ).toEqual({ mountPoint: "/sys/fs/cgroup/user mount", root: "/user.slice" });
     expect(
-      AcpSessionRuntime.parseCgroup2Mount("42 31 0:37 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n"),
+      AcpSessionRuntime.parseCgroup2Mounts("42 31 0:37 / /sys/fs/cgroup rw - tmpfs tmpfs rw\n")[0],
     ).toBeUndefined();
     expect(
       AcpSessionRuntime.parseCgroup2Mounts(
@@ -263,7 +231,7 @@ describe("terminatePosixOwnedProcessTree", () => {
         AcpSessionRuntime.resolveLinuxCgroupTargetCommand("grok", scratch, { PATH: undefined }),
       ).toBeUndefined();
       expect(
-        AcpSessionRuntime.resolveLinuxCgroupTargetCommand("node", scratch, { PATH: undefined }),
+        AcpSessionRuntime.resolveLinuxCgroupTargetCommand("sh", scratch, { PATH: undefined }),
       ).toBeDefined();
       expect(
         AcpSessionRuntime.resolveLinuxCgroupTargetCommand("grok", scratch, {

@@ -32,7 +32,7 @@ export class RunFinalizationObserver extends Context.Reference<{
   readonly refresh: (input: {
     readonly cwd: string;
     readonly threadId: ThreadId;
-    readonly runId: RunId;
+    readonly runId?: RunId;
     readonly vcs?: boolean;
   }) => Effect.Effect<void, RunFinalizationRefreshError>;
 }>("t3/orchestration-v2/RunFinalizationObserver", {
@@ -137,7 +137,7 @@ export const layerObserver = Layer.effect(
             [workspaceEntries.refresh(cwd), vcsStatus.refreshLocalStatus(cwd)],
             { concurrency: "unbounded" },
           );
-          if (local.refName === null || local.isDefaultRef) return;
+          if (runId === undefined || local.refName === null || local.isDefaultRef) return;
           const thread = yield* projections.getThreadShell(threadId);
           if (!thread || thread.branch !== local.refName) return;
           if (thread.activeRunId !== null && thread.activeRunId !== runId) return;

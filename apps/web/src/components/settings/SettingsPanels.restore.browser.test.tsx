@@ -57,12 +57,12 @@ const render = () => renderClient(<Probe />);
 describe("restoring V2 settings", () => {
   it.each([
     ["persistComposerContextStrip", "Composer context"],
-    ["autoResumeLimitedThreads", "Auto-resume limited threads"],
-    ["snoozeLimitedThreads", "Snooze limited threads"],
+    ["autoResumeLimitedThreads", "Resume after usage limits"],
+    ["snoozeLimitedThreads", "Snooze until limits reset"],
   ] as const)("restores %s when it is the only changed setting", async (key, label) => {
     setup();
     state.settings = { ...DEFAULT_UNIFIED_SETTINGS, [key]: !DEFAULT_UNIFIED_SETTINGS[key] };
-    await using screen = await render();
+    await using _screen = await render();
 
     expect(restore.changedSettingLabels).toEqual([label]);
     await act(() => restore.restoreDefaults());
@@ -79,7 +79,7 @@ describe("restoring V2 settings", () => {
       autoResumeLimitedThreads: !DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
     };
     state.confirm.mockResolvedValue(false);
-    await using screen = await render();
+    await using _screen = await render();
 
     await act(() => restore.restoreDefaults());
 

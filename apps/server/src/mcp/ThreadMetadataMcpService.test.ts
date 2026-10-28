@@ -1,6 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -76,42 +76,5 @@ it.effect("keeps calling-thread storage failures as orchestration errors", () =>
     );
 
     expect(error.code).toBe("orchestration_error");
-  }),
-);
-
-it.effect("rejects project-scoped metadata updates in another project", () =>
-  Effect.gen(function* () {
-    const ownProjectId = ProjectId.make("project:metadata-own");
-    const foreignProjectId = ProjectId.make("project:metadata-foreign");
-    const foreignThreadId = ThreadId.make("thread:metadata-foreign");
-    const ownShell = {
-      id: threadId,
-      projectId: ownProjectId,
-      deletedAt: null,
-    } as never;
-    const foreignShell = {
-      id: foreignThreadId,
-      projectId: foreignProjectId,
-      deletedAt: null,
-    } as never;
-    const projectScope = {
-      ...scope,
-      mcpToolScope: "project" as const,
-      thread: { ...scope.thread!, threadId },
-    };
-    const error = yield* Effect.gen(function* () {
-      const service = yield* ThreadMetadataMcp.ThreadMetadataMcpService;
-      return yield* service.update(projectScope, {
-        action: "rename",
-        threadId: foreignThreadId,
-        title: "should stay private",
-      });
-    }).pipe(
-      Effect.provide(
-        layerService((id) => Effect.succeed(id === threadId ? ownShell : foreignShell)),
-      ),
-      Effect.flip,
-    );
-    expect(error.code).toBe("thread_not_found");
   }),
 );

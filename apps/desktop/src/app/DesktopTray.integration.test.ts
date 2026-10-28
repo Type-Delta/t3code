@@ -1,3 +1,4 @@
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import { describe, expect, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -197,6 +198,9 @@ describe("DesktopTray authentication integration", () => {
           platform: "linux",
         } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
         const stateLayer = Layer.succeed(DesktopState.DesktopState, {
+          primaryBackendStartup: yield* SubscriptionRef.make<DesktopState.PrimaryBackendStartup>({
+            _tag: "Starting",
+          }),
           backendReady: yield* Ref.make(false),
           quitting: yield* Ref.make(false),
         });

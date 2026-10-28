@@ -286,6 +286,7 @@ export function CompatibleApiGatewaySection({
     setGateway(readApiGatewayDraft(value));
     if (syncedInputs.idPrefix !== idPrefix) setApiKey("");
   }
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Migrate legacy keys through the settings change callback.
   useEffect(() => {
     const configured = readApiGatewayDraft(value).apiKeyEnvironmentVariable;
     const fingerprint = `${idPrefix}\0${configured}`;

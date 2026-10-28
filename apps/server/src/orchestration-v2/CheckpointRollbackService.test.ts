@@ -48,6 +48,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as RunFinalization from "./RunFinalizationService.ts";
 
 const unrelatedProject = Option.some({
   workspaceRoot: "/nonexistent/t3-rollback-project",
@@ -462,7 +463,7 @@ it.effect.each([
           Layer.mock(ProjectStore.ProjectStoreV2)({
             get: (id) => {
               assert.equal(id, projectId);
-              return Effect.succeed(Option.some({ workspaceRoot } as never));
+              return Effect.succeedSome({ workspaceRoot } as never);
             },
           }),
           Layer.mock(GitWorkflow.GitWorkflowService)({
@@ -581,6 +582,7 @@ it.effect.each([
 
 it.effect.each([
   { restoreFiles: true, shared: "none" },
+  { restoreFiles: true, shared: "none", refreshFails: true },
   { restoreFiles: false, shared: "root" },
   { restoreFiles: true, shared: "root" },
   { restoreFiles: true, shared: "worktree" },
@@ -590,7 +592,7 @@ it.effect.each([
   { restoreFiles: false, shared: "none", targetOrdinal: 1, multipleTurns: true },
 ])(
   "rewinds safely with %s",
-  ({ restoreFiles, shared, targetOrdinal = 0, multipleTurns = false }) => {
+  ({ restoreFiles, shared, targetOrdinal = 0, multipleTurns = false, refreshFails = false }) => {
     const threadId = ThreadId.make("rewind-files");
     const providerThreadId = ProviderThreadId.make("rewind-provider");
     const providerSessionId = ProviderSessionId.make("rewind-session");
@@ -665,6 +667,20 @@ it.effect.each([
       Layer.provide(
         Layer.mergeAll(
           layerThreadCommands,
+          Layer.succeed(RunFinalization.RunFinalizationObserver, {
+            refreshAfterTurn: () => Effect.void,
+            refresh: ({ cwd }) =>
+              Effect.gen(function* () {
+                assert.equal(cwd, process.cwd());
+                calls.push("refresh");
+                if (refreshFails) {
+                  return yield* new RunFinalization.RunFinalizationRefreshError({
+                    cwd,
+                    cause: "test",
+                  });
+                }
+              }),
+          }),
           Layer.mock(CheckpointService.CheckpointServiceV2)({
             restore: () =>
               Effect.sync(() => {
@@ -742,7 +758,7 @@ it.effect.each([
       yield* service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles });
       assert.deepEqual(
         calls,
-        restoreFiles ? ["provider", "files", "projection"] : ["provider", "projection"],
+        restoreFiles ? ["provider", "files", "refresh", "projection"] : ["provider", "projection"],
       );
     }).pipe(Effect.provide(layerTest));
   },

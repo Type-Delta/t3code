@@ -84,7 +84,7 @@ V2 turn checkpoints live in a private bare-Git sidecar repository below the serv
 
 Checkpoints captured between the 2026-10-08 redo and this re-port were written as `refs/t3/orchestration-v2/checkpoints/*` refs in the project repository. They still load, diff, and restore: each boundary lookup tries its sidecar snapshot first, then that in-repo ref. New boundaries always go to the sidecar. Upstream's checkpoint rollback locking and the per-workspace capture lock are unchanged.
 
-A rollback leaves the forward checkpoints ready so the user can redo back to them. Upstream #21804 retires those stale checkpoints during rollback; the fork keeps redo, adapts upstream's rollback tests to expect them ready, and removes upstream's unused rollback `staleCheckpoints` query and `CheckpointService.deleteStaleRefs`. The lower `CheckpointStore.deleteCheckpointRefs` chain is kept to match upstream.
+A rollback leaves the forward checkpoints ready so the user can redo back to them. Restoring a checkpoint refreshes workspace entries and local VCS status for both undo and redo. Upstream #21804 retires those stale checkpoints during rollback; the fork keeps redo, adapts upstream's rollback tests to expect them ready, and removes upstream's unused rollback `staleCheckpoints` query and `CheckpointService.deleteStaleRefs`. The lower `CheckpointStore.deleteCheckpointRefs` chain is kept to match upstream.
 
 Upstream #14892 marks a checkpoint `missing` when its workspace folder is ignored by the repository. Sidecar captures enforce the same rule in `SidecarCheckpointRepository.ts`: an ignored workspace is rejected only when Git lists no tracked or re-included files in it (`CheckpointStore.test.ts` covers rejection, a force-tracked file, and a negated rule).
 
@@ -148,17 +148,9 @@ Pinned and Active drag boundaries occupy normal layout rows, including an empty 
 
 **Last updated:** 2026-10-26
 
-### DL009 — Global default for agent tool access
-
-Agent MCP tool scope now has an environment-level default with Automatic, Project, and Global choices. Project settings display Default when no override is stored and resolve that choice through the global default; Automatic retains repository-aware behavior.
-
-**Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/server/src/mcp/McpToolScope.ts`, `apps/web/src/components/settings/IntegrationsSettings.tsx`, and `apps/web/src/components/settings/ProjectMcpToolScopeSettings.tsx`.
-
-**Recorded validation:** focused MCP scope tests, `vp check`, and `vp run typecheck`.
-
 ### DL012 — Prompt preservation during draft promotion
 
-The initial optimistic prompt remains visible while a draft route becomes its server-backed thread. Chat timeline state resets only when the scoped thread identity changes, so the projected `thread.message-sent` event replaces the prompt instead of briefly erasing it. Dispatch and first-message launch RPCs share a ten-second acknowledgement timeout; a lost WebSocket reply therefore enters the existing visible failure path and restores the durable composer draft instead of leaving a refresh-only optimistic message indefinitely. The acknowledgement covers receipt of the launch RPC, not completion of workspace setup. If an acknowledgement arrives after the ten-second timeout, the server still lands the message while the restored draft remains visible; manually resending that draft can therefore duplicate the message.
+Upstream now keeps the optimistic prompt visible while a draft becomes its server-backed thread. The fork keeps the acknowledgement bound: dispatch and first-message launch RPCs share a ten-second acknowledgement timeout; a lost WebSocket reply therefore enters the existing visible failure path and restores the durable composer draft instead of leaving a refresh-only optimistic message indefinitely. The acknowledgement covers receipt of the launch RPC, not completion of workspace setup. If an acknowledgement arrives after the ten-second timeout, the server still lands the message while the restored draft remains visible; manually resending that draft can therefore duplicate the message.
 
 **Implementation evidence:** `apps/web/src/components/ChatView.tsx` and `packages/client-runtime/src/operations/commands.ts`.
 
@@ -315,39 +307,16 @@ Thread Markdown preserves local Windows drive-letter destinations through URL sa
 
 **Last updated:** 2026-10-25
 
-### DL023 – Scoped V2 MCP thread and project tools
-
-The upstream singular V2 MCP toolkit remains authoritative. Provider callers resolve to project or
-global scope per project setting: Git-backed projects default to project scope, non-Git projects
-default to global scope, and every project can override the default. Project-scoped callers can
-operate only inside their project; global callers may read, launch, send, and wait across projects,
-with the upstream user-attached cross-project read exception preserved.
-
-That boundary also covers every MCP resource selector: pull-request thread links and review-guide
-checkouts, workflow stops, scheduled-task list/update/delete/run-now, and scratch launches. A shared
-project authorization check is applied after resolving the target resource and before any read or
-write that could expose or trigger work in another project; management keys retain their explicit
-environment-wide semantics.
+### DL023 — V2 MCP thread controls
 
 t3_thread_wait accepts up to eight targets and applies the upstream one-hour cap. t3_thread_send can
 select a provider instance and model, and rejects a provider caller that targets its own thread.
-create_threads remains a project-scoped provider tool and is not available to management-key callers.
-Management-key discovery and invocation is limited to the reviewed orchestrator_capabilities,
-t3_thread**, and t3_project** allowlist (with create_threads excluded); all other MCP toolkits retain
-upstream discovery and capability rules.
+Management keys retain their explicit environment-wide permissions and reviewed tool allowlist. Strict MCP tool schemas advertise and reject unknown parameters.
 
-Implementation evidence: McpInvocationContext, McpHttpServer, McpToolScope, threadAccess, the
-orchestrator/project/thread toolkits, orchestratorMcp and managementApiKeys contracts, and
-ProjectMcpToolScopeSettings.
+**Implementation evidence:** `apps/server/src/mcp/OrchestratorMcpService.ts`, the thread toolkit,
+`packages/contracts/src/orchestratorMcp.ts`, and the management API key contracts.
 
-Recorded validation: focused MCP scope, management-key filtering, provider self-send, cross-project
-authorization, model/provider selection, wait-target, and toolkit registration tests; 129 focused
-native-session/MCP/checkpoint tests; vp check; and vp run typecheck.
-
-Project-scoped search applies its project predicate before ranking and limiting results, so a recent
-thread from another project cannot hide a matching local result.
-
-Last updated: 2026-10-04
+**Last updated:** 2026-10-28
 
 ### DL026 — Per-instance API gateway model catalogs
 
@@ -466,13 +435,13 @@ tests, `vp check`, and `vp run typecheck`.
 
 ### DL029 — Selectable sidebar thread ordering
 
-When Working is disabled, the web and desktop sidebar offers **Manual** ordering by default and **Last input** ordering in General settings. Manual preserves saved positions and sidebar drag actions. Last input ignores saved active-order keys and promotes threads on user-authored messages while retaining creation and un-settle lifecycle anchors. Delegated-agent messages and automatic wakes do not advance Last input ordering; older servers without a user-authored timestamp retain the user-role timestamp fallback. Switching modes preserves saved keys. While upstream Working is enabled, the Inbox uses return-priority order, placing threads that most recently returned for attention first. Disabling Working restores the saved Manual or Last input preference. Active-row manual reordering is unavailable while Working is enabled; pin actions, shelf moves, and dragging into splits remain available. Dragging a row into the conversation creates or extends a split in either mode, without a separate grip control. Initial split creation reuses the existing pane-drop overlay to show its right-side placement. The dragged row uses the same row appearance in a document-level drag overlay, preserving sidebar scroll position and avoiding clipping behind the conversation.
+When Working is disabled (upstream enables it by default), the web and desktop sidebar offers **Manual** ordering by default and **Last input** ordering in General settings. Upstream's Labs project-folder mode has no Working shelf and applies the same preference within each folder. Manual preserves saved positions and sidebar drag actions. Last input ignores saved active-order keys and promotes threads on user-authored messages while retaining creation and un-settle lifecycle anchors. Delegated-agent messages and automatic wakes do not advance Last input ordering; older servers without a user-authored timestamp retain the user-role timestamp fallback. Switching modes preserves saved keys. While upstream Working is enabled, the Inbox uses return-priority order, placing threads that most recently returned for attention first. Disabling Working restores the saved Manual or Last input preference. Active-row manual reordering is unavailable while Working is enabled; pin actions, shelf moves, and dragging into splits remain available. Dragging a row into the conversation creates or extends a split in either mode, without a separate grip control. Initial split creation reuses the existing pane-drop overlay to show its right-side placement. The dragged row uses the same row appearance in a document-level drag overlay, preserving sidebar scroll position and avoiding clipping behind the conversation.
 
 **Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/web/src/components/settings/SettingsPanels.tsx`, `apps/web/src/components/Sidebar.tsx`, `apps/web/src/components/Sidebar.logic.ts`, and their focused tests.
 
 **Recorded validation:** focused settings, sidebar sorting, pointer lifecycle, and split target tests; isolated browser checks for initial split creation, pane placement, manual reordering, Last input mode, and settings persistence; `vp check`; and `vp run typecheck`. The 2026-10-26 regression checks cover agent messages, threads without human input, subsequent user messages, and older-server fallback. An isolated browser pass confirmed human input ordering and persistence after reload.
 
-**Last updated:** 2026-10-26
+**Last updated:** 2026-10-28
 
 ### DL030 — Isolated macOS GitHub releases
 
@@ -498,7 +467,7 @@ the workflow can adopt upstream's `--signed` path once those secrets exist.
 
 Management-key HTTP requests use request-time authorization and relay endpoint resolution, including one credential renewal retry for an invalid credential. Insufficient-scope errors do not retry. Bearer and DPoP requests explicitly omit browser cookies so a stale session cookie cannot override the selected environment credential; cookie-authenticated requests continue to include cookies. Regression coverage checks the credential modes and reproduces the collision against the server.
 
-Integrations settings can select any known machine and create environment-wide management API keys
+Sharing & access settings can select any known machine and create environment-wide management API keys
 there with named read-only, thread-orchestration, or custom scopes and explicit expiration. The
 selected environment's prepared HTTP connection supplies its own URL and
 cookie, bearer, or DPoP authorization, so listing and every mutation reach the chosen machine. A
@@ -537,7 +506,7 @@ secrets.
 `apps/server/src/auth/ManagementApiKeyService.ts`,
 `apps/server/src/persistence/ManagementApiKeys.ts`,
 `apps/server/src/persistence/Migrations/050_ManagementApiKeys.ts`,
-`apps/server/src/persistence/Migrations/052_RemoveManagementApiKeyRuntimeModes.ts`,
+`apps/server/src/persistence/ForkMigrations.ts`,
 `apps/server/src/mcp/McpInvocationContext.ts`, `apps/server/src/mcp/McpHttpServer.ts`,
 `apps/server/src/mcp/toolkits/thread/handlers.ts`, `packages/contracts/src/managementApiKeys.ts`,
 and `docs/user/thread-tools.md`.
@@ -557,8 +526,8 @@ keys. Repository-wide `vp check` and `vp run typecheck` passed.
 
 ### DL032 – Automatic resume after native provider usage limits
 
-Auto-resume remains enabled by default for all threads and can be turned off under Settings ->
-General -> Auto-resume after usage limits. V2 persists the failed run's exact provider reset time
+Auto-resume remains enabled by default for all threads and can be turned off under Settings →
+Threads → Resume after usage limits. V2 persists the failed run's exact provider reset time
 and recovery identity. A shared five-second scheduler checks durable failed-thread candidates; it
 does not wait for a provider-specific timer. A candidate is dispatched only when its reset time has
 passed, the thread is still eligible, and its persisted run/message identity is unchanged. The
@@ -598,11 +567,11 @@ next prompt. The agent writes it from its real context (repository instructions,
 conversation so far); no separate model call, provider session, or transcript summary is made.
 `ProviderRuntimeIngestion` withholds any partial or open tag from streamed and buffered deltas,
 strips every tagged block at completion, and carries the sanitized text as `suggestion` on the
-assistant message through the decider, projector, client reducer, and SQLite projection. Persistence keeps upstream migrations 1–69 in `effect_sql_migrations` and fork migrations 1–15 in the independent `fork_sql_migrations` ledger. The web composer shows it as ghost text once the thread is idle and the
+assistant message through the decider, projector, client reducer, and SQLite projection. Persistence keeps upstream migrations 1–72 in `effect_sql_migrations` and fork migrations 1–15 in the independent `fork_sql_migrations` ledger. The web composer shows it as ghost text once the thread is idle and the
 composer is empty; Tab accepts it, typing dismisses it for that message, and a new message or
 thread resets it. Cursor, Grok, OpenCode, and Antigravity receive no instruction. Mobile has no
 toggle or ghost text. An optional `promptSuggestionInstructions` setting appends extra guidance to
-the built-in instruction. Both settings live under Settings → General → Prompt suggestion.
+the built-in instruction. Both settings live under Settings → Chat → Prompt suggestion.
 They persist on the client and travel with turn requests to local or remote environments;
 server settings do not control them. Codex applies the submitting client's preference per
 turn. Claude pins the preference and instructions at its first session start in a thread,
@@ -678,18 +647,6 @@ This is an experiment to reduce abrupt termination. It does not establish or fix
 
 **Last updated:** 2026-10-02
 
-### DL040 — Live project-scoped working tree diffs
-
-Diff previews for an active project are authorized against that registered project root, including projects outside the server startup directory. The web client no longer substitutes the environment startup repository when the selected project is outside that directory.
-
-While DiffPanel is open, working-tree and branch previews refresh once per second. The panel's Git-status-based scope selection is upstream behavior.
-
-**Implementation evidence:** `apps/server/src/review/ReviewService.ts`, `apps/server/src/ws.ts`, and `packages/client-runtime/src/state/review.ts`.
-
-**Recorded validation:** focused review-service authorization and DiffPanel store tests; controlled-browser reproduction and verification with an external registered project, including a file modification made while the panel remained open; `vp check`; and `vp run typecheck`.
-
-**Last updated:** 2026-09-05
-
 ### DL041 — Project-selecting local thread shortcut
 
 The configured Chat: New Local shortcut opens the command palette's "New thread in..." project picker instead of immediately creating a draft in the active project. The same shortcut enters that picker when the command palette already has focus, while the active-project quick-create remains available as a separate palette action.
@@ -759,10 +716,10 @@ Inline Markdown images backed by host files retry a bounded number of times afte
 mint fails. Agents can stream a Markdown path before the file is finished writing; the asset query
 otherwise caches the not-found response while opening the same path in the image viewer explicitly
 refreshes it. Retries require the filesystem read permission and stop after the short backoff or a
-successful signed URL. The retry identity uses the environment and resource value, so streaming renders do not restart the retry budget and a different resource receives its own budget.
+successful signed URL. The retry identity uses the environment and resource value, so streaming renders do not restart the retry budget and a different resource receives its own budget. Reopening a file preview without a workspace revision refreshes its cached URL or failure.
 
-**Implementation evidence:** `apps/web/src/components/chat/ChatMarkdownMedia.tsx` and
-`apps/web/src/components/ChatMarkdown.assets.browser.test.tsx`.
+**Implementation evidence:** `apps/web/src/components/chat/ChatMarkdownMedia.tsx`,
+`apps/web/src/assets/assetUrls.ts`, and `apps/web/src/components/ChatMarkdown.assets.browser.test.tsx`.
 
 **Recorded validation:** focused ChatMarkdown asset tests.
 
@@ -825,19 +782,53 @@ existing request response flow.
 
 **Last updated:** 2026-10-26
 
-### DL049 — Header actions clear the panel toggles
-
-The web and desktop chat header reserves space for all three panel toggles so Git actions
-such as Create PR and Commit & push remain unobstructed. With an inline right panel open,
-the header still reserves space for the thread-details toggle that remains beside it.
-
-**Last updated:** 2026-10-28
-
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
 
 Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+
+### 2026-10-28 — Merge upstream/main through `40d335a7ba`
+
+**Merge commit:** this commit
+**Parents:** `2f1d2d0bbf13717fab719f6ffff9724c1ab6d065` (fork) and `40d335a7ba8ed0e6158a400188b5ed174e6ed19b` (upstream/main); 559 upstream commits since `b808f7fc6d`.
+
+The sync keeps 38 divergence entries. Three were retired by explicit decision: DL009, DL040 and DL049.
+
+User decisions:
+
+- Adopt upstream's Working shelf default (on). DL029 ordering applies while Working is off and inside upstream's Labs project folders, which have no Working shelf.
+- Remove the fork's project/global MCP tool scope and its environment default (DL009 retired). Every provider caller now follows upstream's cross-project and linked-environment rules. DL023 keeps eight-target waits, provider/model send selection, self-send rejection and the management-key allowlist, rewritten for upstream's consolidated action tools (#25423).
+- Adopt upstream's diff refresh model (DL040 retired). The one-second poll is gone; upstream already authorizes previews against registered project roots.
+- Adopt upstream's chat header (DL049 retired). Git actions, project scripts and Open-in controls live in the thread-details card. This also restores upstream's operate-scope guard on header rename.
+
+Other decisions:
+
+- Accept upstream's deletion of LegacySidebar; the fork's split, highlighting, detach and ordering behavior already lives in Sidebar.
+- Accept upstream's removal of the legacy `ProviderRuntimeEvent` contract and its test; DL044 lives in the V2 Claude adapter. Accept removal of thread-update PR-link actions; the standalone link/unlink tools remain.
+- Drop the fork's dead GitActionsControl PR callback wiring and the integration-only `upstreamBranch` publish result, both removed upstream in #26238.
+- Restore `@formkit/auto-animate` (split panes) and the `@modelcontextprotocol/sdk` dev dependency (MCP schema validation test), which upstream dropped.
+- Keep canonical upstream migration IDs through 072 and fork IDs 1–15.
+
+Integration repairs:
+
+- Forwarded multi-target waits keep settled results across chunks and retry only unfinished targets, pinned to their runs.
+- Codex app-server clients notify both the internal termination deferred and a caller-supplied `onTermination`.
+- Split panes go inert and pause route reconciliation under the modal Settings and Usage pages. A draft promoted by upstream's store keeps its split mounted.
+- The model picker's All group shows provider labels and sizes its popup with that group.
+- The shared review atom no longer polls while hidden. Checkpoint undo and redo refresh workspace entries and local VCS status.
+- A sidebar re-render no longer replaces the list ref and cancels an active row drag.
+- Strict MCP tool schemas advertise rejection of unknown parameters, matching Effect's runtime behavior.
+
+Validation:
+
+- Repository-wide `vp check` and `vp run typecheck` pass. Mobile native static checks pass.
+- The full server suite passed 452 files (5,467 tests, seven skipped). After the final fixes, the web suite passed 452 files (5,013 tests) and the server orchestration suites 113 files (1,905 tests). One earlier web run hit timing-dependent telemetry failures in an upstream-identical test that passes in isolation.
+- A read-only snapshot of the 3 GB live database applied upstream migrations 070–072, reran idempotently, matched the migration manifest, kept fork ledger 1–15, and passed `foreign_key_check` and `quick_check`.
+- Independent client (Claude Opus 5.5) and server (GPT 6.1 Sol) audits checked every divergence entry; their findings were fixed above.
+- A paired web client on seeded real data completed live Codex and Claude turns. A Claude thread in a selected existing worktree undid and redid its file change, with the Changes count following each step. Settings pages, model search, header layout at desktop, panel and phone widths, sidebar drag into a two-pane split, and Settings over a split were checked.
+- Desktop and web production builds pass. Linux AppImage and deb installers build. The AppImage, launched under Xvfb with isolated state, created its window, started its backend, and migrated a fresh database. Native mobile runtime and Windows/macOS installers were not exercised. No deployment was performed.
+- `knip:check` already failed on pre-merge `dev`; the merged tree passes its file stage and reports unused exports.
 
 ### 2026-10-25 — Merge upstream/main through `b808f7fc6d`
 

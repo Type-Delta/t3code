@@ -197,7 +197,7 @@ it.effect.each([
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-const compileNative = Effect.fn("test.compileNative")(function* (
+const _compileNative = Effect.fn("test.compileNative")(function* (
   executablePath: string,
   source: string,
 ) {
@@ -284,7 +284,7 @@ it.effect.each([
   { kind: "native", name: "volta-shim" },
   { kind: "native", name: "mise" },
   { kind: "native", name: "aqua-proxy" },
-])("preserves the invoked name of $kind $name launcher symlinks", ({ kind, name }) =>
+])("preserves the invoked name of $kind $name launcher symlinks", ({ kind: _kind, name: _name }) =>
   Effect.gen(function* () {
     const h = yield* makeHarness({ local: { version: "0.156.1" } });
     const launcher = `${h.baseDir}/launcher${hostPlatform === "win32" ? ".cmd" : ""}`;

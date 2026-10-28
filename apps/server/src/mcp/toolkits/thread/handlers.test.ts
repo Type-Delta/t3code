@@ -33,6 +33,7 @@ const modelSelection = { instanceId: providerInstanceId, model: "gpt-5" };
 const managementInvocation = (scopes: ReadonlyArray<ManagementApiKeyScope>) =>
   ({
     environmentId,
+    requestNamespace: "management:mcp-thread-tools-management",
     principal: {
       type: "management-key" as const,
       keyId: ManagementApiKeyId.make("mcp-thread-tools-management"),
@@ -118,12 +119,12 @@ it.effect("requires management keys to scope reads and mutations to explicit thr
     const toolkit = yield* toolkitEffect;
 
     const missingTarget = yield* toolkit
-      .handle("t3_thread_configuration", {})
+      .handle("t3_thread_configure", {})
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(missingTarget.at(-1)?.result).toMatchObject({ code: "target_required" });
 
     const configuration = yield* toolkit
-      .handle("t3_thread_configuration", { threadId: targetThreadId })
+      .handle("t3_thread_configure", { threadId: targetThreadId })
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(configuration.at(-1)?.result).toMatchObject({
       threadId: targetThreadId,
@@ -161,7 +162,8 @@ it.effect("runs management-key thread mutations without inventing a provider cal
     expect(configured.at(-1)?.result).toMatchObject({ sequence: 17 });
 
     const forked = yield* toolkit
-      .handle("t3_thread_fork", {
+      .handle("t3_thread_transfer", {
+        action: "fork",
         threadId: sourceThreadId,
         sourcePoint: { type: "latest_stable" },
       })
@@ -169,8 +171,9 @@ it.effect("runs management-key thread mutations without inventing a provider cal
     expect(forked.at(-1)?.result).toMatchObject({ sequence: 17 });
 
     const merged = yield* toolkit
-      .handle("t3_thread_merge_back", {
-        sourceThreadId,
+      .handle("t3_thread_transfer", {
+        action: "merge_back",
+        threadId: sourceThreadId,
         targetThreadId,
         sourcePoint: { type: "latest_stable" },
       })
@@ -188,132 +191,31 @@ it.effect("runs management-key thread mutations without inventing a provider cal
   }),
 );
 
-it.effect("allows global provider search across projects while keeping project search local", () =>
+it.effect("searches a provider's explicitly selected project", () =>
   Effect.gen(function* () {
-    const otherProjectId = ProjectId.make("mcp-thread-tools-other-project");
-    const otherThreadId = ThreadId.make("mcp-thread-tools-other-thread");
-    const matches: ReadonlyArray<ThreadSearch.ThreadSearchHit> = [
-      {
-        threadId: otherThreadId,
-        projectId: otherProjectId,
-        title: "Another project",
-        source: "user",
-        snippet: "needle in another project",
-        messageCreatedAt: null,
-      },
-      {
-        threadId: targetThreadId,
-        projectId,
-        title: "This project",
-        source: "assistant",
-        snippet: "needle in this project",
-        messageCreatedAt: null,
-      },
-    ];
-    const caller = {
-      id: sourceThreadId,
-      projectId,
-      deletedAt: null,
-    } as unknown as OrchestrationV2ThreadShell;
-    const providerScope = (mcpToolScope: "global" | "project") =>
-      ({
-        environmentId,
-        principal: {
-          type: "provider-session" as const,
-          threadId: sourceThreadId,
-          providerSessionId: "mcp-thread-tools-provider-session",
-          providerInstanceId,
-        },
-        thread: {
-          threadId: sourceThreadId,
-          providerSessionId: "mcp-thread-tools-provider-session",
-          providerInstanceId,
-        },
-        capabilities: new Set(["orchestration" as const]),
-        mcpToolScope,
-        issuedAt: 1,
-      }) satisfies McpInvocationContext.McpInvocationScope;
-
-    const global = makeToolkit(providerScope("global"), [], { matches, caller });
-    const globalToolkit = yield* global.toolkit;
-    const globalResult = yield* globalToolkit
-      .handle("t3_thread_search", { query: "needle" })
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(global.dependencies));
-    expect(globalResult.at(-1)?.result).toMatchObject({ matches });
-
-    const project = makeToolkit(providerScope("project"), [], { matches, caller });
-    const projectToolkit = yield* project.toolkit;
-    const projectResult = yield* projectToolkit
-      .handle("t3_thread_search", { query: "needle", limit: 1 })
-      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(project.dependencies));
-    expect(projectResult.at(-1)?.result).toMatchObject({ matches: [matches[1]] });
+    const otherProject = ProjectId.make("project:other");
+    const match: ThreadSearch.ThreadSearchHit = {
+      threadId: targetThreadId,
+      projectId: otherProject,
+      title: "Other project",
+      source: "user",
+      snippet: "needle",
+      messageCreatedAt: null,
+    };
+    const invocation = {
+      environmentId,
+      requestNamespace: "session",
+      thread: { threadId: sourceThreadId, providerSessionId: "session", providerInstanceId },
+      capabilities: new Set(["orchestration" as const]),
+      issuedAt: 1,
+    } satisfies McpInvocationContext.McpInvocationScope;
+    const { toolkit: toolkitEffect, dependencies } = makeToolkit(invocation, [], {
+      matches: [match],
+    });
+    const toolkit = yield* toolkitEffect;
+    const result = yield* toolkit
+      .handle("t3_thread_search", { query: "needle", projectId: otherProject })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(result.at(-1)?.result).toMatchObject({ matches: [match] });
   }),
-);
-
-it.effect(
-  "scopes run_scheduled_task_now by project while preserving global and management callers",
-  () =>
-    Effect.gen(function* () {
-      const foreignProjectId = ProjectId.make("mcp-thread-tools-foreign-project");
-      let runs = 0;
-      const foreignTask = {
-        id: "mcp-thread-tools-foreign-task",
-        projectId: foreignProjectId,
-        threadId: null,
-        lastRunStatus: "never",
-        runCount: 0,
-        nextRunAt: null,
-      } as unknown as ScheduledTask;
-      const caller = {
-        id: sourceThreadId,
-        projectId,
-        deletedAt: null,
-        archivedAt: null,
-        activeRunId: "run-active",
-        providerInstanceId,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-      } as unknown as OrchestrationV2ThreadShell;
-      const providerScope = (mcpToolScope: "global" | "project") =>
-        ({
-          environmentId,
-          principal: {
-            type: "provider-session" as const,
-            threadId: sourceThreadId,
-            providerSessionId: "mcp-thread-tools-provider-session",
-            providerInstanceId,
-          },
-          thread: {
-            threadId: sourceThreadId,
-            providerSessionId: "mcp-thread-tools-provider-session",
-            providerInstanceId,
-          },
-          capabilities: new Set(["orchestration" as const]),
-          mcpToolScope,
-          issuedAt: 1,
-        }) satisfies McpInvocationContext.McpInvocationScope;
-      const run = (invocation: McpInvocationContext.McpInvocationScope) => {
-        const harness = makeToolkit(invocation, [], {
-          caller,
-          scheduledTasks: [foreignTask],
-          onRunScheduledTask: () => runs++,
-        });
-        return Effect.gen(function* () {
-          const toolkit = yield* harness.toolkit;
-          return yield* toolkit
-            .handle("run_scheduled_task_now", { taskId: foreignTask.id })
-            .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(harness.dependencies));
-        });
-      };
-
-      const denied = yield* run(providerScope("project"));
-      expect(denied.at(-1)?.result).toMatchObject({ code: "invalid_request" });
-      expect(runs).toBe(0);
-      const global = yield* run(providerScope("global"));
-      expect(global.at(-1)?.result).toMatchObject({ taskId: foreignTask.id });
-      expect(runs).toBe(1);
-      const management = yield* run(managementInvocation(["threads:message"]));
-      expect(management.at(-1)?.result).toMatchObject({ taskId: foreignTask.id });
-      expect(runs).toBe(2);
-    }),
 );

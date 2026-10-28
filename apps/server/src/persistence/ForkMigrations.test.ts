@@ -299,6 +299,9 @@ it.effect("converts every deployed 59-67 fork collision before upstream migratio
       [67, "WebhookDedupe"],
       [68, "ShellStopRequestIndex"],
       [69, "ThreadMessageSearch"],
+      [70, "PeerLinks"],
+      [71, "PeerLinkFence"],
+      [72, "WaitingLinkRequestIndex"],
     ]);
     const effectRows = yield* sql<{ migration_id: number; name: string }>`
       SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 48 ORDER BY migration_id`;

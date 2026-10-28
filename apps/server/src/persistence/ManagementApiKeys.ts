@@ -268,11 +268,9 @@ export const make = Effect.gen(function* () {
       ),
       Effect.flatMap((rowOption) =>
         Option.match(rowOption, {
-          onNone: () => Effect.succeed(Option.none()),
+          onNone: () => Effect.succeedNone,
           onSome: (row) =>
-            decode(row, "ManagementApiKeyRepository.getById:decodeRow").pipe(
-              Effect.map(Option.some),
-            ),
+            decode(row, "ManagementApiKeyRepository.getById:decodeRow").pipe(Effect.asSome),
         }),
       ),
     );
@@ -301,11 +299,9 @@ export const make = Effect.gen(function* () {
       ),
       Effect.flatMap((rowOption) =>
         Option.match(rowOption, {
-          onNone: () => Effect.succeed(Option.none()),
+          onNone: () => Effect.succeedNone,
           onSome: (row) =>
-            decode(row, "ManagementApiKeyRepository.replaceSecret:decodeRow").pipe(
-              Effect.map(Option.some),
-            ),
+            decode(row, "ManagementApiKeyRepository.replaceSecret:decodeRow").pipe(Effect.asSome),
         }),
       ),
     );

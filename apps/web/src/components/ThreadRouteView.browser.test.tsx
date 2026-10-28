@@ -105,7 +105,7 @@ describe("ThreadRouteView native split drop", () => {
     const currentRef = scopeThreadRef(EnvironmentId.make("environment-a"), ThreadId.make("a"));
     const draggedRef = scopeThreadRef(EnvironmentId.make("environment-a"), ThreadId.make("b"));
     const container = document.createElement("div");
-    await using screen = await render(
+    await using _screen = await render(
       <ThreadRouteView target={{ kind: "server", threadRef: currentRef }} />,
       { container, router: false },
     );

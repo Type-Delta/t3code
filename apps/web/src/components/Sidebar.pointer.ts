@@ -1,12 +1,9 @@
-import { useLayoutEffect, type PointerEvent as ReactPointerEvent } from "react";
+import { type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { useStableCallback } from "../hooks/useStableCallback";
+import { attachSidebarTree } from "../lib/sidebarTree";
+import { createSidebarListMotion } from "./Sidebar.motion";
 import { type SensorProps } from "@dnd-kit/core";
 import { getOwnerDocument, getWindow } from "@dnd-kit/utilities";
-
-// Search unmounts the drag context while its owning Sidebar remains mounted.
-export function SidebarDragLifecycle({ onUnmount }: { onUnmount: () => void }) {
-  useLayoutEffect(() => onUnmount, [onUnmount]);
-  return null;
-}
 
 type Options = {
   distance: number;
@@ -186,4 +183,25 @@ export class SidebarPointerSensor {
       else this.props.onEnd();
     }
   }
+}
+
+export function useSidebarListRef(
+  listRef: RefObject<HTMLUListElement | null>,
+  motionRef: RefObject<ReturnType<typeof createSidebarListMotion> | null>,
+  sensorRef: RefObject<SidebarPointerSensor | null>,
+) {
+  return useStableCallback((node: HTMLUListElement) => {
+    listRef.current = node;
+    const motion = createSidebarListMotion(node);
+    motionRef.current = motion;
+    motion.update(false);
+    const detachTree = attachSidebarTree(node);
+    return () => {
+      detachTree?.();
+      sensorRef.current?.cancel();
+      motion.dispose();
+      if (motionRef.current === motion) motionRef.current = null;
+      if (listRef.current === node) listRef.current = null;
+    };
+  });
 }

@@ -15,6 +15,7 @@ vi.mock(import("../../state/entities"), () => ({
 }));
 vi.mock(import("../../state/queries"), () => ({
   useDebouncedValue: <T,>(value: T) => value,
+  useThreadSearch: () => ({ matches: [], query: "", isPending: false }),
   useComposerPathSearch: (target) => ({
     entries: [],
     searchedTarget: { ...target, kind: undefined, imageOnly: undefined },
@@ -81,9 +82,7 @@ function OpenCheckpointMenu() {
       : projection,
     activeThread: thread,
     timelineMessages: [],
-    paintOnlyDisplayedTimeline: false,
     phase: "ready",
-    isConnecting: false,
     isSendBusy: false,
     isRevertingCheckpoint: false,
     supportsConversationRollback: true,
@@ -97,6 +96,8 @@ function OpenCheckpointMenu() {
   const menu = useComposerMenuItems({
     composerTrigger: { kind: "slash-command", query: "undo", rangeStart: 0, rangeEnd: 5 },
     environmentId: thread.environmentId,
+    linkedEnvironments: new Map(),
+    questionAttachmentTarget: null,
     gitCwd: null,
     activeThreadId: thread.id,
     pullRequestProjectId: null,

@@ -22,7 +22,6 @@ import {
   OrchestrationV2DomainEvent,
   OrchestrationV2ShellSnapshot,
   OrchestrationV2ThreadProjection,
-  OrchestrationV2ThreadStreamItem,
 } from "./orchestrationV2.ts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
@@ -57,9 +56,6 @@ const decodeOrchestrationV2DomainEvent = Schema.decodeUnknownSync(OrchestrationV
 const decodeProviderReplayTranscript = Schema.decodeUnknownSync(ProviderReplayTranscript);
 const decodeOrchestrationV2ThreadProjection = Schema.decodeUnknownSync(
   OrchestrationV2ThreadProjection,
-);
-const decodeOrchestrationV2ThreadStreamItem = Schema.decodeUnknownSync(
-  OrchestrationV2ThreadStreamItem,
 );
 const LegacyShellStreamItem = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("synchronized") }),

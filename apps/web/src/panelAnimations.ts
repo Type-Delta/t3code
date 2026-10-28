@@ -3,54 +3,16 @@ import { type PanelAnimationDurationMs } from "@t3tools/contracts/settings";
 
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { useClientSettings } from "./hooks/useSettings";
-import { observeResize } from "./lib/observeResize";
 
 const PanelAnimationSuppressionContext = createContext(false);
 
 export const PanelAnimationSuppressionProvider = PanelAnimationSuppressionContext.Provider;
 
-/** Fades the target in when its container crosses a responsive breakpoint. */
-export function observeResponsiveBreakpointFade(options: {
-  target: HTMLElement;
-  container: HTMLElement;
-  active: boolean;
-  durationMs: PanelAnimationDurationMs;
-  breakpoint: { value: number; unit: "px" | "rem" };
-}): () => void {
-  const { target, container, active, durationMs, breakpoint } = options;
-  if (!active) return () => {};
-
-  const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
-  const breakpointPx =
-    breakpoint.unit === "px"
-      ? breakpoint.value
-      : breakpoint.value * (Number.isFinite(rootFontSize) ? rootFontSize : 16);
-  let expanded = container.getBoundingClientRect().width >= breakpointPx;
-  let animation: Animation | null = null;
-
-  const stopObserving = observeResize(container, (entries) => {
-    const entry = entries.at(-1);
-    if (!entry) return;
-    const nextExpanded = entry.contentRect.width >= breakpointPx;
-    if (nextExpanded === expanded) return;
-    expanded = nextExpanded;
-    animation?.cancel();
-    animation = target.animate([{ opacity: 0 }, { opacity: 1 }], {
-      duration: Math.min(100, durationMs),
-      easing: "ease-out",
-    });
-  });
-
-  return () => {
-    stopObserving();
-    animation?.cancel();
-  };
-}
-
 export function usePanelNavigationSuppression(navigationKey: string): boolean {
   const [paintedNavigationKey, setPaintedNavigationKey] = useState<string | null>(null);
   const suppressed = paintedNavigationKey !== navigationKey;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Wait two browser frames so the new route paints before panel animations are re-enabled; cancel the frames on change or unmount.
   useEffect(() => {
     if (!suppressed) return;
     let releaseFrame = 0;
@@ -94,6 +56,7 @@ export function usePanelPresence<T>(
   if (open && !present) setPresent(true);
   if (!open && !animated && present) setPresent(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keep the closing panel mounted for its CSS exit transition, then unmount it; the timer is cleared on reopen or unmount.
   useEffect(() => {
     if (open || !animated) return;
     const timeout = window.setTimeout(() => setPresent(false), durationMs);

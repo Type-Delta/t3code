@@ -110,7 +110,7 @@ export const layerExecutor: Layer.Layer<
     const settings = yield* ServerSettings.ServerSettingsService;
     const launches = yield* Effect.serviceOption(ThreadLaunchService.ThreadLaunchService);
     return OrchestrationEffectExecutorV2.of({
-      execute: (effect, options) => {
+      execute: Effect.fn("OrchestrationEffectExecutorV2.execute")(function (effect, options) {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
           case "auto-retry.continue": {
@@ -131,13 +131,11 @@ export const layerExecutor: Layer.Layer<
                   const run = projection.runs.find((row) => row.id === request.runId);
                   if (run?.status === "preparing") {
                     if (Option.isNone(launches))
-                      return yield* Effect.fail(
-                        new OrchestrationEffectExecutionError({
-                          effectId: effect.id,
-                          effectType: request.type,
-                          cause: "Workspace preparation service is unavailable.",
-                        }),
-                      );
+                      return yield* new OrchestrationEffectExecutionError({
+                        effectId: effect.id,
+                        effectType: request.type,
+                        cause: "Workspace preparation service is unavailable.",
+                      });
                     yield* launches.value.prepareRun({
                       commandId: effect.commandId,
                       threadId: effect.threadId,
@@ -236,14 +234,14 @@ export const layerExecutor: Layer.Layer<
                         cause,
                       }),
                 ),
-                Effect.catch((cause) =>
-                  request.subagent === undefined &&
-                  isNonRetryableProviderTurnControlFailure(
-                    request.type,
-                    Cause.pretty(Cause.fail(cause)),
-                  )
-                    ? Effect.void
-                    : Effect.fail(cause),
+                Effect.catchIf(
+                  (cause) =>
+                    request.subagent === undefined &&
+                    isNonRetryableProviderTurnControlFailure(
+                      request.type,
+                      Cause.pretty(Cause.fail(cause)),
+                    ),
+                  () => Effect.void,
                 ),
                 Effect.andThen((outcome) =>
                   request.subagent !== undefined && outcome === undefined
@@ -532,35 +530,35 @@ export const layerExecutor: Layer.Layer<
               // last failed attempt completes it without a checkpoint instead,
               // retrying that write. When every write fails, the effect stays
               // queued, so the run cannot stay `waiting` until restart.
-              Effect.catchCause((cause) =>
-                willRetry || Cause.hasInterruptsOnly(cause)
-                  ? Effect.failCause(cause)
-                  : runFinalization.abandonCapture(target).pipe(
-                      Effect.retry({
-                        times: 4,
-                        schedule: Schedule.exponential("200 millis"),
-                      }),
-                      Effect.catchCause((abandonCause) =>
-                        Cause.hasInterruptsOnly(abandonCause)
-                          ? Effect.interrupt
-                          : Effect.logError(
-                              "Failed to complete run after checkpoint capture failure; retrying later",
-                              { effectId: effect.id, cause: abandonCause },
-                            ).pipe(
-                              Effect.andThen(
-                                Effect.fail(
-                                  new OrchestrationEffectExecutionError({
-                                    effectId: effect.id,
-                                    effectType: effect.request.type,
-                                    cause: Cause.squash(abandonCause),
-                                    retryAfterLastAttempt: true,
-                                  }),
-                                ),
+              Effect.catchCauseIf(
+                (cause) => !willRetry && !Cause.hasInterruptsOnly(cause),
+                (cause) =>
+                  runFinalization.abandonCapture(target).pipe(
+                    Effect.retry({
+                      times: 4,
+                      schedule: Schedule.exponential("200 millis"),
+                    }),
+                    Effect.catchCause((abandonCause) =>
+                      Cause.hasInterruptsOnly(abandonCause)
+                        ? Effect.interrupt
+                        : Effect.logError(
+                            "Failed to complete run after checkpoint capture failure; retrying later",
+                            { effectId: effect.id, cause: abandonCause },
+                          ).pipe(
+                            Effect.andThen(
+                              Effect.fail(
+                                new OrchestrationEffectExecutionError({
+                                  effectId: effect.id,
+                                  effectType: effect.request.type,
+                                  cause: Cause.squash(abandonCause),
+                                  retryAfterLastAttempt: true,
+                                }),
                               ),
                             ),
-                      ),
-                      Effect.andThen(Effect.failCause(cause)),
+                          ),
                     ),
+                    Effect.andThen(Effect.failCause(cause)),
+                  ),
               ),
               Effect.mapError((cause) =>
                 isOrchestrationEffectExecutionError(cause)
@@ -652,10 +650,33 @@ export const layerExecutor: Layer.Layer<
                 ),
               );
         }
-      },
+      }),
     });
   }),
 );
+
+// A running effect blocks later work on its thread and its lease is never reclaimed in-process,
+// so a stop that hangs must give up and fall through to the normal retry/fail path.
+const DELEGATED_TASKS_STOP_TIMEOUT = Duration.seconds(30);
+
+const boundExecution =
+  (effect: EffectOutbox.OrchestrationEffectV2) =>
+  (execution: Effect.Effect<void, OrchestrationEffectExecutionError>) =>
+    effect.request.type === "delegated-tasks.stop"
+      ? execution.pipe(
+          Effect.timeoutOrElse({
+            duration: DELEGATED_TASKS_STOP_TIMEOUT,
+            orElse: () =>
+              Effect.fail(
+                new OrchestrationEffectExecutionError({
+                  effectId: effect.id,
+                  effectType: effect.request.type,
+                  cause: `Timed out after ${Duration.format(DELEGATED_TASKS_STOP_TIMEOUT)}.`,
+                }),
+              ),
+          }),
+        )
+      : execution;
 
 export class OrchestrationEffectWorkerError extends Schema.TaggedError<OrchestrationEffectWorkerError>()(
   "OrchestrationEffectWorkerError",
@@ -686,7 +707,6 @@ export class OrchestrationEffectWorkerV2 extends Context.Service<
 
 export interface OrchestrationEffectWorkerOptions {
   readonly workerId?: string;
-  readonly leaseDurationMs?: number;
   readonly maxAttempts?: number;
   /** Checkpoint captures this process runs at once. */
   readonly maxConcurrentCaptures?: number;
@@ -709,7 +729,6 @@ export const layerWithOptions = (
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const executor = yield* OrchestrationEffectExecutorV2;
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
-      const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
       const maxConcurrentCaptures = Math.max(
         1,
@@ -864,7 +883,7 @@ export const layerWithOptions = (
 
         const execution = executor
           .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
-          .pipe(Effect.as("executed" as const));
+          .pipe(boundExecution(effect), Effect.as("executed" as const));
         const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
           Effect.ensuring(outbox.clearCancellation(effect.id)),
         );
@@ -939,7 +958,6 @@ export const layerWithOptions = (
               restore(
                 outbox.claimNext({
                   workerId,
-                  leaseDurationMs,
                   excludeRestartContinuations,
                   excludeCheckpointCaptures: !captureSlot,
                 }),
@@ -1068,7 +1086,3 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
   );
 
 export const runDaemon = runDaemonWithOptions();
-
-const layerDaemon: Layer.Layer<never, never, OrchestrationEffectWorkerV2> = Layer.effectDiscard(
-  runDaemon.pipe(Effect.forkScoped),
-);

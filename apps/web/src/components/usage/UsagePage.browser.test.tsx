@@ -29,6 +29,7 @@ vi.mock(import("./usagePagePreferences"), async (original) => ({
 }));
 
 import { UsagePage } from "./UsagePage";
+import { startMainAppLocationTracking } from "../sidebar/mainAppLocation";
 const providerTotals = (codex: number, claude: number) =>
   new Map([
     ["codex", { costUsd: codex, totalTokens: codex * 1_000 }],
@@ -133,24 +134,21 @@ function prepareUsage() {
 describe("UsagePage Escape navigation", () => {
   async function setup() {
     prepareUsage();
-    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
     testState.navigate.mockClear();
     testState.canGoBack = true;
     const screen = await renderClient(<UsagePage />);
     return {
-      container: screen.container,
-      back,
+      container: document.body,
       rerender: screen.rerender,
       async [Symbol.asyncDispose]() {
         await screen[Symbol.asyncDispose]();
-        back.mockRestore();
       },
     };
   }
 
   it("shows answered usage while another environment is still reporting", async () => {
     await using screen = await setup();
-    const { container, back } = screen;
+    const { container } = screen;
     testState.useUsage.mockImplementation((window: unknown) => ({
       get shown() {
         return { window, merged: this.merged };
@@ -184,7 +182,7 @@ describe("UsagePage Escape navigation", () => {
 
   it("keeps recent activity first in both cost and token breakdowns", async () => {
     await using screen = await setup();
-    const { container, back } = screen;
+    const { container } = screen;
     const hour = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (button) => button.textContent === "Hour",
     )!;
@@ -202,7 +200,7 @@ describe("UsagePage Escape navigation", () => {
 
   it("orders model costs, marks unknown rates, and sorts token totals without mutating data", async () => {
     await using screen = await setup();
-    const { container, back } = screen;
+    const { container } = screen;
     const rows = () => [...container.querySelectorAll("tbody tr")].map((row) => row.textContent);
     expect(rows()[0]).toContain("expensive-model");
     expect(rows()[1]).toContain("token-heavy-model");
@@ -227,48 +225,41 @@ describe("UsagePage Escape navigation", () => {
     });
   }
 
-  it("returns to the previous page on Escape", async () => {
-    await using screen = await setup();
-    const { container, back } = screen;
+  it("returns to the page that opened Usage on Escape", async () => {
+    const stopTracking = startMainAppLocationTracking({
+      state: { location: { pathname: "/threads/example", href: "/threads/example" } },
+      subscribe: () => () => {},
+    } as never);
+    stopTracking();
+    await using _screen = await setup();
     await userEvent.keyboard("{Escape}");
-    expect(back).toHaveBeenCalledOnce();
-    expect(testState.navigate).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(testState.navigate).toHaveBeenCalledWith({ href: "/threads/example" }),
+    );
   });
 
-  it("returns home when there is no previous app page", async () => {
+  it("closes the environment menu before Escape closes Usage", async () => {
     await using screen = await setup();
-    const { container, back } = screen;
-    testState.canGoBack = false;
-    await act(() => screen.rerender(<UsagePage />));
-
-    await userEvent.keyboard("{Escape}");
-    expect(testState.navigate).toHaveBeenCalledWith({ to: "/" });
-    expect(back).not.toHaveBeenCalled();
-  });
-
-  it("closes the environment menu before Escape navigates back", async () => {
-    await using screen = await setup();
-    const { container, back } = screen;
-    const trigger = container.querySelector<HTMLButtonElement>('[data-slot="menu-trigger"]')!;
+    const trigger = screen.container.querySelector<HTMLButtonElement>(
+      '[data-slot="menu-trigger"]',
+    )!;
     await userEvent.click(trigger);
     await expect.element(page.getByRole("menu")).toBeVisible();
 
     await userEvent.keyboard("{Escape}");
     await vi.waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull());
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
-    expect(back).not.toHaveBeenCalled();
+    expect(testState.navigate).not.toHaveBeenCalled();
 
     await userEvent.keyboard("{Escape}");
-    expect(back).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(testState.navigate).toHaveBeenCalledOnce());
   });
 
   it.each([{ repeat: true }, { isComposing: true }])(
     "ignores Escape with %j",
     async (properties) => {
-      await using screen = await setup();
-      const { container, back } = screen;
+      await using _screen = await setup();
       document.body.dispatchEvent(escape(properties));
-      expect(back).not.toHaveBeenCalled();
       expect(testState.navigate).not.toHaveBeenCalled();
     },
   );

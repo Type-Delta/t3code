@@ -115,8 +115,10 @@ export function toPersistenceDecodeError(operation: string) {
     PersistenceDecodeError.fromSchemaError(operation, cause);
 }
 
+const isPersistenceSqlError = Schema.is(PersistenceSqlError);
+const isPersistenceDecodeError = Schema.is(PersistenceDecodeError);
 export const isPersistenceError = (value: unknown) =>
-  Schema.is(PersistenceSqlError)(value) || Schema.is(PersistenceDecodeError)(value);
+  isPersistenceSqlError(value) || isPersistenceDecodeError(value);
 
 export type OrchestrationEventStoreError = PersistenceSqlError | PersistenceDecodeError;
 

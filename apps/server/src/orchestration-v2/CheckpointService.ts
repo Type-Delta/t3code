@@ -39,18 +39,6 @@ export class CheckpointRootScopePrepareError extends Schema.TaggedError<Checkpoi
   }
 }
 
-export class CheckpointScopeEnsureError extends Schema.TaggedError<CheckpointScopeEnsureError>()(
-  "CheckpointScopeEnsureError",
-  {
-    scopeId: CheckpointScopeId,
-    cause: Schema.Defect(),
-  },
-) {
-  override get message(): string {
-    return `Failed to ensure checkpoint scope ${this.scopeId}.`;
-  }
-}
-
 export class CheckpointBaselineCaptureError extends Schema.TaggedError<CheckpointBaselineCaptureError>()(
   "CheckpointBaselineCaptureError",
   {
@@ -92,7 +80,6 @@ export class CheckpointRestoreError extends Schema.TaggedError<CheckpointRestore
 
 export const CheckpointServiceV2Error = Schema.Union([
   CheckpointRootScopePrepareError,
-  CheckpointScopeEnsureError,
   CheckpointBaselineCaptureError,
   CheckpointCaptureError,
   CheckpointRestoreError,
@@ -110,9 +97,6 @@ export interface CheckpointServiceV2Shape {
     readonly cwd: string;
     readonly createdAt: DateTime.Utc;
   }) => Effect.Effect<OrchestrationV2CheckpointScope, CheckpointServiceV2Error>;
-  readonly ensureScope: (
-    scope: OrchestrationV2CheckpointScope,
-  ) => Effect.Effect<OrchestrationV2CheckpointScope, CheckpointServiceV2Error>;
   readonly captureBaseline: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly ordinalWithinScope: number;
@@ -294,8 +278,6 @@ export const layer: Layer.Layer<
     const capturesInFlight = new Set<string>();
     const boundaryKey = (scope: OrchestrationV2CheckpointScope, ordinalWithinScope: number) =>
       `${scope.cwd}\0${scope.id}\0${ordinalWithinScope}`;
-
-    const ensureScope: CheckpointServiceV2Shape["ensureScope"] = (scope) => Effect.succeed(scope);
 
     // The next run starts after its baseline. A capture writing the same
     // boundary already is that baseline, so the run never waits behind it.
@@ -594,7 +576,6 @@ export const layer: Layer.Layer<
               }),
           ),
         ),
-      ensureScope,
       captureBaseline,
       materializeBaselineCheckpoint,
       capture,

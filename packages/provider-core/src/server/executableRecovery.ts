@@ -39,20 +39,22 @@ export function withExecutablePathRecovery<A, E, R, E2, R2>(
   launch: Effect.Effect<A, E, R>,
   recover: () => Effect.Effect<A, E2, R2>,
 ): Effect.Effect<A, E | E2, R | R2> {
+  const searchesPath = !(
+    command.includes("/") ||
+    command.includes("\\") ||
+    /^[a-z]:/iu.test(command)
+  );
   return launch.pipe(
-    Effect.catch((error): Effect.Effect<A, E | E2, R2> =>
-      command.includes("/") ||
-      command.includes("\\") ||
-      /^[a-z]:/iu.test(command) ||
-      !isMissingExecutable(error)
-        ? Effect.fail(error)
-        : Effect.gen(function* () {
-            // A failed PATH launch may have cached a stale resolved executable.
-            // Evict it before the fresh lookup so later launches do not replay
-            // the same failure for the cache TTL.
-            (yield* CommandResolutionCache).clear();
-            return yield* recover().pipe(Effect.provideService(CommandResolutionCache, new Map()));
-          }),
+    Effect.catchIf(
+      (error) => searchesPath && isMissingExecutable(error),
+      () =>
+        Effect.gen(function* () {
+          // A failed PATH launch may have cached a stale resolved executable.
+          // Evict it before the fresh lookup so later launches do not replay
+          // the same failure for the cache TTL.
+          (yield* CommandResolutionCache).clear();
+          return yield* recover().pipe(Effect.provideService(CommandResolutionCache, new Map()));
+        }),
     ),
   );
 }

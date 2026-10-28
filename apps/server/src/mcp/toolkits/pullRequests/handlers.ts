@@ -27,7 +27,6 @@ import {
 } from "../../../sourceControl/threadPullRequests.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { assertProjectAllowed } from "../../threadAccess.ts";
 import {
   type ListThreadPullRequestsResult,
   PullRequestLinkFailedError,
@@ -47,6 +46,7 @@ import {
   PullRequestProjectNotFoundError,
   PullRequestsToolkit,
   type ThreadPullRequestEntry,
+  CHILD_PULL_REQUEST_REPORT_NEXT,
 } from "./tools.ts";
 
 interface ResolvedTarget {
@@ -221,25 +221,13 @@ const make = Effect.gen(function* () {
     if (threadId === undefined) {
       return yield* new PullRequestThreadRequiredError();
     }
-    const thread = yield* engine
-      .getThreadShell(threadId)
-      .pipe(Effect.map(Option.fromNullishOr))
-      .pipe(Effect.mapError((cause) => new Failure({ cause })));
+    const thread = yield* engine.getThreadShell(threadId).pipe(
+      Effect.map(Option.fromNullishOr),
+      Effect.mapError((cause) => new Failure({ cause })),
+    );
     if (Option.isNone(thread) || thread.value.deletedAt !== null) {
       return yield* new PullRequestThreadNotFoundError({ threadId });
     }
-    const caller =
-      scope.thread === undefined
-        ? undefined
-        : yield* engine
-            .getThreadShell(scope.thread.threadId)
-            .pipe(Effect.mapError((cause) => new Failure({ cause })));
-    if (scope.thread !== undefined && caller === null) {
-      return yield* new PullRequestThreadNotFoundError({ threadId: scope.thread.threadId });
-    }
-    yield* assertProjectAllowed(scope, caller ?? undefined, thread.value.projectId).pipe(
-      Effect.mapError(() => new PullRequestThreadNotFoundError({ threadId })),
-    );
     return thread.value;
   });
 
@@ -321,17 +309,13 @@ const make = Effect.gen(function* () {
       scope.thread === undefined
         ? undefined
         : yield* engine.getThreadShell(scope.thread.threadId).pipe(
-            Effect.mapError((cause) => new PullRequestListFailedError({ cause })),
+            Effect.orElseSucceed(() => null),
             Effect.map((shell) => shell ?? undefined),
           );
     const known = yield* projects
       .listShells()
       .pipe(Effect.mapError((cause) => new PullRequestListFailedError({ cause })));
     const callerProject = known.find((project) => project.id === callerThread?.projectId);
-    const visibleProjects =
-      scope.thread !== undefined && !McpInvocationContext.canCrossProjects(scope)
-        ? known.filter((project) => project.id === callerThread?.projectId)
-        : known;
     // A pull request named by host and repository builds its URL through the project that holds
     // it, which need not be the caller's.
     const urlProject = (input: PullRequestTargetInput) =>
@@ -347,7 +331,7 @@ const make = Effect.gen(function* () {
         Effect.map((target) => ({
           input,
           target,
-          project: projectForPullRequest(visibleProjects, target, callerProject),
+          project: projectForPullRequest(known, target, callerProject),
           failure: null,
         })),
         Effect.catch((error) =>
@@ -378,13 +362,17 @@ const make = Effect.gen(function* () {
     link_pull_request: writesThread((input) =>
       Effect.gen(function* () {
         const thread = yield* requireThread(PullRequestLinkFailedError, input.threadId);
+        const next =
+          thread.lineage.relationshipToParent === "subagent"
+            ? { next: CHILD_PULL_REQUEST_REPORT_NEXT }
+            : {};
         const project = yield* projectOf(thread, PullRequestLinkFailedError);
         const target = yield* resolveTarget(input, project);
         const existing = threadPullRequestsOf(thread).find((link) =>
           threadPullRequestKeysEqual(link, target),
         );
         if (existing && existing.source !== "stack-dismissed")
-          return { ...target, alreadyLinked: true };
+          return { ...target, alreadyLinked: true, ...next };
         const alreadyLinked = yield* engine
           .dispatch({
             type: "thread.pull-request.link",
@@ -401,7 +389,7 @@ const make = Effect.gen(function* () {
 
             Effect.catchCause(dispatchFailure(PullRequestLinkFailedError)),
           );
-        return { ...target, alreadyLinked };
+        return { ...target, alreadyLinked, ...next };
       }),
     ),
     unlink_pull_request: writesThread((input) =>

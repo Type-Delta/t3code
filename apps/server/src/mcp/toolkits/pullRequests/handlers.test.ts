@@ -33,7 +33,7 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import { listThreadPullRequests } from "./handlers.ts";
 import * as PullRequestsHandlers from "./handlers.ts";
-import { PullRequestsToolkit } from "./tools.ts";
+import { CHILD_PULL_REQUEST_REPORT_NEXT, PullRequestsToolkit } from "./tools.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
 const THREAD_ID = ThreadId.make("thread-1");
@@ -45,7 +45,6 @@ const testCrypto = Crypto.make({
 
 const invocation = (
   capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
-  mcpToolScope?: "global" | "project",
 ): McpInvocationContext.McpInvocationScope => ({
   environmentId: EnvironmentId.make("environment-1"),
   requestNamespace: "provider-session-1",
@@ -56,17 +55,6 @@ const invocation = (
   },
   client: undefined,
   capabilities: new Set(capabilities),
-  ...(mcpToolScope === undefined
-    ? {}
-    : {
-        principal: {
-          type: "provider-session" as const,
-          threadId: THREAD_ID,
-          providerSessionId: "provider-session-1",
-          providerInstanceId: ProviderInstanceId.make("codex"),
-        },
-        mcpToolScope,
-      }),
   issuedAt: 1,
 });
 
@@ -160,7 +148,6 @@ interface HarnessOptions {
     PullRequestOperationError
   >;
   readonly principal?: McpInvocationContext.McpPrincipal;
-  readonly mcpToolScope?: "global" | "project";
   readonly foreignThread?: PullRequestTestThread;
 }
 
@@ -259,7 +246,7 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
               capabilities: new Set(capabilities),
               issuedAt: 1,
             }
-          : invocation(capabilities, options.mcpToolScope),
+          : invocation(capabilities),
       ),
       Effect.provide(layerDependencies),
     );
@@ -305,95 +292,6 @@ describe("pull request toolkit handlers", () => {
           source: "agent",
         },
       ]);
-    }),
-  );
-
-  it.effect("keeps thread pull-request tools inside a project-scoped caller's project", () =>
-    Effect.gen(function* () {
-      const foreignProject = {
-        ...makeProject({
-          canonicalKey: "github.com/acme/other",
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "git@github.com:acme/other.git",
-          },
-          provider: SourceControlProviderKind.make("github"),
-          displayName: "acme/other",
-          owner: "acme",
-          name: "other",
-        }),
-        id: ProjectId.make("project-foreign"),
-      };
-      const foreignThread = {
-        ...makeThread([]),
-        id: ThreadId.make("thread-foreign"),
-        projectId: foreignProject.id,
-      };
-      const projects = [makeProject(), foreignProject];
-      const projectHarness = yield* makeHarness({
-        projects,
-        foreignThread,
-        mcpToolScope: "project",
-      });
-      const deniedLink = yield* projectHarness
-        .call("link_pull_request", {
-          threadId: foreignThread.id,
-          url: "https://github.com/acme/other/pull/1",
-        })
-        .pipe(Effect.flip);
-      const deniedUnlink = yield* projectHarness
-        .call("unlink_pull_request", {
-          threadId: foreignThread.id,
-          url: "https://github.com/acme/other/pull/1",
-        })
-        .pipe(Effect.flip);
-      const deniedList = yield* projectHarness
-        .call("list_thread_pull_requests", { threadId: foreignThread.id })
-        .pipe(Effect.flip);
-      const deniedWatch = yield* projectHarness
-        .call("watch_pull_request", {
-          threadId: foreignThread.id,
-          url: "https://github.com/acme/other/pull/1",
-        })
-        .pipe(Effect.flip);
-      const deniedUnwatch = yield* projectHarness
-        .call("unwatch_pull_request", {
-          threadId: foreignThread.id,
-          url: "https://github.com/acme/other/pull/1",
-        })
-        .pipe(Effect.flip);
-      for (const error of [deniedLink, deniedUnlink, deniedList, deniedWatch, deniedUnwatch])
-        expect(error).toMatchObject({ _tag: "PullRequestThreadNotFoundError" });
-
-      const sameProject = yield* makeHarness({ mcpToolScope: "project" });
-      yield* sameProject.call("list_thread_pull_requests", {});
-      yield* sameProject.call("link_pull_request", {
-        url: "https://github.com/T3Tools/T3Code/pull/1",
-      });
-
-      const global = yield* makeHarness({
-        projects,
-        foreignThread,
-        mcpToolScope: "global",
-      });
-      yield* global.call("link_pull_request", {
-        threadId: foreignThread.id,
-        url: "https://github.com/acme/other/pull/1",
-      });
-      yield* global.call("unlink_pull_request", {
-        threadId: foreignThread.id,
-        url: "https://github.com/acme/other/pull/1",
-      });
-      yield* global.call("list_thread_pull_requests", { threadId: foreignThread.id });
-      yield* global.call("watch_pull_request", {
-        threadId: foreignThread.id,
-        url: "https://github.com/acme/other/pull/1",
-      });
-      yield* global.call("unwatch_pull_request", {
-        threadId: foreignThread.id,
-        url: "https://github.com/acme/other/pull/1",
-      });
     }),
   );
 
@@ -481,6 +379,25 @@ describe("pull request toolkit handlers", () => {
         .pipe(Effect.flip);
       expect(error).toMatchObject({ _tag: "PullRequestWatchFromSubagentError" });
       expect(yield* Ref.get(harness.commands)).toEqual([]);
+    }),
+  );
+
+  it.effect("asks a subagent thread to end with its PR report after it links", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        thread: {
+          ...makeThread([]),
+          lineage: {
+            rootThreadId: ThreadId.make("parent"),
+            parentThreadId: ThreadId.make("parent"),
+            relationshipToParent: "subagent",
+          },
+        },
+      });
+      const result = yield* harness.call("link_pull_request", {
+        url: "https://github.com/t3tools/t3code/pull/124",
+      });
+      expect(result).toMatchObject({ number: 124, next: CHILD_PULL_REQUEST_REPORT_NEXT });
     }),
   );
 
@@ -747,57 +664,6 @@ describe("pull request guide tools", () => {
         number: 12,
       });
       expect(read).toMatchObject({ repository: "t3tools/t3code", number: 12, stale: false });
-    }),
-  );
-
-  it.effect("scopes guide checkout resolution while preserving global and management access", () =>
-    Effect.gen(function* () {
-      const other = {
-        ...makeProject({
-          canonicalKey: "github.com/acme/web",
-          locator: {
-            source: "git-remote",
-            remoteName: "origin",
-            remoteUrl: "git@github.com:acme/web.git",
-          },
-          provider: SourceControlProviderKind.make("github"),
-          displayName: "acme/web",
-          owner: "acme",
-          name: "web",
-        }),
-        id: ProjectId.make("project-web"),
-      };
-      const input = { url: "https://github.com/acme/web/pull/7" };
-      const project = yield* makeHarness({
-        projects: [makeProject(), other],
-        mcpToolScope: "project",
-      });
-      const denied = yield* project.call("read_pull_request_guide", input).pipe(Effect.flip);
-      expect(denied).toMatchObject({
-        _tag: "PullRequestProjectNotFoundError",
-        repository: "acme/web",
-      });
-      const sameProject = yield* makeHarness({
-        projects: [makeProject(), other],
-        mcpToolScope: "project",
-      });
-      const own = yield* sameProject.call("read_pull_request_guide", {
-        repository: "t3tools/t3code",
-        number: 7,
-      });
-      expect(own.repository).toBe("t3tools/t3code");
-      const global = yield* makeHarness({
-        projects: [makeProject(), other],
-        mcpToolScope: "global",
-      });
-      expect((yield* global.call("read_pull_request_guide", input)).repository).toBe("acme/web");
-      const management = yield* makeHarness({
-        projects: [makeProject(), other],
-        principal: reviewPrincipal,
-      });
-      expect((yield* management.call("read_pull_request_guide", input)).repository).toBe(
-        "acme/web",
-      );
     }),
   );
 

@@ -57,7 +57,7 @@ import { Label } from "../ui/label";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Spinner } from "../ui/spinner";
 import { Textarea } from "../ui/textarea";
-import { SettingsRow, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
+import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { EnvironmentSettingsTabs } from "./EnvironmentSettingsTabs";
 import {
   buildManagementApiKeyCodexExample,
@@ -77,6 +77,16 @@ import {
   type ManagementApiKeyRevealState,
   type ManagementApiKeyScope,
 } from "./ManagementApiKeysSettings.logic";
+
+function useRelativeTimeTick(intervalMs: number) {
+  const [now, setNow] = useState(() => Date.now());
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keep expiration labels in step with the clock.
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(timer);
+  }, [intervalMs]);
+  return now;
+}
 
 const DEFAULT_EXPIRATION: ManagementApiKeyExpiration = "90-days";
 const DEFAULT_PRESET: ManagementApiKeyPreset = "read-only";
@@ -657,6 +667,7 @@ export function ManagementApiKeysSettings() {
     },
   );
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refresh keys when the selected environment connection changes.
   useEffect(() => {
     const previousEnvironmentId = activeEnvironmentId.current;
     if (previousEnvironmentId !== null && previousEnvironmentId !== effectiveEnvironmentId) {

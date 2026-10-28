@@ -56,7 +56,7 @@ agent keeps the tools it received when its session started.
 
 ## Management API keys
 
-For an external MCP client, create a durable credential in **Settings → Integrations → Management
+For an external MCP client, create a durable credential in **Settings → Sharing & access → Management
 API keys**. Select the environment that runs on the machine the client should control, give the key
 a recognizable name, choose an expiration and access preset, then copy the secret from the
 confirmation dialog. The secret is shown only once. Store it in a password manager or an

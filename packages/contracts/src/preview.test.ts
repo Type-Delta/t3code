@@ -1,19 +1,9 @@
 import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  ConfiguredLocalServerUrls,
-  CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS,
-  DiscoveredLocalServer,
-  PREVIEW_URL_MAX_LENGTH,
-  PreviewEvent,
-  PreviewNavStatus,
-  PreviewSessionSnapshot,
-  PreviewViewportSetting,
-} from "./preview.ts";
+import { PreviewNavStatus, PreviewSessionSnapshot, PreviewViewportSetting } from "./preview.ts";
 import {
   PreviewAutomationHost,
-  PreviewAutomationError,
   PreviewAutomationOpenInput,
   PreviewAutomationResizeInput,
   PreviewAutomationResizeResult,
@@ -31,6 +21,10 @@ const decodeResizeResult = Schema.decodeUnknownSync(PreviewAutomationResizeResul
 const decodeAutomationHost = Schema.decodeUnknownSync(PreviewAutomationHost);
 const decodeAutomationStatus = Schema.decodeUnknownSync(PreviewAutomationStatus);
 
+const decodeStreamEvent = Schema.decodeUnknownSync(PreviewAutomationStreamEvent);
+const decodeResponse = Schema.decodeSync(PreviewAutomationResponse);
+const decodeUnknownResponse = Schema.decodeUnknownSync(PreviewAutomationResponse);
+
 describe("preview automation acknowledgement compatibility", () => {
   it("preserves the negotiated capability and the started response across the wire", () => {
     const connected = {
@@ -38,7 +32,7 @@ describe("preview automation acknowledgement compatibility", () => {
       connectionId: "connection-1",
       supportsRequestAcknowledgement: true,
     };
-    expect(Schema.decodeUnknownSync(PreviewAutomationStreamEvent)(connected)).toEqual(connected);
+    expect(decodeStreamEvent(connected)).toEqual(connected);
     const started = {
       clientId: "client-1",
       connectionId: "connection-1",
@@ -46,12 +40,12 @@ describe("preview automation acknowledgement compatibility", () => {
       phase: "started",
       ok: true,
     };
-    expect(Schema.decodeUnknownSync(PreviewAutomationResponse)(started)).toEqual(started);
+    expect(decodeUnknownResponse(started)).toEqual(started);
   });
 
   it("accepts connections and final responses from older clients", () => {
     const connected = { type: "connected", connectionId: "connection-1" };
-    expect(Schema.decodeUnknownSync(PreviewAutomationStreamEvent)(connected)).toEqual(connected);
+    expect(decodeStreamEvent(connected)).toEqual(connected);
     const completed = {
       clientId: "client-1",
       connectionId: "connection-1",
@@ -59,7 +53,7 @@ describe("preview automation acknowledgement compatibility", () => {
       ok: true,
       result: { available: true },
     };
-    expect(Schema.decodeSync(PreviewAutomationResponse)(completed)).toEqual(completed);
+    expect(decodeResponse(completed)).toEqual(completed);
   });
 });
 

@@ -679,11 +679,7 @@ describe("CLIProxyAPI built-in management API", () => {
         BackgroundPolicy.of({
           reportClientActivity: () => Effect.void,
           removeRpcClient: () => Effect.void,
-          reportHostPowerState: () => Effect.void,
           snapshot: Effect.die("unused"),
-          streamChanges: Stream.empty,
-          subscribe: Effect.die("unused"),
-          hasDemand: () => Effect.succeed(true),
           shouldRunScopeWork: () => Effect.succeed(true),
           shouldRunOpportunisticWork: Effect.succeed(true),
         }),

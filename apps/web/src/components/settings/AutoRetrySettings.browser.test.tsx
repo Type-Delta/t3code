@@ -49,7 +49,7 @@ async function setup() {
 
 describe("AutoRetrySettings", () => {
   it("edits triggers and nested conditions", async () => {
-    await using screen = await setup();
+    await using _screen = await setup();
     await expect
       .element(page.getByRole("textbox", { name: "Error message substring" }))
       .toBeVisible();

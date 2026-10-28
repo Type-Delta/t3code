@@ -127,17 +127,9 @@ export const make = Effect.gen(function* () {
     );
 
   const resolveCheckpoints = Effect.fn("CheckpointStore.resolveCheckpoints")(function* (
-    operation: string,
     cwd: string,
   ) {
     const handle = yield* vcsRegistry.resolve({ cwd });
-    if (!handle.driver.checkpoints) {
-      return yield* new VcsUnsupportedOperationError({
-        operation,
-        kind: handle.kind,
-        detail: `${handle.kind} driver does not implement checkpoint operations.`,
-      });
-    }
     return handle.driver.checkpoints satisfies VcsCheckpointOps;
   });
 
@@ -160,7 +152,7 @@ export const make = Effect.gen(function* () {
     if (SidecarCheckpointRepository.isSidecarCheckpointRef(input.checkpointRef)) {
       return yield* normalizeSidecarError(input.cwd, sidecars.capture(input));
     }
-    const checkpoints = yield* resolveCheckpoints("CheckpointStore.captureCheckpoint", input.cwd);
+    const checkpoints = yield* resolveCheckpoints(input.cwd);
     return yield* checkpoints.captureCheckpoint(input);
   });
 
@@ -182,7 +174,7 @@ export const make = Effect.gen(function* () {
     if (SidecarCheckpointRepository.isSidecarCheckpointRef(input.checkpointRef)) {
       return yield* normalizeSidecarError(input.cwd, sidecars.has(input));
     }
-    const checkpoints = yield* resolveCheckpoints("CheckpointStore.hasCheckpointRef", input.cwd);
+    const checkpoints = yield* resolveCheckpoints(input.cwd);
     return yield* checkpoints.hasCheckpointRef(input);
   });
 
@@ -192,7 +184,7 @@ export const make = Effect.gen(function* () {
     if (SidecarCheckpointRepository.isSidecarCheckpointRef(input.checkpointRef)) {
       return yield* normalizeSidecarError(input.cwd, sidecars.restore(input));
     }
-    const checkpoints = yield* resolveCheckpoints("CheckpointStore.restoreCheckpoint", input.cwd);
+    const checkpoints = yield* resolveCheckpoints(input.cwd);
     return yield* checkpoints.restoreCheckpoint(input);
   });
 
@@ -204,7 +196,7 @@ export const make = Effect.gen(function* () {
     if (fromSidecar || toSidecar) {
       return yield* normalizeSidecarError(input.cwd, sidecars.diff(input));
     }
-    const checkpoints = yield* resolveCheckpoints("CheckpointStore.diffCheckpoints", input.cwd);
+    const checkpoints = yield* resolveCheckpoints(input.cwd);
     return yield* checkpoints.diffCheckpoints(input);
   });
 
@@ -217,7 +209,7 @@ export const make = Effect.gen(function* () {
     ) {
       return yield* normalizeSidecarError(input.cwd, sidecars.authoredPaths(input));
     }
-    const checkpoints = yield* resolveCheckpoints("CheckpointStore.listAuthoredPaths", input.cwd);
+    const checkpoints = yield* resolveCheckpoints(input.cwd);
     return yield* checkpoints.listAuthoredPaths(input);
   });
 
@@ -237,10 +229,7 @@ export const make = Effect.gen(function* () {
       );
     }
     if (legacyRefs.length === 0) return;
-    const checkpoints = yield* resolveCheckpoints(
-      "CheckpointStore.deleteCheckpointRefs",
-      input.cwd,
-    );
+    const checkpoints = yield* resolveCheckpoints(input.cwd);
     return yield* checkpoints.deleteCheckpointRefs({ ...input, checkpointRefs: legacyRefs });
   });
 

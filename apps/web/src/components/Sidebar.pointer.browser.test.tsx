@@ -1,7 +1,9 @@
+import { useRef } from "react";
 import type { SensorProps } from "@dnd-kit/core";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { fakeTimers } from "../../test/render";
-import { SidebarPointerSensor } from "./Sidebar.pointer";
+import { fakeTimers, render } from "../../test/render";
+import { SidebarPointerSensor, useSidebarListRef } from "./Sidebar.pointer";
+import { createSidebarListMotion } from "./Sidebar.motion";
 
 const sensors: SidebarPointerSensor[] = [];
 
@@ -125,4 +127,33 @@ describe("sidebar pointer lifecycle", () => {
     expect(drag.onMove).toHaveBeenLastCalledWith({ x: 120, y: 40 });
     expect(drag.onPointerMove).toHaveBeenLastCalledWith("thread", { x: 120, y: 40 });
   });
+});
+
+function ListWithDrag({ sensor, label }: { sensor: SidebarPointerSensor; label: string }) {
+  const list = useRef<HTMLUListElement | null>(null);
+  const motion = useRef<ReturnType<typeof createSidebarListMotion> | null>(null);
+  const drag = useRef<SidebarPointerSensor | null>(sensor);
+  const ref = useSidebarListRef(list, motion, drag);
+  return (
+    <ul ref={ref}>
+      <li>{label}</li>
+    </ul>
+  );
+}
+
+it("keeps an active drag through a list rerender and cancels on unmount", async () => {
+  using _environment = setup();
+  const drag = gesture();
+  await using screen = await render(<ListWithDrag sensor={drag.sensor} label="before" />, {
+    // This host tests the list ref without navigation.
+    router: false,
+  });
+  document.dispatchEvent(pointer("pointermove", { clientX: 20 }));
+  expect(drag.onStart).toHaveBeenCalledOnce();
+  await screen.rerender(<ListWithDrag sensor={drag.sensor} label="after" />);
+  document.dispatchEvent(pointer("pointermove", { clientX: 40 }));
+  expect(drag.onCancel).not.toHaveBeenCalled();
+  expect(drag.onMove).toHaveBeenLastCalledWith({ x: 40, y: 10 });
+  await screen.unmount();
+  expect(drag.onCancel).toHaveBeenCalledOnce();
 });

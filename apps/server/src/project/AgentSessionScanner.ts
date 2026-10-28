@@ -1696,12 +1696,10 @@ export const make = Effect.gen(function* () {
               reason: "Multiple transcripts match the saved native conversation",
             } as const);
       },
-      Effect.catch(() =>
-        Effect.succeed({
-          status: "unavailable" as const,
-          reason: "Native conversation transcript or provider home could not be read safely",
-        }),
-      ),
+      Effect.orElseSucceed(() => ({
+        status: "unavailable" as const,
+        reason: "Native conversation transcript or provider home could not be read safely",
+      })),
     );
 
   return AgentSessionScanner.of({ scan, recentThreads, validateNativeConversation });

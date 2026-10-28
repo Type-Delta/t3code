@@ -153,7 +153,9 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       toJsonSchemaObject(outputSchemaJson),
       "Failed to encode structured output schema.",
     );
-    const resolvedModel = yield* resolveModel?.(modelSelection.model) ?? Effect.succeed(undefined);
+    const resolvedModel = yield* (
+      resolveModel?.(modelSelection.model) ?? Effect.void.pipe(Effect.as(undefined))
+    );
     const caps =
       resolvedModel?.capabilities ??
       getClaudeCatalogModelCapabilities(catalog, resolvedModelSelection.model);
