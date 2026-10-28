@@ -825,6 +825,14 @@ existing request response flow.
 
 **Last updated:** 2026-10-26
 
+### DL049 — Header actions clear the panel toggles
+
+The web and desktop chat header reserves space for all three panel toggles so Git actions
+such as Create PR and Commit & push remain unobstructed. With an inline right panel open,
+the header still reserves space for the thread-details toggle that remains beside it.
+
+**Last updated:** 2026-10-28
+
 ## Merge History
 
 This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
