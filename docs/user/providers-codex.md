@@ -25,21 +25,19 @@ T3 Code can use your installed Codex and its existing login. Run `codex login`
 on the environment's machine to sign in. [Provider setup](./install.md#providers)
 covers installation and custom configuration.
 
-## Subagent transcripts
+## Subagent threads
 
-When Codex delegates work, select the subagent tool call in the main chat to open
-its read-only transcript in the right panel. Subagent responses and tool activity
-stay out of the main transcript. The Agents panel shows the model and reasoning
-effort when Codex reports them; missing values are not inferred from the parent.
+When Codex delegates work, each subagent becomes a read-only child thread. Open
+one from its link in the main chat or from the composer's **Subagents** menu,
+which also shows the model and reasoning effort when Codex reports them. A child
+thread links back to its parent.
 
 ## Resume after usage limits
 
-When native Codex rejects a turn because of a usage limit and reports an exact
-reset time, T3 Code sends a scoped continuation three seconds after the reset.
-The pending continuation survives a server restart and is discarded if the
-thread is no longer waiting on that turn. Transient dispatch failures retry after
-three seconds. Disable this under **Settings → Threads → Resume after usage
-limits**.
+When native Codex stops on a usage limit and reports an exact reset time, T3 Code
+continues the thread a few seconds after the reset. This is on by default; see
+[Inspect agent work](./thread-sidebar.md#inspect-agent-work) to cancel it or turn
+it off.
 
 Compatible API gateways do not expose an authoritative reset through Codex, so
 generic gateway `429` errors do not trigger automatic continuation.

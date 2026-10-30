@@ -79,13 +79,6 @@ export function resolveCheckpointNavigationDisabledReason(input: {
 }
 export type ComposerSubmissionIntent = "foreground" | "background" | "alternate";
 
-export function shouldSubmitComposerOnEnter(input: {
-  isMobileViewport: boolean;
-  shiftKey: boolean;
-}): boolean {
-  return !input.isMobileViewport && !input.shiftKey;
-}
-
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
   query: string;
