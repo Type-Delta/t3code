@@ -29,8 +29,8 @@ covers installation and custom configuration.
 
 When Codex delegates work, each subagent becomes a read-only child thread. Open
 one from its link in the main chat or from the composer's **Subagents** menu,
-which also shows the model and reasoning effort when Codex reports them. A child
-thread links back to its parent.
+which also shows the model when Codex reports it. A child thread links back to
+its parent.
 
 ## Resume after usage limits
 
