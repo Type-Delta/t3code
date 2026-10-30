@@ -3799,6 +3799,59 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         yield* start("/unrestricted");
         assert.equal(harness.getOpenedOptions()?.permissionMode, "bypassPermissions");
         assert.equal(harness.getOpenedOptions()?.allowDangerouslySkipPermissions, true);
+        // Bash safety checks are denied with a rewrite hint; other flagged asks still ask.
+        const forwardFlaggedAsk = Effect.fnUntraced(function* (
+          toolName: string,
+          toolInput: Record<string, unknown>,
+          toolUseID: string,
+          decisionReason: string,
+        ) {
+          const decision = yield* Effect.promise(() =>
+            harness.getOpenedOptions()!.canUseTool!(toolName, toolInput, {
+              signal: new AbortController().signal,
+              toolUseID,
+              requestId: `request-${toolUseID}`,
+              decisionReason,
+              suppressAlwaysAllowRule: true,
+            }),
+          ).pipe(Effect.forkScoped);
+          const first = yield* Effect.raceFirst(
+            Queue.take(harness.runtimeRequestReceipts).pipe(
+              Effect.map((event) => ({ type: "request", event }) as const),
+            ),
+            Fiber.join(decision).pipe(
+              Effect.map((result) => ({ type: "decision", result }) as const),
+            ),
+          );
+          return { first, decision };
+        });
+        const safetyCheck = yield* forwardFlaggedAsk(
+          "Bash",
+          { command: 'rm -rf -- "$D/$p"' },
+          "forwarded-safety-check",
+          "\u001b[33mDangerous rm operation on possibly-empty variable\u001b[39m",
+        );
+        assert.equal(safetyCheck.first.type, "decision");
+        const safetyResult = yield* Fiber.join(safetyCheck.decision);
+        assert.equal(safetyResult?.behavior, "deny");
+        if (safetyResult?.behavior !== "deny") return;
+        assert.include(
+          safetyResult.message,
+          "Claude Code's reason: Dangerous rm operation on possibly-empty variable\n",
+        );
+        const mcpConfirmation = yield* forwardFlaggedAsk(
+          "mcp__deploy__confirm",
+          {},
+          "forwarded-mcp-confirmation",
+          "requiresUserInteraction",
+        );
+        assert.equal(mcpConfirmation.first.type, "request");
+        if (mcpConfirmation.first.type !== "request") return;
+        yield* harness.runtime.respondToRuntimeRequest({
+          requestId: mcpConfirmation.first.event.runtimeRequest.id,
+          decision: "decline",
+        });
+        assert.equal((yield* Fiber.join(mcpConfirmation.decision))?.behavior, "deny");
         // Forwarded asks (including ask rules and settings fallback) still need a decision
         // before queued init/status frames arrive.
         for (const { phase, frame } of [

@@ -878,6 +878,16 @@ On Windows, the first V2 desktop launch seeds `%APPDATA%\t3code-v2\Local State` 
 
 **Recorded validation:** 24 focused tests across the triage, boot-error and startup-recovery suites; focused `vp check`; typecheck of the server and shared packages; `vp run build:desktop`.
 
+### DL054 — Full access denies Claude safety checks instead of waiting
+
+In Full access, Claude Code still forwards its own safety checks under `bypassPermissions`, mostly dangerous `rm` targets: globs, variables, `$(...)`, or the current directory and its parents. Upstream (#21806) sends every forwarded ask to a person. A thread nobody watches, including a delegated child whose parent cannot approve for it, then blocks until someone clicks. The fork denies these immediately with Claude's reason and rewrite hints, so the agent rewrites the command and keeps working.
+
+The SDK drops the CLI's reason type, so the denial matches the safety-check shape instead: a `Bash` ask that upstream labels `provider_check`, with `suppressAlwaysAllowRule` set and `defaultToNo` unset. User `permissions.ask` rules (`ask_rule`), ordinary asks after a silent CLI bypass downgrade, MCP tools that require user interaction, and display-bearing hook asks still reach a person. Tracked upstream in pingdotgg/t3code#26418 and #26294.
+
+**Implementation evidence:** `claudeFullAccessSafetyCheckDenial` and `canUseToolEffect` in `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts`; the safety-check case in `ClaudeAdapterV2.test.ts` ("asks before restricted Full access tools and follows policy across turns").
+
+**Recorded validation:** The safety-check case fails on the unfixed adapter (an approval request is raised), the MCP-confirmation case fails without the `Bash`/`defaultToNo` guard, and both pass with the fix; all 255 `ClaudeAdapterV2.test.ts` tests pass. In a real dev-server run, a Full access Claude Haiku thread asked to run `rm -rf -- $(find …)` got the denial with Claude's reason ("statically-unresolvable target: command substitution output"), recorded no runtime request, and finished by removing the literal paths.
+
 **Last updated:** 2026-10-30
 
 ## Sync Checklist

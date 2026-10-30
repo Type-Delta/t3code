@@ -3447,6 +3447,23 @@ export function claudeApprovalPresentation(input: {
   };
 }
 
+// Claude's own safety checks (mostly dangerous rm) ask even under bypass. Full access
+// denies them at once so unattended and delegated runs rewrite instead of waiting.
+function claudeFullAccessSafetyCheckDenial(decisionReason: string | undefined): string {
+  const reason = NodeUtil.stripVTControlCharacters(decisionReason ?? "").trim();
+  return [
+    "T3 Code denied this automatically. This thread runs in Full access, so requests that Claude Code's safety checks flag are not sent to anyone for approval. Don't ask the user to approve it or retry the same command. Rewrite it so the check can verify it, then run that.",
+    ...(reason === "" ? [] : [`Claude Code's reason: ${reason}`]),
+    [
+      "Usual fixes for rm:",
+      "- Pass literal absolute paths. No globs, $VARS, $(...), or backticks in rm targets.",
+      '- If you must use a variable, guard it: rm -rf -- "${DIR:?}/build"',
+      "- For a glob or command output, list the matches first (e.g. ls -d /abs/out/*), then rm the literal paths it printed.",
+      "- Use absolute paths instead of `cd dir && rm ...`, and don't remove the current directory or any of its parents.",
+    ].join("\n"),
+  ].join("\n\n");
+}
+
 export function permissionResultFromDecision(input: {
   readonly toolName: string;
   readonly decision: ProviderApprovalDecision;
@@ -9705,17 +9722,32 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             callbackOptions.description ??
             callbackOptions.decisionReason ??
             summarizeClaudeToolRequest(toolName, nativeToolInput);
+          const presentation = claudeApprovalPresentation({
+            permissionMode: context.queryPolicy.permissionMode,
+            prompt,
+            callbackOptions,
+          });
+          // The SDK drops the reason type. Bash rm safety checks suppress always-allow; downgrade
+          // asks do not, and MCP confirmations and display hooks (defaultToNo) need a person.
+          if (
+            toolName === "Bash" &&
+            presentation.fullAccessOverride === "provider_check" &&
+            callbackOptions.suppressAlwaysAllowRule === true &&
+            callbackOptions.defaultToNo !== true
+          ) {
+            return {
+              behavior: "deny",
+              message: claudeFullAccessSafetyCheckDenial(callbackOptions.decisionReason),
+              toolUseID: callbackOptions.toolUseID,
+            } satisfies PermissionResult;
+          }
           const artifacts = yield* buildApprovalRequestArtifacts({
             context,
             nativeItemId: nativeRequestId,
             nativeRequestId,
             requestKind,
             prompt,
-            presentation: claudeApprovalPresentation({
-              permissionMode: context.queryPolicy.permissionMode,
-              prompt,
-              callbackOptions,
-            }),
+            presentation,
           });
           const decision = yield* Deferred.make<ClaudeApprovalResponse, never>();
           yield* Ref.update(pendingRuntimeRequests, (current) => {
