@@ -437,7 +437,7 @@ The workflow does not publish a `t3` npm package or CLI archives, so `t3 update`
 
 **Implementation evidence:** `.github/workflows/fork-release.yml`, `fork-windows-release.yml`, `fork-macos-release.yml`, and `fork-linux-release.yml`.
 
-**Recorded validation:** actionlint and `vp fmt --check` on the four workflows. Hosted-runner builds and a two-version update on each OS are not yet recorded.
+**Recorded validation:** actionlint and `vp fmt --check` on the four workflows. Fork Release run 41066477319 built every platform on hosted runners and published `v0.1.301` with `latest.yml`, a `latest-mac.yml` listing arm64 and x64, and a `latest-linux.yml` listing the AppImage and `.deb`. A two-version update on each OS is not yet recorded.
 
 **Last updated:** 2026-10-30
 
@@ -459,7 +459,7 @@ Fork macOS builds are signed with one persistent self-signed certificate (`Type-
 
 **Implementation evidence:** `scripts/build-desktop-artifact.ts`, `scripts/build-desktop-artifact.test.ts`, and `.github/workflows/fork-macos-release.yml`.
 
-**Recorded validation:** `vp test run scripts/build-desktop-artifact.test.ts` (50 tests), focused `vp check`, the scripts typecheck, and a Linux-side config generation showing the self-signed identity with notarization and hardened runtime off. A signed hosted build and a two-version update on a Mac are not yet recorded.
+**Recorded validation:** `vp test run scripts/build-desktop-artifact.test.ts` (50 tests), focused `vp check`, the scripts typecheck, and a Linux-side config generation showing the self-signed identity with notarization and hardened runtime off. Hosted builds for `v0.1.301` passed `codesign --verify --deep --strict` with `designated => identifier "com.t3tools.t3code" and certificate leaf = H"7098ba8c…"`. A two-version update on a Mac is not yet recorded.
 
 **Last updated:** 2026-10-30
 
