@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Fork patch = upstream patch × 100 + build: 0.1.3 → 0.1.301, 0.1.302; 0.1.4 → 0.1.401. Start at 50 for a .0 base."
-        required: true
+        description: "Leave blank for the next fork build of the upstream base in apps/desktop/package.json (0.1.3 → 0.1.301, 0.1.302…). Required for nightly."
+        required: false
+        default: ""
         type: string
 
 # Serialize whole runs so preflight's newer-than-latest check sees the previous release.
@@ -34,7 +35,33 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name' > "$RUNNER_TEMP/fork-tags"
           version="${VERSION_INPUT#v}"
+          if [[ -z "$version" ]]; then
+            base="$(gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/$GITHUB_REPOSITORY/contents/apps/desktop/package.json?ref=$GITHUB_SHA" | jq -r .version)"
+            version="$(python3 - "$base" "$RUNNER_TEMP/fork-tags" <<'PY'
+          import re
+          import sys
+
+          # Fork patch = upstream patch × 100 + build; a .0 base starts at 50 so it stays clear of upstream's next patches.
+          base = re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', sys.argv[1])
+          if not base:
+              sys.exit(f'::error::Cannot derive a fork version from upstream base {sys.argv[1]!r}; pass one explicitly.')
+          major, minor, patch = map(int, base.groups())
+          first, last = (patch * 100 + 1 if patch else 50), patch * 100 + 99
+          with open(sys.argv[2], encoding='utf-8') as tags:
+              builds = [int(match[1]) for tag in tags
+                        if (match := re.fullmatch(rf'v{major}\.{minor}\.(0|[1-9]\d*)\s*', tag))
+                        and first <= int(match[1]) <= last]
+          build = max(builds, default=first - 1) + 1
+          if build > last:
+              sys.exit(f'::error::No fork build numbers left for upstream base {sys.argv[1]}.')
+          print(f'{major}.{minor}.{build}')
+          PY
+            )"
+            echo "Derived version $version from upstream base $base."
+          fi
           number='(0|[1-9][0-9]*)'
           if [[ ! "$version" =~ ^${number}\.${number}\.${number}(-nightly\.[0-9]{8}\.${number})?$ ]]; then
             echo "::error::Invalid version '$VERSION_INPUT'. Use X.Y.Z or X.Y.Z-nightly.YYYYMMDD.N; the updater ignores other suffixes."
@@ -58,7 +85,6 @@ jobs:
           if [[ "$version" == *-nightly.* ]]; then
             prerelease=true
           else
-            gh api --paginate "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name' > "$RUNNER_TEMP/fork-tags"
             python3 - "$version" "$RUNNER_TEMP/fork-tags" <<'PY'
           import re
           import sys
@@ -72,9 +98,11 @@ jobs:
               sys.exit(f'::error::Stable version {sys.argv[1]} must be greater than existing stable tag v{latest}.')
           PY
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
 
   windows:
     needs: preflight
