@@ -419,6 +419,10 @@
       "types": "./src/cliRelease.ts",
       "import": "./src/cliRelease.ts"
     },
+    "./forkRepository": {
+      "types": "./src/forkRepository.ts",
+      "import": "./src/forkRepository.ts"
+    },
     "./gitPatchPath": {
       "types": "./src/gitPatchPath.ts",
       "import": "./src/gitPatchPath.ts"

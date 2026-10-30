@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { GitCommandError } from "@t3tools/contracts";
+import { T3CODE_REPOSITORY_URL } from "@t3tools/shared/forkRepository";
 import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -58,6 +59,7 @@ const makeTriage = (
   Effect.gen(function* () {
     const git = yield* GitVcsDriver.GitVcsDriver;
     const commands: string[] = [];
+    const argumentsByCommand: ReadonlyArray<string>[] = [];
     const triage = yield* Layer.build(TriageService.layer).pipe(
       Effect.map(Context.get(TriageService.TriageService)),
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
@@ -65,6 +67,7 @@ const makeTriage = (
         execute: (input) => {
           const command = input.args[0] ?? "";
           commands.push(command);
+          argumentsByCommand.push(input.args);
           return answer(command).pipe(
             Effect.map((stdout) => ({
               exitCode: ChildProcessSpawner.ExitCode(0),
@@ -77,7 +80,7 @@ const makeTriage = (
         },
       }),
     );
-    return { triage, commands };
+    return { triage, commands, argumentsByCommand };
   });
 
 const readContext = Effect.gen(function* () {
@@ -91,7 +94,7 @@ const readContext = Effect.gen(function* () {
 it.effect("sessions started during a clone share it, and a release tag is looked up once", () =>
   Effect.gen(function* () {
     const fetches = yield* Queue.unbounded<void>();
-    const { triage, commands } = yield* makeTriage((command) =>
+    const { triage, commands, argumentsByCommand } = yield* makeTriage((command) =>
       command === "fetch"
         ? Queue.offer(fetches, undefined).pipe(Effect.andThen(Effect.never))
         : Effect.succeed(
@@ -106,6 +109,14 @@ it.effect("sessions started during a clone share it, and a release tag is looked
     assert.deepEqual(
       commands.filter((command) => command === "ls-remote" || command === "init"),
       ["ls-remote", "init"],
+    );
+    assert.include(
+      argumentsByCommand.map((args) => args.join(" ")),
+      `ls-remote ${T3CODE_REPOSITORY_URL} refs/tags/v${packageJson.version} refs/tags/v${packageJson.version}^{} refs/heads/main`,
+    );
+    assert.include(
+      argumentsByCommand.map((args) => args.join(" ")),
+      `remote add origin ${T3CODE_REPOSITORY_URL}`,
     );
   }).pipe(Effect.provide(TestLayer)),
 );
