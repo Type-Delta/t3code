@@ -184,6 +184,7 @@ interface BuildCliInput {
   readonly skipBuild: Option.Option<boolean>;
   readonly keepStage: Option.Option<boolean>;
   readonly signed: Option.Option<boolean>;
+  readonly selfSigned: Option.Option<boolean>;
   readonly verbose: Option.Option<boolean>;
   readonly mockUpdates: Option.Option<boolean>;
   readonly mockUpdateServerPort: Option.Option<number>;
@@ -204,6 +205,28 @@ const getDefaultArch = Effect.fn("getDefaultArch")(function* (platform: typeof B
   }
 
   return yield* getDefaultBuildArch(platform, config);
+});
+
+export class InvalidSelfSignedBuildError extends Schema.TaggedError<InvalidSelfSignedBuildError>()(
+  "InvalidSelfSignedBuildError",
+  { reason: Schema.Literals(["platform", "signed", "certificate"]) },
+) {
+  override get message(): string {
+    switch (this.reason) {
+      case "platform":
+        return "--self-signed requires --platform mac.";
+      case "signed":
+        return "--self-signed cannot be combined with --signed.";
+      case "certificate":
+        return "CSC_LINK must contain the persistent fork signing certificate for --self-signed builds.";
+    }
+  }
+}
+
+export const MAC_SELF_SIGNED_ENTITLEMENTS = Plist.build({
+  "com.apple.security.cs.allow-jit": true,
+  "com.apple.security.cs.allow-unsigned-executable-memory": true,
+  "com.apple.security.cs.disable-library-validation": true,
 });
 
 export class MacPasskeySigningConfigurationResolutionError extends Schema.TaggedError<MacPasskeySigningConfigurationResolutionError>()(
@@ -946,6 +969,7 @@ interface ResolvedBuildOptions {
   readonly skipBuild: boolean;
   readonly keepStage: boolean;
   readonly signed: boolean;
+  readonly selfSigned: boolean;
   readonly verbose: boolean;
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: number | undefined;
@@ -1639,6 +1663,7 @@ const BuildEnvConfig = Config.all({
   skipBuild: Config.Boolean("T3CODE_DESKTOP_SKIP_BUILD").pipe(Config.withDefault(false)),
   keepStage: Config.Boolean("T3CODE_DESKTOP_KEEP_STAGE").pipe(Config.withDefault(false)),
   signed: Config.Boolean("T3CODE_DESKTOP_SIGNED").pipe(Config.withDefault(false)),
+  selfSigned: Config.Boolean("T3CODE_DESKTOP_SELF_SIGNED").pipe(Config.withDefault(false)),
   verbose: Config.Boolean("T3CODE_DESKTOP_VERBOSE").pipe(Config.withDefault(false)),
   mockUpdates: Config.Boolean("T3CODE_DESKTOP_MOCK_UPDATES").pipe(Config.withDefault(false)),
   mockUpdateServerPort: Config.String("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.option),
@@ -1719,6 +1744,19 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const skipBuild = resolveBooleanFlag(input.skipBuild, env.skipBuild);
   const keepStage = resolveBooleanFlag(input.keepStage, env.keepStage);
   const signed = resolveBooleanFlag(input.signed, env.signed);
+  const selfSigned = resolveBooleanFlag(input.selfSigned, env.selfSigned);
+  if (selfSigned) {
+    if (platform !== "mac") {
+      return yield* new InvalidSelfSignedBuildError({ reason: "platform" });
+    }
+    if (signed) {
+      return yield* new InvalidSelfSignedBuildError({ reason: "signed" });
+    }
+    const cscLink = yield* Config.String("CSC_LINK").pipe(Config.option);
+    if (!Option.getOrUndefined(cscLink)?.trim()) {
+      return yield* new InvalidSelfSignedBuildError({ reason: "certificate" });
+    }
+  }
   const verbose = resolveBooleanFlag(input.verbose, env.verbose);
 
   const mockUpdates = resolveBooleanFlag(input.mockUpdates, env.mockUpdates);
@@ -1745,6 +1783,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     skipBuild,
     keepStage,
     signed,
+    selfSigned,
     verbose,
     mockUpdates,
     mockUpdateServerPort,
@@ -2754,6 +2793,43 @@ export function resolveDesktopProductName(version: string): string {
     : (desktopPackageJson.productName ?? "T3 Code");
 }
 
+export function createDesktopBuildEnvironment(
+  options: Pick<ResolvedBuildOptions, "platform" | "signed" | "selfSigned">,
+  env: Readonly<NodeJS.ProcessEnv>,
+): NodeJS.ProcessEnv {
+  // electron-builder treats empty signing variables as enabled; scrub them before spawning.
+  const buildEnv: NodeJS.ProcessEnv = { ...env };
+  buildEnv.npm_config_user_agent = resolvePackageManagerUserAgent(rootPackageJson.packageManager);
+  for (const [key, value] of Object.entries(buildEnv)) {
+    if (value === "") {
+      delete buildEnv[key];
+    }
+  }
+  if (options.platform === "linux") {
+    // fpm uses system xz through tar; threading cuts compression time on many-core runners.
+    buildEnv.XZ_DEFAULTS = "-T0";
+  }
+  if (options.platform === "win") {
+    // Windows signs only through Azure Trusted Signing. Off Windows,
+    // electron-builder's signtool manager would read CSC_LINK (the macOS
+    // certificate) as a Windows certificate.
+    delete buildEnv.CSC_LINK;
+    delete buildEnv.CSC_KEY_PASSWORD;
+  }
+  if (!options.signed && !options.selfSigned) {
+    buildEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
+    delete buildEnv.CSC_LINK;
+    delete buildEnv.CSC_KEY_PASSWORD;
+  }
+  if (!options.signed) {
+    delete buildEnv.APPLE_API_KEY;
+    delete buildEnv.APPLE_API_KEY_ID;
+    delete buildEnv.APPLE_API_ISSUER;
+  }
+
+  return buildEnv;
+}
+
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
@@ -2761,14 +2837,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   signed: boolean,
   mockUpdates: boolean,
   mockUpdateServerPort: number | undefined,
-  macPasskeySigning:
+  macSigning:
     | {
         readonly entitlementsPath: string;
-        readonly provisioningProfilePath: string;
+        readonly provisioningProfilePath?: string;
       }
     | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  selfSigned = false,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
@@ -2818,6 +2895,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "mac") {
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    if (selfSigned) buildConfig.forceCodeSigning = true;
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
@@ -2855,11 +2933,23 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           role: "Viewer",
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
-      ...(macPasskeySigning
+      ...(selfSigned
         ? {
-            entitlements: macPasskeySigning.entitlementsPath,
-            provisioningProfile: macPasskeySigning.provisioningProfilePath,
+            identity: "Type-Delta T3 Code Fork",
+            notarize: false,
+            // No Team ID: hardened library validation can reject Electron's nested code.
+            hardenedRuntime: false,
+            preAutoEntitlements: false,
+            entitlementsInherit: macSigning?.entitlementsPath,
+          }
+        : {}),
+      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      ...(macSigning
+        ? {
+            entitlements: macSigning.entitlementsPath,
+            ...(!selfSigned && macSigning.provisioningProfilePath
+              ? { provisioningProfile: macSigning.provisioningProfilePath }
+              : {}),
           }
         : {}),
     };
@@ -3810,9 +3900,13 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
         ),
       }
     : undefined;
-  const macEntitlementsPath = macPasskeySigning
-    ? path.join(stageAppDir, "entitlements.mac.plist")
-    : undefined;
+  const macEntitlementsPath =
+    macPasskeySigning || options.selfSigned
+      ? path.join(stageAppDir, "entitlements.mac.plist")
+      : undefined;
+  if (options.selfSigned && macEntitlementsPath) {
+    yield* fs.writeFileString(macEntitlementsPath, MAC_SELF_SIGNED_ENTITLEMENTS);
+  }
   let macWebAuthn: MacWebAuthnEntitlements | undefined;
   if (macPasskeySigning && macEntitlementsPath) {
     if (!(yield* fs.exists(macPasskeySigning.provisioningProfilePath))) {
@@ -3873,14 +3967,17 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       options.signed,
       options.mockUpdates,
       options.mockUpdateServerPort,
-      macPasskeySigning && macEntitlementsPath
+      macEntitlementsPath
         ? {
             entitlementsPath: macEntitlementsPath,
-            provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
+            ...(macPasskeySigning
+              ? { provisioningProfilePath: macPasskeySigning.provisioningProfilePath }
+              : {}),
           }
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      options.selfSigned,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -3953,35 +4050,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     });
   }
 
-  // electron-builder treats empty signing variables as enabled; scrub them before spawning.
-  const buildEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-  };
-  buildEnv.npm_config_user_agent = resolvePackageManagerUserAgent(rootPackageJson.packageManager);
-  for (const [key, value] of Object.entries(buildEnv)) {
-    if (value === "") {
-      delete buildEnv[key];
-    }
-  }
-  if (options.platform === "linux") {
-    // fpm uses system xz through tar; threading cuts compression time on many-core runners.
-    buildEnv.XZ_DEFAULTS = "-T0";
-  }
-  if (options.platform === "win") {
-    // Windows signs only through Azure Trusted Signing. Off Windows,
-    // electron-builder's signtool manager would read CSC_LINK (the macOS
-    // certificate) as a Windows certificate.
-    delete buildEnv.CSC_LINK;
-    delete buildEnv.CSC_KEY_PASSWORD;
-  }
-  if (!options.signed) {
-    buildEnv.CSC_IDENTITY_AUTO_DISCOVERY = "false";
-    delete buildEnv.CSC_LINK;
-    delete buildEnv.CSC_KEY_PASSWORD;
-    delete buildEnv.APPLE_API_KEY;
-    delete buildEnv.APPLE_API_KEY_ID;
-    delete buildEnv.APPLE_API_ISSUER;
-  }
+  const buildEnv = createDesktopBuildEnvironment(options, process.env);
 
   if (hostPlatform === "win32") {
     const python = yield* resolvePythonForNodeGyp();
@@ -4129,6 +4198,12 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   signed: Flag.Boolean("signed").pipe(
     Flag.withDescription(
       "Enable signing/notarization discovery; Windows uses Azure Trusted Signing (env: T3CODE_DESKTOP_SIGNED).",
+    ),
+    Flag.optional,
+  ),
+  selfSigned: Flag.Boolean("self-signed").pipe(
+    Flag.withDescription(
+      "Sign macOS builds with the persistent fork certificate in CSC_LINK, without notarization (env: T3CODE_DESKTOP_SELF_SIGNED).",
     ),
     Flag.optional,
   ),

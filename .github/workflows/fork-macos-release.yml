@@ -1,62 +1,18 @@
 name: Fork macOS Release
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       version:
-        description: "Release version, for example 0.0.38 or v0.0.38"
         required: true
         type: string
 
-concurrency:
-  group: fork-macos-release-${{ inputs.version }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
-  id-token: none
 
 jobs:
-  preflight:
-    name: Resolve release version
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      version: ${{ steps.release.outputs.version }}
-      tag: ${{ steps.release.outputs.tag }}
-      release_name: ${{ steps.release.outputs.release_name }}
-      is_prerelease: ${{ steps.release.outputs.is_prerelease }}
-      make_latest: ${{ steps.release.outputs.make_latest }}
-      ref: ${{ github.sha }}
-    steps:
-      - name: Validate version
-        id: release
-        shell: bash
-        env:
-          RELEASE_VERSION_INPUT: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          version="${RELEASE_VERSION_INPUT#v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid release version: $RELEASE_VERSION_INPUT" >&2
-            exit 1
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "release_name=T3 Code v$version" >> "$GITHUB_OUTPUT"
-          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "make_latest=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "make_latest=false" >> "$GITHUB_OUTPUT"
-          fi
-
   build_macos:
     name: Build macOS ${{ matrix.arch }}
-    needs: [preflight]
     # Both arches build on the Apple Silicon runner; electron-builder and the
     # Rust toolchain cross-target x64 the same way upstream's release does.
     runs-on: macos-15
@@ -73,7 +29,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
           sparse-checkout: |
             /*
             !/.repos/
@@ -103,13 +58,34 @@ jobs:
           targets: ${{ matrix.rust_target }}
 
       - name: Align package versions to release version
-        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+        run: node scripts/update-release-package-versions.ts "${{ inputs.version }}"
 
-      # No --signed: the build script disables CSC auto-discovery and scrubs
-      # Apple signing variables, so the DMG is unsigned and not notarized.
-      - name: Build unsigned desktop artifact
+      - name: Trust macOS signing certificate
         shell: bash
         env:
+          MACOS_CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          MACOS_CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MACOS_CSC_LINK" ]]; then
+            echo "::error::MACOS_CSC_LINK is required for macOS signing."
+            exit 1
+          fi
+          cert_dir="$(mktemp -d "$RUNNER_TEMP/macos-cert.XXXXXX")"
+          trap 'rm -rf "$cert_dir"' EXIT
+          printf '%s' "$MACOS_CSC_LINK" | base64 --decode > "$cert_dir/cert.p12"
+          if ! openssl pkcs12 -in "$cert_dir/cert.p12" -nokeys -passin env:MACOS_CSC_KEY_PASSWORD > "$cert_dir/chain.pem"; then
+            openssl pkcs12 -legacy -in "$cert_dir/cert.p12" -nokeys -passin env:MACOS_CSC_KEY_PASSWORD > "$cert_dir/chain.pem"
+          fi
+          openssl x509 -in "$cert_dir/chain.pem" -out "$cert_dir/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$cert_dir/cert.pem"
+
+      # Self-signed builds support Squirrel updates but are not notarized.
+      - name: Build self-signed desktop artifact
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
           T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
         run: |
@@ -117,8 +93,29 @@ jobs:
             --platform mac \
             --target dmg \
             --arch "${{ matrix.arch }}" \
-            --build-version "${{ needs.preflight.outputs.version }}" \
+            --build-version "${{ inputs.version }}" \
+            --self-signed \
             --verbose
+
+      - name: Verify application signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_dir="$(mktemp -d "$RUNNER_TEMP/macos-verify.XXXXXX")"
+          trap 'rm -rf "$verify_dir"' EXIT
+          shopt -s nullglob
+          archives=(release/*.zip)
+          [[ ${#archives[@]} -eq 1 ]] || { echo "::error::Expected one macOS ZIP"; exit 1; }
+          ditto -x -k "${archives[0]}" "$verify_dir"
+          apps=("$verify_dir"/*.app)
+          [[ ${#apps[@]} -eq 1 ]] || { echo "::error::Expected one application in ZIP"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "${apps[0]}"
+          requirement="$(codesign -d -r- "${apps[0]}" 2>&1)"
+          printf '%s\n' "$requirement"
+          if ! grep -Eq 'certificate (leaf|root) = H"' <<< "$requirement"; then
+            echo "::error::Application lacks a certificate-based designated requirement."
+            exit 1
+          fi
 
       - name: Collect release assets
         shell: bash
@@ -127,7 +124,7 @@ jobs:
           mkdir -p release-publish
 
           shopt -s nullglob
-          for pattern in "release/*.dmg" "release/*.zip" "release/*.blockmap" "release/*.yml"; do
+          for pattern in "release/*.dmg" "release/*.zip" "release/*.blockmap" "release/latest-mac.yml" "release/nightly-mac.yml"; do
             for file in $pattern; do
               cp "$file" release-publish/
             done
@@ -147,73 +144,3 @@ jobs:
           name: desktop-mac-${{ matrix.arch }}
           path: release-publish/*
           if-no-files-found: error
-
-  release:
-    name: Publish GitHub Release
-    needs: [preflight, build_macos]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      id-token: none
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.preflight.outputs.ref }}
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
-        with:
-          node-version-file: package.json
-          cache: true
-          run-install: |
-            args:
-              - --filter=@t3tools/scripts...
-
-      - name: Download macOS release assets
-        uses: actions/download-artifact@v8
-        with:
-          pattern: desktop-mac-*
-          merge-multiple: true
-          path: release-assets
-
-      - name: Merge macOS updater manifests
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          for x64_manifest in release-assets/*-mac-x64.yml; do
-            arm64_manifest="${x64_manifest%-x64.yml}.yml"
-            if [[ -f "$arm64_manifest" ]]; then
-              node scripts/merge-update-manifests.ts --platform mac "$arm64_manifest" "$x64_manifest"
-              rm -f "$x64_manifest"
-            fi
-          done
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.preflight.outputs.tag }}
-          target_commitish: ${{ needs.preflight.outputs.ref }}
-          name: ${{ needs.preflight.outputs.release_name }}
-          body: |
-            macOS (Apple Silicon and Intel) build from the Type-Delta fork.
-
-            The app is not code-signed or notarized. macOS will block it on first launch; either right-click the app and choose Open, or run `xattr -dr com.apple.quarantine "/Applications/T3 Code.app"`. In-app auto-update requires a signed app and is unavailable on this build.
-
-            This workflow does not publish a matching `t3` package. The bundled local server works, but remote server self-update to this version is unavailable.
-          generate_release_notes: true
-          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
-          make_latest: ${{ needs.preflight.outputs.make_latest }}
-          files: |
-            release-assets/*.dmg
-            release-assets/*.zip
-            release-assets/*.blockmap
-            release-assets/*.yml
-          fail_on_unmatched_files: true
-          token: ${{ github.token }}

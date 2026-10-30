@@ -1,69 +1,24 @@
 name: Fork Windows x64 Release
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       version:
-        description: "Release version, for example 0.0.38 or v0.0.38"
         required: true
         type: string
 
-concurrency:
-  group: fork-windows-x64-release-${{ inputs.version }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
-  id-token: none
 
 jobs:
-  preflight:
-    name: Resolve release version
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      version: ${{ steps.release.outputs.version }}
-      tag: ${{ steps.release.outputs.tag }}
-      release_name: ${{ steps.release.outputs.release_name }}
-      is_prerelease: ${{ steps.release.outputs.is_prerelease }}
-      make_latest: ${{ steps.release.outputs.make_latest }}
-      ref: ${{ github.sha }}
-    steps:
-      - name: Validate version
-        id: release
-        shell: bash
-        env:
-          RELEASE_VERSION_INPUT: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-
-          version="${RELEASE_VERSION_INPUT#v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid release version: $RELEASE_VERSION_INPUT" >&2
-            exit 1
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "release_name=T3 Code v$version" >> "$GITHUB_OUTPUT"
-          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "make_latest=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "make_latest=false" >> "$GITHUB_OUTPUT"
-          fi
-
   build_wsl_runtime:
     name: Build WSL runtime (linux-x64)
-    needs: [preflight]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
           sparse-checkout: |
             /*
             !/.repos/
@@ -86,7 +41,7 @@ jobs:
           targets: x86_64-unknown-linux-gnu
 
       - name: Align package versions to release version
-        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+        run: node scripts/update-release-package-versions.ts "${{ inputs.version }}"
 
       - name: Build Linux resource monitor
         run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
@@ -113,12 +68,12 @@ jobs:
           node scripts/build-cli-archive.ts \
             --platform linux \
             --arch x64 \
-            --version "${{ needs.preflight.outputs.version }}" \
+            --version "${{ inputs.version }}" \
             --resource-monitor-dir "$resource_monitor_dir" \
             --output-dir release-cli
 
       - name: Smoke-test Linux CLI archive
-        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "${{ needs.preflight.outputs.version }}"
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "${{ inputs.version }}"
 
       - name: Upload Linux CLI archive
         uses: actions/upload-artifact@v7
@@ -129,14 +84,13 @@ jobs:
 
   build_windows:
     name: Build Windows x64
-    needs: [preflight, build_wsl_runtime]
+    needs: [build_wsl_runtime]
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.preflight.outputs.ref }}
           sparse-checkout: |
             /*
             !/.repos/
@@ -177,7 +131,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Align package versions to release version
-        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+        run: node scripts/update-release-package-versions.ts "${{ inputs.version }}"
 
       - name: Download Linux CLI archive for WSL
         uses: actions/download-artifact@v8
@@ -211,7 +165,7 @@ jobs:
             --platform win \
             --target nsis \
             --arch x64 \
-            --build-version "${{ needs.preflight.outputs.version }}" \
+            --build-version "${{ inputs.version }}" \
             --wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz \
             --verbose
 
@@ -222,7 +176,7 @@ jobs:
           mkdir -p release-publish
 
           shopt -s nullglob
-          for pattern in "release/*.exe" "release/*.blockmap" "release/*.yml"; do
+          for pattern in "release/*.exe" "release/*.blockmap" "release/latest.yml" "release/nightly.yml"; do
             for file in $pattern; do
               cp "$file" release-publish/
             done
@@ -234,38 +188,3 @@ jobs:
           name: desktop-win-x64
           path: release-publish/*
           if-no-files-found: error
-
-  release:
-    name: Publish GitHub Release
-    needs: [preflight, build_windows]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      id-token: none
-    steps:
-      - name: Download Windows release assets
-        uses: actions/download-artifact@v8
-        with:
-          name: desktop-win-x64
-          path: release-assets
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.preflight.outputs.tag }}
-          target_commitish: ${{ needs.preflight.outputs.ref }}
-          name: ${{ needs.preflight.outputs.release_name }}
-          body: |
-            Windows x64 build from the Type-Delta fork.
-
-            This workflow does not publish a matching `t3` package. The bundled local server works, but remote server self-update to this version is unavailable.
-          generate_release_notes: true
-          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
-          make_latest: ${{ needs.preflight.outputs.make_latest }}
-          files: |
-            release-assets/*.exe
-            release-assets/*.blockmap
-            release-assets/*.yml
-          fail_on_unmatched_files: true
-          token: ${{ github.token }}

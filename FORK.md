@@ -427,25 +427,19 @@ and Electron shell tests.
 
 **Last updated:** 2026-10-25
 
-### DL028 — Isolated Windows x64 GitHub releases
+### DL028 — One manual fork desktop release for every updater platform
 
-The fork has a manual Windows x64 release workflow that uses GitHub-hosted runners. It builds the
-Linux CLI archive required by the packaged WSL backend, produces an unsigned NSIS installer, and
-publishes only the Windows installer and updater files to this repository's GitHub Releases.
-It does not publish packages, build other desktop platforms, deploy hosted services, announce the
-release, or invoke another release workflow.
+The fork publishes desktop builds only through the manual **Fork Release** workflow. One dispatch builds Windows x64 (unsigned NSIS), macOS arm64 and x64 (DL030), and Linux x64 (AppImage and `.deb`) on GitHub-hosted runners, then publishes a single GitHub Release in this repository with `latest.yml`, a merged `latest-mac.yml`, and `latest-linux.yml` (`nightly*.yml` for nightlies). The platform workflows are reusable build steps with no dispatch trigger of their own. electron-updater's GitHub provider picks the release before it reads the platform manifest, so a release missing any platform would break that platform's Update button; the publish job refuses to run unless every manifest exists. Windows still builds the Linux CLI archive the packaged WSL backend needs.
 
-The packaged local server remains available. Remote server self-update to the fork version is not
-available because this workflow deliberately does not publish a matching `t3` package.
+Preflight accepts only `X.Y.Z` or `X.Y.Z-nightly.YYYYMMDD.N`, because the updater ignores other suffixes. It rejects a tag that already exists here or on upstream, and a stable version that is not newer than the latest stable tag. Fork versions follow upstream patch × 100 + fork build (`0.1.3` → `0.1.301`), so they never equal an upstream version. Unsigned NSIS updates install because electron-updater skips publisher verification when the build has no `publisherName`.
 
-**Implementation evidence:** `.github/workflows/fork-windows-release.yml`.
+The workflow does not publish a `t3` npm package or CLI archives, so `t3 update` and remote server self-update still follow upstream; do not use them on fork servers.
 
-The Windows job also uses upstream's corrected Visual Studio Spectre runtime component identifier when installing packaging prerequisites. The WSL archive handoff follows the current desktop artifact builder's `--wsl-runtime` interface.
+**Implementation evidence:** `.github/workflows/fork-release.yml`, `fork-windows-release.yml`, `fork-macos-release.yml`, and `fork-linux-release.yml`.
 
-**Recorded validation:** workflow YAML and handoff contract checks, focused desktop artifact
-tests, `vp check`, and `vp run typecheck`.
+**Recorded validation:** actionlint and `vp fmt --check` on the four workflows. Hosted-runner builds and a two-version update on each OS are not yet recorded.
 
-**Last updated:** 2026-09-26
+**Last updated:** 2026-10-30
 
 ### DL029 — Selectable sidebar thread ordering
 
@@ -457,25 +451,17 @@ When Working is disabled (upstream enables it by default), the web and desktop s
 
 **Last updated:** 2026-10-28
 
-### DL030 — Isolated macOS GitHub releases
+### DL030 — Self-signed macOS builds that can update in-app
 
-The fork has a manual macOS release workflow that uses GitHub-hosted `macos-15` runners. It builds
-unsigned, non-notarized DMG and ZIP artifacts for Apple Silicon and Intel, merges the per-arch
-updater manifests into one `latest-mac.yml`, and publishes only those files to this repository's
-GitHub Releases. Like DL028 it does not publish packages, build other platforms, or deploy hosted
-services, and it does not publish a matching `t3` package.
+Fork macOS builds are signed with one persistent self-signed certificate (`Type-Delta T3 Code Fork`) supplied through the `MACOS_CSC_LINK` and `MACOS_CSC_KEY_PASSWORD` repository secrets, without notarization or an Apple Developer account. Squirrel.Mac only installs an update whose signature satisfies the running app's designated requirement, which for this certificate is the bundle identifier plus the certificate hash. Signing every release with the same certificate keeps that requirement stable, so in-app updates work; unsigned or ad-hoc builds cannot update. Gatekeeper still blocks the first install until the user approves it under System Settings → Privacy & Security → Open Anyway. Rotating or losing the certificate breaks updates once and requires a manual reinstall.
 
-Because the build is unsigned, Gatekeeper blocks first launch until the user opens the app via
-right-click → Open or clears the quarantine attribute, and in-app auto-update does not work. Signing
-and notarization need a Developer ID certificate (`CSC_LINK`/`CSC_KEY_PASSWORD`), an App Store
-Connect API key (`APPLE_API_KEY*`), and for passkeys an `APPLE_TEAM_ID` plus provisioning profile;
-the workflow can adopt upstream's `--signed` path once those secrets exist.
+`scripts/build-desktop-artifact.ts --self-signed` keeps the certificate variables that unsigned mode scrubs, selects the identity by name, forces code signing, disables notarization, and turns hardened runtime off because a certificate without a Team ID would fail library validation for Electron's own frameworks. It omits the passkey entitlements that require a provisioning profile; upstream's `--signed` path remains for Developer ID builds. The workflow trusts the certificate on the runner, because electron-builder's identity lookup ignores untrusted certificates, and fails the build unless the app's designated requirement contains a certificate hash.
 
-**Implementation evidence:** `.github/workflows/fork-macos-release.yml`.
+**Implementation evidence:** `scripts/build-desktop-artifact.ts`, `scripts/build-desktop-artifact.test.ts`, and `.github/workflows/fork-macos-release.yml`.
 
-**Recorded validation:** actionlint, `vp check`, and `vp run typecheck`.
+**Recorded validation:** `vp test run scripts/build-desktop-artifact.test.ts` (50 tests), focused `vp check`, the scripts typecheck, and a Linux-side config generation showing the self-signed identity with notarization and hardened runtime off. A signed hosted build and a two-version update on a Mac are not yet recorded.
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-10-30
 
 ### DL031 — Durable management API keys for external MCP clients
 
@@ -871,6 +857,16 @@ On Windows, the first V2 desktop launch seeds `%APPDATA%\t3code-v2\Local State` 
 **Implementation evidence:** `apps/desktop/src/app/DesktopUserData.ts` and `DesktopUserData.test.ts` ("prefers the default t3code key when both V1 profiles have one").
 
 **Recorded validation:** No validation recorded beyond that test. The decision is recorded in the 2026-10-16 Merge History entry.
+
+**Last updated:** 2026-10-30
+
+### DL053 — Triage and bug reports target the fork
+
+`t3 triage`, in-app triage, the triage playbook, and the startup-error **Report a bug** link use this repository instead of upstream: the source clone, release tag lookup, issue search and filing, and playbook refresh all go to `Type-Delta/t3code`. Upstream's prompt told the triage agent to replace a differing local playbook with upstream's, which would discard fork edits. Desktop startup recovery opens this repository's releases for the same reason. One shared constant holds the repository so upstream files change by an import. The `npx t3 triage` fallback still runs upstream's published CLI because the fork publishes no npm package.
+
+**Implementation evidence:** `packages/shared/src/forkRepository.ts`, `apps/server/src/triage/{TriageService,triagePrompt}.ts`, `.github/triage/PLAYBOOK.md`, `apps/web/src/lib/bootError.ts`, `apps/desktop/src/app/DesktopStartupRecovery.ts`, and `apps/server/src/triage/TriageService.test.ts`.
+
+**Recorded validation:** 24 focused tests across the triage, boot-error and startup-recovery suites; focused `vp check`; typecheck of the server and shared packages; `vp run build:desktop`.
 
 **Last updated:** 2026-10-30
 

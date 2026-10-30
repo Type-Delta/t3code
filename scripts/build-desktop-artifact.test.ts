@@ -29,6 +29,9 @@ import {
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
+  createDesktopBuildEnvironment,
+  MAC_SELF_SIGNED_ENTITLEMENTS,
+  InvalidSelfSignedBuildError,
   DESKTOP_FILE_EXCLUSIONS,
   InvalidMacPasskeyRpDomainError,
   InvalidMacPasskeyPublishableKeyError,
@@ -1704,6 +1707,179 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
+  it.effect("resolves and validates self-signed builds before staging", () =>
+    Effect.gen(function* () {
+      for (const testCase of [
+        {
+          platform: "mac",
+          flag: true,
+          envFlag: false,
+          signed: false,
+          link: "certificate",
+          error: undefined,
+        },
+        {
+          platform: "mac",
+          flag: undefined,
+          envFlag: true,
+          signed: false,
+          link: "certificate",
+          error: undefined,
+        },
+        {
+          platform: "mac",
+          flag: true,
+          envFlag: false,
+          signed: true,
+          link: "certificate",
+          error: "--signed",
+        },
+        {
+          platform: "linux",
+          flag: true,
+          envFlag: false,
+          signed: false,
+          link: "certificate",
+          error: "--platform mac",
+        },
+        {
+          platform: "win",
+          flag: true,
+          envFlag: false,
+          signed: false,
+          link: "certificate",
+          error: "--platform mac",
+        },
+        {
+          platform: "mac",
+          flag: true,
+          envFlag: false,
+          signed: false,
+          link: "  ",
+          error: "CSC_LINK",
+        },
+        {
+          platform: "mac",
+          flag: true,
+          envFlag: false,
+          signed: false,
+          link: undefined,
+          error: "CSC_LINK",
+        },
+      ] as const) {
+        const result = yield* Effect.result(
+          resolveBuildOptions({
+            platform: Option.some(testCase.platform),
+            target: Option.none(),
+            arch: Option.some("arm64"),
+            buildVersion: Option.none(),
+            outputDir: Option.none(),
+            skipBuild: Option.none(),
+            keepStage: Option.none(),
+            signed: Option.some(testCase.signed),
+            selfSigned: Option.fromNullishOr(testCase.flag),
+            verbose: Option.none(),
+            mockUpdates: Option.none(),
+            mockUpdateServerPort: Option.none(),
+            wslRuntime: Option.none(),
+          }).pipe(
+            Effect.provide(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({
+                  env: {
+                    T3CODE_DESKTOP_SELF_SIGNED: String(testCase.envFlag),
+                    ...(testCase.link === undefined ? {} : { CSC_LINK: testCase.link }),
+                  },
+                }),
+              ),
+            ),
+          ),
+        );
+        if (testCase.error) {
+          assert.equal(result._tag, "Failure");
+          if (result._tag === "Failure") {
+            assert.instanceOf(result.failure, InvalidSelfSignedBuildError);
+            assert.include(result.failure.message, testCase.error);
+          }
+        } else {
+          assert.equal(result._tag, "Success");
+          if (result._tag === "Success") assert.equal(result.success.selfSigned, true);
+        }
+      }
+    }),
+  );
+
+  it.effect("configures mandatory self-signed macOS signing without Apple services", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        { entitlementsPath: "/stage/entitlements.mac.plist" },
+        false,
+        "arm64",
+        true,
+      );
+      const mac = config.mac as Record<string, unknown>;
+      assert.equal(config.forceCodeSigning, true);
+      assert.equal(mac.identity, "Type-Delta T3 Code Fork");
+      assert.equal(mac.notarize, false);
+      assert.equal(mac.hardenedRuntime, false);
+      assert.equal(mac.preAutoEntitlements, false);
+      assert.equal(mac.entitlements, "/stage/entitlements.mac.plist");
+      assert.equal(mac.entitlementsInherit, mac.entitlements);
+      assert.notProperty(mac, "provisioningProfile");
+      assert.notProperty(mac, "sign");
+      assert.deepStrictEqual(mac.target, ["dmg", "zip"]);
+      assert.include(MAC_SELF_SIGNED_ENTITLEMENTS, "com.apple.security.cs.allow-jit");
+      for (const restricted of [
+        "keychain-access-groups",
+        "com.apple.developer",
+        "com.apple.application-identifier",
+        "com.apple.security.application-groups",
+      ]) {
+        assert.notInclude(MAC_SELF_SIGNED_ENTITLEMENTS, restricted);
+      }
+    }),
+  );
+
+  it("preserves self-signed credentials while keeping unsigned and Windows builds isolated", () => {
+    const env = {
+      CSC_LINK: "certificate",
+      CSC_KEY_PASSWORD: "password",
+      CSC_IDENTITY_AUTO_DISCOVERY: "false",
+      APPLE_API_KEY: "apple-key",
+      EMPTY: "",
+    };
+    const selfSigned = createDesktopBuildEnvironment(
+      { platform: "mac", signed: false, selfSigned: true },
+      env,
+    );
+    assert.equal(selfSigned.CSC_LINK, env.CSC_LINK);
+    assert.equal(selfSigned.CSC_KEY_PASSWORD, env.CSC_KEY_PASSWORD);
+    assert.notProperty(selfSigned, "APPLE_API_KEY");
+    assert.notProperty(selfSigned, "EMPTY");
+    for (const platform of ["mac", "win"] as const) {
+      const unsigned = createDesktopBuildEnvironment(
+        { platform, signed: false, selfSigned: false },
+        env,
+      );
+      assert.notProperty(unsigned, "CSC_LINK");
+      assert.notProperty(unsigned, "CSC_KEY_PASSWORD");
+      assert.equal(unsigned.CSC_IDENTITY_AUTO_DISCOVERY, "false");
+    }
+    const windows = createDesktopBuildEnvironment(
+      { platform: "win", signed: true, selfSigned: false },
+      env,
+    );
+    assert.notProperty(windows, "CSC_LINK");
+    assert.notProperty(windows, "CSC_KEY_PASSWORD");
+    assert.equal(env.CSC_LINK, "certificate");
+  });
+
   it.effect("rejects universal builds on Linux and Windows before staging binaries", () =>
     Effect.gen(function* () {
       for (const platform of ["linux", "win"] as const) {
@@ -1717,6 +1893,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             skipBuild: Option.none(),
             keepStage: Option.none(),
             signed: Option.none(),
+            selfSigned: Option.none(),
             verbose: Option.none(),
             mockUpdates: Option.none(),
             mockUpdateServerPort: Option.none(),
@@ -1741,6 +1918,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         skipBuild: Option.some(false),
         keepStage: Option.some(false),
         signed: Option.some(false),
+        selfSigned: Option.some(false),
         verbose: Option.some(false),
         mockUpdates: Option.some(false),
         mockUpdateServerPort: Option.none(),
@@ -1753,6 +1931,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
                 T3CODE_DESKTOP_SKIP_BUILD: "true",
                 T3CODE_DESKTOP_KEEP_STAGE: "true",
                 T3CODE_DESKTOP_SIGNED: "true",
+                T3CODE_DESKTOP_SELF_SIGNED: "true",
                 T3CODE_DESKTOP_VERBOSE: "true",
                 T3CODE_DESKTOP_MOCK_UPDATES: "true",
               },
@@ -1764,6 +1943,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(resolved.skipBuild, false);
       assert.equal(resolved.keepStage, false);
       assert.equal(resolved.signed, false);
+      assert.equal(resolved.selfSigned, false);
       assert.equal(resolved.verbose, false);
       assert.equal(resolved.mockUpdates, false);
     }),
