@@ -13,11 +13,17 @@ import { OrchestratorProjectionError } from "../orchestration-v2/Orchestrator.ts
 import type { ProjectionCheckpointContext } from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as CheckpointDiffQuery from "./CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
-import { CheckpointRefUnavailableError, CheckpointTurnRangeUnavailableError } from "./Errors.ts";
+import {
+  CheckpointObjectsUnavailableError,
+  CheckpointRefUnavailableError,
+  CheckpointSnapshotUnavailableError,
+  CheckpointTurnRangeUnavailableError,
+} from "./Errors.ts";
 
 const threadId = ThreadId.make("thread:checkpoint-diff-v2");
 const firstRunId = RunId.make("run:checkpoint-diff-v2:1");
@@ -168,6 +174,32 @@ it.effect("preserves the typed unavailable-range error contract", () => {
   }).pipe(Effect.provide(layer));
 });
 
+it.effect.each([
+  new CheckpointObjectsUnavailableError({
+    operation: "diff",
+    reason: "auth",
+    remote: "origin (github.com/acme/app)",
+    objectCount: 2,
+  }),
+  new CheckpointSnapshotUnavailableError(),
+])("fails instead of showing an empty diff on $_tag", (unavailable) => {
+  const layer = layerFor({
+    projection: Effect.succeed(makeProjection()),
+    authoredPaths: new Set(),
+    // Only the file summary needs the evicted versions here.
+    diffCheckpoints: (input) =>
+      input.format === "numstat" ? Effect.fail(unavailable) : Effect.succeed(""),
+  });
+
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const error = yield* query
+      .getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 2 })
+      .pipe(Effect.flip);
+    assert.strictEqual(error, unavailable);
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("excludes ready checkpoints from rolled-back runs", () => {
   const projection = makeProjection();
   const layer = layerFor({
@@ -295,8 +327,9 @@ const layerStore = CheckpointStore.layer.pipe(
   Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(layerVcsProcess))),
   // The sidecar checkpoint repository keeps its object store under the server state dir.
   Layer.provide(
-    Layer.merge(
+    Layer.mergeAll(
       layerVcsProcess,
+      ServerSettings.layerTest(),
       ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-diff-query-test-" }),
     ),
   ),

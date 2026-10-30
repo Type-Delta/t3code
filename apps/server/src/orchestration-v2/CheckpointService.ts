@@ -18,6 +18,7 @@ import * as Hex from "effect/encoding/Hex";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 
 import { isGitImport, parseTurnDiffFilesFromNumstat } from "../checkpointing/Diffs.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
@@ -118,6 +119,14 @@ export interface CheckpointServiceV2Shape {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoint: OrchestrationV2Checkpoint;
   }) => Effect.Effect<void, CheckpointServiceV2Error>;
+  /**
+   * Fails like `restore` when evicted file versions cannot be downloaded,
+   * without changing files. They stay local until the scope closes.
+   */
+  readonly prepareRestore: (input: {
+    readonly scope: OrchestrationV2CheckpointScope;
+    readonly checkpoint: OrchestrationV2Checkpoint;
+  }) => Effect.Effect<void, CheckpointServiceV2Error, Scope.Scope>;
 }
 
 export class CheckpointServiceV2 extends Context.Service<
@@ -461,6 +470,8 @@ export const layer: Layer.Layer<
                   fallbackFromToHead: false,
                   ignoreWhitespace: false,
                   format: "numstat",
+                  // Capture never waits on a download; evicted versions only cost line counts.
+                  allowNetwork: false,
                 }),
                 checkpointStore.listAuthoredPaths(refs).pipe(
                   Effect.catch((cause) =>
@@ -564,6 +575,20 @@ export const layer: Layer.Layer<
         ),
       );
 
+    const prepareRestore: CheckpointServiceV2Shape["prepareRestore"] = (input) =>
+      checkpointStore
+        .prepareRestoreCheckpoint({ cwd: input.scope.cwd, checkpointRef: input.checkpoint.ref })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new CheckpointRestoreError({
+                scopeId: input.scope.id,
+                checkpointId: input.checkpoint.id,
+                cause,
+              }),
+          ),
+        );
+
     return CheckpointServiceV2.of({
       prepareRootRunScope: (input) =>
         makeRootRunScope({ ...input, idAllocator }).pipe(
@@ -580,6 +605,7 @@ export const layer: Layer.Layer<
       materializeBaselineCheckpoint,
       capture,
       restore,
+      prepareRestore,
     } satisfies CheckpointServiceV2Shape);
   }),
 );

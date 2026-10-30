@@ -139,6 +139,7 @@ it.effect.each([
               }),
           }),
           Layer.mock(CheckpointServiceV2)({
+            prepareRestore: () => Effect.void,
             restore: () =>
               Effect.gen(function* () {
                 calls.push("files");

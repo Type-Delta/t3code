@@ -22,6 +22,7 @@ import { toastManager } from "../ui/toast";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
+import { ScopedSwitch } from "./ScopedSwitch";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -199,7 +200,9 @@ function CleanupResults({
                 : entry.path?.split(/[\\/]/).findLast(Boolean)) ?? "Worktrees")
             : entry.kind === "logs"
               ? "Rotated logs"
-              : "Browser artifacts";
+              : entry.kind === "snapshots"
+                ? "Snapshots"
+                : "Browser artifacts";
         return (
           <SettingsRow
             key={`${entry.path ?? entry.kind}:${entry.threadId ?? index}`}
@@ -308,6 +311,7 @@ function CleanupSection() {
     return (
       settings.storageCleanup.browserArtifactsAfterDays !== null ||
       settings.storageCleanup.logsAfterDays !== null ||
+      settings.storageCleanup.snapshotsAfterDays !== null ||
       enabled(resolveWorktreeCleanup(settings, null)) ||
       Object.values(settings.projectSettingsOverrides).some(
         (override) =>
@@ -685,6 +689,71 @@ export function WorktreeCleanupSection() {
           </>
         )}
       </>
+    </SettingsSection>
+  );
+}
+
+export function OnlineSnapshotsSection() {
+  const { scope, targets } = useSettingsScope();
+  const settings = useScopedSettings((settings) => settings.onlineSnapshots);
+  const cleanup = useScopedSettings((settings) => settings.storageCleanup);
+  const updateSettings = useUpdateScopedSettings();
+  if (scope.kind === "project" || scope.kind === "checkout") return null;
+  const snapshotStatus = targets.some(
+    (target) => target.settings.storageCleanup.snapshotsAfterDays !== cleanup.snapshotsAfterDays,
+  )
+    ? "Mixed across selected machines"
+    : undefined;
+
+  return (
+    <SettingsSection id="snapshots" title="Snapshots">
+      <SettingsRow
+        {...searchableSetting("online-snapshots")}
+        title="Online Snapshots"
+        description="Delete local copies of file versions your Git remote already has. Undo and diffs download them again when needed."
+        serverScoped
+        settingKeys={["onlineSnapshots"]}
+        resetAction={
+          !settings ? (
+            <SettingResetButton
+              label="online snapshots"
+              onClick={() => updateSettings({ onlineSnapshots: true })}
+            />
+          ) : null
+        }
+        control={
+          <ScopedSwitch
+            settingKeys={["onlineSnapshots"]}
+            checked={settings}
+            onCheckedChange={(checked) => updateSettings({ onlineSnapshots: checked })}
+            aria-label="Online Snapshots"
+          />
+        }
+      />
+      <SettingsRow
+        {...searchableSetting("snapshot-retention")}
+        title="Delete snapshots of idle threads"
+        status={snapshotStatus}
+        description="Delete snapshots of threads idle for this many days. Deleted threads' snapshots are always removed. Undo and diffs stop working for those threads."
+        serverScoped
+        resetAction={
+          cleanup.snapshotsAfterDays !== 15 ? (
+            <SettingResetButton
+              label="snapshot retention"
+              onClick={() => updateSettings({ storageCleanup: { snapshotsAfterDays: 15 } })}
+            />
+          ) : null
+        }
+        control={
+          <RetentionControl
+            label="Delete snapshots of idle threads"
+            value={cleanup.snapshotsAfterDays}
+            onChange={(snapshotsAfterDays) =>
+              updateSettings({ storageCleanup: { snapshotsAfterDays } })
+            }
+          />
+        }
+      />
     </SettingsSection>
   );
 }

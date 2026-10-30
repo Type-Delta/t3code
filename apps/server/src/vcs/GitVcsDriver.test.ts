@@ -28,6 +28,7 @@ import * as GitVcsDriver from "./GitVcsDriver.ts";
 import type * as VcsDriver from "./VcsDriver.ts";
 import * as VcsDriverRegistry from "./VcsDriverRegistry.ts";
 import * as VcsProcess from "./VcsProcess.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { runVcsDriverContractSuite } from "./testing/VcsDriverContractHarness.ts";
 
 const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
@@ -39,6 +40,7 @@ const layerGitContract = Layer.mergeAll(
   SidecarCheckpointRepository.layer,
 ).pipe(
   Layer.provide(layerServerConfig),
+  Layer.provide(ServerSettings.layerTest().pipe(Layer.orDie)),
   Layer.provideMerge(VcsProcess.layer),
   Layer.provideMerge(NodeServices.layer),
 );

@@ -1925,7 +1925,11 @@ export const layerWsRpc = (
             Effect.mapError(
               (cause) =>
                 new OrchestrationGetTurnDiffError({
-                  message: "Failed to load turn diff",
+                  message:
+                    cause._tag === "CheckpointObjectsUnavailableError" ||
+                    cause._tag === "CheckpointSnapshotUnavailableError"
+                      ? cause.message
+                      : "Failed to load turn diff",
                   cause,
                 }),
             ),
@@ -1935,7 +1939,11 @@ export const layerWsRpc = (
             Effect.mapError(
               (cause) =>
                 new OrchestrationGetFullThreadDiffError({
-                  message: "Failed to load full thread diff",
+                  message:
+                    cause._tag === "CheckpointObjectsUnavailableError" ||
+                    cause._tag === "CheckpointSnapshotUnavailableError"
+                      ? cause.message
+                      : "Failed to load full thread diff",
                   cause,
                 }),
             ),

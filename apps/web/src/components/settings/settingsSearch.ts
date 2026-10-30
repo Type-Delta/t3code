@@ -974,6 +974,26 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "environment-defaults",
   },
   {
+    id: "online-snapshots",
+    title: "Online Snapshots",
+    to: "/settings/maintenance",
+    targetId: "online-snapshots",
+    searchTerms: ["checkpoint undo redo diff git remote storage disk space snapshots"],
+    environmentOnly: true,
+    scope: "environment-defaults",
+  },
+  {
+    id: "snapshot-retention",
+    title: "Delete snapshots of idle threads",
+    to: "/settings/maintenance",
+    targetId: "snapshot-retention",
+    searchTerms: [
+      "checkpoint snapshot cleanup idle retention days undo redo diff storage disk space",
+    ],
+    environmentOnly: true,
+    scope: "environment-defaults",
+  },
+  {
     id: "worktree-branch-naming",
     title: "Worktree branch naming",
     to: "/settings/worktrees",

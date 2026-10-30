@@ -20,6 +20,7 @@ import * as Layer from "effect/Layer";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "../orchestration-v2/CheckpointService.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -56,6 +57,7 @@ const layerTest = CheckpointService.layer.pipe(
   Layer.provide(
     ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-non-git-workspace-" }),
   ),
+  Layer.provide(ServerSettings.layerTest()),
   Layer.provideMerge(layerServices),
 );
 

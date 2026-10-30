@@ -23,6 +23,7 @@ import * as SidecarCheckpointRepository from "./SidecarCheckpointRepository.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 
 function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number): CheckpointRef {
   return CheckpointRef.make(`refs/t3/checkpoints/${Base64Url.encode(threadId)}/turn/${turnCount}`);
@@ -50,6 +51,7 @@ const layerTest = layerCheckpointStoreTest.pipe(
     CheckpointRepositoryIdentity.layer.pipe(Layer.provideMerge(NodeServices.layer)),
   ),
   Layer.provideMerge(layerSidecarTest),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provideMerge(NodeServices.layer),
 );
 
@@ -1309,7 +1311,7 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
             VcsProcess.VcsProcess,
             VcsProcess.VcsProcess.of({
               run: (input) => {
-                if (input.operation === "SidecarCheckpointRepository.gc") {
+                if (input.operation.startsWith("SidecarCheckpointRepository.gc")) {
                   return Deferred.succeed(gcStarted, undefined).pipe(
                     Effect.andThen(realProcess.run(input)),
                   );
@@ -1363,7 +1365,7 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
             VcsProcess.VcsProcess,
             VcsProcess.VcsProcess.of({
               run: (input) => {
-                if (input.operation === "SidecarCheckpointRepository.gc") {
+                if (input.operation.startsWith("SidecarCheckpointRepository.gc")) {
                   return Deferred.succeed(gcStarted, undefined).pipe(
                     Effect.andThen(realProcess.run(input)),
                   );
@@ -1417,6 +1419,24 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
         yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: legacyTo });
         yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: sidecarTo });
 
+        // Mixed diffs read legacy objects through a per-command alternate, so
+        // the sidecar gains no copy of project history.
+        const config = yield* ServerConfig.ServerConfig;
+        const identities = yield* CheckpointRepositoryIdentity.CheckpointRepositoryIdentityResolver;
+        const identity = yield* identities.resolve(tmp);
+        const sidecarGitDir = NodePath.join(
+          config.checkpointsDir,
+          "repositories",
+          `${identity.repositoryKey}.git`,
+        );
+        const sidecarObjects = git(tmp, [
+          `--git-dir=${sidecarGitDir}`,
+          "cat-file",
+          "--batch-all-objects",
+          "--batch-check=%(objectname)",
+        ]);
+        const objectsBefore = yield* sidecarObjects;
+
         const expected = yield* checkpointStore.diffCheckpoints({
           cwd: tmp,
           fromCheckpointRef: legacyFrom,
@@ -1439,27 +1459,17 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
             ignoreWhitespace: false,
           }),
         ).toBe(expected);
-
-        // Mixed diff compatibility copies only the requested legacy objects
-        // into the sidecar instead of consulting the project through an
-        // alternate object database.
-        const config = yield* ServerConfig.ServerConfig;
-        const identities = yield* CheckpointRepositoryIdentity.CheckpointRepositoryIdentityResolver;
-        const identity = yield* identities.resolve(tmp);
-        const legacyCommit = yield* git(tmp, ["rev-parse", `${legacyFrom}^{commit}`]);
-        const sidecarGitDir = NodePath.join(
-          config.checkpointsDir,
-          "repositories",
-          `${identity.repositoryKey}.git`,
-        );
         expect(
-          yield* git(tmp, [
-            `--git-dir=${sidecarGitDir}`,
-            "rev-parse",
-            "--verify",
-            `${legacyCommit}^{commit}`,
-          ]),
-        ).toBe(legacyCommit);
+          yield* checkpointStore.diffCheckpoints({
+            cwd: tmp,
+            fromCheckpointRef: yield* makeSidecarRef(tmp, "never-captured"),
+            toCheckpointRef: sidecarTo,
+            fallbackFromToHead: true,
+            ignoreWhitespace: false,
+            format: "numstat",
+          }),
+        ).toContain("README.md");
+        expect(yield* sidecarObjects).toBe(objectsBefore);
       }),
     );
 

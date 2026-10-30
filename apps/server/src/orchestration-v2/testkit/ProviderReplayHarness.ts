@@ -339,6 +339,7 @@ export function layerWithRegistry<Error>(
   );
   const layerCheckpointStore = CheckpointStore.layer.pipe(
     Layer.provide(layerVcsDriverRegistry),
+    Layer.provide(layerServerSettings),
     Layer.provide(VcsProcess.layer),
     Layer.provide(layerServerConfig),
     Layer.provide(NodeServices.layer),

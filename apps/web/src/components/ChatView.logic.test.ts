@@ -50,6 +50,7 @@ import {
   deriveComposerSendState,
   deriveLockedProvider,
   hasServerAcknowledgedLocalDispatch,
+  waitForCheckpointNavigationFailure,
   waitForRevertedMessage,
 } from "./ChatView.logic";
 
@@ -673,6 +674,46 @@ describe("worktree setup visibility", () => {
     expect(resolve(base, newest)).toEqual({ snapshot: newest, isPreparingWorktree: false });
     const other = { ...base, threadId: ThreadId.make("another-thread") };
     expect(resolve(other, other)).toEqual({ snapshot: null, isPreparingWorktree: false });
+  });
+});
+
+describe("waitForCheckpointNavigationFailure", () => {
+  const threadRef = { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("t") };
+  const requestId = CommandId.make("navigate-1");
+
+  function navigationAtom() {
+    const base = makeThreadProjectionFixture();
+    const projection = (isNavigating: boolean, rollbackFailure?: unknown) =>
+      ({
+        ...base,
+        thread: { ...base.thread, ...(rollbackFailure ? { rollbackFailure } : {}) },
+        checkpointNavigation: { isNavigating },
+      }) as unknown as ReturnType<typeof makeThreadProjectionFixture>;
+    const state = Atom.make({ data: Option.some(projection(false)) });
+    vi.spyOn(environmentThreadDetails, "stateAtom").mockReturnValue(state as never);
+    const publish = (isNavigating: boolean, rollbackFailure?: unknown) =>
+      appAtomRegistry.set(state, { data: Option.some(projection(isNavigating, rollbackFailure)) });
+    return { publish };
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("resolves with the failure recorded for its own request", async () => {
+    const { publish } = navigationAtom();
+    const waiting = waitForCheckpointNavigationFailure(threadRef, requestId);
+    publish(true, { requestId: CommandId.make("other"), message: "Not ours." });
+    publish(false, { requestId, message: "Downloading file versions failed." });
+
+    await expect(waiting).resolves.toBe("Downloading file versions failed.");
+  });
+
+  it("resolves null once navigation settles without a failure", async () => {
+    const { publish } = navigationAtom();
+    const waiting = waitForCheckpointNavigationFailure(threadRef, requestId);
+    publish(true);
+    publish(false);
+
+    await expect(waiting).resolves.toBeNull();
   });
 });
 

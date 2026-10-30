@@ -26,6 +26,10 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import {
+  CheckpointObjectsUnavailableError,
+  CheckpointSnapshotUnavailableError,
+} from "../checkpointing/Errors.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -321,6 +325,66 @@ it.effect.each([
     }).pipe(Effect.provide(layer));
     assert.deepEqual(yield* Ref.get(failures), [message]);
   }),
+);
+
+it.effect.each([
+  new CheckpointObjectsUnavailableError({
+    operation: "restore",
+    reason: "auth",
+    remote: "origin (github.com/acme/app)",
+    objectCount: 3,
+  }),
+  new CheckpointSnapshotUnavailableError(),
+])(
+  "reports unavailable checkpoint files on the first attempt without retrying ($_tag)",
+  (unavailable) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const failures = yield* Ref.make<ReadonlyArray<string>>([]);
+      const layer = layerExecutorFor({
+        events: yield* Ref.make<ReadonlyArray<string>>([]),
+        rollback: () =>
+          Effect.fail(
+            new CheckpointRollbackService.CheckpointRollbackExecutionError({
+              reason: "unexpected-failure",
+              threadId,
+              providerThreadId,
+              checkpointId: rollbackCheckpointId,
+              cause: new CheckpointService.CheckpointRestoreError({
+                scopeId: rollbackScopeId,
+                checkpointId: rollbackCheckpointId,
+                cause: unavailable,
+              }),
+            }),
+          ),
+        threads: {
+          dispatch: (command) =>
+            Ref.update(failures, (current) =>
+              command.type === "checkpoint.rollback.fail" ? [...current, command.message] : current,
+            ).pipe(Effect.as({ sequence: 1, storedEvents: [] })),
+        },
+      });
+      const error = yield* Effect.gen(function* () {
+        const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+        return yield* Effect.flip(
+          executor.execute(
+            {
+              ...restartEffect(now, { type: "detach" }),
+              request: {
+                type: "provider-thread.rollback",
+                providerThreadId,
+                checkpointId: rollbackCheckpointId,
+                scopeId: rollbackScopeId,
+                restoreFiles: true,
+              },
+            },
+            { willRetry: true },
+          ),
+        );
+      }).pipe(Effect.provide(layer));
+      assert.deepEqual(yield* Ref.get(failures), [unavailable.message]);
+      assert.strictEqual(error.final, true);
+    }),
 );
 
 it.effect("does not report an answer whose last delivery attempt is interrupted", () =>

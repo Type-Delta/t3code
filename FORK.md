@@ -80,7 +80,7 @@ Server-router and HTTP MCP fixtures use native HTTP clients with OS-assigned loo
 
 ### DL006 — Durable sidecar checkpoints and recoverable navigation
 
-V2 turn checkpoints live in a private bare-Git sidecar repository below the server's checkpoints directory, addressed by opaque `t3-sidecar:v1:` locators bound to the repository and worktree. Capture, restore, and diff never write refs, objects, or an index into the project repository. One sidecar repository serves a repository's linked worktrees, and capture, restore, and maintenance are serialized per sidecar. Capture records the project HEAD in the snapshot so upstream's pull, merge, and rebase filtering keeps working between sidecar boundaries. A scope id too long for a snapshot id is hashed.
+V2 turn checkpoints live in a private bare-Git sidecar repository below the server's checkpoints directory, addressed by opaque `t3-sidecar:v1:` locators bound to the repository and worktree. Capture, restore, and diff never write refs, objects, or an index into the project repository. One sidecar repository serves a repository's linked worktrees. Capture, restore, and diff are serialized per sidecar; background packing (DL050) takes that lock only to swap packs, and storage cleanup (DL051) removes snapshots no thread needs. Capture records the project HEAD in the snapshot so upstream's pull, merge, and rebase filtering keeps working between sidecar boundaries. A scope id too long for a snapshot id is hashed.
 
 Checkpoints captured between the 2026-10-08 redo and this re-port were written as `refs/t3/orchestration-v2/checkpoints/*` refs in the project repository. They still load, diff, and restore: each boundary lookup tries its sidecar snapshot first, then that in-repo ref. New boundaries always go to the sidecar. Upstream's checkpoint rollback locking and the per-workspace capture lock are unchanged.
 
@@ -781,6 +781,64 @@ isolated web verification using a copied long thread. Answering or dismissing re
 existing request response flow.
 
 **Last updated:** 2026-10-26
+
+### DL050 — Compact sidecar checkpoints and Online Snapshots
+
+Sidecar checkpoint stores no longer grow from copied history. Diffs and restores read project objects through a per-command `GIT_ALTERNATE_OBJECT_DIRECTORIES` instead of fetching project revisions into the sidecar. With no refs to negotiate against, the old fetch re-copied the full project history on every fallback diff.
+
+After a capture, a background pass packs the store with `pack-objects` once it holds 1,000 loose objects or 8 packs. Packing never runs during capture, restore, or diff. Only the swap that deletes superseded packs and loose objects takes the repository lock, and packing keeps every object except evicted blobs, including unreachable ones.
+
+Online Snapshots (`ServerSettings.onlineSnapshots`, default on, under **Settings → Maintenance → Snapshots** on web and mobile) lets that pass evict blobs that the project's primary remote already has. A blob counts as on the remote when it is reachable from a remote-tracking ref whose tip matches `ls-remote`, walked without replace refs, after a canary fetch succeeds. Every remote that eviction used is recorded in `t3-online.json` before anything is deleted. Capture writes trees with `--missing-ok`, so the per-worktree index keeps working after eviction.
+
+Before undo, redo, or a diff reads content, missing blobs are recovered from matching workspace files or fetched by oid from the recorded remotes. That happens before the worktree or the provider conversation changes, and the blobs stay pinned until the restore finishes. Fetches into the sidecar carry the credential, HTTP, and SSH-command settings the project sees but the sidecar does not, such as project-local config or a global `includeIf "gitdir:"`, so they authenticate the way the project's own `ls-remote` does. A failure surfaces a classified message (network, auth, timeout, repository unavailable, not on the remote, no remote), is not retried by the effect worker, and leaves the checkpoint usable, so a retry works once the user fixes the problem. Web `/undo` and `/redo` now show rollback failures that arrive after the navigate command is accepted. Turning the setting off makes later passes download evicted blobs again.
+
+**Implementation evidence:** `apps/server/src/checkpointing/{SidecarCheckpointRepository,SidecarOnlineObjects,CheckpointStore,CheckpointDiffQuery,Errors}.ts`, `apps/server/src/orchestration-v2/{CheckpointService,CheckpointRollbackService,EffectWorker}.ts`, `apps/web/src/components/chat/useTimelineRewind.ts`, `apps/web/src/components/ChatView.logic.ts`, the settings rows in `StorageSettings.tsx` and `SettingsServerControlsRouteScreen.tsx`, and `SidecarOnlineSnapshots.test.ts`.
+
+**Recorded validation:**
+
+- **Focused tests:** checkpoint, rollback, effect-worker, and web navigation-failure suites.
+- **Live run:** an isolated dev server with a temporary private GitHub repository and a blobless clone, driven through the web UI with real Haiku turns.
+  - The first capture evicted the 1,207-file baseline.
+  - Undo with no Git credentials and with an unreachable network both showed classified messages and left the worktree and conversation untouched.
+  - After recovery, undo downloaded the evicted version into the sidecar only; redo and turn diffs worked.
+
+**Last updated:** 2026-10-30
+
+### DL051 — Snapshot retention in storage cleanup
+
+Upstream never removes checkpoint snapshots. The hourly storage cleanup, and **Delete now**, now remove snapshots that no thread needs. `storageCleanup.snapshotsAfterDays` sets the idle limit (default 15 days, `null` keeps idle threads' snapshots). It sits under **Settings → Maintenance → Snapshots** on web and mobile.
+
+A snapshot is kept when its checkpoint belongs to a thread that is not deleted and is either busy or active within the limit. Because forks and subagents read their ancestors' checkpoints, every checkpoint of a kept thread's fork and parent ancestry is kept too, even if that ancestor is deleted or idle. If a projection read fails, that sweep skips snapshot cleanup.
+
+Captures reach projections only after their run, so the sweep computes one cutoff. Nothing captured after it is deleted: the cutoff is the earlier of 24 hours ago and the start of any run that is active or finished within the last 24 hours. Git commit times have one-second resolution, so the cutoff is rounded down to the second minus one.
+
+Per sidecar store, `SidecarCheckpointRepository.retain` deletes the unused snapshot refs under the repository lock. It then does one of two things:
+
+- **Store has no snapshots left:** the store is detached into `checkpoints/tmp/retained-*` and deleted, and a failed deletion is retried on later sweeps. A store that already had no snapshots and is older than the cutoff goes the same way.
+- **Otherwise:** the store is pruned. The reachable pack is built outside the repository lock. It keeps everything reachable from refs, every object a persisted capture index names, and every hydration pin, and it skips blobs Online Snapshots evicted. The lock is taken only for the swap, which aborts if refs, capture indexes, or pins changed. A pending marker makes an aborted or failed prune retry. Any capture-index listing error other than a missing directory aborts the prune.
+
+Undo, redo, and diffs of a removed snapshot fail with `CheckpointSnapshotUnavailableError`, which tells the user that cleanup removed it and where to change the limit. The effect worker does not retry it, and the conversation and worktree are unchanged. The cleanup report adds a `snapshots` entry only when it removed something or failed. Clients older than this contract cannot decode that entry, so they cannot show a report that has one.
+
+Legacy checkpoint refs inside project repositories are never touched.
+
+**Implementation evidence:** `apps/server/src/storageCleanup.ts`, `apps/server/src/checkpointing/{SidecarCheckpointRepository,CheckpointStore,CheckpointDiffQuery,Errors}.ts`, `apps/server/src/orchestration-v2/{CheckpointRollbackService,EffectWorker}.ts`, `apps/server/src/ws.ts`, `packages/contracts/src/settings.ts`, `apps/web/src/components/settings/{StorageSettings.tsx,settingsSearch.ts}`, and `apps/mobile/src/features/settings/SettingsServerControlsRouteScreen.tsx`.
+
+**Recorded validation:**
+
+- **Focused tests:** `storageCleanup.test.ts` and `SidecarOnlineSnapshots.test.ts` cover the following, among other cases:
+  - deleted, idle, and kept threads;
+  - fork ancestry;
+  - long-run protection;
+  - a capture landing during a prune;
+  - capture-index and eviction safety;
+  - failed deletion retries;
+  - typed unavailable errors.
+- **Copied-data run:** an isolated dev server on a copy of a real database (202 threads) and its 3.9 GB of sidecar stores.
+  - The startup sweep reduced the stores to 311 MB.
+  - Every checkpoint of a thread active in the last 15 days kept its snapshot, and its turn diff still rendered.
+  - An expired thread's diff showed the removal message.
+
+**Last updated:** 2026-10-30
 
 ## Merge History
 

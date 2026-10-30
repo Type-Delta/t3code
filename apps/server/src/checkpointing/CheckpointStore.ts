@@ -8,6 +8,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import type * as Scope from "effect/Scope";
 
 import type { CheckpointStoreError } from "./Errors.ts";
 import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
@@ -48,6 +49,8 @@ export interface DiffCheckpointsInput {
   readonly maxOutputBytes?: number;
   /** Limits the diff to these exact paths. An empty list yields an empty diff. */
   readonly filePaths?: ReadonlyArray<string>;
+  /** False never downloads evicted file versions; see `SidecarDiffInput.allowNetwork`. */
+  readonly allowNetwork?: boolean;
 }
 
 export interface ListAuthoredPathsInput {
@@ -88,6 +91,14 @@ export class CheckpointStore extends Context.Service<
       input: RestoreCheckpointInput,
     ) => Effect.Effect<boolean, CheckpointStoreError>;
 
+    /**
+     * Downloads what a restore would read, so it can fail before anything else
+     * changes, and keeps it local until the scope closes.
+     */
+    readonly prepareRestoreCheckpoint: (
+      input: Omit<RestoreCheckpointInput, "fallbackToHead">,
+    ) => Effect.Effect<void, CheckpointStoreError, Scope.Scope>;
+
     readonly diffCheckpoints: (
       input: DiffCheckpointsInput,
     ) => Effect.Effect<string, CheckpointStoreError>;
@@ -108,10 +119,10 @@ export const make = Effect.gen(function* () {
   const vcsRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const sidecars = yield* SidecarCheckpointRepository.SidecarCheckpointRepository;
 
-  const normalizeSidecarError = <A>(
+  const normalizeSidecarError = <A, E extends CheckpointStoreError, R>(
     cwd: string,
-    effect: Effect.Effect<A, VcsError | PlatformError.PlatformError>,
-  ): Effect.Effect<A, VcsError> =>
+    effect: Effect.Effect<A, E | PlatformError.PlatformError, R>,
+  ): Effect.Effect<A, E | VcsError, R> =>
     effect.pipe(
       Effect.mapError((error) =>
         error._tag === "PlatformError"
@@ -188,6 +199,12 @@ export const make = Effect.gen(function* () {
     return yield* checkpoints.restoreCheckpoint(input);
   });
 
+  const prepareRestoreCheckpoint: CheckpointStore["Service"]["prepareRestoreCheckpoint"] =
+    Effect.fn("prepareRestoreCheckpoint")(function* (input) {
+      if (!SidecarCheckpointRepository.isSidecarCheckpointRef(input.checkpointRef)) return;
+      return yield* normalizeSidecarError(input.cwd, sidecars.prepareRestore(input));
+    });
+
   const diffCheckpoints: CheckpointStore["Service"]["diffCheckpoints"] = Effect.fn(
     "diffCheckpoints",
   )(function* (input) {
@@ -240,12 +257,14 @@ export const make = Effect.gen(function* () {
     captureCheckpointWithMetadata,
     hasCheckpointRef,
     restoreCheckpoint,
+    prepareRestoreCheckpoint,
     diffCheckpoints,
     listAuthoredPaths,
     deleteCheckpointRefs,
   });
 });
 
+// Exposes its sidecar so storage cleanup shares the same repository locks.
 export const layer = Layer.effect(CheckpointStore, make).pipe(
-  Layer.provide(SidecarCheckpointRepository.layer),
+  Layer.provideMerge(SidecarCheckpointRepository.layer),
 );

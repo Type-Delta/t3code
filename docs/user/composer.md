@@ -168,6 +168,27 @@ with the files. Stop any running turn or background task first. Sending a new
 message after undo discards the old forward branch. To rewind without restoring
 files, use **Edit from here** and **Revert and keep changes** instead.
 
+## Online Snapshots
+
+Undo and turn diffs keep a copy of your files at every turn. Online Snapshots
+saves disk space by deleting the local copies of file versions your Git remote
+already has, and downloading them again when an undo or diff needs them. It uses
+the same Git credentials you push with. It is on by default; turn it off in
+**Settings → Maintenance → Snapshots**.
+
+If an undo or diff says a download failed, nothing was changed. Check your
+network and Git credentials for the repository's remote, then try again. File
+versions that were only on a branch you later deleted or force-pushed can't be
+downloaded again.
+
+After you turn Online Snapshots off, T3 Code downloads the file versions it
+deleted the next time it saves a snapshot while your remote is reachable. Until
+then, undo and diffs for older turns still need the remote.
+
+Storage cleanup removes snapshots of deleted threads, and of threads idle for
+more than 15 days. Change or turn off that delay in the same section. Once a
+thread's snapshots are gone, undo and diffs stop working for it.
+
 ## Prompt suggestions
 
 On web and desktop, enable **Settings → Chat → Prompt suggestion** to show a

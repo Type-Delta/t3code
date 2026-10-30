@@ -247,7 +247,13 @@ export const make = Effect.gen(function* () {
           ? []
           : yield* checkpointStore.diffCheckpoints({ ...comparison, format: "numstat" }).pipe(
               Effect.map(parseTurnDiffFilesFromNumstat),
-              Effect.orElseSucceed(() => []),
+              // A removed snapshot or undownloadable file versions must not read as an empty diff.
+              Effect.catchIf(
+                (error) =>
+                  error._tag !== "CheckpointObjectsUnavailableError" &&
+                  error._tag !== "CheckpointSnapshotUnavailableError",
+                () => Effect.succeed([]),
+              ),
             );
       const retainedFiles = files.filter((file) => !isGitImport(file, authoredPaths));
       // Select retained paths before generating a patch, so imported bulk cannot exhaust its output limit.

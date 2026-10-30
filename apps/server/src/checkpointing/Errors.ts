@@ -77,7 +77,70 @@ export class CheckpointRefUnavailableError extends Schema.TaggedError<Checkpoint
   }
 }
 
-export type CheckpointStoreError = VcsError;
+export const CheckpointObjectsUnavailableReason = Schema.Literals([
+  "network",
+  "timeout",
+  "repository-unavailable",
+  "auth",
+  "not-on-remote",
+  "no-remote",
+  "unknown",
+]);
+export type CheckpointObjectsUnavailableReason = typeof CheckpointObjectsUnavailableReason.Type;
+
+/** File versions a checkpoint operation reads were evicted to the project's remote and could not be fetched back. */
+export class CheckpointObjectsUnavailableError extends Schema.TaggedError<CheckpointObjectsUnavailableError>()(
+  "CheckpointObjectsUnavailableError",
+  {
+    operation: Schema.Literals(["restore", "diff"]),
+    reason: CheckpointObjectsUnavailableReason,
+    /** Remote name and credential-free URL, e.g. `origin (github.com/acme/app)`. */
+    remote: Schema.optional(Schema.String),
+    objectCount: NonNegativeInt,
+  },
+) {
+  override get message(): string {
+    const subject =
+      this.operation === "restore" ? "Restoring this checkpoint" : "Showing this diff";
+    const versions = `${this.objectCount} file ${this.objectCount === 1 ? "version" : "versions"}`;
+    const remote = this.remote ?? "the project's remote";
+    const outcome =
+      this.operation === "restore"
+        ? "this checkpoint can't be restored"
+        : "this diff can't be shown";
+    switch (this.reason) {
+      case "network":
+        return `${subject} needs ${versions} stored on ${remote}, but downloading them failed: the remote could not be reached. Check your network connection, then try again.`;
+      case "timeout":
+        return `${subject} needs ${versions} stored on ${remote}, but the download timed out. Check your connection to the remote, then try again.`;
+      case "repository-unavailable":
+        return `${subject} needs ${versions} stored on ${remote}, but that repository could not be found or you don't have access to it. If it moved, update the remote's URL; if it's private, check that your Git credentials can read it. Then try again.`;
+      case "auth":
+        return `${subject} needs ${versions} stored on ${remote}, but downloading them failed: authentication failed. Fix your Git credentials for this remote, then try again.`;
+      case "not-on-remote":
+        return `${subject} needs ${versions} that ${remote} no longer serves. They may have been deleted by a force-push or branch deletion, or stored on a remote this project no longer uses, so ${outcome}.`;
+      case "no-remote":
+        return `${subject} needs ${versions} that are no longer stored locally, and no Git remote is known to download them from, so ${outcome}.`;
+      case "unknown":
+        return `${subject} needs ${versions} stored on ${remote}, but downloading them failed. Try again; if it keeps failing, check the server logs.`;
+    }
+  }
+}
+
+/** Storage cleanup removed the snapshot a restore or diff reads. */
+export class CheckpointSnapshotUnavailableError extends Schema.TaggedError<CheckpointSnapshotUnavailableError>()(
+  "CheckpointSnapshotUnavailableError",
+  {},
+) {
+  override get message(): string {
+    return "This turn's snapshot is no longer stored, so its diff and undo are unavailable. Storage cleanup removes snapshots of deleted and idle threads; change this in Settings → Maintenance → Snapshots.";
+  }
+}
+
+export type CheckpointStoreError =
+  | VcsError
+  | CheckpointObjectsUnavailableError
+  | CheckpointSnapshotUnavailableError;
 
 export type CheckpointServiceError =
   | CheckpointStoreError

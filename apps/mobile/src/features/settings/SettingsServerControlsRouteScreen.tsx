@@ -5,6 +5,7 @@ import { readEnvironmentScope, useEnvironmentsWithScope } from "../../state/sess
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { AppText as Text } from "../../components/ui/AppText";
 import {
+  DEFAULT_SERVER_SETTINGS,
   type ResponseStreamingMode,
   type ServerSettings,
   type ServerSettingsPatch,
@@ -28,6 +29,7 @@ import { DatabaseStorageNotice } from "./components/DatabaseStorageNotice";
 import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { NumberField } from "../../components/ui/NumberField";
 import { SourceControlSignInSection } from "./components/SourceControlSignInSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
@@ -51,6 +53,8 @@ const PAGE_TITLES: Record<SettingsPage, string> = {
   worktrees: "Worktrees",
   maintenance: "Maintenance",
 };
+
+const SNAPSHOT_RETENTION_DAYS = DEFAULT_SERVER_SETTINGS.storageCleanup.snapshotsAfterDays;
 
 const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettingKey[]> = {
   threads: [
@@ -205,6 +209,15 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const isMixed = (key: keyof ServerSettings) =>
     reference === null ||
     displayTargets.some((entry) => entry.settings[key] !== reference.settings[key]);
+  const snapshotsMixed =
+    reference === null ||
+    displayTargets.some(
+      (entry) =>
+        entry.settings.storageCleanup.snapshotsAfterDays !==
+        reference.settings.storageCleanup.snapshotsAfterDays,
+    );
+  const snapshotRetention =
+    reference === null ? null : reference.settings.storageCleanup.snapshotsAfterDays;
   const writeSettings = useSettingsWriter();
   const write = (patch: ServerSettingsPatch) => {
     if (writeInFlight.current) {
@@ -487,6 +500,62 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       ))}
                     </SettingsSection>
                   ) : null}
+                  <SettingsSection
+                    title="Snapshots"
+                    trailing={
+                      pendingWrites === 0 && snapshotsMixed ? (
+                        <MixedValuesLabel projectSelected={projectSelected} />
+                      ) : null
+                    }
+                  >
+                    <SettingsSwitchRow
+                      icon="internaldrive"
+                      label="Online Snapshots"
+                      subtitle={
+                        projectSelected
+                          ? "Environment-wide setting. Select All projects to change it."
+                          : "Delete local copies of file versions your Git remote already has. Undo and diffs download them again when needed."
+                      }
+                      value={uniform("onlineSnapshots")}
+                      disabled={disabledFor("onlineSnapshots")}
+                      onValueChange={(value) => write({ onlineSnapshots: value })}
+                    />
+                    <View className="border-t border-border-subtle">
+                      <SettingsSwitchRow
+                        icon="clock"
+                        label="Delete snapshots of idle threads"
+                        subtitle="Deleted threads' snapshots are always removed. Undo and diffs stop working for those threads."
+                        value={snapshotsMixed ? null : snapshotRetention !== null}
+                        disabled={disabledFor("snapshotsAfterDays")}
+                        onValueChange={(value) =>
+                          write({
+                            storageCleanup: {
+                              snapshotsAfterDays: value ? SNAPSHOT_RETENTION_DAYS : null,
+                            },
+                          })
+                        }
+                      />
+                      {!snapshotsMixed && snapshotRetention !== null ? (
+                        <View className="flex-row items-center gap-4 px-4 py-4 android:min-h-14 android:py-3">
+                          <View className="w-[22px] android:w-6" />
+                          <Text className="flex-1 text-foreground text-lg android:text-base">
+                            Idle days
+                          </Text>
+                          <NumberField
+                            label="Days before snapshot cleanup"
+                            value={snapshotRetention}
+                            min={1}
+                            max={3650}
+                            formatValue={(value) => `${value} ${value === 1 ? "day" : "days"}`}
+                            disabled={disabledFor("snapshotsAfterDays")}
+                            onValueChange={(value) =>
+                              write({ storageCleanup: { snapshotsAfterDays: value } })
+                            }
+                          />
+                        </View>
+                      ) : null}
+                    </View>
+                  </SettingsSection>
                   <SettingsSection title="Updates">
                     <SettingsSwitchRow
                       icon="arrow.clockwise"

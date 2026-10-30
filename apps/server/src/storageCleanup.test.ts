@@ -20,6 +20,7 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as SidecarCheckpointRepository from "./checkpointing/SidecarCheckpointRepository.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Settings from "./serverSettings.ts";
@@ -271,6 +272,14 @@ const cleanupFixture = (
     let fullStatusCalls = 0;
     let snapshotReads = 0;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
+    let checkpointRows: Array<{ threadId: ThreadId; ref: string }> = [];
+    const retained: Array<{ live: ReadonlyArray<string>; protectedSince: number }> = [];
+    let retainResult: SidecarCheckpointRepository.SidecarRetainResult = {
+      snapshots: 0,
+      repositories: 0,
+      bytes: 0,
+      failures: [],
+    };
     const activated = yield* Deferred.make<void>();
     const context = yield* Layer.build(StorageCleanup.layer).pipe(
       Effect.provideService(GitVcsDriver.GitVcsDriver, {
@@ -359,17 +368,26 @@ const cleanupFixture = (
                   }),
                 },
               ]
-            : strings.join("").includes("deleted_at IS NOT NULL")
-              ? deletedThreads.map((thread) => ({
-                  payload_json: JSON.stringify(thread),
-                  workspaceRoot: repo,
+            : strings.join("").includes('AS "forkSourceThreadId"')
+              ? [...threads, ...deletedThreads].map((thread) => ({
+                  threadId: thread.id,
+                  forkSourceThreadId:
+                    thread.forkedFrom?.type === "run" ? thread.forkedFrom.threadId : null,
+                  parentThreadId: thread.lineage.parentThreadId,
                 }))
-              : strings.join("").includes('AS "worktreePath"')
-                ? [
-                    ...threads.flatMap((thread) => thread.worktreePath ?? []),
-                    ...storedWorktreePaths,
-                  ].map((worktreePath) => ({ worktreePath }))
-                : [],
+              : strings.join("").includes("orchestration_v2_projection_checkpoints")
+                ? checkpointRows
+                : strings.join("").includes("deleted_at IS NOT NULL")
+                  ? deletedThreads.map((thread) => ({
+                      payload_json: JSON.stringify(thread),
+                      workspaceRoot: repo,
+                    }))
+                  : strings.join("").includes('AS "worktreePath"')
+                    ? [
+                        ...threads.flatMap((thread) => thread.worktreePath ?? []),
+                        ...storedWorktreePaths,
+                      ].map((worktreePath) => ({ worktreePath }))
+                    : [],
         )) as unknown as SqlClient.SqlClient),
       Effect.provideService(GitManager.GitManager, {
         invalidateStatus: () => Effect.void,
@@ -377,10 +395,28 @@ const cleanupFixture = (
       Effect.provideService(TerminalManager.TerminalManager, {
         subscribeMetadata: () => Effect.succeed(() => {}),
       } as unknown as TerminalManager.TerminalManager["Service"]),
+      Effect.provideService(SidecarCheckpointRepository.SidecarCheckpointRepository, {
+        retain: (
+          input: Parameters<
+            SidecarCheckpointRepository.SidecarCheckpointRepository["Service"]["retain"]
+          >[0],
+        ) =>
+          Effect.sync(() => {
+            retained.push({ live: [...input.live].sort(), protectedSince: input.protectedSince });
+            return retainResult;
+          }),
+      } as unknown as SidecarCheckpointRepository.SidecarCheckpointRepository["Service"]),
       Effect.provideService(ServerActivation, Deferred.await(activated)),
     );
     return {
       service: Context.get(context, StorageCleanup.StorageCleanup),
+      setCheckpointRows: (rows: typeof checkpointRows) => {
+        checkpointRows = rows;
+      },
+      setRetainResult: (result: typeof retainResult) => {
+        retainResult = result;
+      },
+      retained: () => retained,
       repo,
       editBeforeRemoval: () => {
         editBeforeRemoval = true;
@@ -1811,6 +1847,119 @@ describe("storage cleanup reports and local file policies", () => {
         expect(yield* fs.exists(config.logsDir + "/server.log")).toBe(true);
         expect(yield* fs.exists(config.logsDir + "/server.log.1")).toBe(false);
         expect(yield* fs.exists(config.logsDir + "/server.log.2")).toBe(false);
+      }),
+    ),
+  );
+  it.effect("retains checkpoints of kept threads and every fork ancestor", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(NOW_MS);
+        const fixture = yield* cleanupFixture();
+        fixture.disable();
+        const thread = (id: string, overrides: Partial<OrchestrationV2ThreadShell> = {}) =>
+          shell({
+            id: ThreadId.make(id),
+            lineage: {
+              rootThreadId: ThreadId.make(id),
+              parentThreadId: null,
+              relationshipToParent: null,
+            },
+            ...overrides,
+          });
+        const forkOf = (id: string) => ({
+          type: "run" as const,
+          threadId: ThreadId.make(id),
+          runId: RunId.make(`${id}-run`),
+        });
+        const recent = at(-2 * DAY_MS);
+        fixture.setThreads([
+          // Idle and deleted ancestors stay while their fork is kept.
+          thread("root"),
+          thread("source", { deletedAt: at(-DAY_MS), forkedFrom: forkOf("root") }),
+          thread("fork", { forkedFrom: forkOf("source"), latestUserMessageAt: recent }),
+          thread("idle"),
+          thread("deleted", { deletedAt: at(-DAY_MS), latestUserMessageAt: recent }),
+          // Its run's snapshots reach projections only when the run ends.
+          thread("running", {
+            activeRunId: RunId.make("running-run"),
+            latestRunRequestedAt: at(-3 * DAY_MS),
+          }),
+          // Its final capture may still be on its way to projections.
+          thread("finishing", {
+            latestRunRequestedAt: at(-4 * DAY_MS),
+            latestRunCompletedAt: at(-60 * 60_000),
+          }),
+          thread("finished", {
+            latestRunRequestedAt: at(-6 * DAY_MS),
+            latestRunCompletedAt: at(-2 * DAY_MS),
+          }),
+        ]);
+        fixture.setCheckpointRows(
+          ["root", "source", "fork", "idle", "deleted", "running"].map((id) => ({
+            threadId: ThreadId.make(id),
+            ref: `t3-sidecar:v1:${id}`,
+          })),
+        );
+        yield* fixture.service.runNow;
+        fixture.setSettings({
+          storageCleanup: { ...DEFAULT_SERVER_SETTINGS.storageCleanup, snapshotsAfterDays: null },
+        });
+        yield* fixture.service.runNow;
+        expect(fixture.retained()).toEqual([
+          {
+            live: ["fork", "root", "running", "source"].map((id) => `t3-sidecar:v1:${id}`),
+            protectedSince: NOW_MS - 4 * DAY_MS,
+          },
+          {
+            live: ["fork", "idle", "root", "running", "source"].map((id) => `t3-sidecar:v1:${id}`),
+            protectedSince: NOW_MS - 4 * DAY_MS,
+          },
+        ]);
+      }),
+    ),
+  );
+  it.effect.each([
+    [
+      { snapshots: 3, repositories: 2, bytes: 4096, failures: [] },
+      {
+        outcome: "removed",
+        reason: "Removed 3 snapshots from 2 repositories",
+        bytes: 4096,
+        files: 3,
+      },
+    ],
+    [
+      { snapshots: 0, repositories: 1, bytes: 512, failures: [] },
+      { outcome: "removed", reason: "Removed 1 empty snapshot store", bytes: 512, files: null },
+    ],
+    // Clients older than the snapshots kind cannot decode a report that names it.
+    [{ snapshots: 0, repositories: 0, bytes: 0, failures: [] }, null],
+    [
+      { snapshots: 1, repositories: 1, bytes: 64, failures: ["git update-ref failed"] },
+      { outcome: "failed", reason: "git update-ref failed", bytes: 64, files: 1 },
+    ],
+  ] as const)("reports at most one aggregated snapshots entry (%j)", ([result, entry]) =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const fixture = yield* cleanupFixture();
+        fixture.disable();
+        fixture.setRetainResult(result);
+        const report = yield* fixture.service.runNow;
+        expect(report.entries).toEqual(
+          entry === null
+            ? []
+            : [
+                {
+                  kind: "snapshots",
+                  path: null,
+                  projectPath: null,
+                  threadId: null,
+                  threadTitle: null,
+                  ...entry,
+                },
+              ],
+        );
+        expect(report.bytesFreed).toBe(entry?.bytes ?? 0);
       }),
     ),
   );

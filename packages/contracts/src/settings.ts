@@ -1157,7 +1157,7 @@ export function shouldRecommendDatabaseCompaction(status: DatabaseStorageStatus)
 }
 
 export const StorageCleanupReportEntry = Schema.Struct({
-  kind: Schema.Literals(["worktree", "browser-artifacts", "logs"]),
+  kind: Schema.Literals(["worktree", "browser-artifacts", "logs", "snapshots"]),
   outcome: Schema.Literals(["removed", "kept", "failed"]),
   reason: Schema.String,
   path: Schema.NullOr(Schema.String),
@@ -1194,6 +1194,8 @@ export const StorageCleanupSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   logsAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  /** Drops checkpoints of threads idle this long; deleted threads' checkpoints always go. */
+  snapshotsAfterDays: StorageRetentionDays.pipe(Schema.withDecodingDefault(Effect.succeed(15))),
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
@@ -1261,6 +1263,7 @@ export const ServerSettings = Schema.Struct({
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
   ),
+  onlineSnapshots: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 
   worktreesDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** Server-maintained history keeps old worktrees eligible for cleanup and review diffs. */
@@ -1633,9 +1636,11 @@ export const ServerSettingsPatch = Schema.Struct({
       worktreeUnchanged: Schema.optionalKey(Schema.Boolean),
       browserArtifactsAfterDays: Schema.optionalKey(StorageRetentionDays),
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
+      snapshotsAfterDays: Schema.optionalKey(StorageRetentionDays),
     }),
   ),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
+  onlineSnapshots: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),

@@ -9,6 +9,7 @@ import type { SessionPhase } from "../../types";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   AuthOrchestrationOperateScope,
+  CommandId,
   type EnvironmentId,
   type MessageId,
   type ScopedThreadRef,
@@ -24,7 +25,7 @@ import {
 import { readLocalApi } from "../../localApi";
 import { findRevertCheckpoint } from "../../session-logic";
 import { type ChatMessage } from "../../types";
-import { newThreadId } from "~/lib/utils";
+import { newThreadId, randomUUID } from "~/lib/utils";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { threadEnvironment } from "../../state/threads";
@@ -36,7 +37,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
 import { rewindToMessage } from "./chatViewSend";
-import { makeThreadErrorSetter } from "../ChatView.logic";
+import { makeThreadErrorSetter, waitForCheckpointNavigationFailure } from "../ChatView.logic";
 interface TimelineRewindInput {
   readonly isServerThread: boolean;
   readonly environmentId: EnvironmentId;
@@ -165,9 +166,11 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     }));
     setThreadError(activeThread.id, null);
 
+    const commandId = CommandId.make(randomUUID());
     const result = await navigateThreadCheckpoint({
       environmentId,
       input: {
+        commandId,
         threadId: activeThread.id,
         kind: command,
         ...(targetEntryId === undefined ? {} : { targetEntryId }),
@@ -189,6 +192,10 @@ export function useTimelineRewind(input: TimelineRewindInput) {
         activeThread.id,
         error instanceof Error ? error.message : "Failed to navigate thread checkpoints.",
       );
+    } else if (result._tag === "Success") {
+      // The command is accepted before the provider rollback runs; that failure arrives on the projection.
+      const failure = await waitForCheckpointNavigationFailure(routeThreadRef, commandId);
+      if (failure !== null) setThreadError(activeThread.id, failure);
     }
   };
   const onRevertToTurnCount = async (

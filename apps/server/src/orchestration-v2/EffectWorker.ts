@@ -47,10 +47,19 @@ export class OrchestrationEffectExecutionError extends Schema.TaggedError<Orches
     cause: Schema.optional(Schema.Defect()),
     /** The worker retries the effect even after its last attempt. */
     retryAfterLastAttempt: Schema.optional(Schema.Boolean),
+    /** Retrying cannot help, so the worker fails the effect now. */
+    final: Schema.optional(Schema.Boolean),
   },
 ) {}
 
 const isOrchestrationEffectExecutionError = Schema.is(OrchestrationEffectExecutionError);
+
+// Undo cannot succeed by retrying while its snapshot or evicted file versions are unavailable.
+const isFinalRollbackCause = (cause: Cause.Cause<unknown>) =>
+  Option.exists(
+    Cause.findErrorOption(cause),
+    CheckpointRollbackService.isCheckpointContentUnavailable,
+  );
 
 /**
  * Do not apply this to `provider-turn.restart`: that compound effect also runs
@@ -487,7 +496,7 @@ export const layerExecutor: Layer.Layer<
               })
               .pipe(
                 Effect.tapCause((cause) =>
-                  willRetry || Cause.hasInterruptsOnly(cause)
+                  (willRetry && !isFinalRollbackCause(cause)) || Cause.hasInterruptsOnly(cause)
                     ? Effect.void
                     : threads
                         .dispatch({
@@ -515,6 +524,9 @@ export const layerExecutor: Layer.Layer<
                       effectId: effect.id,
                       effectType: effect.request.type,
                       cause,
+                      ...(CheckpointRollbackService.isCheckpointContentUnavailable(cause)
+                        ? { final: true }
+                        : {}),
                     }),
                 ),
               );
@@ -907,6 +919,10 @@ export const layerWithOptions = (
 
         const error = Cause.pretty(exit.cause);
         const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
+        const final = Option.exists(
+          Cause.findErrorOption(exit.cause),
+          (failure) => isOrchestrationEffectExecutionError(failure) && failure.final === true,
+        );
         const retryAfterLastAttempt = Option.exists(
           Cause.findErrorOption(exit.cause),
           (failure) =>
@@ -923,7 +939,7 @@ export const layerWithOptions = (
           ? yield* outbox
               .succeed({ effectId: effect.id, workerId })
               .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-          : effect.attemptCount >= maxAttempts && !retryAfterLastAttempt
+          : final || (effect.attemptCount >= maxAttempts && !retryAfterLastAttempt)
             ? yield* outbox
                 .fail({ effectId: effect.id, workerId, error })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))

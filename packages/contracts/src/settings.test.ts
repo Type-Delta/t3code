@@ -122,6 +122,12 @@ describe("provider API gateway model settings", () => {
   );
 });
 
+describe("online snapshots", () => {
+  it("defaults existing settings to enabled", () => {
+    expect(decodeServerSettings({}).onlineSnapshots).toBe(true);
+  });
+});
+
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
@@ -134,6 +140,7 @@ describe("storage cleanup settings", () => {
       worktreeKeepWhen: "uncommitted-changes",
       browserArtifactsAfterDays: null,
       logsAfterDays: null,
+      snapshotsAfterDays: 15,
     });
   });
 

@@ -953,6 +953,39 @@ export async function waitForStartedServerThread(
   });
 }
 
+/** Resolves with the server's rollback failure message for `requestId`, or null once navigation settles without one. */
+export function waitForCheckpointNavigationFailure(
+  threadRef: ScopedThreadRef,
+  requestId: CommandId,
+  timeoutMs = 120_000,
+): Promise<string | null> {
+  const threadAtom = environmentThreadDetails.stateAtom(threadRef);
+  return new Promise((resolve) => {
+    let settled = false;
+    let sawNavigating = false;
+    let unsubscribe: (() => void) | undefined;
+    const finish = (message: string | null) => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearTimeout(timeout);
+      unsubscribe?.();
+      resolve(message);
+    };
+    const inspect = () => {
+      const projection = Option.getOrNull(appAtomRegistry.get(threadAtom).data);
+      if (!projection) return;
+      const failure = projection.thread.rollbackFailure;
+      if (failure?.requestId === requestId) return finish(failure.message);
+      if (projection.checkpointNavigation?.isNavigating === true) sawNavigating = true;
+      else if (sawNavigating) finish(null);
+    };
+    const timeout = globalThis.setTimeout(() => finish(null), timeoutMs);
+    unsubscribe = appAtomRegistry.subscribe(threadAtom, inspect);
+    if (settled) unsubscribe();
+    else inspect();
+  });
+}
+
 export async function waitForRevertedMessage(
   threadRef: ScopedThreadRef,
   turnCount: number,

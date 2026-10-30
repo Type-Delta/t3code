@@ -22,6 +22,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import { isSidecarCheckpointRef } from "../checkpointing/SidecarCheckpointRepository.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as CheckpointService from "./CheckpointService.ts";
@@ -37,6 +38,7 @@ const layerTest = CheckpointService.layer.pipe(
   Layer.provide(IdAllocator.layer),
   Layer.provideMerge(NodeCrypto.layer),
   Layer.provide(ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-sidecar-v2-" })),
+  Layer.provide(ServerSettings.layerTest()),
   Layer.provideMerge(NodeServices.layer),
 );
 

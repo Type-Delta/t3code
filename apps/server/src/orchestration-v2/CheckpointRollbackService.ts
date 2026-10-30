@@ -30,6 +30,10 @@ import { EventSinkV2 } from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import { GIT_INDEX_LOCKED_DETAIL } from "../vcs/VcsProcess.ts";
+import {
+  CheckpointObjectsUnavailableError,
+  CheckpointSnapshotUnavailableError,
+} from "../checkpointing/Errors.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
@@ -78,19 +82,30 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
 const isCheckpointRollbackExecutionError = Schema.is(CheckpointRollbackExecutionError);
 const isVcsProcessExitError = Schema.is(VcsProcessExitError);
 const isCheckpointRestoreError = Schema.is(CheckpointRestoreError);
+const isCheckpointContentUnavailableError = Schema.is(
+  Schema.Union([CheckpointObjectsUnavailableError, CheckpointSnapshotUnavailableError]),
+);
 
 /**
- * The message clients see when a rollback fails. Only a held Git index lock
- * gets its own explanation; other reasons carry internal ids or raw Git
- * output, so they fall back to the generic message.
+ * The message clients see when a rollback fails. Only a held Git index lock,
+ * a removed snapshot, and file versions that could not be downloaded get their
+ * own explanation; other reasons carry internal ids or raw Git output, so they
+ * fall back to the generic message.
  */
 export function rollbackFailureClientMessage(error: CheckpointRollbackExecutionError): string {
   if (error.reason === "background-work-active") return error.message;
   const restoreCause = isCheckpointRestoreError(error.cause) ? error.cause.cause : undefined;
+  if (isCheckpointContentUnavailableError(restoreCause)) return restoreCause.message;
   return isVcsProcessExitError(restoreCause) && restoreCause.detail === GIT_INDEX_LOCKED_DETAIL
     ? GIT_INDEX_LOCKED_DETAIL
     : ROLLBACK_FAILED_MESSAGE;
 }
+
+/** The checkpoint's files are gone or cannot be downloaded; retrying will not change that. */
+export const isCheckpointContentUnavailable = (error: unknown): boolean =>
+  isCheckpointRollbackExecutionError(error) &&
+  isCheckpointRestoreError(error.cause) &&
+  isCheckpointContentUnavailableError(error.cause.cause);
 
 export interface CheckpointRollbackServiceV2Shape {
   readonly execute: (input: {
@@ -239,6 +254,13 @@ export const layer: Layer.Layer<
           providerThreadId: input.providerThreadId,
           checkpointId: input.checkpointId,
         });
+      }
+
+      // Evicted file versions are downloaded before the provider conversation
+      // changes, so a failed download leaves the thread as it was. They stay
+      // pinned until this rollback's scope closes.
+      if (input.restoreFiles !== false) {
+        yield* checkpoints.prepareRestore({ scope, checkpoint });
       }
 
       const modelSelection = context.thread.modelSelection;
@@ -548,7 +570,7 @@ export const layer: Layer.Layer<
           yield* eventSink.write({ events });
         }),
       );
-    });
+    }, Effect.scoped);
 
     return CheckpointRollbackServiceV2.of({
       // The inner execute owns the rollback span; this wrapper selects the workspace lease.

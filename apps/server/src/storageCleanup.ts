@@ -1,4 +1,5 @@
 import {
+  CheckpointRef,
   GitCommandError,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
@@ -34,6 +35,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { parse as parseYaml } from "yaml";
 
+import * as SidecarCheckpointRepository from "./checkpointing/SidecarCheckpointRepository.ts";
 import * as ServerConfig from "./config.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
@@ -115,9 +117,8 @@ function sameProjectWorktreePolicies(left: ServerSettings, right: ServerSettings
   );
 }
 
-export function storageCleanupThreadIdle(thread: OrchestrationV2ThreadShell, now: number): boolean {
+function threadQuiet(thread: OrchestrationV2ThreadShell, now: number): boolean {
   return (
-    thread.worktreePath !== null &&
     thread.activeRunId === null &&
     (thread.status === "idle" ||
       thread.status === "completed" ||
@@ -129,6 +130,10 @@ export function storageCleanupThreadIdle(thread: OrchestrationV2ThreadShell, now
     thread.pendingRuntimeRequest === null &&
     !threadHasQueuedTurnStart(thread, now)
   );
+}
+
+export function storageCleanupThreadIdle(thread: OrchestrationV2ThreadShell, now: number): boolean {
+  return thread.worktreePath !== null && threadQuiet(thread, now);
 }
 
 /** PR metadata refreshes must not reset the inactivity clock. */
@@ -215,6 +220,7 @@ const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
   const terminals = yield* TerminalManager.TerminalManager;
+  const sidecars = yield* SidecarCheckpointRepository.SidecarCheckpointRepository;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const liveTerminals = new Map<string, Map<string, TerminalSummary>>();
@@ -1087,6 +1093,69 @@ const make = Effect.gen(function* () {
     return removed;
   });
 
+  // A fork reads its ancestors' checkpoints, so a kept thread keeps every ancestor's.
+  const cleanSnapshots = Effect.fn("StorageCleanup.cleanSnapshots")(function* (
+    days: number | null,
+    now: number,
+  ) {
+    const { threads } = yield* readThreads();
+    const sources = yield* sql<{
+      threadId: string;
+      forkSourceThreadId: string | null;
+      parentThreadId: string | null;
+    }>`
+      SELECT thread_id AS "threadId",
+        json_extract(payload_json, '$.forkedFrom.threadId') AS "forkSourceThreadId",
+        json_extract(payload_json, '$.lineage.parentThreadId') AS "parentThreadId"
+      FROM orchestration_v2_projection_threads
+    `.pipe(NodeSqliteClient.readOnly);
+    const checkpoints = yield* sql<{ threadId: string; ref: string }>`
+      SELECT thread_id AS "threadId", json_extract(payload_json, '$.ref') AS ref
+      FROM orchestration_v2_projection_checkpoints
+      WHERE json_extract(payload_json, '$.ref') LIKE 't3-sidecar:%'
+    `.pipe(NodeSqliteClient.readOnly);
+    const ancestors = new Map(
+      sources.map((row) => [row.threadId, [row.forkSourceThreadId, row.parentThreadId]]),
+    );
+    const kept = new Set<string>();
+    const pending: Array<string> = threads
+      .filter(
+        (thread) =>
+          days === null ||
+          !threadQuiet(thread, now) ||
+          storageCleanupActivityAt(thread) > now - days * DAY_MS,
+      )
+      .map((thread) => thread.id);
+    while (pending.length > 0) {
+      const threadId = pending.pop()!;
+      if (kept.has(threadId)) continue;
+      kept.add(threadId);
+      for (const ancestor of ancestors.get(threadId) ?? []) {
+        if (ancestor !== null) pending.push(ancestor);
+      }
+    }
+    // A run's snapshots reach projections only with the capture after it completes,
+    // so snapshots since the oldest active or recently completed run began are
+    // protected; an untimed run protects all.
+    const unpublishedRunStarts = threads
+      .filter(
+        (thread) =>
+          thread.activeRunId !== null ||
+          (thread.latestRunCompletedAt != null &&
+            DateTime.toEpochMillis(thread.latestRunCompletedAt) > now - DAY_MS),
+      )
+      .map((thread) => {
+        const startedAt = thread.latestRunRequestedAt ?? thread.latestRunStartedAt;
+        return startedAt ? DateTime.toEpochMillis(startedAt) : Number.NEGATIVE_INFINITY;
+      });
+    return yield* sidecars.retain({
+      live: checkpoints.flatMap((row) =>
+        kept.has(row.threadId) ? [CheckpointRef.make(row.ref)] : [],
+      ),
+      protectedSince: Math.min(now - DAY_MS, ...unpublishedRunStarts),
+    });
+  });
+
   const reportRef = yield* SubscriptionRef.make<StorageCleanupReport | null>(null);
   const sweep = Effect.fn("StorageCleanup.sweep")(function* (
     trigger: StorageCleanupReport["trigger"],
@@ -1161,6 +1230,45 @@ const make = Effect.gen(function* () {
         ),
       );
     }
+    const snapshotEntry = {
+      kind: "snapshots" as const,
+      path: null,
+      projectPath: null,
+      threadId: null,
+      threadTitle: null,
+    };
+    yield* cleanSnapshots(settings.snapshotsAfterDays, now).pipe(
+      Effect.map(({ snapshots, repositories, bytes, failures }) => {
+        const removed = snapshots > 0 || repositories > 0;
+        // Clients older than the snapshots kind cannot decode a report that names it.
+        if (!removed && failures.length === 0) return;
+        const plural = (count: number, one: string, many: string) =>
+          `${count} ${count === 1 ? one : many}`;
+        entries.push({
+          ...snapshotEntry,
+          outcome: failures.length > 0 ? "failed" : "removed",
+          reason:
+            failures[0] ??
+            (snapshots > 0
+              ? `Removed ${plural(snapshots, "snapshot", "snapshots")} from ${plural(repositories, "repository", "repositories")}`
+              : `Removed ${plural(repositories, "empty snapshot store", "empty snapshot stores")}`),
+          bytes: removed ? bytes : null,
+          files: snapshots > 0 ? snapshots : null,
+        });
+      }),
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          entries.push({
+            ...snapshotEntry,
+            outcome: "failed",
+            reason: cleanupFailureReason(error),
+            bytes: null,
+            files: null,
+          });
+          yield* Effect.logWarning("snapshot cleanup failed", { error });
+        }),
+      ),
+    );
     const counts = { removed: 0, kept: 0, failed: 0 };
     let bytesFreed = 0;
     for (const entry of entries) {
