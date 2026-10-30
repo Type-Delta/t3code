@@ -1468,11 +1468,15 @@ const make = Effect.gen(function* () {
             childControls.runs.filter((run) => run.delegatedTaskId === task.id),
           )
         : progress.resultRun;
+    const taskRunStatus = taskStatusForRun(taskResultRun);
+    // Fork DL018: a reopened run that completed still waits for the child's own delegates and background work.
     const taskWorkState =
       childRun?.delegatedTaskId === task.id
-        ? isTerminalTaskStatus(taskStatusForRun(taskResultRun))
-          ? "result_available"
-          : "working"
+        ? taskRunStatus === "completed"
+          ? progress.state
+          : isTerminalTaskStatus(taskRunStatus)
+            ? "result_available"
+            : "working"
         : progress.state;
     const resultRunIds = [
       ...new Set(

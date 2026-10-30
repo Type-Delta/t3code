@@ -604,6 +604,7 @@ function cancelledAppOwnedTask(
 }
 
 // Provider wakes can start follow-up work; monitor updates only report progress.
+// Delegated-completion wakes only join a reopened task that is still running.
 // Dispatch takes the parent's lock for follow-ups because intake writes the parent.
 function mayStartSubagentFollowup(
   command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
@@ -611,7 +612,11 @@ function mayStartSubagentFollowup(
   if (command.scheduledTaskId !== undefined || command.restartContinuationOfRunId !== undefined)
     return false;
   if (command.notification !== undefined) return command.notification.source.kind !== "monitor";
-  return command.createdBy === "user" || command.creationSource === "mcp";
+  return (
+    command.createdBy === "user" ||
+    command.creationSource === "mcp" ||
+    command.delegatedCompletion !== undefined
+  );
 }
 
 function isBlockingRun(run: OrchestrationV2Run): boolean {
@@ -7486,6 +7491,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       child.lineage.relationshipToParent !== "subagent" ||
       parentThreadId === null ||
       (command.notification === undefined &&
+        command.delegatedCompletion === undefined &&
         command.createdBy !== "user" &&
         command.senderThreadId !== parentThreadId)
     )
@@ -7539,6 +7545,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       return;
     }
+    if (command.delegatedCompletion !== undefined) return;
     const owner =
       parent.runs.filter(isBlockingRun).toSorted((a, b) => b.ordinal - a.ordinal)[0] ??
       latestExecutedRun(parent.runs);
@@ -12083,6 +12090,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly syncRunId?: RunId;
         readonly task: OrchestrationV2Subagent;
         readonly resultRun?: OrchestrationV2Run;
+        readonly childWorkSettled: boolean;
       },
     ) {
       const childThreadId = childControls.thread.id;
@@ -12103,6 +12111,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : delegatedTaskCurrentRun(taskRuns);
       if (childRun === undefined) return;
       const outcome = runOutcome(childRun);
+      // Fork DL018: a reopened run that ended its turn with its own delegates or background work
+      // in flight waits for them; the wakes that settle them join the task.
+      const awaitsChildWork = taskRuns.length > 0 && outcome === "completed";
       const terminalStatus = delegatedTaskTerminalStatus(outcome);
       if (terminalStatus === null) {
         if (childRun.delegatedTaskId === undefined || childRun.id !== options.syncRunId) return;
@@ -12234,6 +12245,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (transfer.sourcePoint.runId === childRun.id ||
             (options.task.id === forkedFrom.nodeId && transfer.sourcePoint.runId === undefined)),
       );
+      if (existingResultTransfer === undefined && awaitsChildWork && !options.childWorkSettled)
+        return;
       const now = yield* DateTime.now;
       const result = subagentResultForRun(childProjection, { ...childRun, status: outcome });
       if (existingResultTransfer !== undefined) {
@@ -12508,6 +12521,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...options,
         task,
         ...(progress.resultRun === undefined ? {} : { resultRun: progress.resultRun }),
+        childWorkSettled: progress.state === "result_available",
       });
     }
 

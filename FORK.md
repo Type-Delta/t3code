@@ -257,10 +257,20 @@ returns it to running, and it publishes the follow-up's result once (upstream #2
 running can still be cancelled. The delegation's first run is identified by the spawn transfer's target run. A user
 follow-up also reopens a task the parent had cancelled, re-arming its completion wake.
 
+A follow-up whose run completes while the child's own delegates or background work are still in
+flight is not done, the same rule upstream applies to the delegation's first run. The task stays
+running, and `task_status` reports `waiting_for_children`. While the task is reopened, the
+delegated-completion and background-command wakes that settle that work also carry its task id,
+so the task publishes the wake's result instead of the interim reply. A follow-up that fails, is
+stopped, or is cancelled still settles at once. Upstream has the same gap for its per-follow-up tasks (pingdotgg/t3code#21837, partial fix
+in #21877).
+
 **Implementation evidence:** orchestrationV2 contracts and server layers; ChatView, Sidebar,
 ThreadRelationshipsControl, ComposerSubagents, V2LifecycleRow, V2ItemInspector, rightPanelStore,
 and session-logic. Reopen edge cases: `DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
-follow-up never starts", including "pauses a reopened task behind a held follow-up") and `OrchestratorMcpService.test.ts` (held follow-up cancel).
+follow-up never starts", including "pauses a reopened task behind a held follow-up", and "holds a
+reopened task while … runs") and `OrchestratorMcpService.test.ts` (held follow-up cancel, and
+the follow-up variant of terminal acknowledgement).
 
 **Recorded validation:** focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
 and composer tests; vp check; vp run typecheck; and an isolated paired web-app smoke test that
@@ -269,7 +279,7 @@ composer rendered. The preview client's accessibility snapshot and click calls f
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
 
-**Last updated:** 2026-10-20
+**Last updated:** 2026-10-30
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
