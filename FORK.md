@@ -1,10 +1,22 @@
 # t3code Fork
 
+<!-- In-synced fork: maintained with the `syncfork` skill. -->
+
 This fork keeps the Windows reliability, durable checkpointing, and workspace capabilities that are still not supplied by the shared base.
 
-Git repository cache keys use Node's native `realpath` so Windows long paths and their 8.3 aliases share one VCS snapshot and refresh history.
-
 ## Divergence Log
+
+Each behavior where this fork differs from upstream has one entry here. If you change code in this repository, check if this log needs an update.
+
+The rules:
+
+- Update the entry that owns the behavior you changed, or add an entry with the next unused ID. One entry covers one behavior, not one commit.
+- Describe the current behavior, why the fork needs it, and how it composes with upstream's related behavior. When the behavior changes, rewrite the entry. Do not append a changelog; git and the Merge History hold history.
+- Under **Implementation evidence**, list the key source files and tests. Under **Recorded validation**, list the checks that proved the current behavior.
+- Set **Last updated** to today's date on every entry you touch.
+- Never reuse an ID. Retire an entry only with the user's explicit approval: delete it and name the retired ID in the next Merge History entry.
+- When an ID conflicts from merges, renumber the IDs as needed.
+- A change that does not alter how the fork differs from upstream (formatting, or an edit to this file) needs no entry.
 
 ### DL001 — Claude Windows resolver and artifact safeguards
 
@@ -68,7 +80,7 @@ The shared fixture launcher dispatches by shebang: shell fixtures use Git for Wi
 
 Git fixtures set repository-local `core.autocrlf=false` when exact LF content is part of an assertion, preserving the tested reset and restore behavior across Windows installations.
 
-Git worktree comparison uses native realpaths and case-folding on Windows so Git for Windows path canonicalization cannot mistake the main checkout for another worktree.
+Git worktree comparison uses native realpaths and case-folding on Windows so Git for Windows path canonicalization cannot mistake the main checkout for another worktree. Git status cache keys use the same canonical path, so Windows long paths and their 8.3 aliases share one VCS snapshot and refresh history.
 
 Server-router and HTTP MCP fixtures use native HTTP clients with OS-assigned loopback ports. Windows can assign port `6566`, which Fetch blocks before connecting. Explicit compression checks retain Fetch and its automatic decompression. The fixtures retain real HTTP requests and their status, body, and session assertions.
 
@@ -76,7 +88,7 @@ Server-router and HTTP MCP fixtures use native HTTP clients with OS-assigned loo
 
 **Recorded validation:** targeted Cursor/Grok ACP, provider-runtime ingestion, checkpoint, Git PR-selector, desktop, relay, workspace, Tailscale, and oxlint suites on Windows; `vp check` and `vp run typecheck`.
 
-**Last updated:** 2026-10-02
+**Last updated:** 2026-10-30
 
 ### DL006 — Durable sidecar checkpoints and recoverable navigation
 
@@ -92,11 +104,11 @@ Sidecar capture runs Git with `-C` at the worktree root, so paths stay worktree-
 
 Legacy checkpoint tables remain for schema compatibility. V2 navigation uses upstream's checkpoint rollback with the fork's retained forward checkpoints for redo; no server code reads the former capture-job or navigation-journal tables.
 
-Persistence keeps canonical upstream migrations `001`–`069` in `effect_sql_migrations` and fork migrations `001`–`015` in the independent `fork_sql_migrations` ledger. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
+Persistence keeps canonical upstream migrations `001`–`072` in `effect_sql_migrations` and fork migrations `001`–`015` in the independent `fork_sql_migrations` ledger. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
 
 The old ID-58 prompt-suggestion collision is repaired by canonical upstream migration `048_ProjectionThreadBranchPullRequest` and fork migration `009_ProjectionThreadMessageSuggestions`. This preserves both columns even when the original numeric ledger skipped the branch column. Startup also removes the legacy checkpoint table's foreign key to `projection_turns` before upstream `063_DropUnusedV1Projections` drops that table. Incoming upstream migrations `065`–`069` retain their canonical IDs, including webhook deduplication and message-search schema.
 
-The isolated migration helper verifies known historical ledger aliases against their repaired schema before accepting them. Codex and Claude checkpoint navigation fork the saved native conversation at the selected provider-turn boundary instead of destructively truncating it. Captures retain the native source, and older checkpoints acquire it before their first navigation. Redo restores the original terminal run and root-node states as well as files and conversation context. Restoration events reach clients but do not repeat live completion handling, usage metrics, settlement, or automatic retries. A new message after undo abandons the previous forward branch.
+Historical fork records are recognized by name. Repair of a V2 preview database moves only its two known preview rows and records `054` only when that slot is free; it leaves later or unfamiliar rows to the upstream migrator and the fork ledger, so a preview database that already holds newer upstream rows still starts. Upstream rejects such a ledger. Codex and Claude checkpoint navigation fork the saved native conversation at the selected provider-turn boundary instead of destructively truncating it. Captures retain the native source, and older checkpoints acquire it before their first navigation. Redo restores the original terminal run and root-node states as well as files and conversation context. Restoration events reach clients but do not repeat live completion handling, usage metrics, settlement, or automatic retries. A new message after undo abandons the previous forward branch.
 
 Terminal provider events end the workspace mutation for their exact turn and settle the run before local VCS status refresh or checkpoint capture. Checkpoint capture runs as a follow-up effect and records the checkpoint when it succeeds, so a slow or unavailable VCS backend cannot leave the conversation showing as active. Capture and mutation intervals are serialized instead of preempting one another, preventing normal provider turns from producing `workspace-mutated` checkpoints. A capture waiting for active work releases the worktree gate, so provider turns in other threads can join the same mutation cohort and share its next stable checkpoint boundary; an already-running capture and checkpoint navigation remain exclusive. Aborted turns and provider-turn handoff ownership retain the same exact-owner completion semantics. A stale lease with no active provider turn is recovered automatically; if ownership is ambiguous, the provider turn continues without checkpoint navigation instead of blocking the conversation. Failed mutation-blocked text messages expose a retry action that reuses the persisted user message when available or recreates an optimistic-only message without duplicating it in the UI.
 
@@ -124,7 +136,7 @@ The 2026-10-05 completion split passed the focused RunExecutionService, Checkpoi
 
 The 2026-10-15 re-port restored the 16 sidecar characterization tests the redo dropped (32 checkpoint-store tests pass), plus sidecar authored-path filtering, long scope ids, and the V2 real-repository suite.
 
-**Last updated:** 2026-10-25
+**Last updated:** 2026-10-30
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -134,11 +146,11 @@ Collapsed Working, snoozed, and settled shelves keep all displayed split panes v
 
 The fork supports up to ten visible thread panes in five columns and two rows. Panes fill columns at full height until a sixth pane opens the lower row. A full-height pane accepts a thread above or below it in its outer quarters; its middle half accepts left/right placement while fewer than five columns exist. A stacked column accepts only left/right placement while fewer than five columns exist. Left/right drop hints cover the full destination column, including both rows of a stacked column. Blocked drop areas show no hint. Split layouts retain focused-pane routing, a shared toolbar, one right panel, and controlled ownership of global keyboard, preview, and composer behavior. The right-panel toggle reflects the shared split layout and closes every open pane panel together, so changing focus cannot reopen a panel owned by another pane. Panes can be opened or detached from the sidebar, safely reconcile draft promotion/archive/deletion, and animate layout changes without leaving stale portals or listeners. Reconciliation never returns a deleted thread as the fallback when all panes disappear.
 
-Both pointer drags and native legacy-sidebar drags can create the first split on either side of a thread or place a pane above or below an unstacked column, with the hint and insertion using the same pointer position. Detaching the focused pane through the legacy sidebar routes to the remaining pane. Thread context menus can detach one pane or dissolve the entire containing split group. Entering a thread route restores its saved group, including navigation from the command palette, notifications, citations, and browser history; preloading a route leaves the current layout alone.
+Both pointer drags and native sidebar drags can create the first split on either side of a thread or place a pane above or below an unstacked column, with the hint and insertion using the same pointer position. Detaching the focused pane through the sidebar routes to the remaining pane. Thread context menus can detach one pane or dissolve the entire containing split group. Entering a thread route restores its saved group, including navigation from the command palette, notifications, citations, and browser history; preloading a route leaves the current layout alone.
 
-Split membership is persisted as multiple ordered local groups with active state and stable group colors. Selecting any member restores its group; the current and legacy sidebars preserve group tinting, support pane and thread drag placement, and show complete left/right drop intent. The group tint is textured with an inline desaturated SVG grain so the color-coded row reads as a surface rather than a flat slab. The grain is a masked pseudo-element rather than a second background layer, because background layers cannot carry their own mask and unmasked grain also covers the gradient's faded tail, flattening the row back into a uniform slab; the overlay shares the tint's fade axis and stops short of its extent so the texture is gone before the color is. Group hues carry a hue-dependent chroma: a flat chroma across the wheel does not read as a flat saturation, since yellow-green renders at full strength while red and blue are gamut-clipped, so chroma eases down around yellow-green. Rows supply only the hue and that chroma, leaving the stylesheet to compose per-theme lightness and strength — light mode takes a deeper, less translucent tint because the translucency that reads as a clear band on the near-black sidebar washes out against zinc-50. The current sidebar also names the other panes in each grouped thread's details tooltip, keeps displayed panes visible when settled or snoozed shelves are collapsed, and preserves split actions in its context menu. Right-panel ownership remains useful when focus moves to a pane with no surface of its own.
+Split membership is persisted as multiple ordered local groups with active state and stable group colors. Selecting any member restores its group; the sidebar preserves group tinting, support pane and thread drag placement, and show complete left/right drop intent. The group tint is textured with an inline desaturated SVG grain so the color-coded row reads as a surface rather than a flat slab. The grain is a masked pseudo-element rather than a second background layer, because background layers cannot carry their own mask and unmasked grain also covers the gradient's faded tail, flattening the row back into a uniform slab; the overlay shares the tint's fade axis and stops short of its extent so the texture is gone before the color is. Group hues carry a hue-dependent chroma: a flat chroma across the wheel does not read as a flat saturation, since yellow-green renders at full strength while red and blue are gamut-clipped, so chroma eases down around yellow-green. Rows supply only the hue and that chroma, leaving the stylesheet to compose per-theme lightness and strength — light mode takes a deeper, less translucent tint because the translucency that reads as a clear band on the near-black sidebar washes out against zinc-50. The current sidebar also names the other panes in each grouped thread's details tooltip, keeps displayed panes visible when settled or snoozed shelves are collapsed, and preserves split actions in its context menu. Right-panel ownership remains useful when focus moves to a pane with no surface of its own.
 
-**Implementation evidence:** `apps/web/src/{splitViewStore,splitViewDrag,splitViewNavigation}.ts`, `apps/web/src/components/{SplitThreadWorkspace,ThreadRouteView,SplitPaneDropHint,Sidebar,LegacySidebar,CommandPalette,RightPanelTabs,ChatView,chat/ChatComposer}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
+**Implementation evidence:** `apps/web/src/{splitViewStore,splitViewDrag,splitViewNavigation}.ts`, `apps/web/src/components/{SplitThreadWorkspace,ThreadRouteView,SplitPaneDropHint,Sidebar,CommandPalette,RightPanelTabs,ChatView,chat/ChatComposer}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
 
 **Recorded validation:** 248 focused tests across split state, navigation, native drag events, route history, sidebar logic, workspace, right-panel, notification, and citation behavior; `vp check`; `vp run typecheck`; and `git diff --check`. The 2026-09-28 isolated paired-browser pass confirmed that pointer hints switch between left and right and a left drop places the dragged thread before the original. The Browser panel then lost its automation host, so the remaining live flows and screenshot capture could not be completed. Native legacy drops and route restoration were verified by automated tests. An unrelated existing command-palette sorting test still fails in unchanged code. Earlier integrated checks cover composer shortcut ownership and shared right-panel closing. The 2026-09-29 5x2 extension passed 211 focused tests, `vp check`, `vp run typecheck`, and an isolated paired-browser pass at 2560x1440 showing five full-height columns and a sixth pane below the first. The drop-area correction passed 214 focused tests; an isolated paired-browser pass confirmed top and bottom native drops, and confirmed that a filled column at five columns accepts no drop or hint while an unstacked column still offers the top hint. The 2026-09-29 standalone vertical-drop and group-detach update passed 220 focused tests, including top/bottom native and pointer targets, active/inactive group dissolution, and both sidebar menu paths; the isolated browser pass confirmed the new menu item, top and bottom first-split hints, and the resulting stacked two-pane layout.
 
@@ -146,7 +158,7 @@ The 2026-10-07 drag update passed 90 focused drag tests, `vp check`, `vp run typ
 
 Pinned and Active drag boundaries occupy normal layout rows, including an empty Pinned group. Sorting uses their measured heights so labels keep consistent spacing in Manual and Last input ordering.
 
-**Last updated:** 2026-10-26
+**Last updated:** 2026-10-30
 
 ### DL012 — Prompt preservation during draft promotion
 
@@ -210,7 +222,7 @@ The new-thread Workspace controls expose a neighboring Worktree selector in Curr
 
 **Last updated:** 2026-07-31
 
-### DL018 – Child-thread navigation and retained composer metadata
+### DL018 — Child-thread navigation and retained composer metadata
 
 Orchestrator V2 models provider-native subagents as real child threads with durable lineage. The
 parent projection records each child thread, parent/root identifiers, relationship, status, model,
@@ -245,19 +257,19 @@ returns it to running, and it publishes the follow-up's result once (upstream #2
 running can still be cancelled. The delegation's first run is identified by the spawn transfer's target run. A user
 follow-up also reopens a task the parent had cancelled, re-arming its completion wake.
 
-Implementation evidence: orchestrationV2 contracts and server layers; ChatView, Sidebar,
+**Implementation evidence:** orchestrationV2 contracts and server layers; ChatView, Sidebar,
 ThreadRelationshipsControl, ComposerSubagents, V2LifecycleRow, V2ItemInspector, rightPanelStore,
 and session-logic. Reopen edge cases: `DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
 follow-up never starts", including "pauses a reopened task behind a held follow-up") and `OrchestratorMcpService.test.ts` (held follow-up cancel).
 
-Recorded validation: focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
+**Recorded validation:** focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
 and composer tests; vp check; vp run typecheck; and an isolated paired web-app smoke test that
 loaded a V2 thread route, confirmed the Agents/right-transcript surface is absent, and confirmed the
 composer rendered. The preview client's accessibility snapshot and click calls failed after the app
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
 
-Last updated: 2026-10-20
+**Last updated:** 2026-10-20
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
@@ -315,6 +327,8 @@ Management keys retain their explicit environment-wide permissions and reviewed 
 
 **Implementation evidence:** `apps/server/src/mcp/OrchestratorMcpService.ts`, the thread toolkit,
 `packages/contracts/src/orchestratorMcp.ts`, and the management API key contracts.
+
+**Recorded validation:** No validation recorded. Covered by `apps/server/src/mcp/OrchestratorMcpService.test.ts` and `OrchestratorMcpToolkit.integration.test.ts`.
 
 **Last updated:** 2026-10-28
 
@@ -524,7 +538,7 @@ keys. Repository-wide `vp check` and `vp run typecheck` passed.
 
 **Last updated:** 2026-09-05
 
-### DL032 – Automatic resume after native provider usage limits
+### DL032 — Automatic resume after native provider usage limits
 
 Auto-resume remains enabled by default for all threads and can be turned off under Settings →
 Threads → Resume after usage limits. V2 persists the failed run's exact provider reset time
@@ -540,13 +554,13 @@ repeating completed work or expanding scope. Restart, archive, settle, a newer t
 provider selection invalidates the saved recovery. The one-hour wait and scheduler behavior are
 upstream V2 behavior; the default and prompt are the fork's surviving differences.
 
-Implementation evidence: UsageLimitRecoveryWorker, Orchestrator, Scheduler, orchestrationV2/settings
+**Implementation evidence:** UsageLimitRecoveryWorker, Orchestrator, Scheduler, orchestrationV2/settings
 contracts, serverSettings, and SettingsPanels.
 
-Recorded validation: focused usage-limit parsing, scheduler, recovery-worker, V2 runtime, and
+**Recorded validation:** focused usage-limit parsing, scheduler, recovery-worker, V2 runtime, and
 server-settings tests; vp check; vp run typecheck; and the isolated migration/startup smoke.
 
-Last updated: 2026-10-04
+**Last updated:** 2026-10-04
 
 ### DL033 — Model search within the selected group
 
@@ -556,6 +570,8 @@ search, and switching groups preserves the query. Provider and continuation rest
 
 **Implementation evidence:** `apps/web/src/components/chat/ModelPickerContent.tsx`,
 `ModelPickerSidebar.tsx`, and `ModelPickerContent.test.ts`.
+
+**Recorded validation:** No validation recorded. Covered by `ModelPickerContent.test.ts`.
 
 **Last updated:** 2026-09-07
 
@@ -567,7 +583,7 @@ next prompt. The agent writes it from its real context (repository instructions,
 conversation so far); no separate model call, provider session, or transcript summary is made.
 `ProviderRuntimeIngestion` withholds any partial or open tag from streamed and buffered deltas,
 strips every tagged block at completion, and carries the sanitized text as `suggestion` on the
-assistant message through the decider, projector, client reducer, and SQLite projection. Persistence keeps upstream migrations 1–72 in `effect_sql_migrations` and fork migrations 1–15 in the independent `fork_sql_migrations` ledger. The web composer shows it as ghost text once the thread is idle and the
+assistant message through the decider, projector, client reducer, and SQLite projection. The web composer shows it as ghost text once the thread is idle and the
 composer is empty; Tab accepts it, typing dismisses it for that message, and a new message or
 thread resets it. Cursor, Grok, OpenCode, and Antigravity receive no instruction. Mobile has no
 toggle or ghost text. An optional `promptSuggestionInstructions` setting appends extra guidance to
@@ -591,7 +607,9 @@ Suggestion-less streaming updates retain message and timeline-row identity. Clea
 `apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/ComposerPromptEditor.tsx`,
 and `apps/web/src/components/settings/SettingsPanels.tsx`.
 
-**Last updated:** 2026-10-02
+**Recorded validation:** No validation recorded. Covered by `packages/shared/src/promptSuggestion.test.ts`.
+
+**Last updated:** 2026-10-30
 
 ### DL035 — Manual-only release actions
 
@@ -657,7 +675,7 @@ The configured Chat: New Local shortcut opens the command palette's "New thread 
 
 **Last updated:** 2026-07-29
 
-### DL042 – Native conversation adoption during V2 cutover
+### DL042 — Native conversation adoption during V2 cutover
 
 V2 imports valid saved Codex and Claude native conversation cursors into a durable provider-thread
 projection. Legacy threads with a matching provider runtime cursor now retain a strong native thread
@@ -669,11 +687,13 @@ A fork or rollback request may carry a saved native turn boundary (`nativeBounda
 adapter fork input). Codex and Claude fork exactly at a strong ref of their own driver and reject a
 weak, foreign, or synthetic one instead of falling back to a guessed turn count. Checkpoint navigation uses the persisted provider-turn boundary through the existing fork API. No orchestrator path supplies the explicit `nativeBoundaryRef` override yet; V1 import records thread cursors only.
 
-Implementation evidence: LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
+**Implementation evidence:** LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
 projection, Codex and Claude V2 adapters (`resolveCodexForkBoundary`,
 `resolveClaudeForkUpToMessageId`), and the legacy importer/cutover and Codex adapter tests.
 
-Last updated: 2026-10-25
+**Recorded validation:** No validation recorded. Covered by `LegacyV1ThreadImporter.test.ts`, `LegacyV1Cutover.integration.test.ts`, and the Codex adapter tests.
+
+**Last updated:** 2026-10-25
 
 ### DL043 — Codex compaction context usage restored
 
@@ -738,6 +758,8 @@ submodules remain best-effort failures and do not prevent worktree creation.
 `apps/server/src/vcs/GitVcsDriver.ts`, `apps/server/src/vcs/GitVcsDriverCore.ts`, and the focused
 Git driver regression test.
 
+**Recorded validation:** No validation recorded. Covered by `apps/server/src/vcs/GitVcsDriver.test.ts`.
+
 **Last updated:** 2026-10-16
 
 ### DL047 — Configurable automatic retry for matched failures
@@ -775,6 +797,8 @@ transcript rows fall outside the recent history window. SQL snapshots retain the
 separately from the visible timeline, and wire paging preserves them until the request is
 answered or dismissed. This keeps an older async question from leaving a thread marked Input
 with no visible prompt to answer or dismiss.
+
+**Implementation evidence:** `apps/server/src/orchestration-v2/{ProjectionStore,threadHistoryPaging}.ts` and `ProjectionStore.test.ts`.
 
 **Recorded validation:** SQL and memory projection regressions, history paging tests, and an
 isolated web verification using a copied long thread. Answering or dismissing remains the
@@ -840,11 +864,29 @@ Legacy checkpoint refs inside project repositories are never touched.
 
 **Last updated:** 2026-10-30
 
+### DL052 — Windows desktop keeps the default profile's safe-storage key
+
+On Windows, the first V2 desktop launch seeds `%APPDATA%\t3code-v2\Local State` from the default `t3code` profile and falls back to `T3 Code (Alpha)` only when that is missing. Upstream tries `T3 Code (Alpha)` first. V1 switched `userData` only after Electron had loaded the `t3code` profile's key, so that key encrypted existing desktop secrets such as `connection-catalog.json`. On machines with both profiles, upstream's order copies an unused key: the renderer cannot decrypt its connection catalog, never connects to the local backend, and shows no threads and a disconnected settings page. The rest of upstream's migration, which copies only the key preferences and never the locked databases, is unchanged.
+
+**Implementation evidence:** `apps/desktop/src/app/DesktopUserData.ts` and `DesktopUserData.test.ts` ("prefers the default t3code key when both V1 profiles have one").
+
+**Recorded validation:** No validation recorded beyond that test. The decision is recorded in the 2026-10-16 Merge History entry.
+
+**Last updated:** 2026-10-30
+
+## Sync Checklist
+
+Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.
+
+- Apply new upstream migrations to a read-only snapshot of the live database (`~/.t3/userdata/statev2.sqlite`). Check that a rerun is a no-op, the upstream ledger matches the migration manifest, the fork ledger (`fork_sql_migrations`) keeps every fork migration, and `foreign_key_check` and `quick_check` pass.
+- Run `vp run lint:mobile` when the merge touches native mobile code.
+- Build the desktop and web production bundles, then build an installer (`vp run dist:desktop:win` on Windows) and launch it with isolated state. Confirm the window opens, the backend starts, and a fresh database migrates.
+- If provider auth is set up, run live turns with the cheapest models (Haiku for Claude, Luna for Codex) on a paired web client with seeded real data. Include an undo and redo of a file change (DL006).
+- Move the `base` tag to the merge commit and force-push it to `origin`.
+
 ## Merge History
 
-This is an append-only historical decision record. It provides context for integrations but never, by itself, establishes an ongoing fork divergence; use the current Divergence Log for that determination.
-
-Don't forget to update the `base` tag after each merge to track the latest shared base with upstream/main.
+This is an append-only decision record, newest first, with one entry per upstream sync. It explains past integrations but does not by itself establish a current divergence; use the Divergence Log for that. Sync with upstream only when the user explicitly asks. Do not edit past entries.
 
 ### 2026-10-28 — Merge upstream/main through `40d335a7ba`
 

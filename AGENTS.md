@@ -19,25 +19,6 @@ You can think of T3 Code as an open source "bring-your-own-subscription" alterna
   - Subagents must not independently launch dev servers or repeat integrated client verification unless their delegated task explicitly requires it.
   - Stop dev servers, watchers, and other long-running verification processes when the focused verification is complete.
 
-## Syncing this fork with the upstream T3 Code repository
-
-Since this is a fork of the T3 Code repository, it is important to keep it in sync with the upstream repository.
-But this process requires explicit user consent.
-
-If you are tasked with syncing this fork with the upstream T3 Code repository, please do it with the following considerations:
-
-- Keep features from both sides
-- If both fixes the same issue, prefer fixes from theirs ONLY if theirs is more elegant AND has the same or larger coverage.
-- If some feature/changes conflicts in a way that it is best to choose either theirs or ours, pause and ask me.
-- If you are unsure about how to proceed, please ask me for guidance.
-- This is not a "fix merge conflicts" task, you have to make sure that all features are behaving as expected and that those features make sense together both functionally, aesthetically and user experience. An app that works isn't necessarily a good app.
-- All features/changes described in [Divergence Log](./FORK.md#divergence-log) must exist (make sure you go through ALL of them when auditing), and thoroughly verified/audited after the merge, ensureing no feature is left half-broken or missing even when the tests are green (because the test it self might be missing). Execption can be made for features/changes intentinally drop after explicit approval from the user.
-- After merging, please run the full test suite and ensure that no regressions or addition test failures have been introduced. Then smoke test the app to make sure that all main upstream features and fork-introduced features are working as expected. If auth is already setup, test it E2E with the live models. Also test database migration, desktop builds and installer builds.
-- After all the code related changes are done (merged, fixed, verified, finalized/cleanup), do the following:
-  - Update "Divergence Log" and "Merge History" sections in FORK.md with the latest changes.
-  - Commit merge changes in a single commit with a clear message describing the merge decisions made.
-  - Move the "base" tag to the commit you just created. Force pushing this tag is fine since its only used for reference. (if `gdx` are available, you can use `gdx tag mv base ~0` to move "base" to the latest commit)
-
 ## What makes T3 Code special?
 
 We have over 500,000 users who love T3 Code. It's important we maintain the things they love as we continue to iterate on the product. Here's a brief list of the things we can never compromise on.
