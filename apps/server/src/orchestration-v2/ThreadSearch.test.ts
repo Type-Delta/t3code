@@ -218,49 +218,32 @@ it.layer(layerTest)("ThreadSearch", (it) => {
     }),
   );
 
-  it.effect("limits project searches after excluding matches from other projects", () =>
+  it.effect("indexes a message when it finishes streaming and follows later edits", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const search = yield* ThreadSearch.ThreadSearch;
-      const localProject = ProjectId.make("project:search-local");
-      const otherProject = ProjectId.make("project:search-other");
-      const localThread = ThreadId.make("thread:search-local");
-      const otherThread = ThreadId.make("thread:search-other");
-      yield* createProject(localProject);
-      yield* createProject(otherProject);
-      yield* Effect.forEach(
-        [
-          thread(localThread, localProject),
-          message(localThread, "search-local", "assistant", "scope-needle in the local project", {
-            minute: 1,
-          }),
-          thread(otherThread, otherProject),
-          message(otherThread, "search-other", "user", "scope-needle in another project", {
-            minute: 2,
-          }),
-        ],
-        projections.apply,
-        { discard: true },
-      );
+      const project = ProjectId.make("project:search-sync");
+      const threadId = ThreadId.make("thread:sync");
+      yield* createProject(project);
+      yield* projections.apply(thread(threadId, project));
+      const threadIds = (query: string) =>
+        search.search({ query }).pipe(Effect.map(({ matches }) => matches.map((m) => m.threadId)));
 
-      const global = yield* search.search({ query: "scope-needle", limit: 1 });
-      assert.deepEqual(
-        global.matches.map((match) => match.threadId),
-        [otherThread],
+      yield* projections.apply(
+        message(threadId, "sync", "assistant", "streaming draft", { streaming: true }),
       );
-      const local = yield* search.search({
-        query: "scope-needle",
-        limit: 1,
-        projectId: localProject,
-      });
-      assert.deepEqual(
-        local.matches.map((match) => match.threadId),
-        [localThread],
-      );
+      assert.deepEqual(yield* threadIds("draft"), []);
+
+      yield* projections.apply(message(threadId, "sync", "assistant", "finished answer"));
+      assert.deepEqual(yield* threadIds("finished"), [threadId]);
+
+      yield* projections.apply(message(threadId, "sync", "assistant", "edited reply"));
+      assert.deepEqual(yield* threadIds("finished"), []);
+      assert.deepEqual(yield* threadIds("edited"), [threadId]);
     }),
   );
 
-  it.effect("reports an unreadable match as a decode failure", () =>
+  it.effect("matches inside identifiers and skips subagent threads and short tokens", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const search = yield* ThreadSearch.ThreadSearch;
