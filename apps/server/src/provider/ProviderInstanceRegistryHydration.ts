@@ -135,7 +135,7 @@ const layerSettingsWatcher = (settingsChanges: Stream.Stream<ServerSettings>) =>
             ),
           ),
         ),
-        Effect.forkScoped({ startImmediately: true }),
+        Effect.forkScoped,
       );
     }),
   );
