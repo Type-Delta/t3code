@@ -140,7 +140,7 @@ jobs:
             "T3-Code-$VERSION-x64.exe" "T3-Code-$VERSION-x64.exe.blockmap" \
             "T3-Code-$VERSION-arm64.dmg" "T3-Code-$VERSION-arm64.zip" \
             "T3-Code-$VERSION-x64.dmg" "T3-Code-$VERSION-x64.zip" \
-            "T3-Code-$VERSION-x64.AppImage" "T3-Code-$VERSION-x64.deb"; do
+            "T3-Code-$VERSION-x86_64.AppImage" "T3-Code-$VERSION-amd64.deb"; do
             [[ -s "release-assets/$file" ]] || { echo "::error::Missing release asset: $file"; exit 1; }
           done
           node scripts/merge-update-manifests.ts --platform mac "release-assets/$channel-mac.yml" "release-assets/$channel-mac-x64.yml"

@@ -177,8 +177,9 @@ jobs:
 
           shopt -s nullglob
           for pattern in "release/*.exe" "release/*.blockmap" "release/latest.yml" "release/nightly.yml"; do
+            # Literal manifest names survive nullglob, so skip the channel this build did not emit.
             for file in $pattern; do
-              cp "$file" release-publish/
+              if [[ -e "$file" ]]; then cp "$file" release-publish/; fi
             done
           done
 
