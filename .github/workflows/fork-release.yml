@@ -1,0 +1,188 @@
+name: Fork Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Fork patch = upstream patch × 100 + build: 0.1.3 → 0.1.301, 0.1.302; 0.1.4 → 0.1.401. Start at 50 for a .0 base."
+        required: true
+        type: string
+
+# Serialize whole runs so preflight's newer-than-latest check sees the previous release.
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Validate version and tags
+        id: version
+        shell: bash
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${VERSION_INPUT#v}"
+          number='(0|[1-9][0-9]*)'
+          if [[ ! "$version" =~ ^${number}\.${number}\.${number}(-nightly\.[0-9]{8}\.${number})?$ ]]; then
+            echo "::error::Invalid version '$VERSION_INPUT'. Use X.Y.Z or X.Y.Z-nightly.YYYYMMDD.N; the updater ignores other suffixes."
+            exit 1
+          fi
+          tag="v$version"
+          for repo in "$GITHUB_REPOSITORY" pingdotgg/t3code; do
+            error_file="$(mktemp)"
+            if gh api "repos/$repo/git/ref/tags/$tag" > /dev/null 2> "$error_file"; then
+              rm -f "$error_file"
+              echo "::error::Tag $tag already exists in $repo."
+              exit 1
+            elif ! grep -q 'HTTP 404' "$error_file"; then
+              cat "$error_file" >&2
+              rm -f "$error_file"
+              exit 1
+            fi
+            rm -f "$error_file"
+          done
+          prerelease=false
+          if [[ "$version" == *-nightly.* ]]; then
+            prerelease=true
+          else
+            gh api --paginate "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name' > "$RUNNER_TEMP/fork-tags"
+            python3 - "$version" "$RUNNER_TEMP/fork-tags" <<'PY'
+          import re
+          import sys
+
+          version = tuple(map(int, sys.argv[1].split('.')))
+          with open(sys.argv[2], encoding='utf-8') as tags:
+              stable = [tuple(map(int, match.groups())) for tag in tags
+                        if (match := re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\s*', tag))]
+          if stable and version <= max(stable):
+              latest = '.'.join(map(str, max(stable)))
+              sys.exit(f'::error::Stable version {sys.argv[1]} must be greater than existing stable tag v{latest}.')
+          PY
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: preflight
+    uses: ./.github/workflows/fork-windows-release.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+
+  macos:
+    needs: preflight
+    uses: ./.github/workflows/fork-macos-release.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+    secrets: inherit
+
+  linux:
+    needs: preflight
+    uses: ./.github/workflows/fork-linux-release.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: [preflight, windows, macos, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/scripts...
+
+      - name: Download desktop assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Merge and validate release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          channel=latest
+          if [[ "$PRERELEASE" == true ]]; then channel=nightly; fi
+          for file in "$channel.yml" "$channel-mac.yml" "$channel-mac-x64.yml" "$channel-linux.yml" \
+            "T3-Code-$VERSION-x64.exe" "T3-Code-$VERSION-x64.exe.blockmap" \
+            "T3-Code-$VERSION-arm64.dmg" "T3-Code-$VERSION-arm64.zip" \
+            "T3-Code-$VERSION-x64.dmg" "T3-Code-$VERSION-x64.zip" \
+            "T3-Code-$VERSION-x64.AppImage" "T3-Code-$VERSION-x64.deb"; do
+            [[ -s "release-assets/$file" ]] || { echo "::error::Missing release asset: $file"; exit 1; }
+          done
+          node scripts/merge-update-manifests.ts --platform mac "release-assets/$channel-mac.yml" "release-assets/$channel-mac-x64.yml"
+          rm "release-assets/$channel-mac-x64.yml"
+
+      - name: Recheck release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          error_file="$(mktemp)"
+          trap 'rm -f "$error_file"' EXIT
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2> "$error_file"; then
+            echo "::error::Tag $TAG was created after preflight; refusing to modify its release."
+            exit 1
+          elif ! grep -q 'HTTP 404' "$error_file"; then
+            cat "$error_file" >&2
+            exit 1
+          fi
+
+      - name: Create draft and upload assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: T3 Code ${{ needs.preflight.outputs.tag }}
+          body: |
+            Windows and Linux builds are unsigned. macOS builds are self-signed and not notarized. On first install, use System Settings → Privacy & Security → Open Anyway. Later updates install in-app.
+
+            No `t3` npm package or CLI archives are published. Remote server self-update to this version is unavailable.
+          draft: true
+          prerelease: ${{ needs.preflight.outputs.prerelease }}
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}
+
+      - name: Publish complete release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          draft: false
+          prerelease: ${{ needs.preflight.outputs.prerelease }}
+          make_latest: ${{ needs.preflight.outputs.prerelease == 'false' }}
+          token: ${{ github.token }}
