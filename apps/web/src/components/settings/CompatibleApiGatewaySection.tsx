@@ -310,7 +310,8 @@ export function CompatibleApiGatewaySection({
   const apiKeyVariable = apiGatewayApiKeyEnvironmentVariable(value);
   const hasStoredApiKey = environment.some(
     (entry) =>
-      entry.name === apiKeyVariable && (entry.value.length > 0 || entry.valueRedacted === true),
+      entry.name === apiKeyVariable &&
+      (typeof entry.value !== "string" || entry.value.length > 0 || entry.valueRedacted === true),
   );
   const commitApiKey = (nextApiKey: string) => {
     setApiKey(variant === "dialog" ? nextApiKey : "");

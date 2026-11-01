@@ -105,6 +105,8 @@ export interface CheckpointServiceV2Shape {
   readonly materializeBaselineCheckpoint: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly ordinalWithinScope: number;
+    /** Records a missing checkpoint without touching git, for side chats sharing a parent's worktree. */
+    readonly forceMissing?: boolean;
   }) => Effect.Effect<OrchestrationV2Checkpoint, CheckpointServiceV2Error>;
   readonly capture: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
@@ -114,6 +116,7 @@ export interface CheckpointServiceV2Shape {
     readonly appRunOrdinal: number | null;
     readonly baselineOrdinalWithinScope?: number;
     readonly capturedAt: DateTime.Utc;
+    readonly forceMissing?: boolean;
   }) => Effect.Effect<OrchestrationV2Checkpoint, CheckpointServiceV2Error>;
   readonly restore: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
@@ -340,7 +343,8 @@ export const layer: Layer.Layer<
               scopeId: input.scope.id,
               ordinalWithinScope: input.ordinalWithinScope,
             });
-            const checkpointable = yield* isGitCheckpointable(input.scope.cwd);
+            const checkpointable =
+              input.forceMissing !== true && (yield* isGitCheckpointable(input.scope.cwd));
             const storedRef = checkpointable
               ? yield* findBoundaryRef(input.scope, input.ordinalWithinScope).pipe(
                   Effect.catch((cause) =>
@@ -395,7 +399,7 @@ export const layer: Layer.Layer<
                   ordinalWithinScope: baselineOrdinal,
                 })
               : null;
-          if (!(yield* isGitCheckpointable(input.scope.cwd))) {
+          if (input.forceMissing === true || !(yield* isGitCheckpointable(input.scope.cwd))) {
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,

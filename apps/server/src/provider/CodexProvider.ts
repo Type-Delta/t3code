@@ -38,6 +38,8 @@ import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts
 import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
+  DEFAULT_TIMEOUT_MS,
+  spawnAndCollect,
   type ServerProviderDraft,
 } from "@t3tools/provider-core/server/snapshotProbe";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
@@ -74,6 +76,9 @@ const CODEX_CLIENT_NAME = "T3 Code";
 // Handshake plus account/models/skills requests can exceed the shared 10s probe budget.
 const CODEX_AUTH_PROBE_TIMEOUT_MS = 20_000;
 const CODEX_DISCOVERY_MARGIN_MS = 250;
+// `codex-cli 0.159.0`, `codex-cli 0.160.0-alpha.1` or the npm CLI's bare `0.1.4161006`.
+// Keep a prerelease suffix so compatibility stays unknown for it, as it does for `initialize`.
+const CODEX_CLI_VERSION_PATTERN = /(?:^|\s)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=\s|$)/u;
 
 const CODEX_PRESENTATION = {
   displayName: "Codex",
@@ -111,12 +116,17 @@ function reasoningEffortLabel(reasoningEffort: string): string {
   return REASONING_EFFORT_LABELS[reasoningEffort] ?? reasoningEffort;
 }
 
-function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["account"]) {
+function codexAccountAuthLabel(
+  account: CodexSchema.V2GetAccountResponse["account"],
+  usagePlanType: string | null | undefined,
+) {
   if (!account) return undefined;
   if (account.type === "apiKey") return "OpenAI API Key";
   if (account.type === "amazonBedrock") return "Amazon Bedrock";
   if (account.type !== "chatgpt") return undefined;
-  return codexPlanLabel(account.planType);
+  // account/read takes the plan from the cached login token; the usage read asks the backend.
+  const usageLabel = usagePlanType === "unknown" ? undefined : codexPlanLabel(usagePlanType);
+  return usageLabel ?? codexPlanLabel(account.planType);
 }
 
 export function codexPlanLabel(planType: string | null | undefined): string | undefined {
@@ -445,6 +455,20 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
   };
 }
 
+const codexProcessEnvironment = Effect.fn("codexProcessEnvironment")(function* (input: {
+  readonly homePath?: string | undefined;
+  readonly environment?: NodeJS.ProcessEnv | undefined;
+}) {
+  // Expand CODEX_HOME explicitly: spawn passes a literal ~ that Codex rejects.
+  const resolvedHomePath = input.homePath
+    ? expandHomePath(input.homePath, yield* HostProcess.HomeDirectory)
+    : undefined;
+  return {
+    ...codexAppServerEnvironment(input.environment),
+    ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+  };
+});
+
 export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(function* (input: {
   readonly binaryPath: string;
   readonly homePath?: string | undefined;
@@ -452,15 +476,8 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv | undefined;
 }) {
-  // Expand CODEX_HOME explicitly: spawn passes a literal ~ that Codex rejects.
-  const resolvedHomePath = input.homePath
-    ? expandHomePath(input.homePath, yield* HostProcess.HomeDirectory)
-    : undefined;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const environment = {
-    ...codexAppServerEnvironment(input.environment),
-    ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-  };
+  const environment = yield* codexProcessEnvironment(input);
   const launch = Effect.gen(function* () {
     const command = yield* resolveSpawnCommand(
       input.binaryPath,
@@ -583,6 +600,42 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   } satisfies CodexAppServerProviderSnapshot;
 });
 
+// Old CLIs can exit before initialize reports the version needed for compatibility advice.
+const probeCodexCliVersion = Effect.fn("probeCodexCliVersion")(
+  function* (input: {
+    readonly binaryPath: string;
+    readonly homePath?: string | undefined;
+    readonly cwd: string;
+    readonly environment?: NodeJS.ProcessEnv | undefined;
+  }) {
+    const environment = yield* codexProcessEnvironment(input);
+    const launch = Effect.gen(function* () {
+      const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, ["--version"], {
+        env: environment,
+        extendEnv: true,
+      });
+      return yield* spawnAndCollect(
+        input.binaryPath,
+        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+          cwd: input.cwd,
+          env: environment,
+          extendEnv: true,
+          forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
+          shell: spawnCommand.shell,
+        }),
+      );
+    });
+    const result = yield* withExecutablePathRecovery(input.binaryPath, launch, () => launch);
+    if (result.code !== 0) return null;
+    return CODEX_CLI_VERSION_PATTERN.exec(result.stdout)?.[1] ?? null;
+  },
+  Effect.timeoutOption(Duration.millis(DEFAULT_TIMEOUT_MS)),
+  Effect.map(Option.getOrNull),
+  Effect.catch((cause) =>
+    Effect.logDebug("Codex --version fallback failed.", { cause }).pipe(Effect.as(null)),
+  ),
+);
+
 export const probeCodexSkillsForCwd = Effect.fn("probeCodexSkillsForCwd")(function* (input: {
   readonly binaryPath: string;
   readonly homePath?: string;
@@ -644,7 +697,10 @@ function accountProbeStatus({ account, rateLimits }: CodexAppServerProviderSnaps
   readonly auth: ServerProvider["auth"];
   readonly message?: string;
 } {
-  const authLabel = codexAccountAuthLabel(account.account);
+  const authLabel = codexAccountAuthLabel(
+    account.account,
+    rateLimits && "snapshot" in rateLimits ? rateLimits.snapshot.planType : undefined,
+  );
   const authEmail = codexAccountEmail(account.account);
   const workspaceId =
     rateLimits && "accountId" in rateLimits ? rateLimits.accountId?.trim() : undefined;
@@ -683,7 +739,7 @@ const mergeCodexCatalogModels = (
       customModels: settings.customModels,
       modelOverrides: settings.modelOverrides ?? {},
       reasoningOptionId: "reasoningEffort",
-      emptyCustomCapabilities: null,
+      emptyCustomCapabilities: baseModels.find((model) => model.capabilities)?.capabilities ?? null,
     }),
   );
 
@@ -747,6 +803,14 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
     const installed = !isCodexAppServerSpawnError(error);
+    const version = installed
+      ? yield* probeCodexCliVersion({
+          binaryPath: codexSettings.binaryPath,
+          homePath: codexSettings.homePath,
+          cwd: process.cwd(),
+          environment: resolvedEnvironment,
+        })
+      : null;
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -755,7 +819,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       skills: [],
       probe: {
         installed,
-        version: null,
+        version,
         status: "error",
         auth: { status: "unknown" },
         message: installed

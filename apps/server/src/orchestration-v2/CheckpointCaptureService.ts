@@ -76,6 +76,7 @@ export const layer: Layer.Layer<
       readonly scopeId: CheckpointScopeId;
     }) {
       const {
+        sideChat,
         run,
         rootNode,
         scope,
@@ -135,12 +136,14 @@ export const layer: Layer.Layer<
           : yield* checkpoints.materializeBaselineCheckpoint({
               scope,
               ordinalWithinScope: 0,
+              forceMissing: sideChat,
             });
       const baselineCheckpoint = hasReadyCheckpoint(baselineOrdinalWithinScope)
         ? null
         : yield* checkpoints.materializeBaselineCheckpoint({
             scope,
             ordinalWithinScope: baselineOrdinalWithinScope,
+            forceMissing: sideChat,
           });
       const captured = yield* checkpoints.capture({
         scope,
@@ -150,6 +153,7 @@ export const layer: Layer.Layer<
         appRunOrdinal: run.ordinal,
         baselineOrdinalWithinScope,
         capturedAt,
+        forceMissing: sideChat,
       });
       const checkpoint = { ...captured, nativeThreadRef: providerThread.nativeThreadRef };
       const nativeBaselineRef =

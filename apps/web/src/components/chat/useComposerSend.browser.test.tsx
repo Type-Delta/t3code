@@ -67,6 +67,7 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
   } as Partial<ChatComposerHandle> as ChatComposerHandle;
   return {
     onCheckpointNavigation: navigate,
+    sideChatDisabledReason: null,
     environmentId: thread.environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef: { current: routeThreadKey },

@@ -8,7 +8,7 @@ import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { memo, type MouseEvent as ReactMouseEvent } from "react";
 
 import { readLocalApi } from "../../localApi";
-
+import { cn } from "../../lib/utils";
 import { shouldOpenMarkdownFileLinkInEditor } from "../../markdown-links";
 import type { markdownFileCopyPaths } from "../../markdownFileHostPath";
 import { documentChipKindForFileName } from "../../pierre-icons";
@@ -45,6 +45,8 @@ interface MarkdownFileLinkProps {
   onReveal?: (() => Promise<AtomCommandResult<unknown, unknown>>) | undefined;
   revealLabel?: string | undefined;
 }
+
+const MARKDOWN_FILE_LINK_CLASS_NAME = "chat-markdown-file-link";
 
 export const MarkdownFileLink = memo(function MarkdownFileLink({
   environmentId,
@@ -330,7 +332,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
               kind={chipKind}
               dir="ltr"
               render={<a href={href} />}
-              data-chat-markdown-file-link
+              className={MARKDOWN_FILE_LINK_CLASS_NAME}
               data-markdown-copy={copyMarkdown}
               onClick={(event) => {
                 event.preventDefault();
@@ -361,8 +363,7 @@ export const MarkdownFileLink = memo(function MarkdownFileLink({
               render={<button type="button" />}
               aria-label={`File options for ${label}`}
               aria-haspopup="menu"
-              data-chat-markdown-file-link
-              className="select-text"
+              className={cn(MARKDOWN_FILE_LINK_CLASS_NAME, "select-text")}
               data-markdown-copy={copyMarkdown}
               onClick={handleContextMenu}
               onContextMenu={handleContextMenu}

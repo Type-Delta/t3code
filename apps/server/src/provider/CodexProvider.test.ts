@@ -164,9 +164,9 @@ it("ignores custom models that shadow a preferred slug", () => {
   assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-5.4");
 });
 
-it.effect("does not inherit another model's capabilities for an unknown custom model", () =>
+it.effect("keeps explicit custom capabilities and gives new slugs builtin options", () =>
   Effect.gen(function* () {
-    const settings = decodeCodexSettings({ customModels: ["proxy-only-model"] });
+    const settings = decodeCodexSettings({ customModels: ["proxy-only-model", "new-custom"] });
     const status = yield* checkCodexProviderStatus(settings, () =>
       Effect.succeed({
         account: {
@@ -195,6 +195,10 @@ it.effect("does not inherit another model's capabilities for an unknown custom m
     assert.strictEqual(
       status.models.find((model) => model.slug === "proxy-only-model")?.capabilities,
       null,
+    );
+    assert.deepStrictEqual(
+      status.models.find((model) => model.slug === "new-custom")?.capabilities,
+      createReasoningCapabilities("medium"),
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );

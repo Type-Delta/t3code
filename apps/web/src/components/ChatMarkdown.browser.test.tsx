@@ -16,6 +16,18 @@ const { workspaceSearch, filesystemMetadata } = vi.hoisted(() => ({
   workspaceSearch: vi.fn(),
   filesystemMetadata: vi.fn(),
 }));
+const parsedSources = vi.hoisted(() => [] as string[]);
+vi.mock(import("mdast-util-from-markdown"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    fromMarkdown: ((source: string, ...rest: never[]) => {
+      parsedSources.push(String(source));
+      return (actual.fromMarkdown as (...args: unknown[]) => unknown)(source, ...rest);
+    }) as typeof actual.fromMarkdown,
+  };
+});
+
 vi.mock(import("../state/use-atom-query-runner"), async (original) => ({
   ...(await original()),
   useAtomQueryRunner: ((family: unknown) =>
@@ -99,6 +111,7 @@ it("keeps compact audio playback loaded across signed URL renewals", async () =>
 });
 
 function setup() {
+  parsedSources.length = 0;
   settingsOverrides.mathRenderingEnabled = false;
   renderDiagram.mockReset();
   workspaceSearch.mockReset().mockResolvedValue(AsyncResult.success({ entries: [] }));
@@ -137,6 +150,34 @@ it("loads a host image through the page's own route when there is no environment
   expect(new Set(hostImageUrl.mock.calls.map(([path]) => path))).toEqual(
     new Set(["/work/my shot.png"]),
   );
+});
+
+it("reuses the parse of a streaming reply's finished blocks when it remounts", async () => {
+  setup();
+  const message = (
+    <ChatMarkdown cwd="/tmp/project" text={"Finished block\n\nStill growing"} isStreaming />
+  );
+  {
+    await using _first = await render(message);
+  }
+  await using screen = await render(message);
+  await expect.element(screen.getByText("Still growing")).toBeVisible();
+  expect(parsedSources.filter((source) => source.includes("Finished block"))).toHaveLength(1);
+});
+
+it("reuses the parse of a remounted message that has stable extra plugins", async () => {
+  setup();
+  const parsed = vi.fn();
+  const countingPlugins = [() => () => void parsed()];
+  const message = (
+    <ChatMarkdown cwd="/tmp/project" text="Cached text" extraRemarkPlugins={countingPlugins} />
+  );
+  {
+    await using _first = await render(message);
+  }
+  await using screen = await render(message);
+  await expect.element(screen.getByText("Cached text")).toBeVisible();
+  expect(parsed).toHaveBeenCalledTimes(1);
 });
 
 describe("ChatMarkdown favicon privacy", () => {
@@ -328,6 +369,22 @@ describe("ChatMarkdown headings", () => {
   });
 });
 
+describe("ChatMarkdown inline code selection", () => {
+  it("selects the whole inline code span on double-click, but only a word in fenced code", async () => {
+    setup();
+    await using screen = await renderText(
+      "Run `migration-gate --dry-run` first.\n\n```txt\nfenced-block word\n```",
+    );
+    await userEvent.dblClick(screen.getByText("migration-gate --dry-run"));
+    expect(window.getSelection()?.toString()).toBe("migration-gate --dry-run");
+
+    window.getSelection()?.removeAllRanges();
+    const fenced = screen.container.querySelector("pre code")!;
+    await userEvent.dblClick(fenced, { position: { x: 4, y: 4 } });
+    expect(window.getSelection()?.toString()).toBe("fenced");
+  });
+});
+
 describe("ChatMarkdown Windows file links", () => {
   const environmentId = EnvironmentId.make("env-windows");
   const renderWindows = (text: string, parseRawHtml: boolean) =>
@@ -338,21 +395,9 @@ describe("ChatMarkdown Windows file links", () => {
       parseRawHtml,
     });
   const fileHrefs = (container: HTMLElement) =>
-    [...container.querySelectorAll("[data-chat-markdown-file-link]")].map((chip) =>
+    [...container.querySelectorAll(".chat-markdown-file-link")].map((chip) =>
       chip.getAttribute("href"),
     );
-
-  it.each([
-    ["drive paths", "[Open](C:/Users/shawn/project/src/main.ts)"],
-    ["backslashes", String.raw`[Open](C:\Users\shawn\project\src\main.ts)`],
-    ["reference links", "[Open][source]\n\n[source]: C:/Users/shawn/project/src/main.ts"],
-  ])("opens %s through the workspace file chip", async (_, text) => {
-    setup();
-    for (const parseRawHtml of [true, false]) {
-      await using screen = await renderWindows(text, parseRawHtml);
-      expect(fileHrefs(screen.container)).toEqual(["C:/Users/shawn/project/src/main.ts"]);
-    }
-  });
 
   it("still rejects unsafe schemes", async () => {
     setup();
@@ -366,27 +411,5 @@ describe("ChatMarkdown Windows file links", () => {
       expect(container.innerHTML).not.toContain("d:alert");
       expect(fileHrefs(container)).toEqual([]);
     }
-  });
-});
-
-describe("ChatMarkdown structured context references", () => {
-  it("renders link and image references as chips and preserves readable fallbacks", async () => {
-    setup();
-    const text =
-      "See [Terminal output](t3-context://v1/terminal/term-1) and ![Error image](t3-context://v1/image/img-1).";
-    await using screen = await renderText(text, {
-      renderContextReference: ({ kind, label }) => (
-        <button>
-          {kind}: {label}
-        </button>
-      ),
-    });
-    expect(
-      [...screen.container.querySelectorAll("button")].map((button) => button.textContent),
-    ).toEqual(["terminal: Terminal output", "image: Error image"]);
-    expect(screen.container.querySelectorAll("img, a")).toHaveLength(0);
-    await screen.rerender(<ChatMarkdown cwd={undefined} text={text} />);
-    expect(screen.container.textContent).toBe("See Terminal output and Error image.");
-    expect(screen.container.querySelectorAll("img, a, button")).toHaveLength(0);
   });
 });

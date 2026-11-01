@@ -199,6 +199,7 @@ const CLEARED_TABLES: ReadonlyArray<string> = [
   "auto_resume_jobs",
   "auth_sessions",
   "auth_pairing_links",
+  "peer_environment_links",
 ];
 
 const PROVIDER_SESSIONS_TABLE = "orchestration_v2_projection_provider_sessions";

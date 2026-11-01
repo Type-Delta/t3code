@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Leave blank for the next fork build of the upstream base in apps/desktop/package.json (0.1.3 → 0.1.301, 0.1.302…). Required for nightly."
+        description: "Leave blank for the next fork build of the upstream base in apps/desktop/package.json (0.1.6 → 0.1.601, 0.1.602…). Required for nightly."
         required: false
         default: ""
         type: string

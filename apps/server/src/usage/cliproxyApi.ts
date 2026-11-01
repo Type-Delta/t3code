@@ -72,6 +72,15 @@ const ClaudeWindow = Schema.Struct({
 const ClaudeUsage = Schema.Struct({
   five_hour: forgivingOptional(ClaudeWindow),
   seven_day: forgivingOptional(ClaudeWindow),
+  spend: Schema.optional(Schema.Unknown),
+  extra_usage: forgivingOptional(
+    Schema.Struct({
+      is_enabled: Schema.Boolean,
+      monthly_limit: Schema.NullOr(Schema.Number),
+      used_credits: Schema.NullOr(Schema.Number),
+      utilization: Schema.NullOr(Schema.Number),
+    }),
+  ),
   limits: forgivingOptional(
     ForwardCompatibleArray(
       Schema.Struct({
@@ -313,6 +322,17 @@ export const makeCliproxyApi = Effect.gen(function* () {
               ]
             : [],
         );
+        const rateLimits = {
+          five_hour: usage.five_hour
+            ? { ...usage.five_hour, resets_at: usage.five_hour.resets_at ?? null }
+            : null,
+          seven_day: usage.seven_day
+            ? { ...usage.seven_day, resets_at: usage.seven_day.resets_at ?? null }
+            : null,
+          model_scoped,
+          spend: usage.spend,
+          extra_usage: usage.extra_usage ?? null,
+        };
         return {
           ...base,
           plan: "Claude Subscription",
@@ -320,17 +340,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
             checkedAt,
             response: {
               rate_limits_available: true,
-              rate_limits: {
-                five_hour: usage.five_hour
-                  ? { ...usage.five_hour, resets_at: usage.five_hour.resets_at ?? null }
-                  : null,
-                seven_day: usage.seven_day
-                  ? { ...usage.seven_day, resets_at: usage.seven_day.resets_at ?? null }
-                  : null,
-                model_scoped,
-              } as unknown as NonNullable<
-                Parameters<typeof claudeUsageResponseToLimits>[0]["response"]["rate_limits"]
-              >,
+              rate_limits: rateLimits,
             },
           }).limits,
         };

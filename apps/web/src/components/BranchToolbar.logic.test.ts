@@ -244,12 +244,11 @@ describe("shouldIncludeBranchPickerItem", () => {
   it("keeps subagent controls visible in a non-Git thread", () => {
     expect(
       shouldShowComposerContextStrip({
-        isDraftHeroState: true,
-        persistInActiveThreads: false,
+        isDraftHeroState: false,
+        persistInActiveThreads: true,
         hasActiveProject: true,
         isGitRepo: false,
         showEnvironmentIndicator: false,
-        hostsRestingComposerControls: false,
         hasSubagentRuns: true,
       }),
     ).toBe(true);

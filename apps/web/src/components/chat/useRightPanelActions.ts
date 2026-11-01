@@ -45,6 +45,8 @@ interface RightPanelActionsInput {
   readonly pullRequestPanelTarget: ReturnType<typeof threadPullRequestPanelTarget> | null;
   readonly threadPanelPresentation: ThreadPanelPresentation;
   readonly isServerThread: boolean;
+  /** A side chat pane; the main view already answers preview bus actions. */
+  readonly embedded: boolean;
   readonly isGitRepo: boolean;
   readonly browserAvailable: boolean;
   readonly canOperatePreview: boolean;
@@ -80,6 +82,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     pullRequestPanelTarget,
     threadPanelPresentation,
     isServerThread,
+    embedded,
     isGitRepo,
     browserAvailable,
     canOperatePreview,
@@ -317,11 +320,11 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
   const onOpenTurnDiffStable = useStableCallback(onOpenTurnDiff);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribe the active pane to preview actions.
   useEffect(() => {
-    if (input.isActivePane === false) return;
+    if (input.isActivePane === false || embedded) return;
     return subscribePreviewAction((action) => {
       if (action === "toggle-panel") togglePreviewPanelStable();
     });
-  }, [input.isActivePane, togglePreviewPanelStable]);
+  }, [embedded, input.isActivePane, togglePreviewPanelStable]);
 
   const shortcuts = {
     "rightPanel.toggle": () => (input.onToggleRightPanel ?? toggleRightPanel)(),

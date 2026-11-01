@@ -110,6 +110,9 @@ function OpenCheckpointMenu() {
     selectedProviderSlashCommands: [],
     showSkillsInSlashMenu: false,
     checkpointNavigationDisabledReason,
+    workspaceSkillsScanning: false,
+    sideChatAvailable: false,
+    sideChatDisabledReason: null,
   });
   return (
     <>

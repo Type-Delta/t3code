@@ -1,7 +1,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
@@ -123,3 +126,23 @@ describe("runMigrations", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
+
+// Historical fork files remain alongside the canonical files the npm launcher scans.
+it.effect("registers canonical migrations and keeps the launcher head canonical", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const dir = path.join(import.meta.dirname, "Migrations");
+    const files = (yield* fs.readDirectory(dir)).flatMap((name) => {
+      const match = /^(\d+)_(\w+)\.ts$/.exec(name);
+      return match ? [[Number(match[1]), match[2]] as const] : [];
+    });
+    const canonicalNames = new Map<number, string>(migrationManifest);
+    assert.deepStrictEqual(
+      files.filter(([id, name]) => canonicalNames.get(id) === name).toSorted(([a], [b]) => a - b),
+      migrationManifest,
+    );
+    assert.strictEqual(new Set(migrationManifest.map(([id]) => id)).size, migrationManifest.length);
+    assert.strictEqual(Math.max(...files.map(([id]) => id)), migrationManifest.at(-1)?.[0]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);

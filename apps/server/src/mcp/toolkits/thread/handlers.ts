@@ -9,7 +9,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
-import { formatThreadLink } from "@t3tools/shared/threadLinks";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -95,15 +94,29 @@ export const ThreadToolkitHandlersLive = McpToolAccess.toLayer(ThreadToolkit, {
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;
+      const { tasks } = yield* scheduler.list().pipe(Effect.mapError(unavailable));
+      if (!tasks.some((task) => task.id === input.taskId))
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The scheduled task was not found.",
+        });
       const { task: runTask, threadId } = yield* scheduler
         .runNow({ id: input.taskId })
-        .pipe(Effect.mapError(unavailable));
-      const { environmentId } = yield* McpInvocationContext.McpInvocationContext;
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
+      const scope = yield* McpInvocationContext.McpInvocationContext;
       return {
         taskId: runTask.id,
         threadId,
-        ...(threadId === null ? {} : { link: formatThreadLink({ environmentId, threadId }) }),
-
+        ...(threadId === null
+          ? {}
+          : {
+              link: McpInvocationContext.threadLinkFor(scope, threadId),
+            }),
         lastRunStatus: runTask.lastRunStatus,
         runCount: runTask.runCount,
         nextRunAt: runTask.nextRunAt,
@@ -113,8 +126,7 @@ export const ThreadToolkitHandlersLive = McpToolAccess.toLayer(ThreadToolkit, {
   t3_thread_search: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { caller } = yield* readCaller();
-
-      const { environmentId } = yield* McpInvocationContext.McpInvocationContext;
+      const scope = yield* McpInvocationContext.McpInvocationContext;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const { matches } = yield* threadSearch
         .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
@@ -122,7 +134,7 @@ export const ThreadToolkitHandlersLive = McpToolAccess.toLayer(ThreadToolkit, {
       return {
         matches: matches.map((match) => ({
           ...match,
-          link: formatThreadLink({ environmentId, threadId: match.threadId }),
+          link: McpInvocationContext.threadLinkFor(scope, match.threadId),
         })),
       };
     }),

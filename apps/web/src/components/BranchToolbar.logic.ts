@@ -190,19 +190,14 @@ export function shouldShowComposerContextStrip(input: {
   hasActiveProject: boolean;
   isGitRepo: boolean;
   showEnvironmentIndicator: boolean;
-  hostsRestingComposerControls: boolean;
-  serverUpdateAvailable?: boolean;
   hasSubagentRuns?: boolean;
 }): boolean {
+  // A new thread always shows the strip, since it names the permissions the first send uses.
   return (
     input.hasActiveProject &&
     (input.isDraftHeroState ||
-      input.persistInActiveThreads ||
-      input.serverUpdateAvailable === true) &&
-    (input.isGitRepo ||
-      input.showEnvironmentIndicator ||
-      input.hostsRestingComposerControls ||
-      input.hasSubagentRuns === true)
+      (input.persistInActiveThreads &&
+        (input.isGitRepo || input.showEnvironmentIndicator || input.hasSubagentRuns === true)))
   );
 }
 
