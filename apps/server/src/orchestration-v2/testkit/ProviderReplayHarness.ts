@@ -425,6 +425,7 @@ export function layerWithRegistry<Error>(
   const layerCheckpointRollbackServiceProvided = CheckpointRollbackService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerVcsDriverRegistry,
         layerCheckpointServiceProvided,
         layerEventSinkProvided,
         IdAllocator.layer,
@@ -461,6 +462,7 @@ export function layerWithRegistry<Error>(
   const layerOrchestratorProvided = Orchestrator.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
+        layerVcsDriverRegistry,
         layerCheckpointServiceProvided,
         CommandPolicy.layer,
         layerContextHandoffServiceProvided,

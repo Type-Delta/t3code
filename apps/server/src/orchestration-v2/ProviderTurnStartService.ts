@@ -1693,12 +1693,22 @@ export const layer: Layer.Layer<
     return ProviderTurnStartServiceV2.of({
       start: Effect.fn("ProviderTurnStartService.start")(
         function* (input) {
-          // Storage cleanup removes worktrees under the same lease. Only startup
-          // holds it; the provider turn runs after it is released.
+          // Storage cleanup removes worktrees under the same lease, and file restore excludes
+          // project roots in or above its checkout. Only startup holds it; the provider turn
+          // runs after it is released, when its active run blocks restores instead.
           const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
-          const providerTurn = yield* thread.worktreePath === null
-            ? start(input)
-            : withWorkspaceLease(path.resolve(thread.worktreePath), start(input));
+          const projectRoot =
+            thread.worktreePath === null
+              ? yield* projects.getById(thread.projectId).pipe(
+                  Effect.map(Option.map((project) => project.workspaceRoot)),
+                  Effect.orElseSucceed(() => Option.none<string>()),
+                )
+              : Option.none<string>();
+          const providerTurn = yield* thread.worktreePath !== null
+            ? withWorkspaceLease(path.resolve(thread.worktreePath), start(input))
+            : Option.isSome(projectRoot)
+              ? withWorkspaceLease(path.resolve(projectRoot.value), start(input), "shared")
+              : start(input);
           if (providerTurn !== undefined) yield* providerTurn;
         },
         (effect, input) =>

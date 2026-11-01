@@ -193,6 +193,7 @@ const layerCheckpointRollbackServiceProvided = CheckpointRollbackService.layer.p
       layerProviderSessionManagerProvided,
       ThreadCommandExecutor.layer,
       layerRuntimePolicyProvided,
+      TurnItemPositionStore.layer,
     ),
   ),
 );

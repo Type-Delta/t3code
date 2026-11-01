@@ -154,20 +154,22 @@ On web and desktop, choose **Edit from here** beneath a sent message to rewind
 the conversation to before that message. Choose **Revert and keep changes** to
 leave workspace files as they are, or **Revert files too** to put the workspace back
 to its checkpoint from before that message. That also undoes edits you made yourself.
-File restore is only offered for threads running in a worktree, and it is
-refused when another thread or agent session also uses that directory, a folder
-inside it, or a folder that contains it, since
-restoring would erase their changes. A thread that works in the project directory
-rewinds the conversation only. The selected prompt and its attachments return to the composer for editing and
-resending. Any unsent draft stays above the restored prompt.
+File restore rewrites the whole Git checkout, so it is refused while another
+thread that is not settled or archived works in the same checkout, a checkout
+inside it, or one that contains it, or while a subagent or side chat is still
+running there. Settle or archive those threads first, or rewind without restoring
+files. Settled and archived threads that changed files in that checkout stay as
+they are and show a notice that their workspace changed. The selected prompt and
+its attachments return to the composer for editing and resending. Any unsent
+draft stays above the restored prompt.
 
 This removes the selected message and later conversation from the active thread
 and provider history. It does not undo external actions or separate provider
 memory. The action is available only when the provider supports rewind.
 
-In an isolated worktree, send `/undo` to restore the previous ready checkpoint and
-`/redo` to return to a later one. Codex and Claude restore the conversation along
-with the files. Stop any running turn or background task first. Sending a new
+Send `/undo` to restore the previous ready checkpoint and `/redo` to return to a
+later one. Codex and Claude restore the conversation along with the files, under
+the same file restore rules. Stop any running turn or background task first. Sending a new
 message after undo discards the old forward branch. To rewind without restoring
 files, use **Edit from here** and **Revert and keep changes** instead.
 

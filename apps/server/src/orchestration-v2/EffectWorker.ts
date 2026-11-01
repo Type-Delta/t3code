@@ -56,10 +56,7 @@ const isOrchestrationEffectExecutionError = Schema.is(OrchestrationEffectExecuti
 
 // Undo cannot succeed by retrying while its snapshot or evicted file versions are unavailable.
 const isFinalRollbackCause = (cause: Cause.Cause<unknown>) =>
-  Option.exists(
-    Cause.findErrorOption(cause),
-    CheckpointRollbackService.isCheckpointContentUnavailable,
-  );
+  Option.exists(Cause.findErrorOption(cause), CheckpointRollbackService.isFinalRollbackFailure);
 
 /**
  * Do not apply this to `provider-turn.restart`: that compound effect also runs
@@ -539,7 +536,7 @@ export const layerExecutor: Layer.Layer<
                       effectId: effect.id,
                       effectType: effect.request.type,
                       cause,
-                      ...(CheckpointRollbackService.isCheckpointContentUnavailable(cause)
+                      ...(CheckpointRollbackService.isFinalRollbackFailure(cause)
                         ? { final: true }
                         : {}),
                     }),

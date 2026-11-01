@@ -1,3 +1,4 @@
+import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import { SourceControlProviderKind } from "@t3tools/contracts";
@@ -4108,8 +4109,8 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     return { repoDir, manager, providerCalls, firstCommit, pullHead };
   });
 
-  it.effect.each(["switch", "create-and-switch", "feature-branch", "commit"] as const)(
-    "local PR checkout excludes a concurrent %s from a nested project with an alternate root",
+  it.effect.each(["switch", "create-and-switch", "feature-branch", "commit", "pull"] as const)(
+    "checkout owner excludes a concurrent %s from a nested project with an alternate root",
     (operation) =>
       Effect.gen(function* () {
         const gate = {
@@ -4146,14 +4147,6 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         const events: string[] = [];
         const workflows = yield* Effect.forEach([0, 1], () =>
           GitWorkflowService.make.pipe(
-            // Cache the real filesystem result so startImmediately reaches lease acquisition.
-            Effect.provideService(FileSystem.FileSystem, {
-              ...fileSystem,
-              realPath: (root) =>
-                root === resolvedHandle.repository.rootPath
-                  ? Effect.succeed(canonicalRoot)
-                  : fileSystem.realPath(root),
-            }),
             Effect.provideService(GitManager.GitManager, {
               ...manager,
               runStackedAction: (input, options) =>
@@ -4171,6 +4164,10 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
             }),
             Effect.provideService(GitVcsDriver.GitVcsDriver, {
               ...git,
+              pullCurrentBranch: (cwd) =>
+                Effect.sync(() => events.push("pull")).pipe(
+                  Effect.andThen(git.pullCurrentBranch(cwd)),
+                ),
               switchRef: (input) =>
                 Effect.sync(() => events.push("switch")).pipe(Effect.andThen(git.switchRef(input))),
               createRef: (input) =>
@@ -4181,25 +4178,39 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           ),
         );
         const preparing = yield* Effect.forkChild(
-          workflows[0]!.preparePullRequestThread({ cwd: repoDir, reference: "91", mode: "local" }),
+          operation === "pull"
+            ? withWorkspaceLease(
+                canonicalRoot,
+                Deferred.succeed(gate.reached, undefined).pipe(
+                  Effect.andThen(Deferred.await(gate.release)),
+                ),
+                "checkout",
+              )
+            : workflows[0]!.preparePullRequestThread({
+                cwd: repoDir,
+                reference: "91",
+                mode: "local",
+              }),
         );
         yield* Deferred.await(gate.reached);
         const switching = yield* Effect.forkChild(
-          operation === "switch"
-            ? workflows[1]!.switchRef({ cwd: nestedCwd, refName: "main" })
-            : operation === "create-and-switch"
-              ? workflows[1]!.createRef({
-                  cwd: nestedCwd,
-                  refName: "second-client",
-                  switchRef: true,
-                })
-              : workflows[1]!.runStackedAction({
-                  cwd: nestedCwd,
-                  actionId: `second-client-${operation}`,
-                  action: "commit",
-                  featureBranch: operation === "feature-branch",
-                  commitMessage: "Second client commit",
-                }),
+          operation === "pull"
+            ? workflows[1]!.pullCurrentBranch(nestedCwd)
+            : operation === "switch"
+              ? workflows[1]!.switchRef({ cwd: nestedCwd, refName: "main" })
+              : operation === "create-and-switch"
+                ? workflows[1]!.createRef({
+                    cwd: nestedCwd,
+                    refName: "second-client",
+                    switchRef: true,
+                  })
+                : workflows[1]!.runStackedAction({
+                    cwd: nestedCwd,
+                    actionId: `second-client-${operation}`,
+                    action: "commit",
+                    featureBranch: operation === "feature-branch",
+                    commitMessage: "Second client commit",
+                  }),
           { startImmediately: true },
         );
         // Both independent server workflows have started, but the second cannot touch Git yet.
@@ -4208,6 +4219,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         const prepared = yield* Fiber.join(preparing);
         const switched = yield* Fiber.join(switching);
         expect(events).toEqual([operation]);
+        if (operation === "pull") return;
         expect(prepared).toMatchObject({ branch: "feature/pr-safe", isOnPullRequestHead: true });
         expect((yield* runGit(repoDir, ["rev-parse", "main"])).stdout.trim()).toBe(mainCommit);
         const pullBranch = operation === "commit" ? "feature/pr-safe^" : "feature/pr-safe";

@@ -1,7 +1,6 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as FileSystem from "effect/FileSystem";
 
 import {
   GitManagerError,
@@ -186,15 +185,6 @@ export const make = Effect.gen(function* () {
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
-  const fileSystem = yield* FileSystem.FileSystem;
-
-  // Nested projects and path aliases must share the checkout's branch-mutation lease.
-  const withCheckoutLease = <A, E, R>(rootPath: string, effect: Effect.Effect<A, E, R>) =>
-    fileSystem.realPath(rootPath).pipe(
-      Effect.orElseSucceed(() => rootPath),
-      Effect.flatMap((cwd) => withWorkspaceLease(cwd, effect)),
-    );
-
   const ensureGit = Effect.fn("GitWorkflowService.ensureGit")(function* (
     operation: string,
     cwd: string,
@@ -383,13 +373,15 @@ export const make = Effect.gen(function* () {
     invalidateStatus: gitManager.invalidateStatus,
     pullCurrentBranch: Effect.fn("GitWorkflowService.pullCurrentBranch")(function (cwd) {
       return ensureGitCommand("GitWorkflowService.pullCurrentBranch", cwd).pipe(
-        Effect.andThen(git.pullCurrentBranch(cwd)),
+        Effect.flatMap((handle) =>
+          withWorkspaceLease(handle.repository.rootPath, git.pullCurrentBranch(cwd)),
+        ),
       );
     }),
     runStackedAction: Effect.fn("GitWorkflowService.runStackedAction")(function (input, options) {
       return ensureGit("GitWorkflowService.runStackedAction", input.cwd).pipe(
         Effect.flatMap((handle) =>
-          withCheckoutLease(
+          withWorkspaceLease(
             handle.repository.rootPath,
             gitManager.runStackedAction(input, options),
           ),
@@ -405,7 +397,7 @@ export const make = Effect.gen(function* () {
         return ensureGit("GitWorkflowService.preparePullRequestThread", input.cwd).pipe(
           Effect.flatMap((handle) =>
             input.mode === "local"
-              ? withCheckoutLease(
+              ? withWorkspaceLease(
                   handle.repository.rootPath,
                   gitManager.preparePullRequestThread(input),
                 )
@@ -498,7 +490,7 @@ export const make = Effect.gen(function* () {
       return ensureGitCommand("GitWorkflowService.createRef", input.cwd).pipe(
         Effect.flatMap((handle) =>
           input.switchRef
-            ? withCheckoutLease(handle.repository.rootPath, git.createRef(input))
+            ? withWorkspaceLease(handle.repository.rootPath, git.createRef(input))
             : git.createRef(input),
         ),
       );
@@ -506,7 +498,7 @@ export const make = Effect.gen(function* () {
     switchRef: Effect.fn("GitWorkflowService.switchRef")(function (input) {
       return ensureGitCommand("GitWorkflowService.switchRef", input.cwd).pipe(
         Effect.flatMap((handle) =>
-          withCheckoutLease(handle.repository.rootPath, Effect.scoped(git.switchRef(input))),
+          withWorkspaceLease(handle.repository.rootPath, Effect.scoped(git.switchRef(input))),
         ),
       );
     }),

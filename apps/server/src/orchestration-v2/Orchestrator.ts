@@ -1,3 +1,4 @@
+import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import type {
   GuestShareId,
   OrchestrationV2SearchThreadInput,
@@ -93,10 +94,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
-import {
-  isCheckpointRestoreIsolated,
-  SHARED_WORKSPACE_RESTORE_MESSAGE,
-} from "./CheckpointRestoreSafety.ts";
+import { assessCheckpointRestore } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
 import {
   CommandPolicyV2,
@@ -1006,6 +1004,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     );
 
+  const vcs = yield* VcsDriverRegistry.VcsDriverRegistry;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
@@ -12160,9 +12159,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       if (command.restoreFiles !== false) {
-        const isolated = yield* isCheckpointRestoreIsolated(projection.thread, targetScope, {
+        // Fast feedback only; the rollback re-checks under the checkout lease.
+        const { blockedMessage } = yield* assessCheckpointRestore(projection.thread, targetScope, {
           projects,
           path,
+          vcs,
           fileSystem,
           projections: projectionStore,
         }).pipe(
@@ -12175,11 +12176,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
           ),
         );
-        if (!isolated)
+        if (blockedMessage !== null)
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: SHARED_WORKSPACE_RESTORE_MESSAGE,
+            cause: blockedMessage,
           });
       }
 
@@ -14517,6 +14518,7 @@ export const layer: Layer.Layer<
   OrchestratorV2,
   never,
   | CheckpointServiceV2
+  | VcsDriverRegistry.VcsDriverRegistry
   | FileSystem.FileSystem
   | Path.Path
   | CommandPolicyV2

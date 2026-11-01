@@ -1535,22 +1535,29 @@ effectIt.effect("forks an older run from its saved native source after checkpoin
   }),
 );
 
-effectIt.effect("reads current startup state after waiting for the workspace lease", () =>
+effectIt.effect.each([
+  { holder: "storage cleanup", checkout: "worktree" },
+  { holder: "a file restore", checkout: "project root" },
+] as const)("reads current startup state after waiting for $holder", ({ checkout }) =>
   Effect.gen(function* () {
-    const worktreePath = "/tmp/provider-start-fresh-state";
+    const workspacePath = "/tmp/provider-start-fresh-state";
     const release = yield* Deferred.make<void>();
     const readEntered = yield* Deferred.make<void>();
     const harness = makeLocalCommandHarness({
       text: "Continue",
-      worktreePath,
+      ...(checkout === "worktree"
+        ? { worktreePath: workspacePath }
+        : { workspaceRoot: `${workspacePath}/project` }),
       failReadsAfterRunning: true,
     });
     harness.getThreadRecords.mockImplementationOnce(() =>
       Deferred.succeed(readEntered, undefined).pipe(Effect.as(harness.projection())),
     );
-    const holder = yield* withWorkspaceLease(worktreePath, Deferred.await(release)).pipe(
-      Effect.forkChild({ startImmediately: true }),
-    );
+    const holder = yield* withWorkspaceLease(
+      workspacePath,
+      Deferred.await(release),
+      checkout === "worktree" ? "exclusive" : "checkout",
+    ).pipe(Effect.forkChild({ startImmediately: true }));
     const startup = yield* harness.start.pipe(Effect.forkChild({ startImmediately: true }));
     yield* Deferred.await(readEntered);
     expect(harness.getTurnStartContext).not.toHaveBeenCalled();

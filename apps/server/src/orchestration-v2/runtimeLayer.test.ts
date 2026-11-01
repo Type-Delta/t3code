@@ -38,7 +38,6 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -112,7 +111,7 @@ const layerVcsDriverRegistryTest = VcsDriverRegistry.layer.pipe(
 );
 
 const layerCheckpointStoreTest = CheckpointStore.layer.pipe(
-  Layer.provide(layerVcsDriverRegistryTest),
+  Layer.provideMerge(layerVcsDriverRegistryTest),
   Layer.provide(VcsProcess.layer),
 );
 const layerGitWorkflowTest = Layer.mock(GitWorkflow.GitWorkflowService)({
@@ -1269,7 +1268,6 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
             (yield* outbox.listByCommandId(commandId)).map((effect) => effect.request.type),
             ["provider-thread.rollback"],
           );
-          const path = yield* Path.Path.pipe(Effect.provide(NodeServices.layer));
           yield* orchestrator.dispatch({
             type: "thread.create",
             createdBy: "user",
@@ -1282,7 +1280,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
             runtimeMode: "full-access",
             interactionMode: "default",
             branch: null,
-            worktreePath: path.dirname(process.cwd()),
+            worktreePath: process.cwd(),
           });
           const overlapCommandId = CommandId.make("runtime-rollback-overlap");
           const overlapSequence = yield* orchestrator.getThreadEventSequence(threadId);
@@ -1295,9 +1293,16 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
               scopeId: scope.id,
             })
             .pipe(Effect.flip);
-          assert.match(String(overlap.cause), /isolated worktree/);
+          assert.match(String(overlap.cause), /overlapping Git checkout/);
           assert.equal(yield* orchestrator.getThreadEventSequence(threadId), overlapSequence);
           assert.deepEqual(yield* outbox.listByCommandId(overlapCommandId), []);
+          yield* seedProject({
+            projectId: ProjectId.make("runtime-rollback-readiness-project"),
+            title: "Rollback readiness",
+            workspaceRoot: process.cwd(),
+            defaultModelSelection: modelSelection,
+            createdAt: "2026-10-25T00:00:00.000Z",
+          });
           yield* orchestrator.dispatch({
             type: "thread.metadata.update",
             commandId: CommandId.make("runtime-rollback-share"),
@@ -1315,7 +1320,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
               scopeId: scope.id,
             })
             .pipe(Effect.flip);
-          assert.match(String(shared.cause), /isolated worktree/);
+          assert.match(String(shared.cause), /overlapping Git checkout/);
           assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
           assert.deepEqual(yield* outbox.listByCommandId(sharedCommandId), []);
           const conversationOnly = yield* orchestrator.dispatch({

@@ -77,7 +77,7 @@ const layerVcsDriverRegistryTest = VcsDriverRegistry.layer.pipe(
 );
 
 const layerCheckpointStoreTest = CheckpointStore.layer.pipe(
-  Layer.provide(layerVcsDriverRegistryTest),
+  Layer.provideMerge(layerVcsDriverRegistryTest),
   Layer.provide(VcsProcess.layer),
 );
 
