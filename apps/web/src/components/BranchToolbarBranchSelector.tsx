@@ -274,6 +274,8 @@ export function BranchToolbarBranchSelector({
     branchRefState.data?.nextCursor !== null && branchRefState.data?.nextCursor !== undefined;
   const isFetchingNextPage = branchRefState.isFetchingNextPage;
   const isInitialBranchesLoadPending = branchRefState.isPending && branchRefState.data === null;
+  // Ref actions need the checkout; the next turn recreates a removed worktree on its recorded branch.
+  const worktreeMissing = activeWorktreePath !== null && branchStatusQuery.data?.isRepo === false;
   const currentGitBranch =
     branchStatusQuery.data?.refName ?? refs.find((refName) => refName.current)?.name ?? null;
   const sourceControlPresentation = getSourceControlPresentation(
@@ -717,7 +719,7 @@ export function BranchToolbarBranchSelector({
               )
             }
             className="min-w-0 max-w-full active:scale-100"
-            disabled={isInitialBranchesLoadPending || isBranchActionPending}
+            disabled={isInitialBranchesLoadPending || isBranchActionPending || worktreeMissing}
           >
             <GitBranchIcon
               className={cn(

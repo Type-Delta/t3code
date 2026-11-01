@@ -40,7 +40,11 @@ import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import { resolveDraftHeroState } from "./ChatView.logic";
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
-import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
+import {
+  recallCheckoutIsRepo,
+  rememberCheckoutIsRepo,
+  resolveCheckoutGitState,
+} from "./ChatView.logic";
 import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnvironments";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { useProjectScriptEditing } from "./chat/useProjectScriptEditing";
@@ -1140,7 +1144,9 @@ export default function ChatView(props: ChatViewProps) {
     activePreviewMiniPlayer?.source ?? null,
     renderedRightPanelSurface,
   );
-  const canMaximizeRightPanel = rightPanelOpen && !isPaneMode;
+  // In a split, only the focused pane that owns the shared panel maximizes it.
+  const canMaximizeRightPanel =
+    rightPanelOpen && (!paneMode || (paneMode.isActive && paneMode.isRightPanelOwner));
   // An embedded side chat has no panel; a stale maximized flag would hide its own column.
   const rightPanelMaximized =
     !embedded && canMaximizeRightPanel && rightPanelState.maximized === true;
@@ -1808,7 +1814,11 @@ export default function ChatView(props: ChatViewProps) {
       rememberCheckoutIsRepo(environmentId, gitStatusCwd, liveIsGitRepo);
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
-  const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  const { isGitRepo, worktreePendingRecreation } = resolveCheckoutGitState({
+    worktreePath: activeThread?.worktreePath ?? null,
+    branch: activeThread?.branch ?? null,
+    isRepo: liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd),
+  });
   // Provider-native subagents cannot take messages; approvals and questions go to the top-level parent.
   const showProviderSubagentBar = isProviderSubagent;
   const composerMounted = !showProviderSubagentBar;
@@ -3402,7 +3412,7 @@ export default function ChatView(props: ChatViewProps) {
 
   const chatHeader = (
     <>
-      {rightPanelControlsAtRoot ? panelLayoutControls : null}
+      {isPaneMode && rightPanelControlsAtRoot ? panelLayoutControls : null}
       <WorkspacePageHeader
         ref={threadPanelPopoverAnchorRef}
         data-chat-header
@@ -3511,6 +3521,8 @@ export default function ChatView(props: ChatViewProps) {
           state={deviceState}
         />
       )}
+      {/* Outside the chat column, which goes inert and drops out of hit-testing when maximized. */}
+      {!embedded && !isPaneMode && rightPanelControlsAtRoot ? panelLayoutControls : null}
       <div
         className={cn(
           "flex min-h-0 min-w-0 flex-col overflow-x-hidden",
@@ -3930,6 +3942,7 @@ export default function ChatView(props: ChatViewProps) {
                                 threadId={activeThread.id}
                                 projectId={activeThread.projectId}
                                 worktreePath={activeThread.worktreePath}
+                                branch={activeThread.branch ?? null}
                                 isServerThread={isServerThread}
                                 showGitControls={isGitRepo}
                                 {...(routeKind === "draft" && draftId ? { draftId } : {})}
@@ -4028,6 +4041,7 @@ export default function ChatView(props: ChatViewProps) {
                   threadId={activeThread.id}
                   projectId={activeThread.projectId}
                   worktreePath={activeThread.worktreePath}
+                  branch={activeThread.branch ?? null}
                   isServerThread={isServerThread}
                   {...(draftId ? { draftId } : {})}
                   activeProjectName={activeProject?.title}
@@ -4047,6 +4061,7 @@ export default function ChatView(props: ChatViewProps) {
                   }
                   gitCwd={gitCwd}
                   isGitRepo={isGitRepo}
+                  worktreePendingRecreation={worktreePendingRecreation}
                   envLocked={envLocked}
                   availableEnvironments={logicalProjectEnvironments}
                   autoEnvironmentLabel={autoEnvironmentLabel}

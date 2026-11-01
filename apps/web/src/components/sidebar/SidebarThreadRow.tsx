@@ -988,7 +988,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
     props.isActive
       ? "bg-sidebar-row-active text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
       : isSelected || props.sweepAction !== null
-        ? "bg-sidebar-row-selected text-sidebar-foreground"
+        ? "bg-sidebar-row-selected text-sidebar-foreground light:ring-1 light:ring-inset light:ring-sidebar-border/70"
         : props.isDisplayedInSplitView
           ? "bg-accent/50 text-foreground hover:bg-accent/65 hover:text-foreground dark:bg-accent/35 dark:hover:bg-accent/50"
           : hasUnsentDraft

@@ -63,6 +63,8 @@ interface ThreadDetailsPanelProps extends Pick<
   openInShortcutEnabled: boolean;
   gitCwd: string | null;
   isGitRepo: boolean;
+  /** Git actions would run in a checkout that does not exist until the next turn recreates it. */
+  worktreePendingRecreation?: boolean;
   envLocked: boolean;
   availableEnvironments: readonly EnvironmentOption[];
   autoEnvironmentLabel?: string | undefined;
@@ -158,6 +160,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
           branch: props.gitCwd !== null && props.isGitRepo && visible.branch,
           git:
             props.gitCwd !== null &&
+            !props.worktreePendingRecreation &&
             props.activeProjectName !== undefined &&
             (visible.gitActions || (visible.changes && props.isGitRepo)),
         };

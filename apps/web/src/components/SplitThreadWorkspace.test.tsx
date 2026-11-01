@@ -4,6 +4,7 @@ vi.mock("./ChatView", () => ({ default: () => null }));
 vi.mock("./DiffWorkerPoolProvider", () => ({ DiffWorkerPoolProvider: () => null }));
 
 import {
+  isSplitRightPanelMaximized,
   resolveSplitPaneDropPosition,
   resolveSplitRightPanelOwner,
   splitThreadGridColumnClassName,
@@ -133,5 +134,14 @@ describe("splitThreadGridColumnClassName", () => {
         openPanelKeys: new Set(["thread-a", "thread-b"]),
       }),
     ).toBe("thread-b");
+  });
+
+  it("fills the split only while the maximized panel's owner is focused and open", () => {
+    const fills = (activePaneKey: string, ownerPanel: { isOpen: boolean; maximized?: true }) =>
+      isSplitRightPanelMaximized({ activePaneKey, ownerKey: "thread-a", ownerPanel });
+    expect(fills("thread-a", { isOpen: true, maximized: true })).toBe(true);
+    expect(fills("thread-b", { isOpen: true, maximized: true })).toBe(false);
+    expect(fills("thread-a", { isOpen: false, maximized: true })).toBe(false);
+    expect(fills("thread-a", { isOpen: true })).toBe(false);
   });
 });

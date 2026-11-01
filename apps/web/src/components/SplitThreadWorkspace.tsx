@@ -130,6 +130,20 @@ export function resolveSplitRightPanelOwner(input: {
   return input.paneKeys.find((paneKey) => input.openPanelKeys.has(paneKey)) ?? null;
 }
 
+/** Only the focused owner can fill the split, so moving focus away always restores the panes. */
+export function isSplitRightPanelMaximized(input: {
+  activePaneKey: string | null;
+  ownerKey: string | null;
+  ownerPanel: { readonly isOpen: boolean; readonly maximized?: true } | undefined;
+}): boolean {
+  return (
+    input.ownerKey !== null &&
+    input.ownerKey === input.activePaneKey &&
+    input.ownerPanel?.isOpen === true &&
+    input.ownerPanel.maximized === true
+  );
+}
+
 function routeToPane(
   navigate: ReturnType<typeof useNavigate>,
   threadRef: ScopedThreadRef,
@@ -513,6 +527,7 @@ export function SplitThreadWorkspace({
             ...activeSurface.target,
           });
         }
+        state.setMaximized(paneRef, false);
         state.close(paneRef);
       }
       return;
@@ -535,6 +550,13 @@ export function SplitThreadWorkspace({
   if (resolvedRightPanelOwnerThreadKey !== rightPanelOwnerThreadKey) {
     setRightPanelOwnerThreadKey(resolvedRightPanelOwnerThreadKey);
   }
+  const rightPanelMaximized = isSplitRightPanelMaximized({
+    activePaneKey,
+    ownerKey: resolvedRightPanelOwnerThreadKey,
+    ownerPanel: resolvedRightPanelOwnerThreadKey
+      ? rightPanelStateByThreadKey[resolvedRightPanelOwnerThreadKey]
+      : undefined,
+  });
   const currentRouteKey = currentRouteRef ? scopedThreadKey(currentRouteRef) : null;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keep split navigation and the router in step.
   useEffect(() => {
@@ -672,7 +694,14 @@ export function SplitThreadWorkspace({
       <BackgroundThreadContext value={background}>
         <DiffWorkerPoolProvider>
           <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            {/* Maximizing collapses the panes like the single chat column. The header slot
+                stays interactive: it hosts the fixed titlebar restore control. */}
+            <div
+              className={cn(
+                "flex min-h-0 min-w-0 flex-col overflow-hidden",
+                rightPanelMaximized ? "w-0 flex-none" : "flex-1",
+              )}
+            >
               <div
                 ref={setHeaderSlot}
                 className="relative z-20 min-w-0 shrink-0"
@@ -686,6 +715,8 @@ export function SplitThreadWorkspace({
                   gridHasTwoRows ? "grid-rows-2" : "grid-rows-1",
                 )}
                 data-split-thread-grid
+                data-chat-column-maximized-away={rightPanelMaximized ? "true" : "false"}
+                inert={rightPanelMaximized}
                 onDragEnd={() => {
                   endSplitThreadDrag();
                   setDropTarget(null);
@@ -748,7 +779,10 @@ export function SplitThreadWorkspace({
             </div>
             <div
               ref={setRightPanelSlot}
-              className="relative flex min-h-0 min-w-0 shrink-0"
+              className={cn(
+                "relative flex min-h-0 min-w-0",
+                rightPanelMaximized ? "flex-1" : "shrink-0",
+              )}
               data-split-workspace-right-panel
             />
           </div>

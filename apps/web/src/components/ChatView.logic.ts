@@ -872,6 +872,23 @@ export function recallCheckoutIsRepo(
     : sessionCheckoutIsRepo.get(checkoutIsRepoKey(environmentId, cwd));
 }
 
+/**
+ * Git state for the thread's checkout. A branched thread whose worktree was removed outside the app
+ * stays a Git thread: the server recreates the worktree on that branch at the next turn.
+ */
+export function resolveCheckoutGitState(input: {
+  worktreePath: string | null;
+  branch: string | null;
+  isRepo: boolean | undefined;
+}): { isGitRepo: boolean; worktreePendingRecreation: boolean } {
+  const worktreePendingRecreation =
+    input.isRepo === false && input.worktreePath !== null && input.branch !== null;
+  return {
+    isGitRepo: worktreePendingRecreation || (input.isRepo ?? true),
+    worktreePendingRecreation,
+  };
+}
+
 function threadHasStarted(thread: Thread | null | undefined): boolean {
   return Boolean(thread && (thread.latestRun !== null || thread.itemCount > 0 || thread.runtime));
 }

@@ -8,7 +8,11 @@ import {
   deriveAvailableRevertTurnCounts,
   deriveWorkspaceMutationId,
 } from "./ChatView.logic";
-import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
+import {
+  recallCheckoutIsRepo,
+  rememberCheckoutIsRepo,
+  resolveCheckoutGitState,
+} from "./ChatView.logic";
 import { ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import { deriveProviderInstanceEntries } from "../providerInstances";
 import { ensureInlineContextReferences } from "../lib/composerContextReferences";
@@ -676,6 +680,22 @@ describe("checkout Git memory", () => {
     rememberCheckoutIsRepo(EnvironmentId.make("env"), "a:b", false);
     expect(recallCheckoutIsRepo(EnvironmentId.make("env:a"), "b")).toBeUndefined();
   });
+
+  it.each([
+    { worktreePath: "/wt", branch: "feature", isRepo: false, git: true, pending: true },
+    { worktreePath: "/wt", branch: null, isRepo: false, git: false, pending: false },
+    { worktreePath: null, branch: "main", isRepo: false, git: false, pending: false },
+    { worktreePath: "/wt", branch: "feature", isRepo: undefined, git: true, pending: false },
+    { worktreePath: "/wt", branch: "feature", isRepo: true, git: true, pending: false },
+  ])(
+    "keeps a branched thread whose worktree is missing on Git (%o)",
+    ({ worktreePath, branch, isRepo, git, pending }) => {
+      expect(resolveCheckoutGitState({ worktreePath, branch, isRepo })).toEqual({
+        isGitRepo: git,
+        worktreePendingRecreation: pending,
+      });
+    },
+  );
 });
 
 describe("worktree setup visibility", () => {
