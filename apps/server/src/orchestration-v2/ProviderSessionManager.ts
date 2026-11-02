@@ -216,6 +216,7 @@ export class ProviderSessionManagerV2 extends Context.Service<
 >()("t3/orchestration-v2/ProviderSessionManager/ProviderSessionManagerV2") {}
 
 interface LiveSessionEntry {
+  readonly providerRevision: object | undefined;
   readonly attachedThreadIds: ReadonlySet<ThreadId>;
   readonly loadedProviderThreadKeyByThread: ReadonlyMap<ThreadId, string>;
   /** Scope revocation to recorded credential ids so superseded sessions cannot revoke replacements opened before detach. */
@@ -2136,7 +2137,57 @@ export const layerWithOptions = (
                 }
               }
               const key = sessionKey(input.providerSessionId);
-              const existing = (yield* Ref.get(sessions)).get(key);
+              let existing = (yield* Ref.get(sessions)).get(key);
+              const revision =
+                registry.getRevision === undefined
+                  ? undefined
+                  : yield* registry.getRevision(input.modelSelection.instanceId).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderSessionOpenError({
+                            instanceId: input.modelSelection.instanceId,
+                            providerSessionId: input.providerSessionId,
+                            cause,
+                          }),
+                      ),
+                    );
+              if (revision?.enabled === false) {
+                return yield* new ProviderSessionOpenError({
+                  instanceId: input.modelSelection.instanceId,
+                  providerSessionId: input.providerSessionId,
+                  cause: "Provider instance is disabled.",
+                });
+              }
+              if (
+                existing !== undefined &&
+                revision !== undefined &&
+                existing.providerRevision !== revision.identity &&
+                existing.busyTurns.size === 0
+              ) {
+                const hasPendingWork =
+                  existing.runtime.hasPendingBackgroundWork === undefined
+                    ? false
+                    : yield* existing.runtime.hasPendingBackgroundWork.pipe(
+                        Effect.catchCause(() => Effect.succeed(true)),
+                      );
+                if (!hasPendingWork) {
+                  yield* releaseEntry({
+                    providerSessionId: input.providerSessionId,
+                    reason: "idle_timeout",
+                    onlyIfIdleGeneration: existing.idleGeneration,
+                  }).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderSessionOpenError({
+                          instanceId: input.modelSelection.instanceId,
+                          providerSessionId: input.providerSessionId,
+                          cause,
+                        }),
+                    ),
+                  );
+                  existing = (yield* Ref.get(sessions)).get(key);
+                }
+              }
               if (existing !== undefined) {
                 const attached = existing.attachedThreadIds.has(input.threadId);
                 if (!attached && !existing.supportsMultipleProviderThreads) {
@@ -2235,6 +2286,7 @@ export const layerWithOptions = (
               >(new Map());
               const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
               const entry: LiveSessionEntry = {
+                providerRevision: revision?.identity,
                 attachedThreadIds: new Set([input.threadId]),
                 loadedProviderThreadKeyByThread: new Map(),
                 mcpCredentialIdByThread:

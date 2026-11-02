@@ -78,6 +78,10 @@ it.effect("routes two configured instances of the same driver independently", ()
     assert.strictEqual(yield* registry.get(personalId), personalAdapter);
     assert.strictEqual(yield* registry.get(workId), workAdapter);
     assert.deepEqual(yield* registry.list(), [personalId, workId]);
+    assert.strictEqual((yield* registry.getRevision!(personalId)).identity, instances[0]);
+    assert.isTrue(
+      Exit.isFailure(yield* Effect.exit(registry.getRevision!(ProviderInstanceId.make("removed")))),
+    );
   }).pipe(Effect.provide(layerTest)),
 );
 

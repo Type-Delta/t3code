@@ -366,6 +366,13 @@ The gateway controls remain part of upstream's split provider settings editor. E
 credentials survive settings refreshes, and the UI replaces or removes a stored key without
 round-tripping its value through provider snapshots.
 
+Saved provider changes take effect when an idle session is next used. The session manager compares
+the current provider instance with the one that opened the session and replaces stale sessions while
+preserving their native conversation IDs. This covers gateway keys, URLs, authentication, catalog
+and image-generation options, and provider environment settings. Active turns and background work
+keep their session until a later idle use. Disabled or removed instances cannot accept new turns
+through an existing session.
+
 Codex gateway controls apply to CLI-managed instances. Managed ChatGPT accounts use upstream authentication and hide gateway controls that cannot affect those accounts. Saved gateway configuration remains available for CLI-managed instances.
 
 The add-instance wizard keeps its title, description, and step tabs pinned above a single scrollable
@@ -398,6 +405,7 @@ of catalog discovery and preserves the existing bearer or x-api-key credential c
 
 **Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
 `apps/server/src/provider/{Drivers/ClaudeDriver.ts,ClaudeProvider.ts,GatewayModelCatalog.ts}`,
+`apps/server/src/orchestration-v2/{ProviderAdapterRegistry,ProviderSessionManager}.ts` and their tests,
 `apps/server/src/textGeneration/ClaudeTextGeneration.ts`,
 `apps/web/src/components/settings/{AddProviderInstanceDialog,CompatibleApiGatewaySection,CustomModelMetadataDialog,ProviderInstanceCard,ProviderModelsSection,ProviderSettingsPanel}.tsx`,
 and `apps/web/src/components/settings/providerModelDetails.ts`.
@@ -409,9 +417,15 @@ of gateway configuration, custom model metadata, and model-detail tooltips. The 
 add-instance dialog scroll fix was verified in a browser at 1000x720 and 390x700 with the gateway
 section expanded.
 
+Session-refresh verification passed 52 focused session-manager and adapter-registry tests, focused
+lint, `vp check`, and `vp run typecheck`. An isolated paired web client ran three turns through the
+real Codex CLI against a recording gateway. Replacing the key, changing the URL and authentication
+mode, and enabling native catalog discovery and image generation updated the subsequent requests
+and launch configuration without restarting T3 or changing the native conversation ID.
+
 Claude adapter and text-generation launches now resolve each selected gateway model through the per-instance catalog, applying `[1m]` model IDs and normalized CLI effort before opening or spawning.
 
-**Last updated:** 2026-10-25
+**Last updated:** 2026-11-02
 
 ### DL027 — Remote editor links select the server account
 

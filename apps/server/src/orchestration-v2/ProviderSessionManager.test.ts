@@ -462,6 +462,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 
 function layerTest(input: {
   readonly state: Ref.Ref<TestProviderRuntimeState>;
+  readonly revision?: Ref.Ref<{ readonly identity: object; readonly enabled: boolean }>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
   readonly failEventStream?: boolean;
@@ -471,6 +472,7 @@ function layerTest(input: {
   >;
   readonly beforeOpen?: (input: {
     readonly providerSessionId: ProviderSessionId;
+    readonly initialNativeThreadId?: string;
     readonly initialProviderItemIdentityVersion?: 2;
   }) => Effect.Effect<void>;
   readonly failReleaseEventWrites?: boolean;
@@ -528,7 +530,17 @@ function layerTest(input: {
       ...(input.scopeCloseReached === undefined
         ? {}
         : { scopeCloseReached: input.scopeCloseReached }),
-    }).pipe(Effect.map(ProviderAdapterRegistry.layerSingle)),
+    }).pipe(
+      Effect.map((adapter) =>
+        input.revision === undefined
+          ? ProviderAdapterRegistry.layerSingle(adapter)
+          : Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, {
+              get: () => Effect.succeed(adapter),
+              list: () => Effect.succeed([adapter.instanceId]),
+              getRevision: () => Ref.get(input.revision!),
+            }),
+      ),
+    ),
   );
   const layerConfiguredMcpRegistry =
     input.pauseResolve === undefined
@@ -1082,6 +1094,70 @@ it.effect(
     }),
 );
 
+it.effect("ProviderSessionManagerV2 refreshes an idle session after provider settings change", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const revision = yield* Ref.make({ identity: {} as object, enabled: true });
+    const nativeIds: Array<string | undefined> = [];
+    const pendingWork = yield* Ref.make(false);
+    const threadId = ThreadId.make("thread-provider-settings-refresh");
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* Ref.set(revision, { identity: {}, enabled: true });
+      yield* Ref.set(pendingWork, true);
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      assert.equal((yield* Ref.get(state)).closeCount, 0);
+      yield* Ref.set(pendingWork, false);
+      for (let i = 0; i < 2; i++) {
+        yield* Ref.set(revision, { identity: {}, enabled: true });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+          initialNativeThreadId: "native-thread",
+        });
+      }
+      assert.equal((yield* Ref.get(state)).openCount, 3);
+      assert.deepEqual(nativeIds, [undefined, "native-thread", "native-thread"]);
+      yield* Ref.set(revision, { identity: {}, enabled: false });
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(
+            manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy }),
+          ),
+        ),
+      );
+      assert.equal((yield* Ref.get(state)).openCount, 3);
+    });
+    yield* effect.pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          revision,
+          hasPendingBackgroundWork: Ref.get(pendingWork),
+          idleTimeoutMs: 60_000,
+          beforeOpen: (input) =>
+            Effect.sync(() => {
+              nativeIds.push(input.initialNativeThreadId);
+            }),
+        }),
+      ),
+    );
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 cleans up an open interrupted mid-handshake", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -1261,6 +1337,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
+      const revision = yield* Ref.make({ identity: {} as object, enabled: true });
       // Like OpenCode2, a stopped start can still emit turn.terminal later.
       const holdStart = yield* Ref.make(false);
       const startHeld = yield* Deferred.make<void>();
@@ -1326,6 +1403,15 @@ it.effect(
           });
 
         yield* startTurn(threadB);
+        yield* Ref.set(revision, { identity: {}, enabled: true });
+        yield* manager.open({
+          threadId: threadA,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
 
         yield* Ref.set(holdStart, true);
         const startingA = yield* startTurn(threadA).pipe(Effect.forkChild);
@@ -1356,6 +1442,7 @@ it.effect(
         Effect.provide(
           layerTest({
             state,
+            revision,
             idleTimeoutMs: 1000,
             startTurn: Ref.get(holdStart).pipe(
               Effect.flatMap((hold) =>
