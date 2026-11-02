@@ -902,6 +902,16 @@ Upstream refuses file restore for every current-checkout thread and for any non-
 
 **Last updated:** 2026-11-01
 
+### DL056 — Working shelf holds running threads through a reconnect
+
+Upstream (#26195) lists a running thread outside the web sidebar's Working shelf as soon as its environment is reconnecting or its shell is resyncing, so a thread whose state is unknown is not hidden in a collapsed shelf. Every brief reconnect then moved running threads into the inbox and back. The fork keeps them on the shelf until the environment has been disconnected for 20 seconds, the same delay after which the composer offers to disconnect a server; longer outages still list them in the inbox. Environments already disconnected when the sidebar mounts count as disconnected at once, so a remount mid-outage does not hide their threads again. Mobile has no such placement rule, so it is unchanged.
+
+**Implementation evidence:** `useEnvironmentsHeldFor` in `apps/web/src/hooks/useEnvironmentDisconnectDelay.ts` and its case in `useEnvironmentDisconnectDelay.browser.test.tsx`; the `disconnectedEnvironmentIds` wiring in `useSidebarThreads` (`apps/web/src/components/Sidebar.tsx`).
+
+**Recorded validation:** The hook case passes and fails when the delay is skipped. In a seeded dev app with a running Claude Haiku thread in the collapsed Working shelf, refusing the app socket for 4 seconds moved the thread into the inbox before the fix (for about 6 seconds, until reconnect) and left it on the shelf after. A 25-second outage still moved it to the inbox at about 21 seconds and back to the shelf after reconnecting.
+
+**Last updated:** 2026-11-02
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.

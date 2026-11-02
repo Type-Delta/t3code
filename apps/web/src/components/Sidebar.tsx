@@ -157,6 +157,10 @@ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import {
+  DISCONNECT_DELAY_MS,
+  useEnvironmentsHeldFor,
+} from "../hooks/useEnvironmentDisconnectDelay";
+import {
   useEnvironmentIdentities,
   useConnectedEnvironmentIds,
   useEnvironmentConnectionSummaries,
@@ -466,7 +470,9 @@ function useSidebarThreads(input: {
   ]);
   const environmentConnections = useEnvironmentConnectionSummaries();
   const liveShellEnvironmentIds = useAtomValue(liveShellEnvironmentIdsAtom);
-  const disconnectedEnvironmentIds = new Set(
+  // A reconnect keeps running threads on the Working shelf. An environment unreachable this long
+  // lists them in the inbox, where a thread whose state is unknown can be seen.
+  const disconnectedEnvironmentIds = useEnvironmentsHeldFor(
     environmentConnections
       .filter((environment) =>
         isSidebarEnvironmentDisconnected(
@@ -475,6 +481,7 @@ function useSidebarThreads(input: {
         ),
       )
       .map((environment) => environment.environmentId),
+    DISCONNECT_DELAY_MS,
   );
   const inboxReturnsVersion = useSyncExternalStore(
     inboxReturns.subscribe,
