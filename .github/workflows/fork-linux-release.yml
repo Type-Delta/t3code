@@ -47,6 +47,9 @@ jobs:
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ inputs.version }}"
 
+      - name: Configure public T3 Connect identifiers
+        run: cp .env.example .env
+
       - name: Build desktop artifacts
         env:
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}

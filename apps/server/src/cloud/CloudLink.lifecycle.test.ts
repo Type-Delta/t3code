@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -176,7 +177,13 @@ describe("releaseManagedTunnelOnShutdown", () => {
           ServerEnvironment.ServerEnvironment,
           ServerEnvironment.ServerEnvironment.of({
             getEnvironmentId: Effect.succeed(EnvironmentId.make("env_123")),
-            getDescriptor: Effect.die("unused"),
+            getDescriptor: Effect.succeed({
+              environmentId: EnvironmentId.make("env_123"),
+              label: "test",
+              platform: { os: "linux", arch: "x64" },
+              serverVersion: "test",
+              capabilities: { repositoryIdentity: false },
+            }),
           }),
         ),
         Effect.provideService(
@@ -262,6 +269,95 @@ describe("releaseManagedTunnelOnShutdown", () => {
       expect(requests).toEqual([]);
       expect(applyConfigCalls).toEqual([]);
     }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  it.effect("stops and clears an unlinked connector without removing renewed intent", () => {
+    const { store, values } = makeMemorySecretStore([
+      ...managedLinkSecrets,
+      [CLOUD_LINKED_USER_ID, "user"],
+      [RELAY_ENVIRONMENT_CREDENTIAL_SECRET, "credential"],
+    ]);
+    const applyConfigCalls: Array<unknown> = [];
+    const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      yield* link.unlinkIfNoLongerDesired(0);
+      expect(applyConfigCalls).toEqual([]);
+      expect(values.has(CLOUD_LINKED_USER_ID)).toBe(true);
+      values.delete(CLOUD_CLI_DESIRED_LINK_SECRET);
+      yield* link.unlinkIfNoLongerDesired(0);
+      expect(applyConfigCalls).toEqual([null]);
+      expect(values.has(CLOUD_LINKED_USER_ID)).toBe(false);
+      expect(values.has(CLOUD_ENDPOINT_RUNTIME_CONFIG)).toBe(false);
+      expect(values.has(RELAY_ENVIRONMENT_CREDENTIAL_SECRET)).toBe(false);
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  it.effect("does not clear a newer web link when delayed CLI cleanup runs", () => {
+    const { store, values } = makeMemorySecretStore();
+    const applyConfigCalls: Array<unknown> = [];
+    const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      yield* link.applyRelayConfig({
+        relayUrl: "https://relay.example.test",
+        cloudUserId: "user-123",
+        environmentCredential: "new-web-credential",
+        cloudMintPublicKey:
+          "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAqZ2u2LjMoAyG2QTHXmITJ9w6RzZtVUAv394XCcPV0zE=\n-----END PUBLIC KEY-----",
+        endpointRuntime: null,
+      });
+      yield* link.unlinkIfNoLongerDesired(0);
+      expect(new TextDecoder().decode(values.get(RELAY_ENVIRONMENT_CREDENTIAL_SECRET))).toBe(
+        "new-web-credential",
+      );
+    }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
+  });
+
+  it.effect("does not restore CLI intent removed while the relay provisions a link", () => {
+    const { store, values } = makeMemorySecretStore([[CLOUD_CLI_DESIRED_LINK_SECRET, "managed"]]);
+    const applyConfigCalls: Array<unknown> = [];
+    const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      expect(yield* link.reconcileDesiredLinkIfStillDesired("http://127.0.0.1:3773")).toBeNull();
+      expect(values.has(CLOUD_CLI_DESIRED_LINK_SECRET)).toBe(false);
+      expect(values.has(CLOUD_LINKED_USER_ID)).toBe(false);
+      expect(applyConfigCalls).toEqual([]);
+    }).pipe(
+      provideReleaseHarness({
+        store,
+        applyConfigCalls,
+        requests,
+        onRequest: (request) =>
+          Effect.sync(() => {
+            if (request.url.endsWith("/environment-links"))
+              values.delete(CLOUD_CLI_DESIRED_LINK_SECRET);
+          }),
+        respond: () =>
+          requests.length === 1
+            ? Response.json({ challenge: "challenge", expiresAt: "2099-01-01T00:00:00Z" })
+            : Response.json({
+                ok: true,
+                cloudUserId: "user",
+                environmentId: "env_123",
+                endpoint: {
+                  httpBaseUrl: "https://example.test",
+                  wsBaseUrl: "wss://example.test",
+                  providerKind: "cloudflare_tunnel",
+                },
+                endpointRuntime: null,
+                relayIssuer: "https://relay.example.test",
+                environmentCredential: "credential",
+                cloudMintPublicKey: "key",
+              }),
+      }),
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({ env: { T3CODE_RELAY_URL: "https://relay.example.test" } }),
+        ),
+      ),
+    );
   });
 
   it.effect("stops the connector, releases the relay tunnel, and drops the dead token", () => {

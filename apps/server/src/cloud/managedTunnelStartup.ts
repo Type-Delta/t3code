@@ -2,10 +2,60 @@ import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 
 import { isRelayUnavailable, relayRetryAfterMillis } from "./relayResponse.ts";
+import type { CliDesiredLinkMode } from "./CliState.ts";
+
+function desiredLinkChanged(
+  previous: {
+    readonly mode: CliDesiredLinkMode | null;
+    readonly revoked: boolean;
+    readonly revision: string | null;
+    readonly generation: number;
+  },
+  current: {
+    readonly mode: CliDesiredLinkMode | null;
+    readonly revoked: boolean;
+    readonly revision: string | null;
+    readonly generation: number;
+  },
+) {
+  return (
+    !current.revoked && (current.mode !== previous.mode || current.revision !== previous.revision)
+  );
+}
+
+export function makeDesiredLinkObserver<E, R, R2>(
+  initial: Parameters<typeof desiredLinkChanged>[0],
+  read: Effect.Effect<Parameters<typeof desiredLinkChanged>[1], E, R>,
+  onChange: (mode: CliDesiredLinkMode | null, generation: number) => Effect.Effect<void, never, R2>,
+) {
+  let previous = initial;
+  return Effect.gen(function* () {
+    const current = yield* read;
+    const changed = desiredLinkChanged(previous, current);
+    const generation = previous.generation;
+    if (!current.revoked) previous = current;
+    if (changed) yield* onChange(current.mode, generation);
+  });
+}
+
+export const makeDesiredLinkWorker = Effect.fn("ManagedTunnelStartup.makeDesiredLinkWorker")(
+  function* <R>(
+    initial: Effect.Effect<void, never, R>,
+    next: (mode: CliDesiredLinkMode | null, generation: number) => Effect.Effect<void, never, R>,
+  ) {
+    let worker = yield* Effect.forkScoped(initial);
+    return (mode: CliDesiredLinkMode | null, generation: number) =>
+      Effect.gen(function* () {
+        yield* Fiber.interrupt(worker);
+        worker = yield* Effect.forkScoped(next(mode, generation));
+      });
+  },
+);
 
 // Relinking revoked environments is the user's choice; startup takes no action.
 export type ManagedTunnelRegistrationResult =

@@ -60,6 +60,9 @@ jobs:
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ inputs.version }}"
 
+      - name: Configure public T3 Connect identifiers
+        run: cp .env.example .env
+
       - name: Trust macOS signing certificate
         shell: bash
         env:

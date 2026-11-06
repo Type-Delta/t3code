@@ -43,6 +43,9 @@ jobs:
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ inputs.version }}"
 
+      - name: Configure public T3 Connect identifiers
+        run: cp .env.example .env
+
       - name: Build Linux resource monitor
         run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
 
@@ -135,6 +138,10 @@ jobs:
 
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ inputs.version }}"
+
+      - name: Configure public T3 Connect identifiers
+        shell: bash
+        run: cp .env.example .env
 
       - name: Download Linux CLI archive for WSL
         uses: actions/download-artifact@v8

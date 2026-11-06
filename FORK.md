@@ -912,6 +912,16 @@ Upstream (#26195) lists a running thread outside the web sidebar's Working shelf
 
 **Last updated:** 2026-11-02
 
+### DL057 — Official T3 Connect link with a running fork
+
+Fork release builds include the public T3 Connect identifiers from `.env.example`, including in the Windows WSL runtime. A running backend checks for changes to the CLI's desired link and reconciles them through the existing guarded relay path. This lets the official npm `t3 connect link` authorize the same T3 home without restarting the fork. Runtime configuration still overrides build values.
+
+**Implementation evidence:** fork release workflows, `apps/server/src/server.ts`, and `apps/server/src/cloud/managedTunnelStartup.ts` and its tests.
+
+**Recorded validation:** focused cloud tests cover repeated link intent, interrupting registration, unlink during provisioning, and preserving a newer web link. An isolated release-configured backend attempted reconciliation for both initial and repeated managed-link intent; the isolated official npm CLI interoperability check recorded in the investigation verified the shared state format. `vp check` and `vp run typecheck` passed. Real OAuth and official mobile access were not verified in this task.
+
+**Last updated:** 2026-11-06
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.

@@ -17,8 +17,11 @@ import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -148,6 +151,7 @@ import {
 } from "./scheduledTasks/ScheduledTaskService.ts";
 import {
   CLOUD_ENDPOINT_RUNTIME_CONFIG,
+  CLOUD_LINK_REVOKED,
   decodeRuntimeConfig,
   RELAY_URL_SECRET,
 } from "./cloud/config.ts";
@@ -162,6 +166,8 @@ import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts"
 import {
   MANAGED_TUNNEL_FIRST_REGISTRATION_JITTER,
   makeManagedTunnelRecovery,
+  makeDesiredLinkObserver,
+  makeDesiredLinkWorker,
   managedTunnelStartupAction,
   retryDesiredLinkReconcile,
   retryManagedTunnelRegistration,
@@ -947,6 +953,7 @@ const layerMakeServer = Layer.unwrap(
               Stream.runForEach(recoverManagedTunnel),
               Effect.forkScoped,
             );
+            const generationAtStartup = yield* cloudLink.externalLinkGeneration;
             const wantsCliLink = hasCloudPublicConfig
               ? yield* CloudCliState.readCliDesiredCloudLink.pipe(
                   Effect.catch((cause) =>
@@ -966,6 +973,30 @@ const layerMakeServer = Layer.unwrap(
                   ),
                 )
               : null;
+            const secrets = yield* ServerSecretStore.ServerSecretStore;
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const desiredPath = path.join(
+              config.secretsDir,
+              `${CloudCliState.CLOUD_CLI_DESIRED_LINK_SECRET}.bin`,
+            );
+            const readDesiredRevision = fs.stat(desiredPath).pipe(
+              Effect.map(
+                (stat) =>
+                  `${Option.getOrElse(stat.ino, () => 0n)}:${Option.match(stat.mtime, { onNone: () => 0, onSome: (time) => time.getTime() })}`,
+              ),
+              Effect.catchIf(
+                (cause) => cause.reason._tag === "NotFound",
+                () => Effect.succeed(null),
+              ),
+            );
+            const revokedAtStartup = yield* secrets.get(CLOUD_LINK_REVOKED).pipe(
+              Effect.map(Option.isSome),
+              Effect.orElseSucceed(() => false),
+            );
+            const revisionAtStartup = yield* readDesiredRevision.pipe(
+              Effect.orElseSucceed(() => null),
+            );
             // Publish-only links must not expose the host through old managed configs.
             const startedConfirmed =
               desiredCliLinkMode === "publish_only"
@@ -1016,26 +1047,7 @@ const layerMakeServer = Layer.unwrap(
                     }).pipe(Effect.as({ status: "unavailable" as const })),
               ),
             );
-            // Jitter registrations so update waves do not hit the relay simultaneously.
-            if (!startedConfirmed && desiredCliLinkMode !== "publish_only") {
-              const jitter = yield* Random.nextIntBetween(
-                0,
-                Duration.toMillis(MANAGED_TUNNEL_FIRST_REGISTRATION_JITTER),
-              );
-              yield* Effect.sleep(Duration.millis(jitter));
-            }
-            const registration =
-              desiredCliLinkMode === "publish_only"
-                ? { status: "not_linked" as const }
-                : yield* registerManagedTunnel;
-            if (registration.status === "unavailable" && !startedConfirmed) {
-              yield* startStoredManagedTunnel;
-            }
-            const startupAction = managedTunnelStartupAction({ wantsCliLink, registration });
-            if (startupAction.action === "request_recovery") {
-              yield* endpointRuntime.requestRecovery(startupAction.config);
-            }
-            if (startupAction.action === "reconcile_link") {
+            const reconcileDesiredLink = Effect.gen(function* () {
               const reconciledMode = yield* cloudLink
                 .reconcileDesiredLinkIfStillDesired(localOrigin)
                 .pipe(
@@ -1049,10 +1061,10 @@ const layerMakeServer = Layer.unwrap(
                   Effect.tap((mode) =>
                     mode === null
                       ? Effect.void
-                      : Effect.logInfo("T3 Connect desired link reconciled on startup"),
+                      : Effect.logInfo("T3 Connect desired link reconciled"),
                   ),
                   Effect.catch((cause) =>
-                    Effect.logWarning("Failed to reconcile T3 Connect desired link on startup", {
+                    Effect.logWarning("Failed to reconcile T3 Connect desired link", {
                       cause,
                     }).pipe(Effect.as(null)),
                   ),
@@ -1063,6 +1075,71 @@ const layerMakeServer = Layer.unwrap(
                   yield* endpointRuntime.requestRecovery(afterReconcile.config);
                 }
               }
+            });
+            const startupCloudLink = Effect.gen(function* () {
+              // Jitter registrations so update waves do not hit the relay simultaneously.
+              if (!startedConfirmed && desiredCliLinkMode !== "publish_only") {
+                const jitter = yield* Random.nextIntBetween(
+                  0,
+                  Duration.toMillis(MANAGED_TUNNEL_FIRST_REGISTRATION_JITTER),
+                );
+                yield* Effect.sleep(Duration.millis(jitter));
+              }
+              const registration =
+                desiredCliLinkMode === "publish_only"
+                  ? { status: "not_linked" as const }
+                  : yield* registerManagedTunnel;
+              if (registration.status === "unavailable" && !startedConfirmed) {
+                yield* startStoredManagedTunnel;
+              }
+              const startupAction = managedTunnelStartupAction({ wantsCliLink, registration });
+              if (startupAction.action === "request_recovery") {
+                yield* endpointRuntime.requestRecovery(startupAction.config);
+              }
+              if (startupAction.action === "reconcile_link") {
+                yield* reconcileDesiredLink;
+              }
+            });
+            const changeDesiredLink = yield* makeDesiredLinkWorker(
+              startupCloudLink,
+              (mode, generation) =>
+                mode === null
+                  ? cloudLink.unlinkIfNoLongerDesired(generation).pipe(
+                      Effect.catch((cause) =>
+                        Effect.logWarning("Failed to stop the undesired T3 Connect link", {
+                          cause,
+                        }),
+                      ),
+                    )
+                  : reconcileDesiredLink,
+            );
+            if (hasCloudPublicConfig) {
+              const initial = {
+                mode: desiredCliLinkMode,
+                revoked: revokedAtStartup,
+                revision: revisionAtStartup,
+                generation: generationAtStartup,
+              };
+              const readCliLink = Effect.gen(function* () {
+                const generation = yield* cloudLink.externalLinkGeneration;
+                const desired = yield* CloudCliState.readCliDesiredCloudLink;
+                const mode = desired ? yield* CloudCliState.readCliDesiredLinkMode : null;
+                const revoked = Option.isSome(yield* secrets.get(CLOUD_LINK_REVOKED));
+                const revision = yield* readDesiredRevision;
+                return { mode, revoked, revision, generation };
+              });
+              const observeCliLink = makeDesiredLinkObserver(
+                initial,
+                readCliLink,
+                changeDesiredLink,
+              ).pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("Failed to observe the desired T3 Connect link", { cause }),
+                ),
+                Effect.repeat(Schedule.spaced("5 seconds")),
+                Effect.forkScoped,
+              );
+              yield* observeCliLink;
             }
           }),
         );

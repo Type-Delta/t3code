@@ -453,6 +453,10 @@ export class CloudLink extends Context.Service<
       CloudLinkInternalError
     >;
     readonly unlink: () => Effect.Effect<EnvironmentCloudRelayConfigResult, CloudLinkInternalError>;
+    readonly externalLinkGeneration: Effect.Effect<number>;
+    readonly unlinkIfNoLongerDesired: (
+      generation: number,
+    ) => Effect.Effect<void, CloudLinkInternalError>;
     readonly updatePreferences: (
       input: EnvironmentCloudPreferencesRequest,
     ) => Effect.Effect<
@@ -516,6 +520,7 @@ export class CloudLink extends Context.Service<
 >()("t3/cloud/CloudLink") {}
 
 const make = Effect.gen(function* () {
+  let externalLinkGeneration = 0;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const endpointRuntime = yield* ManagedEndpointRuntime.CloudManagedEndpointRuntime;
@@ -773,6 +778,7 @@ const make = Effect.gen(function* () {
       const endpointRuntimeJson = payload.endpointRuntime
         ? yield* encodeEndpointRuntimeConfigJson(payload.endpointRuntime)
         : null;
+      if (!options?.lockHeld) externalLinkGeneration += 1;
       yield* endpointRuntime.applyConfig(null);
       yield* secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN);
       // Store runtime config last so partial writes cannot appear managed or respawn a stale tunnel.
@@ -887,7 +893,12 @@ const make = Effect.gen(function* () {
         schema: RelayEnvironmentLinkResponse,
         timeout: MANAGED_ENDPOINT_PROVISION_REQUEST_TIMEOUT,
       });
-      yield* setCliDesiredCloudLink(true, mode).pipe(withSecrets);
+      if (
+        !(yield* readCliDesiredCloudLink.pipe(withSecrets)) ||
+        (yield* readCliDesiredLinkMode.pipe(withSecrets)) !== mode
+      ) {
+        return null;
+      }
       yield* applyCloudRelayConfig(
         {
           relayUrl,
@@ -1308,28 +1319,44 @@ const make = Effect.gen(function* () {
     Effect.catchIf(ServerSecretStore.isSecretStoreError, internalError("read-relay-config")),
   );
 
+  const clearCloudRelayConfig = Effect.gen(function* () {
+    const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(null);
+    yield* Effect.all(
+      [
+        secrets.remove(CLOUD_LINKED_USER_ID),
+        secrets.remove(RELAY_URL_SECRET),
+        secrets.remove(RELAY_ISSUER_SECRET),
+        secrets.remove(RELAY_ENVIRONMENT_CREDENTIAL_SECRET),
+        secrets.remove(CLOUD_MINT_PUBLIC_KEY),
+        secrets.remove(CLOUD_ENDPOINT_RUNTIME_CONFIG),
+        secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN),
+        secrets.remove(PUBLISH_AGENT_ACTIVITY_SECRET),
+        secrets.remove(HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET),
+        secrets.remove(CLOUD_LINK_REVOKED),
+      ],
+      { concurrency: 10 },
+    );
+    return { ok: true, endpointRuntimeStatus } satisfies EnvironmentCloudRelayConfigResult;
+  });
   const unlink = Effect.fn("environment.cloud.unlink")(
     function* () {
       return yield* endpointRuntime.withLinkStateLock(
+        clearCloudRelayConfig.pipe(
+          Effect.tap(() => setCliDesiredCloudLink(false).pipe(withSecrets)),
+        ),
+      );
+    },
+    Effect.catchIf(ServerSecretStore.isSecretStoreError, internalError("remove-relay-config")),
+  );
+  const unlinkIfNoLongerDesired = Effect.fn("environment.cloud.unlinkIfNoLongerDesired")(
+    function* (generation: number) {
+      yield* endpointRuntime.withLinkStateLock(
         Effect.gen(function* () {
-          const endpointRuntimeStatus = yield* endpointRuntime.applyConfig(null);
-          yield* Effect.all(
-            [
-              secrets.remove(CLOUD_LINKED_USER_ID),
-              secrets.remove(RELAY_URL_SECRET),
-              secrets.remove(RELAY_ISSUER_SECRET),
-              secrets.remove(RELAY_ENVIRONMENT_CREDENTIAL_SECRET),
-              secrets.remove(CLOUD_MINT_PUBLIC_KEY),
-              secrets.remove(CLOUD_ENDPOINT_RUNTIME_CONFIG),
-              secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN),
-              secrets.remove(PUBLISH_AGENT_ACTIVITY_SECRET),
-              secrets.remove(HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET),
-              secrets.remove(CLOUD_LINK_REVOKED),
-            ],
-            { concurrency: 10 },
-          );
-          yield* setCliDesiredCloudLink(false).pipe(withSecrets);
-          return { ok: true, endpointRuntimeStatus } satisfies EnvironmentCloudRelayConfigResult;
+          if (
+            generation === externalLinkGeneration &&
+            !(yield* readCliDesiredCloudLink.pipe(withSecrets))
+          )
+            yield* clearCloudRelayConfig;
         }),
       );
     },
@@ -1623,6 +1650,8 @@ const make = Effect.gen(function* () {
     applyRelayConfig,
     linkState,
     unlink,
+    externalLinkGeneration: Effect.sync(() => externalLinkGeneration),
+    unlinkIfNoLongerDesired,
     updatePreferences,
     answerHealthRequest,
     mintCredential,
