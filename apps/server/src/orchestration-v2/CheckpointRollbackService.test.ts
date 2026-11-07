@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import {
@@ -60,7 +61,7 @@ import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 const layerVcs = VcsDriverRegistry.layer.pipe(
   Layer.provideMerge(VcsProcess.layer),
-  Layer.provide(NodeServices.layer),
+  Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 const layerUnusedPositions = Layer.mock(TurnItemPositionStore.TurnItemPositionStoreV2)({});
 const makeGitRepo = Effect.fn("RollbackTest.makeGitRepo")(function* (prefix: string) {
@@ -78,7 +79,7 @@ const layerRollbackServiceFor = (workspaceRoot?: string) =>
   CheckpointRollbackService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        NodeServices.layer,
+        Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
         layerVcs,
         Layer.mock(ServerConfig.ServerConfig)({ worktreesDir: "/synthetic-worktrees" } as never),
         ServerSettings.layerTest(),
@@ -260,6 +261,7 @@ it.effect.each([
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getThread: () => Effect.succeed(projection.thread),
             getCheckpointRollbackContext: () => Effect.succeed(projection),
+            getProviderControlContext: () => Effect.succeed({ attempt: undefined } as never),
             getShellSnapshot: () =>
               Effect.succeed({
                 schemaVersion: 1,
@@ -337,6 +339,7 @@ it.effect("rejects a rollback when another provider thread became active", () =>
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThread: () => Effect.succeed(projection.thread),
           getCheckpointRollbackContext: () => Effect.succeed(projection),
+          getProviderControlContext: () => Effect.succeed({ attempt: undefined } as never),
           getShellSnapshot: () =>
             Effect.succeed({
               schemaVersion: 1,
@@ -421,6 +424,7 @@ it.effect("rejects a rollback when provider selection changed before execution",
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThread: () => Effect.succeed(projection.thread),
           getCheckpointRollbackContext: () => Effect.succeed(projection),
+          getProviderControlContext: () => Effect.succeed({ attempt: undefined } as never),
           getShellSnapshot: () =>
             Effect.succeed({
               schemaVersion: 1,
@@ -501,6 +505,7 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
           getThread: () => Effect.succeed(projection.thread),
           getCheckpointRollbackContext: () => Effect.succeed(projection),
+          getProviderControlContext: () => Effect.succeed({ attempt: undefined } as never),
           getShellSnapshot: () =>
             Effect.succeed({
               schemaVersion: 1,
@@ -594,7 +599,7 @@ it.effect.each([
       Layer.provide(
         Layer.mergeAll(
           ThreadCommandExecutor.layer,
-          NodeServices.layer,
+          Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
           layerVcs,
           Layer.mock(ServerConfig.ServerConfig)({ worktreesDir } as never),
           ServerSettings.layerTest(),
@@ -648,6 +653,7 @@ it.effect.each([
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getThread: () => Effect.succeed(projection.thread),
             getCheckpointRollbackContext: () => Effect.succeed(projection),
+            getProviderControlContext: () => Effect.succeed({ attempt: undefined } as never),
             getShellSnapshot: () =>
               Effect.succeed({
                 schemaVersion: 1,
@@ -723,7 +729,10 @@ it.effect.each([
           : [...rollbackCalls, "cleanup"],
       );
     }).pipe(Effect.provide(testLayer));
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(layerVcs, NodeServices.layer))),
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(Layer.mergeAll(layerVcs, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  ),
 );
 
 it.effect.each([
@@ -891,6 +900,7 @@ it.effect.each([
                     : [],
                 } as never),
               getCheckpointRollbackContext: () => Effect.succeed(projection),
+              getProviderControlContext: () => Effect.succeed({ attempt: undefined } as never),
               getThreadProviderContext: () => Effect.succeed({ providerSessions: [] } as never),
               getCheckpointContext: () =>
                 Effect.succeed({
@@ -1003,7 +1013,12 @@ it.effect.each([
             : ["provider", "projection"],
         );
       }).pipe(Effect.provide(layerTest));
-    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(layerVcs, NodeServices.layer))),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(layerVcs, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
 );
 
 it.effect.each([false, ...(symlinksSupported ? [true] : [])])(
@@ -1071,6 +1086,7 @@ it.effect.each([false, ...(symlinksSupported ? [true] : [])])(
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getThread: () => Effect.succeed(projection.thread),
               getCheckpointRollbackContext: () => Effect.succeed(projection),
+              getProviderControlContext: () => Effect.succeed({ attempt: undefined } as never),
               getShellSnapshot: () =>
                 Effect.succeed({
                   schemaVersion: 1,
@@ -1106,7 +1122,12 @@ it.effect.each([false, ...(symlinksSupported ? [true] : [])])(
         yield* Fiber.join(turnStart);
         assert.deepEqual(order, ["restore", "turn start"]);
       }).pipe(Effect.provide(layerTest));
-    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(layerVcs, NodeServices.layer))),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(layerVcs, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
 );
 
 it.effect.skipIf(!symlinksSupported)(
@@ -1163,7 +1184,12 @@ it.effect.skipIf(!symlinksSupported)(
         },
       );
       assert.match(blockedMessage ?? "", /"Alias work" is active/);
-    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(layerVcs, NodeServices.layer))),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(layerVcs, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
 );
 
 const seedRollbackHistory = Effect.fn("RollbackTest.seedHistory")(function* (

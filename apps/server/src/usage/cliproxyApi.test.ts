@@ -1,3 +1,5 @@
+import * as Layer from "effect/Layer";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Fiber from "effect/Fiber";
 // oxlint-disable t3code/no-test-in-loop -- These cases intentionally exercise independent API responses.
 import { describe, expect, it } from "@effect/vitest";
@@ -289,14 +291,38 @@ describe("CLIProxyAPI built-in management API", () => {
     }),
   );
 
-  it.effect("keeps the path of a hub served under a prefix", () =>
+  it.effect.each([
+    "https://tools.test/cliproxy",
+    "https://tools.test/cliproxy/",
+    "https://tools.test/cliproxy/management.html",
+    "https://tools.test/cliproxy/management.html/",
+    "https://tools.test/cliproxy/MANAGEMENT.HTML",
+    "https://tools.test/cliproxy/management.html?tab=accounts",
+    "https://tools.test/cliproxy/management.html#accounts",
+    "https://tools.test/cliproxy/management.html/?tab=accounts",
+    "https://tools.test/cliproxy/management.html/#accounts",
+  ])("keeps the path of a hub served under a prefix: %s", (url) =>
     Effect.gen(function* () {
       const test = fixture();
       const api = yield* test.api;
-      yield* api.readAccounts({ ...config, url: "https://tools.test/cliproxy" });
+      yield* api.readAccounts({ ...config, url });
       expect(test.requests.length).toBeGreaterThan(0);
       expect(
         test.requests.every((request) => request.path.startsWith("/cliproxy/v0/management/")),
+      ).toBe(true);
+    }),
+  );
+
+  it.effect("preserves a hub path that only ends with the panel filename", () =>
+    Effect.gen(function* () {
+      const test = fixture();
+      const api = yield* test.api;
+      yield* api.readAccounts({ ...config, url: "https://tools.test/team-management.html" });
+      expect(test.requests.length).toBeGreaterThan(0);
+      expect(
+        test.requests.every((request) =>
+          request.path.startsWith("/team-management.html/v0/management/"),
+        ),
       ).toBe(true);
     }),
   );
@@ -548,7 +574,7 @@ describe("CLIProxyAPI built-in management API", () => {
         if (failure._tag === "Failure") expect(failure.failure.detail).toContain(`HTTP ${status}`);
         for (let i = 0; i < 6; i++) yield* api.readAccounts(config).pipe(Effect.result);
         yield* api.consume(config, "first.json", "credit").pipe(Effect.result);
-        yield* api.readAccounts({ ...config, label: "New label" }).pipe(Effect.result);
+        yield* api.readAccounts({ ...config }).pipe(Effect.result);
         expect(test.requests).toHaveLength(1);
         yield* api
           .readAccounts({ ...config, url: "http://another-hub.test:8317" })
@@ -722,6 +748,7 @@ describe("CLIProxyAPI built-in management API", () => {
       });
       const service = yield* makeUsageLimitSources.pipe(
         Effect.provideService(HttpClient.HttpClient, test.http),
+        Effect.provide(Layer.mock(SecretResolver.SecretResolver)({})),
       );
       yield* Stream.runHead(
         service.streamChanges.pipe(Stream.filter((sources) => sources[0]?.accounts.length === 1)),

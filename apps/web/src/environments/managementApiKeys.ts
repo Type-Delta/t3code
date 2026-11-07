@@ -45,22 +45,19 @@ export interface ManagementApiKeyCreateResult {
 
 export interface ManagementApiKeyRotateResult extends ManagementApiKeyCreateResult {}
 
-type ManagementApiKeyRequestOperation = "list" | "create" | "revoke" | "rotate";
-
-export class ManagementApiKeyRequestError extends Error {
-  readonly operation: ManagementApiKeyRequestOperation;
-  readonly status: number;
-
-  constructor(input: {
-    readonly operation: ManagementApiKeyRequestOperation;
-    readonly status: number;
-  }) {
-    super(`Management API key request failed (HTTP ${input.status}).`);
-    this.name = "ManagementApiKeyRequestError";
-    this.operation = input.operation;
-    this.status = input.status;
+export class ManagementApiKeyRequestError extends Schema.TaggedError<ManagementApiKeyRequestError>()(
+  "ManagementApiKeyRequestError",
+  {
+    operation: Schema.Literals(["list", "create", "revoke", "rotate"]),
+    status: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `Management API key request failed (HTTP ${this.status}).`;
   }
 }
+
+type ManagementApiKeyRequestOperation = ManagementApiKeyRequestError["operation"];
 
 function readHttpApiStatus(error: unknown): number {
   if (isEnvironmentHttpCommonError(error)) {

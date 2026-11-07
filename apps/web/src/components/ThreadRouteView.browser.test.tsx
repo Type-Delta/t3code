@@ -1,5 +1,6 @@
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 import { type HTMLAttributes } from "react";
 import { act, render } from "../../test/render";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -8,7 +9,13 @@ vi.mock(import("@tanstack/react-router"), async (original) => ({
   ...(await original()),
   useNavigate: () => vi.fn(),
 }));
-vi.mock("../state/threads", () => ({ useEnvironmentThread: () => null }));
+vi.mock("../state/threads", async () => {
+  const { Atom } = await import("effect/reactivity");
+  return {
+    environmentThreadShells: { hiddenThreadKeysAtom: Atom.make(new Set<string>()) },
+    useEnvironmentThread: () => ({ data: Option.none() }),
+  };
+});
 vi.mock("./ChatView", () => ({ default: () => null }));
 vi.mock("./ChatView.logic", () => ({
   resolveDraftPromotionNavigationTarget: () => null,
@@ -41,6 +48,7 @@ vi.mock("../sidebarPendingFileDropStore", () => ({
   useSidebarPendingFileDropStore: { getState: () => ({ clearPendingFileDropsForThread: vi.fn() }) },
 }));
 vi.mock("../state/entities", () => ({
+  useAnyEnvironmentHiding: () => false,
   useEnvironmentThreadRefs: () => [],
   useThread: () => null,
   useThreadDetail: () => null,

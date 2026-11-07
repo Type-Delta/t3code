@@ -1,4 +1,5 @@
 import { assert, it, describe } from "@effect/vitest";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -26,7 +27,7 @@ const DETECT_COMMAND = "rev-parse --is-inside-work-tree --show-toplevel --git-co
 describe("VcsDriverRegistry", () => {
   const makeDiskBackedLayer = (rootDir: string, calls: string[]) =>
     Layer.effect(VcsDriverRegistry.VcsDriverRegistry, VcsDriverRegistry.make).pipe(
-      Layer.provide(NodeServices.layer),
+      Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       Layer.provide(
         Layer.mock(VcsProjectConfig.VcsProjectConfig)({
           resolveKind: (input) => Effect.succeed(input.requestedKind ?? "auto"),
@@ -57,7 +58,10 @@ describe("VcsDriverRegistry", () => {
                 );
               }
               return processOutput("");
-            }).pipe(Effect.provide(NodeServices.layer), Effect.orDie),
+            }).pipe(
+              Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+              Effect.orDie,
+            ),
         }),
       ),
     );
@@ -79,7 +83,7 @@ describe("VcsDriverRegistry", () => {
         assert.equal(yield* registry.detect({ cwd: repoDir }), null);
         assert.equal(calls.filter((call) => call === DETECT_COMMAND).length, 1);
       }).pipe(Effect.provide(makeDiskBackedLayer(repoDir, calls)));
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
   it.effect("detects again when git init creates a repository inside a cached one", () =>
@@ -103,7 +107,7 @@ describe("VcsDriverRegistry", () => {
           projectDir,
         );
       }).pipe(Effect.provide(makeDiskBackedLayer(parentDir, calls)));
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
   it.effect("detects a repository created after a negative lookup", () =>
@@ -122,11 +126,12 @@ describe("VcsDriverRegistry", () => {
         assert.equal((yield* registry.detect({ cwd: repoDir }))?.repository.rootPath, repoDir);
         assert.equal(calls.filter((call) => call === DETECT_COMMAND).length, 1);
       }).pipe(Effect.provide(makeDiskBackedLayer(repoDir, calls)));
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
-  it.effect("ignores Git repository bindings the server inherited", () =>
-    Effect.gen(function* () {
+  it.effect("ignores Git repository bindings the server inherited", () => {
+    const hostEnv = process.env;
+    return Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.realPath(
@@ -155,17 +160,17 @@ describe("VcsDriverRegistry", () => {
         yield* Effect.acquireRelease(
           Effect.sync(() => {
             const previous = {
-              GIT_DIR: process.env.GIT_DIR,
-              GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+              GIT_DIR: hostEnv.GIT_DIR,
+              GIT_WORK_TREE: hostEnv.GIT_WORK_TREE,
             };
-            Object.assign(process.env, bindings);
+            Object.assign(hostEnv, bindings);
             return previous;
           }),
           (previous) =>
             Effect.sync(() => {
               for (const [key, value] of Object.entries(previous)) {
-                if (value === undefined) delete process.env[key];
-                else process.env[key] = value;
+                if (value === undefined) delete hostEnv[key];
+                else hostEnv[key] = value;
               }
             }),
         );
@@ -187,10 +192,10 @@ describe("VcsDriverRegistry", () => {
         Effect.provide(
           VcsDriverRegistry.layer.pipe(
             Layer.provideMerge(VcsProcess.layer),
-            Layer.provide(NodeServices.layer),
+            Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
           ),
         ),
       );
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
+  });
 });

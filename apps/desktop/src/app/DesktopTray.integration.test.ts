@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { describe, expect, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
@@ -178,7 +179,7 @@ describe("DesktopTray authentication integration", () => {
         );
         const poolLayer = DesktopBackendPool.layerTest([makeInstance(configRef, readyRef)]);
         const authLayer = DesktopLocalEnvironmentAuth.layer.pipe(
-          Layer.provide(Layer.mergeAll(poolLayer, httpClientLayer)),
+          Layer.provide(Layer.mergeAll(poolLayer, httpClientLayer, NodeCrypto.layerMac)),
         );
         const assetsLayer = Layer.succeed(DesktopAssets.DesktopAssets, {
           iconPaths: Effect.succeed({

@@ -1,6 +1,7 @@
 import { CommandResolutionCache, resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
+import * as Redacted from "effect/Redacted";
 import * as Predicate from "effect/Predicate";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
@@ -68,7 +69,16 @@ export const spawnProviderProcess = Effect.fn("spawnProviderProcess")(function* 
 ) {
   const launch = Effect.gen(function* () {
     const resolved = yield* resolveSpawnCommand(command, args, {
-      ...(options.env ? { env: options.env } : {}),
+      ...(options.env
+        ? {
+            env: Object.fromEntries(
+              Object.entries(options.env).map(([key, value]) => [
+                key,
+                Redacted.isRedacted(value) ? Redacted.value(value) : value,
+              ]),
+            ),
+          }
+        : {}),
       extendEnv: options.extendEnv ?? true,
     });
     return yield* spawner.spawn(

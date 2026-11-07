@@ -10,7 +10,7 @@ import { useComposerMenuItems } from "./useComposerMenuItems";
 import { useTimelineRewind } from "./useTimelineRewind";
 
 vi.mock(import("../../state/entities"), () => ({
-  useThreadShells: () => [],
+  useVisibleThreadShells: () => [],
   waitForThreadShell: vi.fn(),
 }));
 vi.mock(import("../../state/queries"), () => ({
@@ -105,6 +105,7 @@ function OpenCheckpointMenu() {
     threadPullRequests: undefined,
     planModeUiEnabled: false,
     compactSlashCommandAvailable: false,
+    freshSessionAvailable: false,
     selectedProvider: ProviderDriverKind.make("codex"),
     selectedProviderSkills: [],
     selectedProviderSlashCommands: [],

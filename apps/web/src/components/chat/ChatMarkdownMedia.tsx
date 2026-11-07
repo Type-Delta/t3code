@@ -7,6 +7,7 @@ import { TriangleAlertIcon } from "lucide-react";
 import {
   createContext,
   memo,
+  use,
   useEffect,
   useEffectEvent,
   useState,
@@ -80,6 +81,8 @@ const CHAT_MARKDOWN_WORKSPACE_IMAGE_CLASS_NAME = cn(
 // turning permanently missing files into a background polling loop.
 const CHAT_MARKDOWN_MEDIA_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000] as const;
 export const MarkdownLinkContext = createContext(false);
+/** The thread's workspace mutation id, so a host image the agent rewrites gets a fresh URL. */
+export const WorkspaceMutationIdContext = createContext<string | null | undefined>(undefined);
 
 function expandableMarkdownImageProps(
   onImageExpand: ((preview: ExpandedImagePreview) => void) | undefined,
@@ -348,14 +351,19 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
   readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
 }) {
   const resource = props.resource;
+  const threadWorkspaceMutationId = use(WorkspaceMutationIdContext);
+  // A file preview passes null explicitly; only an absent prop falls back to the thread's id.
+  const workspaceMutationId =
+    props.workspaceMutationId === undefined ? threadWorkspaceMutationId : props.workspaceMutationId;
   const assetUrl = useAssetUrlState(
     props.environmentId,
     resource,
-    props.workspaceMutationId !== undefined &&
+    workspaceMutationId !== undefined &&
       props.kind !== "video" &&
       (resource._tag === "media-file" || resource._tag === "workspace-file")
-      ? props.workspaceMutationId
+      ? workspaceMutationId
       : undefined,
+    props.workspaceMutationId === null,
   );
   const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, resource);
   // Agents can stream a host image path before the file is written, and the asset query

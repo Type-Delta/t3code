@@ -10,7 +10,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
@@ -105,6 +105,9 @@ export interface CheckpointServiceV2Shape {
   readonly materializeBaselineCheckpoint: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly ordinalWithinScope: number;
+    /** The run materializing the baseline: its root node, and when it was requested. */
+    readonly nodeId: NodeId;
+    readonly capturedAt: DateTime.Utc;
     /** Records a missing checkpoint without touching git, for side chats sharing a parent's worktree. */
     readonly forceMissing?: boolean;
   }) => Effect.Effect<OrchestrationV2Checkpoint, CheckpointServiceV2Error>;
@@ -139,9 +142,9 @@ export class CheckpointServiceV2 extends Context.Service<
 
 export const checkpointRefForScopeOrdinal = Effect.fn("checkpointRefForScopeOrdinal")(
   function* (input: { readonly scopeId: CheckpointScopeId; readonly ordinalWithinScope: number }) {
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* Digest.Digest;
     const digest = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(input.scopeId))
+      .digest(Digest.sha256, new TextEncoder().encode(input.scopeId))
       .pipe(Effect.orDie);
     const scopeKey = Hex.encode(digest).slice(0, 32);
     return CheckpointRef.make(
@@ -159,9 +162,9 @@ export const sidecarSnapshotIdForScopeOrdinal = Effect.fn("sidecarSnapshotIdForS
   function* (input: { readonly scopeId: CheckpointScopeId; readonly ordinalWithinScope: number }) {
     const readable = `orchestration-v2-${Base64Url.encode(String(input.scopeId))}-${input.ordinalWithinScope}`;
     if (readable.length <= 256) return readable;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* Digest.Digest;
     const digest = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(input.scopeId))
+      .digest(Digest.sha256, new TextEncoder().encode(input.scopeId))
       .pipe(Effect.orDie);
     return `orchestration-v2-h${Hex.encode(digest)}-${input.ordinalWithinScope}`;
   },
@@ -240,21 +243,21 @@ function makeCheckpoint(input: {
 export const layer: Layer.Layer<
   CheckpointServiceV2,
   never,
-  CheckpointStore.CheckpointStore | Crypto.Crypto | IdAllocator.IdAllocatorV2
+  CheckpointStore.CheckpointStore | Digest.Digest | IdAllocator.IdAllocatorV2
 > = Layer.effect(
   CheckpointServiceV2,
   Effect.gen(function* () {
     const checkpointStore = yield* CheckpointStore.CheckpointStore;
-    const crypto = yield* Crypto.Crypto;
+    const crypto = yield* Digest.Digest;
     const legacyRefFor = (scope: OrchestrationV2CheckpointScope, ordinalWithinScope: number) =>
       checkpointRefForScopeOrdinal({ scopeId: scope.id, ordinalWithinScope }).pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Digest.Digest, crypto),
       );
     // New boundaries live in T3's private sidecar repository, so capture never
     // writes refs or objects into the project repository.
     const sidecarRefFor = (scope: OrchestrationV2CheckpointScope, ordinalWithinScope: number) =>
       sidecarSnapshotIdForScopeOrdinal({ scopeId: scope.id, ordinalWithinScope }).pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Digest.Digest, crypto),
         Effect.flatMap((snapshotId) =>
           checkpointStore.allocateCheckpointRef({ cwd: scope.cwd, snapshotId }),
         ),
@@ -362,14 +365,14 @@ export const layer: Layer.Layer<
               id: checkpointId,
               scope: input.scope,
               runId: null,
-              nodeId: input.scope.nodeId,
+              nodeId: input.nodeId,
               parentCheckpointId: null,
               ordinalWithinScope: input.ordinalWithinScope,
               appRunOrdinal: null,
               ref: checkpointRef,
               status: available ? "ready" : "missing",
               files: [],
-              capturedAt: input.scope.createdAt,
+              capturedAt: input.capturedAt,
             });
           }),
         ).pipe(

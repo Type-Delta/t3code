@@ -7,6 +7,9 @@ import { expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 
 import { AppRoot } from "~/AppRoot";
+// The route loads ChatView lazily, and its first transform (React Compiler over ~4k lines)
+// takes 6-11s; importing it here keeps that out of the test's timeout.
+import "~/components/ChatView";
 import { DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { getRouter } from "~/router";
@@ -14,6 +17,7 @@ import {
   ENVIRONMENT_ID,
   PROJECT_ID,
   installFakeEnvironment,
+  threadWithHistory,
   type FakeDriver,
 } from "../../test/fakeEnvironment";
 import { render } from "../../test/render";
@@ -61,4 +65,35 @@ it("a new draft does not load its reserved thread before the server lists it", a
     .filter((url) => url.includes(`/api/orchestration/threads/${threadId}/`));
   // A 404 here marks the thread deleted, and the view never loads it once the send creates it.
   expect(threadRequests).toEqual([]);
+});
+
+it("shows the settled reply's prompt suggestion as composer ghost text", async () => {
+  const thread = threadWithHistory("thread-suggestion", 1);
+  const items = thread.items.map((item) =>
+    item.type === "assistant_message" ? { ...item, suggestion: "Run the tests next." } : item,
+  );
+  using _environment = installFakeEnvironment([{ ...thread, items }]);
+  // Ghost text is off on mobile widths.
+  await page.viewport(1400, 900);
+  __setClientSettingsForTests({
+    ...DEFAULT_CLIENT_SETTINGS,
+    onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
+    enablePromptSuggestion: true,
+  });
+
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${thread.id}`] }),
+  );
+  await router.load();
+  const container = document.createElement("div");
+  container.style.cssText = "height: 900px; width: 1400px;";
+  await using _app = await render(<AppRoot router={router} />, {
+    container,
+    // AppRoot brings its own router.
+    router: false,
+  });
+  await expect.element(page.getByText("Answer 0 for thread-suggestion.")).toBeVisible();
+  await expect
+    .element(page.getByTestId("composer-ghost-text"))
+    .toHaveTextContent("Run the tests next.");
 });

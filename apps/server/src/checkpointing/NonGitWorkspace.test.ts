@@ -42,8 +42,11 @@ const layerRecordingSpawner = Layer.effect(
       }).pipe(Effect.andThen(real.spawn(command))),
     );
   }),
-).pipe(Layer.provide(NodeServices.layer));
-const layerServices = Layer.provideMerge(layerRecordingSpawner, NodeServices.layer);
+).pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
+const layerServices = Layer.provideMerge(
+  layerRecordingSpawner,
+  Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
+);
 
 const layerTest = CheckpointService.layer.pipe(
   Layer.provideMerge(
@@ -81,8 +84,18 @@ const runTurnCheckpointWork = (cwd: string) =>
     const checkpoints = yield* CheckpointService.CheckpointServiceV2;
     const scope = scopeFor(cwd);
     yield* checkpoints.captureBaseline({ scope, ordinalWithinScope: 1 });
-    yield* checkpoints.materializeBaselineCheckpoint({ scope, ordinalWithinScope: 0 });
-    yield* checkpoints.materializeBaselineCheckpoint({ scope, ordinalWithinScope: 1 });
+    yield* checkpoints.materializeBaselineCheckpoint({
+      scope,
+      nodeId: scope.nodeId!,
+      capturedAt: scope.createdAt,
+      ordinalWithinScope: 0,
+    });
+    yield* checkpoints.materializeBaselineCheckpoint({
+      scope,
+      nodeId: scope.nodeId!,
+      capturedAt: scope.createdAt,
+      ordinalWithinScope: 1,
+    });
     return yield* checkpoints.capture({
       scope,
       runId: scope.runId,

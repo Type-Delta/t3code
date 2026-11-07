@@ -85,12 +85,14 @@ export const resolveNodeExecutable = Effect.fn("nodeRuntime.resolveNodeExecutabl
     const sameFile =
       hostInode !== null && nodeInode !== null && hostInode > 0n && nodeInode > 0n
         ? hostInfo.value.dev === nodeInfo.value.dev && hostInode === nodeInode
-        : yield* Effect.tryPromise(() =>
-            Promise.all([
-              NodeFSP.stat(executablePath, { bigint: true }),
-              NodeFSP.stat(nodePath, { bigint: true }),
-            ]),
-          ).pipe(
+        : yield* Effect.tryPromise({
+            try: () =>
+              Promise.all([
+                NodeFSP.stat(executablePath, { bigint: true }),
+                NodeFSP.stat(nodePath, { bigint: true }),
+              ]),
+            catch: (cause) => new NodeRuntimeUnavailableError({ feature, cause }),
+          }).pipe(
             Effect.map(
               ([host, node]) => host.dev === node.dev && host.ino > 0n && host.ino === node.ino,
             ),

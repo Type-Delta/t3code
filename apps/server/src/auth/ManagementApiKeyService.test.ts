@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import * as Crypto from "effect/Crypto";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -28,7 +30,7 @@ const createInput = {
   scopes: ["models:read", "threads:list", "threads:read"] as const,
 };
 
-it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ManagementApiKeyService", (it) => {
   it.effect("stores only a hash and resolves valid credentials", () =>
     Effect.gen(function* () {
       const service = yield* ManagementApiKeyService.ManagementApiKeyService;
@@ -177,21 +179,20 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
 
   it.effect("serializes concurrent rotations and rejects stale authentication", () =>
     Effect.gen(function* () {
-      const baseCrypto = yield* Crypto.Crypto;
+      const baseCrypto = yield* Digest.Digest;
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let gateEnabled = false;
       let gateConsumed = false;
       let randomSeed = 0;
-      const controlledCrypto = Crypto.Crypto.of({
+      const controlledRandom = SecureRandom.make((size) => {
+        const bytes = new Uint8Array(size);
+        bytes.fill(randomSeed);
+        randomSeed += 1;
+        return bytes;
+      });
+      const controlledCrypto = Digest.Digest.of({
         ...baseCrypto,
-        randomBytes: (size) =>
-          Effect.sync(() => {
-            const bytes = new Uint8Array(size);
-            bytes.fill(randomSeed);
-            randomSeed += 1;
-            return bytes;
-          }),
         digest: (algorithm, data) => {
           if (!gateEnabled || gateConsumed) return baseCrypto.digest(algorithm, data);
           gateConsumed = true;
@@ -204,7 +205,12 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
       const controlledServiceLayer = Layer.fresh(ManagementApiKeyService.layer).pipe(
         Layer.provideMerge(ManagementApiKeys.layer),
         Layer.provideMerge(SqlitePersistenceMemory),
-        Layer.provide(Layer.succeed(Crypto.Crypto, controlledCrypto)),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Digest.Digest, controlledCrypto),
+            Layer.succeed(SecureRandom.SecureRandom, controlledRandom),
+          ),
+        ),
       );
 
       yield* Effect.gen(function* () {
@@ -233,21 +239,20 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
 
   it.effect("lets a concurrent revoke win without returning a replacement secret", () =>
     Effect.gen(function* () {
-      const baseCrypto = yield* Crypto.Crypto;
+      const baseCrypto = yield* Digest.Digest;
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let gateEnabled = false;
       let gateConsumed = false;
       let randomSeed = 0;
-      const controlledCrypto = Crypto.Crypto.of({
+      const controlledRandom = SecureRandom.make((size) => {
+        const bytes = new Uint8Array(size);
+        bytes.fill(randomSeed);
+        randomSeed += 1;
+        return bytes;
+      });
+      const controlledCrypto = Digest.Digest.of({
         ...baseCrypto,
-        randomBytes: (size) =>
-          Effect.sync(() => {
-            const bytes = new Uint8Array(size);
-            bytes.fill(randomSeed);
-            randomSeed += 1;
-            return bytes;
-          }),
         digest: (algorithm, data) => {
           if (!gateEnabled || gateConsumed) return baseCrypto.digest(algorithm, data);
           gateConsumed = true;
@@ -260,7 +265,12 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
       const controlledServiceLayer = Layer.fresh(ManagementApiKeyService.layer).pipe(
         Layer.provideMerge(ManagementApiKeys.layer),
         Layer.provideMerge(SqlitePersistenceMemory),
-        Layer.provide(Layer.succeed(Crypto.Crypto, controlledCrypto)),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Digest.Digest, controlledCrypto),
+            Layer.succeed(SecureRandom.SecureRandom, controlledRandom),
+          ),
+        ),
       );
 
       yield* Effect.gen(function* () {
@@ -289,21 +299,20 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
 
   it.effect("retries a revoke after a rotation fails", () =>
     Effect.gen(function* () {
-      const baseCrypto = yield* Crypto.Crypto;
+      const baseCrypto = yield* Digest.Digest;
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let gateEnabled = false;
       let gateConsumed = false;
       let randomSeed = 0;
-      const controlledCrypto = Crypto.Crypto.of({
+      const controlledRandom = SecureRandom.make((size) => {
+        const bytes = new Uint8Array(size);
+        bytes.fill(randomSeed);
+        randomSeed += 1;
+        return bytes;
+      });
+      const controlledCrypto = Digest.Digest.of({
         ...baseCrypto,
-        randomBytes: (size) =>
-          Effect.sync(() => {
-            const bytes = new Uint8Array(size);
-            bytes.fill(randomSeed);
-            randomSeed += 1;
-            return bytes;
-          }),
         digest: (algorithm, data) => {
           if (!gateEnabled || gateConsumed) return baseCrypto.digest(algorithm, data);
           gateConsumed = true;
@@ -316,7 +325,12 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
       const controlledServiceLayer = Layer.fresh(ManagementApiKeyService.layer).pipe(
         Layer.provideMerge(ManagementApiKeys.layer),
         Layer.provideMerge(SqlitePersistenceMemory),
-        Layer.provide(Layer.succeed(Crypto.Crypto, controlledCrypto)),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Digest.Digest, controlledCrypto),
+            Layer.succeed(SecureRandom.SecureRandom, controlledRandom),
+          ),
+        ),
       );
 
       yield* Effect.gen(function* () {
@@ -350,21 +364,20 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
 
   it.effect("releases an interrupted resolve reservation", () =>
     Effect.gen(function* () {
-      const baseCrypto = yield* Crypto.Crypto;
+      const baseCrypto = yield* Digest.Digest;
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let gateEnabled = false;
       let gateConsumed = false;
       let randomSeed = 0;
-      const controlledCrypto = Crypto.Crypto.of({
+      const controlledRandom = SecureRandom.make((size) => {
+        const bytes = new Uint8Array(size);
+        bytes.fill(randomSeed);
+        randomSeed += 1;
+        return bytes;
+      });
+      const controlledCrypto = Digest.Digest.of({
         ...baseCrypto,
-        randomBytes: (size) =>
-          Effect.sync(() => {
-            const bytes = new Uint8Array(size);
-            bytes.fill(randomSeed);
-            randomSeed += 1;
-            return bytes;
-          }),
         digest: (algorithm, data) => {
           if (!gateEnabled || gateConsumed) return baseCrypto.digest(algorithm, data);
           gateConsumed = true;
@@ -377,7 +390,12 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
       const controlledServiceLayer = Layer.fresh(ManagementApiKeyService.layer).pipe(
         Layer.provideMerge(ManagementApiKeys.layer),
         Layer.provideMerge(SqlitePersistenceMemory),
-        Layer.provide(Layer.succeed(Crypto.Crypto, controlledCrypto)),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Digest.Digest, controlledCrypto),
+            Layer.succeed(SecureRandom.SecureRandom, controlledRandom),
+          ),
+        ),
       );
 
       yield* Effect.gen(function* () {
@@ -399,7 +417,7 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
   it.effect("releases an interrupted revoke reservation", () =>
     Effect.gen(function* () {
       const repository = yield* ManagementApiKeys.ManagementApiKeyRepository;
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* Digest.Digest;
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let gateEnabled = false;
@@ -417,7 +435,7 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
         Layer.provide(
           Layer.succeed(ManagementApiKeys.ManagementApiKeyRepository, controlledRepository),
         ),
-        Layer.provide(Layer.succeed(Crypto.Crypto, crypto)),
+        Layer.provide(Layer.succeed(Digest.Digest, crypto)),
       );
 
       yield* Effect.gen(function* () {
@@ -439,21 +457,20 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
 
   it.effect("reserves resolution across lookup and hashing", () =>
     Effect.gen(function* () {
-      const baseCrypto = yield* Crypto.Crypto;
+      const baseCrypto = yield* Digest.Digest;
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let gateEnabled = false;
       let gateConsumed = false;
       let randomSeed = 0;
-      const controlledCrypto = Crypto.Crypto.of({
+      const controlledRandom = SecureRandom.make((size) => {
+        const bytes = new Uint8Array(size);
+        bytes.fill(randomSeed);
+        randomSeed += 1;
+        return bytes;
+      });
+      const controlledCrypto = Digest.Digest.of({
         ...baseCrypto,
-        randomBytes: (size) =>
-          Effect.sync(() => {
-            const bytes = new Uint8Array(size);
-            bytes.fill(randomSeed);
-            randomSeed += 1;
-            return bytes;
-          }),
         digest: (algorithm, data) => {
           if (!gateEnabled || gateConsumed) return baseCrypto.digest(algorithm, data);
           gateConsumed = true;
@@ -466,7 +483,12 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
       const controlledServiceLayer = Layer.fresh(ManagementApiKeyService.layer).pipe(
         Layer.provideMerge(ManagementApiKeys.layer),
         Layer.provideMerge(SqlitePersistenceMemory),
-        Layer.provide(Layer.succeed(Crypto.Crypto, controlledCrypto)),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Digest.Digest, controlledCrypto),
+            Layer.succeed(SecureRandom.SecureRandom, controlledRandom),
+          ),
+        ),
       );
 
       yield* Effect.gen(function* () {
@@ -496,21 +518,20 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
 
   it.effect("shares an active resolution reservation across valid requests", () =>
     Effect.gen(function* () {
-      const baseCrypto = yield* Crypto.Crypto;
+      const baseCrypto = yield* Digest.Digest;
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let gateEnabled = false;
       let gateConsumed = false;
       let randomSeed = 0;
-      const controlledCrypto = Crypto.Crypto.of({
+      const controlledRandom = SecureRandom.make((size) => {
+        const bytes = new Uint8Array(size);
+        bytes.fill(randomSeed);
+        randomSeed += 1;
+        return bytes;
+      });
+      const controlledCrypto = Digest.Digest.of({
         ...baseCrypto,
-        randomBytes: (size) =>
-          Effect.sync(() => {
-            const bytes = new Uint8Array(size);
-            bytes.fill(randomSeed);
-            randomSeed += 1;
-            return bytes;
-          }),
         digest: (algorithm, data) => {
           if (!gateEnabled || gateConsumed) return baseCrypto.digest(algorithm, data);
           gateConsumed = true;
@@ -523,7 +544,12 @@ it.layer(NodeServices.layer)("ManagementApiKeyService", (it) => {
       const controlledServiceLayer = Layer.fresh(ManagementApiKeyService.layer).pipe(
         Layer.provideMerge(ManagementApiKeys.layer),
         Layer.provideMerge(SqlitePersistenceMemory),
-        Layer.provide(Layer.succeed(Crypto.Crypto, controlledCrypto)),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Digest.Digest, controlledCrypto),
+            Layer.succeed(SecureRandom.SecureRandom, controlledRandom),
+          ),
+        ),
       );
 
       yield* Effect.gen(function* () {

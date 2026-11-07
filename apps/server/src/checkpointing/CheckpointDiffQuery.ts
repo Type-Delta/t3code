@@ -8,7 +8,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -88,7 +88,7 @@ function buildTurnDiffResult(
 export const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
-  const crypto = yield* Crypto.Crypto;
+  const digest = yield* Digest.Digest;
 
   // The thread-start boundary: its sidecar snapshot, else the in-repo ref an
   // older thread recorded. A missing ref is left to the HEAD fallback.
@@ -98,7 +98,7 @@ export const make = Effect.gen(function* () {
   }) {
     const boundary = { scopeId: scope.id, ordinalWithinScope: 0 };
     const sidecarRef = yield* sidecarSnapshotIdForScopeOrdinal(boundary).pipe(
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(Digest.Digest, digest),
       Effect.flatMap((snapshotId) =>
         checkpointStore.allocateCheckpointRef({ cwd: scope.cwd, snapshotId }),
       ),
@@ -113,7 +113,7 @@ export const make = Effect.gen(function* () {
       return sidecarRef;
     }
     return yield* checkpointRefForScopeOrdinal(boundary).pipe(
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(Digest.Digest, digest),
     );
   });
 

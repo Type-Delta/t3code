@@ -1,21 +1,21 @@
 import * as NodeAssert from "node:assert/strict";
 import * as NodeSqlite from "node:sqlite";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Path from "effect/Path";
 import * as Logger from "effect/Logger";
 import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { beforeEach } from "vite-plus/test";
+import { settingsSecretLiteral } from "@t3tools/contracts";
 
 import { OpenCodeSettings } from "../settings.ts";
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
@@ -75,7 +75,7 @@ it.effect("reads Go limits with the instance's XDG credentials and preserves res
           );
         }),
       ),
-      Effect.provide(Layer.mergeAll(Path.layer, NodeCrypto.layer)),
+      Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
     );
     NodeAssert.equal(limits.unavailable, undefined);
     NodeAssert.equal(
@@ -225,7 +225,7 @@ it.effect(
           consoleStatus === 500 ? undefined : fingerprints.get(requested.at(-1)!),
         );
       }
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.effect("prefers the selected stored Go key over the auth.json key OpenCode 2 imported", () =>
@@ -294,7 +294,7 @@ it.effect("prefers the selected stored Go key over the auth.json key OpenCode 2 
       NodeAssert.equal(limits.unavailable, undefined);
       NodeAssert.equal(limits.windows.length, 3);
     }
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.effect("does not read local credentials for external or disabled OpenCode instances", () =>
@@ -314,7 +314,7 @@ it.effect("does not read local credentials for external or disabled OpenCode ins
           HttpClient.HttpClient,
           HttpClient.make(() => Effect.die("unexpected usage request")),
         ),
-        Effect.provide(NodeServices.layer),
+        Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       );
       NodeAssert.equal(limits.unavailable?.reason, "unsupported");
     }
@@ -347,7 +347,7 @@ it.effect("keeps Go entitlement absence distinct from failed or malformed usage 
             Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({}, { status }))),
           ),
         ),
-        Effect.provide(NodeServices.layer),
+        Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       );
       NodeAssert.equal(limits.unavailable?.reason, reason);
       NodeAssert.equal(limits.credentialFingerprint, undefined);
@@ -479,11 +479,12 @@ beforeEach(() => {
 });
 
 const layerTest = Layer.succeed(OpenCodeRuntime.OpenCodeRuntime, OpenCodeRuntimeTestDouble).pipe(
-  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 
-const makeOpenCodeSettings = (overrides?: Partial<OpenCodeSettings>): OpenCodeSettings =>
-  decodeOpenCodeSettings({
+// As the instance registry hands them to the driver: a referenced password is already read.
+const makeOpenCodeSettings = (overrides?: Partial<OpenCodeSettings>) => {
+  const settings = decodeOpenCodeSettings({
     enabled: true,
     binaryPath: "opencode",
     serverUrl: "",
@@ -491,9 +492,11 @@ const makeOpenCodeSettings = (overrides?: Partial<OpenCodeSettings>): OpenCodeSe
     customModels: [],
     ...overrides,
   });
+  return { ...settings, serverPassword: settingsSecretLiteral(settings.serverPassword) };
+};
 
 const checkProvider = Effect.fn("checkProvider")(function* (
-  settings: OpenCodeSettings,
+  settings: ReturnType<typeof makeOpenCodeSettings>,
   cwd = process.cwd(),
   environment?: NodeJS.ProcessEnv,
   server = replayOpenCodeServer(OPENCODE_1_RESPONSES, settings.serverPassword),

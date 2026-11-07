@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -32,7 +33,7 @@ import { TurnItemPositionStoreV2 } from "./TurnItemPositionStore.ts";
 
 const layerVcs = VcsDriverRegistry.layer.pipe(
   Layer.provideMerge(VcsProcess.layer),
-  Layer.provide(NodeServices.layer),
+  Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 
 it.effect.each([
@@ -120,7 +121,7 @@ it.effect.each([
     const layerTest = CheckpointRollbackService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
-          NodeServices.layer,
+          Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
           layerVcs,
           Layer.mock(ServerConfig.ServerConfig)({ worktreesDir: "/synthetic-worktrees" } as never),
           ServerSettings.layerTest(),
@@ -208,7 +209,10 @@ it.effect.each([
       assert.deepEqual(calls, restoreFiles ? ["provider", "files"] : ["provider"]);
       assert.equal(yield* fs.exists(otherFile), !restoreFiles);
     }
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(layerVcs, NodeServices.layer))),
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(Layer.mergeAll(layerVcs, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  ),
 );
 
 interface Scene {
@@ -485,5 +489,10 @@ it.effect.each<Case>([
       if (blocked === undefined) assert.isNull(result.blockedMessage);
       else assert.match(result.blockedMessage ?? "", blocked);
       assert.deepEqual(result.noticeThreadIds, notified ? [otherId] : []);
-    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(layerVcs, NodeServices.layer))),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(layerVcs, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      ),
+    ),
 );

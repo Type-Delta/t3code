@@ -4,6 +4,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
+import { threadKey as hiddenThreadKey } from "@t3tools/client-runtime/state/entities";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import { autoAnimate } from "@formkit/auto-animate";
 import { GripVerticalIcon, PanelLeftCloseIcon } from "lucide-react";
@@ -63,6 +64,8 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 interface SplitThreadWorkspaceProps {
   /** The thread represented by the browser URL before split-mode reconciliation. */
   currentRouteRef: ScopedThreadRef | null;
+  /** Active group panes minus threads the tag filter hides; see `resolveVisibleSplitPanes`. */
+  paneRefs: readonly ScopedThreadRef[];
   background?: boolean;
 }
 
@@ -142,6 +145,22 @@ export function isSplitRightPanelMaximized(input: {
     input.ownerPanel?.isOpen === true &&
     input.ownerPanel.maximized === true
   );
+}
+
+/**
+ * Panes the split may render, or null when the route must use the single view instead: the route
+ * thread is hidden (its redirect lives there) or fewer than two panes stay visible.
+ */
+export function resolveVisibleSplitPanes(input: {
+  paneRefs: readonly ScopedThreadRef[];
+  hiddenKeys: ReadonlySet<string>;
+  routeRef: ScopedThreadRef;
+}): readonly ScopedThreadRef[] | null {
+  if (input.hiddenKeys.has(hiddenThreadKey(input.routeRef))) return null;
+  const visible = input.paneRefs.filter(
+    (paneRef) => !input.hiddenKeys.has(hiddenThreadKey(paneRef)),
+  );
+  return visible.length >= 2 ? visible : null;
 }
 
 function routeToPane(
@@ -407,10 +426,11 @@ function SplitThreadPane(props: {
  */
 export function SplitThreadWorkspace({
   currentRouteRef,
+  paneRefs,
   background = false,
 }: SplitThreadWorkspaceProps) {
   const navigate = useNavigate();
-  const paneRefs = useSplitViewStore(selectSplitPaneRefs);
+  const groupPaneCount = useSplitViewStore((state) => selectSplitPaneRefs(state).length);
   const activeGroup = useSplitViewStore(selectActiveSplitGroup);
   const activePane = useSplitViewStore(selectActiveSplitPane);
   const splitActive = useSplitViewStore(selectIsSplitViewActive);
@@ -621,10 +641,10 @@ export function SplitThreadWorkspace({
   };
 
   const canPlaceThread = (threadRef: ScopedThreadRef | null) => {
-    if (!threadRef) return paneRefs.length < MAX_SPLIT_VIEW_PANES;
+    if (!threadRef) return groupPaneCount < MAX_SPLIT_VIEW_PANES;
     return (
       paneRefs.some((paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef)) ||
-      paneRefs.length < MAX_SPLIT_VIEW_PANES
+      groupPaneCount < MAX_SPLIT_VIEW_PANES
     );
   };
   const isExistingPane = (threadRef: ScopedThreadRef | null) =>
@@ -637,16 +657,24 @@ export function SplitThreadWorkspace({
   ) => {
     const state = useSplitViewStore.getState();
     const activePaneRefs = selectSplitPaneRefs(state);
+    // The index counts rendered panes; hidden panes keep their saved slots, so map past them.
+    const insertBefore = paneRefs[insertionIndex];
+    const beforeIndex = insertBefore
+      ? activePaneRefs.findIndex(
+          (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(insertBefore),
+        )
+      : -1;
+    const groupIndex = beforeIndex < 0 ? activePaneRefs.length : beforeIndex;
     const isExistingPane = activePaneRefs.some(
       (paneRef) => scopedThreadKey(paneRef) === scopedThreadKey(threadRef),
     );
     if (isExistingPane) {
-      state.movePane(threadRef, insertionIndex, bottomPaneKey);
+      state.movePane(threadRef, groupIndex, bottomPaneKey);
       return;
     }
     const anchor = currentRouteRef ?? activePaneRefs[0];
     if (!anchor) return;
-    state.placePane(anchor, threadRef, insertionIndex, bottomPaneKey);
+    state.placePane(anchor, threadRef, groupIndex, bottomPaneKey);
   };
   const detachPane = (threadRef: ScopedThreadRef) => {
     const state = useSplitViewStore.getState();

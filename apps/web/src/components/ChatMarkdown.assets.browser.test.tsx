@@ -23,6 +23,7 @@ vi.mock(import("../state/assets"), async (original) => {
   const actual = await original();
   const { Atom } = await import("effect/reactivity");
   const family = Atom.family((_key: string) =>
+    // @effect-diagnostics-next-line effectTryWithoutCatch:off - stands in for the RPC's UnknownError.
     Atom.make(Effect.tryPromise(() => mint())).pipe(Atom.keepAlive),
   );
   return {

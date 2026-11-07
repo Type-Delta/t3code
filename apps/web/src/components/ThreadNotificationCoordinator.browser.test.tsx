@@ -1,5 +1,4 @@
 import { fakeTimers, stubGlobal } from "../../test/render";
-import { WORKING_EXIT_GRACE_MS } from "@t3tools/client-runtime/state/thread-inbox";
 import { Atom, AtomRegistry } from "effect/reactivity";
 import type { AnyRouter } from "@tanstack/react-router";
 import type { ClientSettings } from "@t3tools/contracts/settings";
@@ -233,7 +232,7 @@ async function setup() {
     } else {
       for (const listener of settingsListeners) listener();
     }
-    await vi.advanceTimersByTimeAsync(WORKING_EXIT_GRACE_MS);
+    await vi.advanceTimersByTimeAsync(0);
   };
   return {
     render: rerender,

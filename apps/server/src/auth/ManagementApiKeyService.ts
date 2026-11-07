@@ -6,7 +6,8 @@ import {
   ManagementApiKeyScopes,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -208,19 +209,20 @@ function internal(operation: string, cause: unknown) {
 
 export const make = Effect.gen(function* () {
   const repository = yield* ManagementApiKeys.ManagementApiKeyRepository;
-  const crypto = yield* Crypto.Crypto;
+  const digest = yield* Digest.Digest;
+  const random = yield* SecureRandom.SecureRandom;
   const mutations = yield* SynchronizedRef.make<ReadonlyMap<ManagementApiKeyId, KeyMutation>>(
     new Map(),
   );
 
   const hashToken = (token: string) =>
-    crypto.digest("SHA-256", new TextEncoder().encode(token)).pipe(
+    digest.digest(Digest.sha256, new TextEncoder().encode(token)).pipe(
       Effect.map(bytesToHex),
       Effect.mapError((cause) => internal("hashToken", cause)),
     );
 
   const generateToken = (id: ManagementApiKeyId) =>
-    crypto.randomBytes(TOKEN_SECRET_BYTES).pipe(
+    random.randomBytes(TOKEN_SECRET_BYTES).pipe(
       Effect.map(tokenFromBytes),
       Effect.map((secret) => {
         const token = `${TOKEN_PREFIX}${id}_${secret}`;
@@ -399,7 +401,7 @@ export const make = Effect.gen(function* () {
     const now = yield* DateTime.now;
     yield* validateInput(input, now);
     const id = ManagementApiKeyId.make(
-      yield* crypto.randomUUIDv4().pipe(Effect.mapError((cause) => internal("create.id", cause))),
+      yield* random.uuidV4().pipe(Effect.mapError((cause) => internal("create.id", cause))),
     );
     const generated = yield* generateToken(id);
     const secretHash = yield* hashToken(generated.token);

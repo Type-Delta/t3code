@@ -1,4 +1,4 @@
-import type { MessageId, ThreadId } from "@t3tools/contracts";
+import type { ThreadId } from "@t3tools/contracts";
 import { useState } from "react";
 
 import type { ComposerTrigger } from "../../composer-logic";
@@ -6,14 +6,8 @@ import {
   createPromptSuggestionKey,
   resolveDismissedPromptSuggestionKey,
   shouldShowPromptSuggestion,
+  type PromptSuggestionMessage,
 } from "../../promptSuggestion.logic";
-
-interface PromptSuggestionMessage {
-  readonly id: MessageId;
-  readonly role: string;
-  readonly streaming: boolean;
-  readonly suggestion?: string | undefined;
-}
 
 /**
  * Surfaces the suggestion the server attached to the settled assistant reply as
@@ -35,7 +29,7 @@ export function usePromptSuggestion(input: {
     input.threadId && input.lastMessage
       ? createPromptSuggestionKey({
           threadId: input.threadId,
-          lastMessageId: input.lastMessage.id,
+          lastMessageId: input.lastMessage.messageId,
         })
       : null;
 
@@ -51,7 +45,7 @@ export function usePromptSuggestion(input: {
   }
 
   const settledAssistantMessage =
-    input.lastMessage?.role === "assistant" && !input.lastMessage.streaming
+    input.lastMessage?.type === "assistant_message" && !input.lastMessage.streaming
       ? input.lastMessage
       : null;
   const suggestion = settledAssistantMessage?.suggestion?.trim() || null;

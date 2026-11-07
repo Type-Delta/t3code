@@ -1,5 +1,7 @@
 import { ApiGatewaySettings, CodexSettings, ProviderDriverKind } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import type * as Signature from "effect/crypto/Signature";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -140,7 +142,9 @@ export type CodexDriverEnv =
   | ProviderHost.ProviderHost
   | ChildProcessSpawner.ChildProcessSpawner
   | ResetCreditCoordinator.ResetCreditCoordinator
-  | Crypto.Crypto
+  | Digest.Digest
+  | SecureRandom.SecureRandom
+  | Signature.Signature
   | FileSystem.FileSystem
   | HttpClient.HttpClient
   | ProviderLatestVersions.ProviderLatestVersions
@@ -192,7 +196,10 @@ export const CodexDriver: ProviderDriver<
     const installation = yield* CodexInstallation.CodexInstallation;
     const modelCatalog = yield* ModelCatalog.ModelCatalog;
     const currentCatalog = modelCatalog.current(DRIVER_KIND);
-    const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+    const processEnv = yield* mergeProviderInstanceEnvironment(
+      environment,
+      yield* HostProcess.Environment,
+    );
     const gatewayModelCatalog = yield* makeGatewayModelCatalog({
       instanceId,
       settings: config.apiGateway,
@@ -200,7 +207,12 @@ export const CodexDriver: ProviderDriver<
       nativeCodexHomePath: config.homePath,
       customModels: config.customModels,
     }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
-    const homeLayout = yield* resolveCodexHomeLayout(config);
+    const environmentHome = processEnv.CODEX_HOME;
+    const homeLayout = yield* resolveCodexHomeLayout(
+      !config.homePath.trim() && !config.shadowHomePath.trim() && environmentHome?.trim()
+        ? { ...config, homePath: environmentHome }
+        : config,
+    );
     const gatewayCatalog = yield* gatewayModelCatalog.current;
     const baseLaunchArgs = resolveCodexLaunchArgs(config.launchArgs, processEnv);
     const effectiveProcessEnv: NodeJS.ProcessEnv = { ...processEnv };

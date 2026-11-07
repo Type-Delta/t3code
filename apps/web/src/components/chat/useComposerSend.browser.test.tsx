@@ -68,6 +68,7 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
   return {
     onCheckpointNavigation: navigate,
     sideChatDisabledReason: null,
+    freshSessionAvailable: false,
     environmentId: thread.environmentId,
     routeThreadKey,
     currentRouteThreadKeyRef: { current: routeThreadKey },

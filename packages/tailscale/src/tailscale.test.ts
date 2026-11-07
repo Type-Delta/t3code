@@ -19,6 +19,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   ensureTailscaleServe,
   parseTailscaleExitNode,
+  parseTailscaleServeRoutesTo,
   parseTailscaleSshEnabled,
   parseTailscaleStatus,
   readTailscaleSshEnabled,
@@ -106,6 +107,101 @@ function layerMockSpawner(
 const mockSpawnerLayer = layerMockSpawner;
 
 describe("tailscale", () => {
+  it("finds the Serve routes that forward to the bound address, and only those", () => {
+    const status = JSON.stringify({
+      TCP: {
+        "443": { HTTPS: true },
+        "7000": { TCPForward: "127.0.0.1:3773" },
+        "7001": { TCPForward: "127.0.0.2:3773" },
+        "80": { TCPForward: "unix:/run/app.sock" },
+      },
+      Web: {
+        "box.tailnet.ts.net:443": {
+          Handlers: {
+            "/t3": { Proxy: "http://127.0.0.1:3773" },
+            "/dashboard": { Proxy: "http://127.0.0.1:9000" },
+          },
+        },
+        "box.tailnet.ts.net:8443": { Handlers: { "/": { Proxy: "http://127.0.0.1:5173" } } },
+        "box.tailnet.ts.net:10000": {
+          Handlers: {
+            // Another service on another loopback address, and one on the other family.
+            "/a": { Proxy: "http://127.0.0.2:3773" },
+            "/b": { Proxy: "http://[::1]:3773" },
+            "/c": { Proxy: "http://192.168.1.5:3773" },
+            "/d": { Proxy: "http://0.0.0.0:3773" },
+            "/e": { Proxy: "http://[::ffff:127.0.0.1]:3773" },
+            "/f": { Proxy: "http://localhost:3773" },
+            // Shorthand Tailscale expands when it proxies.
+            "/g": { Proxy: "3773" },
+            "/h": { Proxy: "localhost:3773" },
+            "/i": { Proxy: "http://[::]:3773" },
+            // A name can resolve to any address, the bound one included.
+            "/j": { Proxy: "http://ip6-localhost:3773" },
+            // Go resolves these as names; a WHATWG URL rejects the first and rewrites the second.
+            "/k": { Proxy: "http://box.1:3773" },
+            "/l": { Proxy: "http://127.1:3773" },
+            "/m": { Proxy: "unix:/run/app.sock" },
+            // Credentials before the host, and IPv6 written out in full, still dial here.
+            "/n": { Proxy: "http://user:pass@127.0.0.1:3773" },
+            "/o": { Proxy: "http://[0:0:0:0:0:ffff:7f00:1]:3773" },
+            "/p": { Proxy: "http://127.0.0.1:03773" },
+          },
+        },
+      },
+      Services: {
+        "svc:t3": {
+          Web: {
+            "t3.tailnet.ts.net:443": { Handlers: { "/": { Proxy: "http://127.0.0.1:3773" } } },
+          },
+        },
+      },
+      Foreground: {
+        session1: { TCP: { "9000": { TCPForward: "localhost:3773" } } },
+      },
+    });
+    assert.deepEqual(parseTailscaleServeRoutesTo(status, { host: "127.0.0.1", port: 3773 }), [
+      { servePort: 7000 },
+      { servePort: 443, mount: "/t3", host: "box.tailnet.ts.net" },
+      // `localhost` and `[::]` can dial either loopback, so they might be another service's.
+      ...(
+        [
+          ["/d", undefined],
+          ["/e", undefined],
+          ["/f", "localhost"],
+          ["/g", undefined],
+          ["/h", "localhost"],
+          ["/i", "[::]"],
+          ["/j", "ip6-localhost"],
+          ["/k", "box.1"],
+          ["/l", "127.1"],
+          ["/n", undefined],
+          ["/o", undefined],
+          ["/p", undefined],
+        ] as const
+      ).map(([mount, ambiguous]) => ({
+        servePort: 10000,
+        mount,
+        host: "box.tailnet.ts.net",
+        ...(ambiguous === undefined ? {} : { ambiguous }),
+      })),
+      { servePort: 443, mount: "/", host: "t3.tailnet.ts.net", owner: "svc:t3" },
+      { servePort: 9000, ambiguous: "localhost", owner: "foreground" },
+    ]);
+    assert.deepEqual(
+      parseTailscaleServeRoutesTo(
+        JSON.stringify({
+          Web: { "box:443": { Handlers: { "/": { Proxy: "http://127.0.0.1" } } } },
+        }),
+        { host: "127.0.0.1", port: 80 },
+      ),
+      [{ servePort: 443, mount: "/", host: "box" }],
+    );
+    assert.deepEqual(parseTailscaleServeRoutesTo("{}", { host: "127.0.0.1", port: 3773 }), []);
+    assert.deepEqual(parseTailscaleServeRoutesTo("null", { host: "127.0.0.1", port: 3773 }), []);
+    assert.isUndefined(parseTailscaleServeRoutesTo("not json", { host: "127.0.0.1", port: 3773 }));
+  });
+
   it.effect("parses status facts", () =>
     Effect.gen(function* () {
       const status = yield* parseTailscaleStatus(tailscaleStatusJson);
@@ -312,19 +408,32 @@ describe("tailscale", () => {
     );
 
     return Effect.gen(function* () {
-      const fiber = yield* readTailscaleStatus.pipe(Effect.flip, Effect.forkScoped);
-      yield* Effect.yieldNow;
-      yield* TestClock.adjust("3500 millis");
-      const error = yield* Fiber.join(fiber);
-
-      assert.instanceOf(error, TailscaleCommandTimeoutError);
-      assert.equal(error.executable, tailscaleCommand);
-      assert.equal(error.subcommand, "status");
-      assert.equal(error.argumentCount, 2);
-      assert.equal(error.timeoutMs, 3_500);
-      assert.isTrue(Cause.isTimeoutError(error.cause));
-      assert.equal(error.message, "tailscale status timed out after 3500ms.");
-      assert.deepEqual(killGraces, [500]);
+      const errors = yield* Effect.all(
+        [
+          readTailscaleStatus.pipe(Effect.flip),
+          readTailscaleSshEnabled.pipe(Effect.flip),
+          ensureTailscaleServe({ localPort: 45_678 }).pipe(Effect.flip),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkScoped);
+      yield* TestClock.adjust("10 seconds");
+      const results = yield* Fiber.join(errors);
+      for (const error of results) {
+        assert.instanceOf(error, TailscaleCommandTimeoutError);
+        assert.equal(error.executable, tailscaleCommand);
+        assert.isTrue(Cause.isTimeoutError(error.cause));
+      }
+      assert.deepEqual(
+        results.map((error) =>
+          error._tag === "TailscaleCommandTimeoutError" ? error.timeoutMs : undefined,
+        ),
+        [3_500, 3_500, 10_000],
+      );
+      assert.instanceOf(results[0], TailscaleCommandTimeoutError);
+      assert.equal(results[0].subcommand, "status");
+      assert.equal(results[0].argumentCount, 2);
+      assert.equal(results[0].message, "tailscale status timed out after 3500ms.");
+      assert.deepEqual(killGraces, [500, 500, 500]);
     }).pipe(Effect.provide(layer));
   });
 
@@ -372,14 +481,14 @@ describe("tailscale", () => {
     const layer = layerMockSpawner((command, args) => {
       commands.push({ command, args });
       assert.equal(command, tailscaleCommand);
-      assert.deepEqual(args, ["serve", "--https=8443", "off"]);
+      assert.deepEqual(args, ["serve", "--https=8443", "--set-path=/", "off"]);
       return {};
     });
 
     return Effect.gen(function* () {
       yield* disableTailscaleServe({ servePort: 8443 }).pipe(Effect.provide(layer));
       assert.deepEqual(commands, [
-        { command: tailscaleCommand, args: ["serve", "--https=8443", "off"] },
+        { command: tailscaleCommand, args: ["serve", "--https=8443", "--set-path=/", "off"] },
       ]);
     });
   });

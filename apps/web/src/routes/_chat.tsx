@@ -3,8 +3,8 @@ import { Navigate, Outlet, createFileRoute, redirect, useMatches } from "@tansta
 import { useState } from "react";
 
 import { useComposerDraftStore } from "../composerDraftStore";
-import { selectIsSplitViewActive, useSplitViewStore } from "../splitViewStore";
-import { SplitThreadWorkspace } from "../components/SplitThreadWorkspace";
+import { selectSplitPaneRefs, useSplitViewStore } from "../splitViewStore";
+import { resolveVisibleSplitPanes, SplitThreadWorkspace } from "../components/SplitThreadWorkspace";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { isAppModalPage } from "../components/sidebar/mainAppLocation";
 import { SidebarInset } from "../components/ui/sidebar";
@@ -16,6 +16,7 @@ import {
 import { retainThreadFindForRoute } from "../components/chat/threadFindStore";
 import { ThreadLinkPrompt } from "../components/promptLinks/ThreadLinkPrompt";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
+import { useHiddenThreadKeys } from "../state/entities";
 
 function threadRouteTargetKey(target: ThreadRouteTarget | null) {
   if (!target) return null;
@@ -35,7 +36,9 @@ function ChatRouteLayout() {
     setBackgroundTarget(threadTarget);
   }
   const shownTarget = modalOpen ? backgroundTarget : threadTarget;
-  const splitViewActive = useSplitViewStore(selectIsSplitViewActive);
+  const splitPaneRefs = useSplitViewStore(selectSplitPaneRefs);
+  const splitViewActive = splitPaneRefs.length > 0;
+  const hiddenKeys = useHiddenThreadKeys();
   const draftSession = useComposerDraftStore((store) =>
     shownTarget?.kind === "draft" ? store.getDraftSession(shownTarget.draftId) : null,
   );
@@ -48,13 +51,21 @@ function ChatRouteLayout() {
       : draftSession
         ? scopeThreadRef(draftSession.environmentId, draftSession.threadId)
         : promotedDraftRef;
+  const visibleSplitPaneRefs =
+    splitViewActive && currentRouteRef
+      ? resolveVisibleSplitPanes({ paneRefs: splitPaneRefs, hiddenKeys, routeRef: currentRouteRef })
+      : null;
   return (
     <>
       {shownTarget?.kind === "server" && !modalOpen ? (
         <ThreadLinkPrompt threadRef={shownTarget.threadRef} />
       ) : null}
-      {splitViewActive && currentRouteRef ? (
-        <SplitThreadWorkspace currentRouteRef={currentRouteRef} background={modalOpen} />
+      {visibleSplitPaneRefs && currentRouteRef ? (
+        <SplitThreadWorkspace
+          currentRouteRef={currentRouteRef}
+          paneRefs={visibleSplitPaneRefs}
+          background={modalOpen}
+        />
       ) : shownTarget ? (
         <ThreadRouteView target={shownTarget} background={modalOpen} />
       ) : modalOpen ? (

@@ -71,7 +71,12 @@ it.effect.each([false, true, "interrupt"] as const)(
       const checkpoints = yield* CheckpointService.CheckpointServiceV2;
       if (lookupFails === "interrupt") {
         const exit = yield* Effect.exit(
-          checkpoints.materializeBaselineCheckpoint({ scope, ordinalWithinScope: 2 }),
+          checkpoints.materializeBaselineCheckpoint({
+            scope,
+            nodeId: scope.nodeId!,
+            capturedAt: scope.createdAt,
+            ordinalWithinScope: 2,
+          }),
         );
         assert.isTrue(Exit.hasInterrupts(exit));
         const captureExit = yield* Effect.exit(
@@ -89,6 +94,8 @@ it.effect.each([false, true, "interrupt"] as const)(
       }
       const baseline = yield* checkpoints.materializeBaselineCheckpoint({
         scope,
+        nodeId: scope.nodeId!,
+        capturedAt: scope.createdAt,
         ordinalWithinScope: 2,
       });
 
@@ -189,6 +196,8 @@ it.effect(
             const materialized = yield* checkpoints.materializeBaselineCheckpoint({
               scope,
               ordinalWithinScope: 0,
+              nodeId: scope.nodeId,
+              capturedAt: scope.createdAt,
             });
             assert.strictEqual(materialized.status, "missing");
           }

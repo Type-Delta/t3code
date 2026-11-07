@@ -79,7 +79,7 @@ Resume only the work already requested in this thread. Inspect current workspace
 Do not repeat completed work, start new work, or expand the user's requested scope. If the requested work is already complete, report completion and stop.`,
     attachments: [],
     dispatchMode: { type: "start_immediately" },
-    createdBy: "user",
+    createdBy: "agent",
     creationSource: "server",
   };
 }

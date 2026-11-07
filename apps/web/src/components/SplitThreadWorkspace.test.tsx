@@ -7,9 +7,11 @@ import {
   isSplitRightPanelMaximized,
   resolveSplitPaneDropPosition,
   resolveSplitRightPanelOwner,
+  resolveVisibleSplitPanes,
   splitThreadGridColumnClassName,
 } from "./SplitThreadWorkspace";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { resolveSplitPaneSlots } from "../splitViewStore";
 
@@ -143,5 +145,19 @@ describe("splitThreadGridColumnClassName", () => {
     expect(fills("thread-b", { isOpen: true, maximized: true })).toBe(false);
     expect(fills("thread-a", { isOpen: false, maximized: true })).toBe(false);
     expect(fills("thread-a", { isOpen: true })).toBe(false);
+  });
+
+  it("never renders a thread the tag filter hides", () => {
+    const ref = (id: string) => scopeThreadRef(EnvironmentId.make("env"), ThreadId.make(id));
+    const [a, b, c] = [ref("a"), ref("b"), ref("c")];
+    const visible = (hidden: readonly (typeof a)[], routeRef = a) =>
+      resolveVisibleSplitPanes({
+        paneRefs: [a, b, c],
+        hiddenKeys: new Set(hidden.map(threadKey)),
+        routeRef,
+      });
+    expect(visible([b])).toEqual([a, c]);
+    expect(visible([b, c])).toBeNull();
+    expect(visible([c], c)).toBeNull();
   });
 });

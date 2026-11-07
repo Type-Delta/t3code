@@ -1,4 +1,25 @@
+import type {
+  ThreadStructureTurnItem,
+  ThreadStructureVisibleTurnItem,
+} from "@t3tools/client-runtime/state/models";
+
 import type { ComposerTrigger } from "./composer-logic";
+
+export type PromptSuggestionMessage = Extract<
+  ThreadStructureTurnItem,
+  { readonly type: "user_message" | "assistant_message" }
+>;
+
+/** The thread's last message. The structure drops assistant text but keeps its suggestion. */
+export function findLastPromptSuggestionMessage(
+  rows: ReadonlyArray<ThreadStructureVisibleTurnItem>,
+): PromptSuggestionMessage | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const item = rows[index]!.item;
+    if (item.type === "user_message" || item.type === "assistant_message") return item;
+  }
+  return null;
+}
 
 /**
  * A prompt suggestion is a whole next message, not a continuation of what the

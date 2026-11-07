@@ -87,6 +87,8 @@ const runTurn = (
     yield* edit;
     const baseline = yield* checkpoints.materializeBaselineCheckpoint({
       scope,
+      nodeId: scope.nodeId!,
+      capturedAt: scope.createdAt,
       ordinalWithinScope: ordinal - 1,
     });
     const checkpoint = yield* checkpoints.capture({

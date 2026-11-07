@@ -46,11 +46,11 @@ The upstream draft hero remains the empty-state headline. The fork adds `On <mac
 
 Projectless drafts retain upstream's scratch-project picker beside the machine context.
 
-**Implementation evidence:** `apps/web/src/components/ChatView.tsx`, `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`.
+**Implementation evidence:** `apps/web/src/components/ChatView.tsx`, `apps/web/src/components/chat/DraftHeroHeadline.tsx`, `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`.
 
 **Recorded validation:** `vp test apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`, `vp check`, and `vp run typecheck`.
 
-**Last updated:** 2026-10-02
+**Last updated:** 2026-11-07
 
 ### DL004 — Preview navigation and automation hardening
 
@@ -104,7 +104,7 @@ Sidecar capture runs Git with `-C` at the worktree root, so paths stay worktree-
 
 Legacy checkpoint tables remain for schema compatibility. V2 navigation uses upstream's checkpoint rollback with the fork's retained forward checkpoints for redo; no server code reads the former capture-job or navigation-journal tables.
 
-Persistence keeps canonical upstream migrations `001`–`076` in `effect_sql_migrations` and fork migrations `001`–`015` in the independent `fork_sql_migrations` ledger. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
+Persistence keeps canonical upstream migrations `001`–`080` in `effect_sql_migrations` and fork migrations `001`–`015` in the independent `fork_sql_migrations` ledger. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
 
 The old ID-58 prompt-suggestion collision is repaired by canonical upstream migration `048_ProjectionThreadBranchPullRequest` and fork migration `009_ProjectionThreadMessageSuggestions`. This preserves both columns even when the original numeric ledger skipped the branch column. Startup also removes the legacy checkpoint table's foreign key to `projection_turns` before upstream `063_DropUnusedV1Projections` drops that table. Incoming upstream migrations `065`–`069` retain their canonical IDs, including webhook deduplication and message-search schema.
 
@@ -136,7 +136,7 @@ The 2026-10-05 completion split passed the focused RunExecutionService, Checkpoi
 
 The 2026-10-15 re-port restored the 16 sidecar characterization tests the redo dropped (32 checkpoint-store tests pass), plus sidecar authored-path filtering, long scope ids, and the V2 real-repository suite.
 
-**Last updated:** 2026-11-01
+**Last updated:** 2026-11-07
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -146,13 +146,15 @@ Collapsed Working, snoozed, and settled shelves keep all displayed split panes v
 
 The fork supports up to ten visible thread panes in five columns and two rows. Panes fill columns at full height until a sixth pane opens the lower row. A full-height pane accepts a thread above or below it in its outer quarters; its middle half accepts left/right placement while fewer than five columns exist. A stacked column accepts only left/right placement while fewer than five columns exist. Left/right drop hints cover the full destination column, including both rows of a stacked column. Blocked drop areas show no hint. Split layouts retain focused-pane routing, a shared toolbar, one right panel, and controlled ownership of global keyboard, preview, and composer behavior. The right-panel toggle reflects the shared split layout and closes every open pane panel together, so changing focus cannot reopen a panel owned by another pane. Panes can be opened or detached from the sidebar, safely reconcile draft promotion/archive/deletion, and animate layout changes without leaving stale portals or listeners. Reconciliation never returns a deleted thread as the fallback when all panes disappear.
 
+Split view respects upstream's tag filter while recording. `resolveVisibleSplitPanes` skips hidden panes without changing the saved group. A hidden route thread falls back to `ThreadRouteView` for upstream's redirect; fewer than two visible panes also renders single view.
+
 Both pointer drags and native sidebar drags can create the first split on either side of a thread or place a pane above or below an unstacked column, with the hint and insertion using the same pointer position. Detaching the focused pane through the sidebar routes to the remaining pane. Thread context menus can detach one pane or dissolve the entire containing split group. Entering a thread route restores its saved group, including navigation from the command palette, notifications, citations, and browser history; preloading a route leaves the current layout alone.
 
 Split membership is persisted as multiple ordered local groups with active state and stable group colors. Selecting any member restores its group; the sidebar preserves group tinting, support pane and thread drag placement, and show complete left/right drop intent. The group tint is textured with an inline desaturated SVG grain so the color-coded row reads as a surface rather than a flat slab. The grain is a masked pseudo-element rather than a second background layer, because background layers cannot carry their own mask and unmasked grain also covers the gradient's faded tail, flattening the row back into a uniform slab; the overlay shares the tint's fade axis and stops short of its extent so the texture is gone before the color is. Group hues carry a hue-dependent chroma: a flat chroma across the wheel does not read as a flat saturation, since yellow-green renders at full strength while red and blue are gamut-clipped, so chroma eases down around yellow-green. Rows supply only the hue and that chroma, leaving the stylesheet to compose per-theme lightness and strength — light mode takes a deeper, less translucent tint because the translucency that reads as a clear band on the near-black sidebar washes out against zinc-50. The current sidebar also names the other panes in each grouped thread's details tooltip, keeps displayed panes visible when settled or snoozed shelves are collapsed, and preserves split actions in its context menu. Right-panel ownership remains useful when focus moves to a pane with no surface of its own.
 
 Maximizing the shared right panel in a split collapses the whole pane column to zero width and makes the pane grid inert, so the panel fills the workspace. Panes stay mounted, so restoring keeps their order, sizes, focus, scroll, and drafts. Only the focused pane that owns the panel can maximize it (`isSplitRightPanelMaximized`), so moving focus to another pane restores the split, and closing the split's panel clears the flag. The header slot stays outside the inert grid so the titlebar restore control keeps receiving clicks. In single view the titlebar controls likewise render beside the chat column rather than inside it; upstream renders them inside, where the column's `inert` while maximized lets the panel tab bar take the restore click. The narrow-screen right-panel sheet has no in-panel maximize button (the fork removed it in 602682f97b); the sheet already covers the chat. Upstream side chats render an embedded ChatView that every pane-owner guard skips (`isActivePane && !embedded`), so a side chat never takes focus, shortcuts, menus, or preview actions from a pane. The right panel's owner pane is sticky (`resolveSplitRightPanelOwner`), so a side chat stays with its parent pane's thread when focus moves to a pane without a panel.
 
-**Implementation evidence:** `apps/web/src/{splitViewStore,splitViewDrag,splitViewNavigation}.ts`, `apps/web/src/components/{SplitThreadWorkspace,ThreadRouteView,SplitPaneDropHint,Sidebar,CommandPalette,RightPanelTabs,ChatView,chat/ChatComposer}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `SplitThreadWorkspace.test.tsx` (maximize ownership), `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
+**Implementation evidence:** `apps/web/src/{splitViewStore,splitViewDrag,splitViewNavigation}.ts`, `apps/web/src/components/{SplitThreadWorkspace,ThreadRouteView,SplitPaneDropHint,Sidebar,CommandPalette,RightPanelTabs,ChatView,chat/ChatComposer}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/components/SplitThreadWorkspace.test.tsx` (maximize ownership and "never renders a thread the tag filter hides"), `apps/web/src/components/SplitThreadWorkspace.browser.test.tsx`, `apps/web/src/routes/_chat.tsx`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
 
 **Recorded validation:** 248 focused tests across split state, navigation, native drag events, route history, sidebar logic, workspace, right-panel, notification, and citation behavior; `vp check`; `vp run typecheck`; and `git diff --check`. The 2026-09-28 isolated paired-browser pass confirmed that pointer hints switch between left and right and a left drop places the dragged thread before the original. The Browser panel then lost its automation host, so the remaining live flows and screenshot capture could not be completed. Native legacy drops and route restoration were verified by automated tests. An unrelated existing command-palette sorting test still fails in unchanged code. Earlier integrated checks cover composer shortcut ownership and shared right-panel closing. The 2026-09-29 5x2 extension passed 211 focused tests, `vp check`, `vp run typecheck`, and an isolated paired-browser pass at 2560x1440 showing five full-height columns and a sixth pane below the first. The drop-area correction passed 214 focused tests; an isolated paired-browser pass confirmed top and bottom native drops, and confirmed that a filled column at five columns accepts no drop or hint while an unstacked column still offers the top hint. The 2026-09-29 standalone vertical-drop and group-detach update passed 220 focused tests, including top/bottom native and pointer targets, active/inactive group dissolution, and both sidebar menu paths; the isolated browser pass confirmed the new menu item, top and bottom first-split hints, and the resulting stacked two-pane layout.
 
@@ -162,31 +164,29 @@ The 2026-11-01 split-maximize change passed `SplitThreadWorkspace.test.tsx`. In 
 
 Pinned and Active drag boundaries occupy normal layout rows, including an empty Pinned group. Sorting uses their measured heights so labels keep consistent spacing in Manual and Last input ordering.
 
-**Last updated:** 2026-11-01
+**Last updated:** 2026-11-07
 
 ### DL012 — Prompt preservation during draft promotion
 
 Upstream now keeps the optimistic prompt visible while a draft becomes its server-backed thread. The fork keeps the acknowledgement bound: dispatch and first-message launch RPCs share a ten-second acknowledgement timeout; a lost WebSocket reply therefore enters the existing visible failure path and restores the durable composer draft instead of leaving a refresh-only optimistic message indefinitely. The acknowledgement covers receipt of the launch RPC, not completion of workspace setup. If an acknowledgement arrives after the ten-second timeout, the server still lands the message while the restored draft remains visible; manually resending that draft can therefore duplicate the message.
 
-**Implementation evidence:** `apps/web/src/components/ChatView.tsx` and `packages/client-runtime/src/operations/commands.ts`.
+**Implementation evidence:** `packages/client-runtime/src/operations/commands.ts` and `packages/client-runtime/src/operations/commands.test.ts` (unacknowledged command and launch acknowledgement timeout cases).
 
 **Recorded validation:** `vp check`, `vp run typecheck`, and the repository `dev` startup smoke test.
 
-**Last updated:** 2026-08-10
+**Last updated:** 2026-11-07
 
 ### DL013 — Codex availability through catalog and turn failures
 
-Codex model and skill discovery is bounded, optional catalog enrichment after a healthy authenticated app-server session starts. Catalog failure cannot replace that healthy snapshot with a provider-status error.
+Codex model and skill discovery shares the authenticated app-server probe's 20-second budget, ending 250 ms before its outer deadline. A discovery timeout keeps the account result with missing enrichment. ChatGPT model discovery waits up to three seconds for the startup catalog refresh, then uses the first catalog if no refresh arrives. Skills discovery has no separate three-second deadline. A skills/list or model-list RPC error still fails the probe and reports provider status `error`, even after successful authentication.
 
-App-server errors are classified by scope: retryable transport errors remain warnings, while a typed non-retryable turn error emits the terminal failed-turn lifecycle needed to release the thread for a follow-up message. A root Codex collaboration `wait` that remains open for 30 minutes is failed explicitly after bounded child-then-parent interruption; matching item or turn completion cancels that deadline. Actual process or transport failure still marks the session unavailable. Upstream terminal-state, hard-stop, tool-identity, and liveness fixes remain authoritative; in particular, a late collaboration `interacted` event can enrich an existing child without restarting one that already completed.
+App-server errors are classified by scope: retryable transport errors remain warnings, while a typed non-retryable turn error emits the terminal failed-turn lifecycle needed to release the thread for a follow-up message. Actual process or transport failure still marks the session unavailable. The V2 adapter has no equivalent of the former 30-minute root collaboration-wait watchdog. Upstream terminal-state, hard-stop, tool-identity, and liveness behavior remains in place.
 
-**Implementation evidence:** `apps/server/src/provider/CodexProvider.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`, and `packages/contracts/src/providerRuntime.ts`.
+**Implementation evidence:** `apps/server/src/provider/CodexProvider.ts`, `apps/server/src/provider/CodexProvider.test.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`, and `packages/contracts/src/providerRuntime.ts`.
 
-**Recorded validation:** focused Codex adapter, collaboration-runtime, provider-runtime ingestion, mixed-tool lifecycle, and transfer-budget tests, `vp check`, and `vp run typecheck`. The 2026-09-01 merge-focused provider suites also covered bounded collaboration waits, turn-scoped failure recovery, and upstream child-model enrichment.
+**Recorded validation:** focused Codex provider, adapter, and provider-runtime ingestion suites; `vp check`; and `vp run typecheck`. Optional discovery RPC failures remain a known limitation.
 
-Catalog enrichment remains optional and bounded: skills/list stays at three seconds, while ChatGPT model discovery allows its three-second refresh poll to finish and then returns the cached first catalog. Healthy Codex account probes retain their snapshot when skills or model discovery is slow or fails. The V2 adapter has no surviving root collaboration wait lifecycle equivalent to the former 30-minute V1 watchdog, so that behavior is intentionally not reintroduced.
-
-**Last updated:** 2026-10-15
+**Last updated:** 2026-11-07
 
 ### DL014 — Loadable checkpoint diffs with a legacy baseline fallback
 
@@ -266,8 +266,7 @@ returns it to running, and it publishes the follow-up's result once (upstream #2
 running can still be cancelled. The delegation's first run is identified by the spawn transfer's target run. A user
 follow-up also reopens a task the parent had cancelled, re-arming its completion wake.
 
-A follow-up whose run completes while the child's own delegates or background work are still in
-flight is not done, the same rule upstream applies to the delegation's first run. The task stays
+Delegated task completion waits for the child's own delegates and every nonempty background-work roster, including unawaited commands. Upstream's `backgroundWorkHoldsCompletion` only holds for `awaited: true`. The fork applies the roster check to both the first run and reopened follow-ups, and the delegated-child settlement listener finalizes the task when the roster empties. The task stays
 running, and `task_status` reports `waiting_for_children`. While the task is reopened, the
 delegated-completion and background-command wakes that settle that work also carry its task id,
 so the task publishes the wake's result instead of the interim reply. A follow-up that fails, is
@@ -276,7 +275,7 @@ in #21877).
 
 **Implementation evidence:** orchestrationV2 contracts and server layers; ChatView, Sidebar,
 ThreadRelationshipsControl, ComposerSubagents, `threadDetailsCardLayout.ts` (density threshold and its test), V2LifecycleRow, V2ItemInspector, rightPanelStore,
-and session-logic. Reopen edge cases: `DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
+and session-logic. Completion gating: `packages/provider-core/src/server/subagentProjection.ts`, the delegated-child settlement listener in `apps/server/src/orchestration-v2/Orchestrator.ts`, and `apps/server/src/orchestration-v2/SubagentProjection.test.ts`. Reopen edge cases: `apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
 follow-up never starts", including "pauses a reopened task behind a held follow-up", and "holds a
 reopened task while … runs") and `OrchestratorMcpService.test.ts` (held follow-up cancel, and
 the follow-up variant of terminal acknowledgement).
@@ -288,7 +287,7 @@ composer rendered. The preview client's accessibility snapshot and click calls f
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
 
-**Last updated:** 2026-11-01
+**Last updated:** 2026-11-07
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
@@ -429,32 +428,30 @@ Claude adapter and text-generation launches now resolve each selected gateway mo
 
 ### DL027 — Remote editor links select the server account
 
-Remote open-in-editor targets advertise the operating-system account running the
-server when it can be resolved. The web client includes that account inside the
+Upstream advertises the operating-system account running the server when it can be resolved. The fork retains a raw `@` separator in VS Code Remote-SSH authorities and resolves Windows domain accounts. The web client includes that account inside the
 VS Code Remote-SSH authority (`ssh-remote+user@host`), so Windows clients do not
 fall back to their local username. Windows AD accounts use `USERDOMAIN\\username`
 only when `USERDNSDOMAIN` confirms a domain and the name is not the local
 computer/workgroup. Local accounts use the unqualified username. Systems that
 cannot resolve an account omit the field and retain host-only behavior.
 Desktop-managed SSH aliases remain authoritative and continue to omit the
-advertised account. VS Code Remote-SSH links retain the fork's raw `@` separator inside the path authority, with upstream's `:1:1` file-position suffix. The username field is optional for compatibility with older
+advertised account. Links retain upstream's `:1:1` file-position suffix. The username field is optional for compatibility with older
 server configurations.
 
 **Implementation evidence:** `packages/shared/src/HostProcess.ts`,
 `packages/contracts/src/editor.ts`, `apps/server/src/environment/RemoteOpenTargets.ts`,
-`apps/web/src/remoteOpen.ts`, `apps/web/src/components/chat/OpenInPicker.tsx`, and
-`apps/desktop/src/electron/ElectronShell.test.ts`.
+`apps/web/src/remoteOpen.test.ts`, and `packages/shared/src/HostProcess.test.ts`.
 
 **Recorded validation:** focused contract, server target discovery, web remote-open,
 and Electron shell tests.
 
-**Last updated:** 2026-10-25
+**Last updated:** 2026-11-07
 
 ### DL028 — One manual fork desktop release for every updater platform
 
 The fork publishes desktop builds only through the manual **Fork Release** workflow. One dispatch builds Windows x64 (unsigned NSIS), macOS arm64 and x64 (DL030), and Linux x64 (AppImage and `.deb`) on GitHub-hosted runners, then publishes a single GitHub Release in this repository with `latest.yml`, a merged `latest-mac.yml`, and `latest-linux.yml` (`nightly*.yml` for nightlies). The platform workflows are reusable build steps with no dispatch trigger of their own. electron-updater's GitHub provider picks the release before it reads the platform manifest, so a release missing any platform would break that platform's Update button; the publish job refuses to run unless every manifest exists. Windows still builds the Linux CLI archive the packaged WSL backend needs; that job installs or checks `patchelf`, which upstream's CLI archive build now requires.
 
-Preflight accepts only `X.Y.Z` or `X.Y.Z-nightly.YYYYMMDD.N`, because the updater ignores other suffixes. It rejects a tag that already exists here or on upstream, and a stable version that is not newer than the latest stable tag. Fork versions follow upstream patch × 100 + fork build (`0.1.6` → `0.1.601`), so they never equal an upstream version. A blank version input derives the next build from `apps/desktop/package.json` (upstream's `0.1.6`, so `0.1.601` onward) and the fork's tags; a `.0` base starts at build 50 to stay clear of upstream's next patches. Unsigned NSIS updates install because electron-updater skips publisher verification when the build has no `publisherName`.
+Preflight accepts only `X.Y.Z` or `X.Y.Z-nightly.YYYYMMDD.N`, because the updater ignores other suffixes. It rejects a tag that already exists here or on upstream, and a stable version that is not newer than the latest stable tag. Fork versions follow upstream patch × 100 + fork build (`0.1.7` → `0.1.701`), so they never equal an upstream version. A blank version input derives the next build from `apps/desktop/package.json` (upstream's `0.1.7`, so `0.1.701` onward) and the fork's tags; a `.0` base starts at build 50 to stay clear of upstream's next patches. Unsigned NSIS updates install because electron-updater skips publisher verification when the build has no `publisherName`.
 
 The workflow does not publish a `t3` npm package or CLI archives, so `t3 update` and remote server self-update still follow upstream; do not use them on fork servers.
 
@@ -462,7 +459,7 @@ The workflow does not publish a `t3` npm package or CLI archives, so `t3 update`
 
 **Recorded validation:** actionlint and `vp fmt --check` on the four workflows. Fork Release run 41066477319 built every platform on hosted runners and published `v0.1.301` with `latest.yml`, a `latest-mac.yml` listing arm64 and x64, and a `latest-linux.yml` listing the AppImage and `.deb`. A two-version update on each OS is not yet recorded.
 
-**Last updated:** 2026-11-01
+**Last updated:** 2026-11-07
 
 ### DL029 — Selectable sidebar thread ordering
 
@@ -488,7 +485,7 @@ Fork macOS builds are signed with one persistent self-signed certificate (`Type-
 
 ### DL031 — Durable management API keys for external MCP clients
 
-Management-key HTTP requests use request-time authorization and relay endpoint resolution, including one credential renewal retry for an invalid credential. Insufficient-scope errors do not retry. Bearer and DPoP requests explicitly omit browser cookies so a stale session cookie cannot override the selected environment credential; cookie-authenticated requests continue to include cookies. Regression coverage checks the credential modes and reproduces the collision against the server.
+Management-key HTTP requests use request-time authorization and relay endpoint resolution, including one credential renewal retry for an invalid credential. Insufficient-scope errors do not retry. Bearer and DPoP requests explicitly omit browser cookies so a stale session cookie cannot override the selected environment credential; cookie-authenticated requests continue to include cookies. Regression coverage checks the credential modes and reproduces the collision against the server. Web management-key request failures use `Schema.TaggedError`.
 
 Sharing & access settings can select any known machine and create environment-wide management API keys
 there with named read-only, thread-orchestration, or custom scopes and explicit expiration. The
@@ -525,7 +522,8 @@ secrets.
 `apps/web/src/components/settings/ManagementApiKeysSettings.logic.ts`,
 `apps/web/src/environments/managementApiKeys.ts`,
 `packages/client-runtime/src/state/managementApiKeys.ts`,
-`packages/client-runtime/src/connection/onboarding.ts`,
+`apps/web/src/routes/_chat.settings.access.tsx`,
+`packages/client-runtime/src/state/environmentHttpAuth.ts`,
 `apps/server/src/auth/ManagementApiKeyService.ts`,
 `apps/server/src/persistence/ManagementApiKeys.ts`,
 `apps/server/src/persistence/Migrations/050_ManagementApiKeys.ts`,
@@ -545,7 +543,7 @@ environment, created separate keys on the primary and remote machines, showed ea
 MCP endpoint, kept the two lists isolated while switching the selector, and revoked both disposable
 keys. Repository-wide `vp check` and `vp run typecheck` passed.
 
-**Last updated:** 2026-09-05
+**Last updated:** 2026-11-07
 
 ### DL032 — Automatic resume after native provider usage limits
 
@@ -559,8 +557,7 @@ controls the earliest continuation.
 
 The fork retains its explicit continuation prompt, which asks the provider to resume only incomplete
 work, inspect the current workspace and subagent state, repair partial operations, and avoid
-repeating completed work or expanding scope. Restart, archive, settle, a newer turn, or a changed
-provider selection invalidates the saved recovery. The one-hour wait and scheduler behavior are
+repeating completed work or expanding scope. Recovery survives a server restart, as upstream now supports. An explicit thread restart, archive, settle, a newer turn, or a changed provider selection invalidates the saved recovery. The one-hour wait and scheduler behavior are
 upstream V2 behavior; the default and prompt are the fork's surviving differences.
 
 **Implementation evidence:** UsageLimitRecoveryWorker, Orchestrator, Scheduler, orchestrationV2/settings
@@ -569,7 +566,7 @@ contracts, serverSettings, and SettingsPanels.
 **Recorded validation:** focused usage-limit parsing, scheduler, recovery-worker, V2 runtime, and
 server-settings tests; vp check; vp run typecheck; and the isolated migration/startup smoke.
 
-**Last updated:** 2026-10-04
+**Last updated:** 2026-11-07
 
 ### DL033 — Model search within the selected group
 
@@ -603,12 +600,14 @@ turn. Claude pins the preference and instructions at its first session start in 
 preserving them across session recovery and restarts. Each viewing client independently
 controls whether suggestions appear in its composer. See [prompt suggestions](docs/user/composer.md#prompt-suggestions).
 
+Upstream's chat timeline entries no longer include assistant messages, so `ChatView` reads the last user or assistant message from the thread's turn items (`findLastPromptSuggestionMessage` in `apps/web/src/promptSuggestion.logic.ts`) and passes it to the composer; a just-sent message still waiting for the server hides the suggestion. The settings description stays within upstream's 200-character limit.
+
 Suggestion-less streaming updates retain message and timeline-row identity. Clearing an existing suggestion still updates the message metadata.
 
 **Implementation evidence:** `packages/shared/src/promptSuggestion.ts`,
 `packages/contracts/src/{settings,orchestration,provider}.ts`,
 `apps/server/src/orchestration-v2/Adapters/{CodexAdapterV2,ClaudeAdapterV2}.ts`,
-`apps/server/src/provider/CodexDeveloperInstructions.ts`,
+`apps/server/src/provider/CodexDeveloperInstructions.ts`, `apps/web/src/promptSuggestion.logic.ts`, `apps/web/src/components/chat/usePromptSuggestion.ts`, `ChatView.browser.test.tsx` ("shows the settled reply's prompt suggestion as composer ghost text"),
 `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`,
 `apps/server/src/orchestration-v2/{Orchestrator,ProjectionStore}.ts`,
 `apps/server/src/persistence/Migrations/062_ProjectionThreadMessageSuggestions.ts`,
@@ -618,7 +617,7 @@ and `apps/web/src/components/settings/SettingsPanels.tsx`.
 
 **Recorded validation:** No validation recorded. Covered by `packages/shared/src/promptSuggestion.test.ts`.
 
-**Last updated:** 2026-11-01
+**Last updated:** 2026-11-07
 
 ### DL035 — Manual-only release actions
 
@@ -652,13 +651,13 @@ Hub requests pause after management HTTP 401/403 until the URL or management key
 
 ### DL038 — Precise transcript identity checks on Windows
 
-Session scanning skips parsing completed history from matching file metadata only when the inode is present. Effect 4.0.5 reports inodes as bigints, which import sources store as exact decimal strings; legacy numeric inodes that are not safe integers never match because they may already have lost NTFS file ID precision. Windows can omit inode values, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts, 4 GiB, and 100,000 records per scan. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
+Session scanning skips parsing completed history from matching file metadata only when the inode is present. Effect 4.0.5 reports inodes as bigints, which import sources store as exact decimal strings; legacy numeric inodes that are not safe integers never match because they may already have lost NTFS file ID precision. Windows can omit inode values, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts and 4 GiB per scan, with 100,000 records per transcript and 10,000,000 records in aggregate. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
 
 **Implementation evidence:** `apps/server/src/project/AgentSessionScanner.ts`, its replacement identity tests, and bounded retry tests in `AgentSessionImporter.test.ts`. `packages/shared/src/nodeRuntime.ts` falls back to native bigint file IDs when Effect stats report a missing or zero inode; `nodeRuntime.test.ts` covers native, missing, and zero identities.
 
 **Recorded validation:** 100 scanner/importer tests, including 201-history imports across three attempts with missing inodes and exact-string versus rounded legacy inodes. Server typecheck, scoped lint, and formatting passed.
 
-**Last updated:** 2026-10-20
+**Last updated:** 2026-11-07
 
 ### DL039 — Graceful Codex shutdown before Windows tree termination
 
@@ -678,11 +677,11 @@ This is an experiment to reduce abrupt termination. It does not establish or fix
 
 The configured Chat: New Local shortcut opens the command palette's "New thread in..." project picker instead of immediately creating a draft in the active project. The same shortcut enters that picker when the command palette already has focus, while the active-project quick-create remains available as a separate palette action.
 
-**Implementation evidence:** `apps/web/src/routes/_chat.tsx`, `apps/web/src/components/CommandPalette.tsx`, `apps/web/src/components/CommandPalette.logic.ts`, and `apps/web/src/commandPaletteBus.ts`.
+**Implementation evidence:** `startNewLocal` in `apps/web/src/shortcuts/chatRouteCommands.ts`, `apps/web/src/shortcuts/chatRouteCommands.test.ts` (boring sidebar, `chat.newLocal` opens the picker), `apps/web/src/components/CommandPalette.tsx`, and `apps/web/src/components/CommandPalette.logic.ts`.
 
 **Recorded validation:** focused command-palette and keybinding tests; controlled-browser verification from the main app and an already-focused palette; `vp check`; `vp run typecheck`; and `git diff --check`.
 
-**Last updated:** 2026-07-29
+**Last updated:** 2026-11-07
 
 ### DL042 — Native conversation adoption during V2 cutover
 
@@ -694,15 +693,15 @@ the safe context-handoff path.
 
 A fork or rollback request may carry a saved native turn boundary (`nativeBoundaryRef` on the
 adapter fork input). Codex and Claude fork exactly at a strong ref of their own driver and reject a
-weak, foreign, or synthetic one instead of falling back to a guessed turn count. Checkpoint navigation uses the persisted provider-turn boundary through the existing fork API. No orchestrator path supplies the explicit `nativeBoundaryRef` override yet; V1 import records thread cursors only.
+weak, foreign, or synthetic one instead of falling back to a guessed turn count. Checkpoint navigation uses the persisted provider-turn boundary through the existing fork API. Claude thread-start rollback supplies the saved native baseline through `nativeBoundaryRef` when one exists; without one, it starts a fresh native thread. V1 import records thread cursors only.
 
-**Implementation evidence:** LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
+**Implementation evidence:** `apps/server/src/orchestration-v2/CheckpointRollbackService.ts` and its tests, LegacyV1ThreadImporter, Core V2 cutover migration, provider-thread
 projection, Codex and Claude V2 adapters (`resolveCodexForkBoundary`,
 `resolveClaudeForkUpToMessageId`), and the legacy importer/cutover and Codex adapter tests.
 
 **Recorded validation:** No validation recorded. Covered by `LegacyV1ThreadImporter.test.ts`, `LegacyV1Cutover.integration.test.ts`, and the Codex adapter tests.
 
-**Last updated:** 2026-10-25
+**Last updated:** 2026-11-07
 
 ### DL043 — Codex compaction context usage restored
 
@@ -745,14 +744,14 @@ Inline Markdown images backed by host files retry a bounded number of times afte
 mint fails. Agents can stream a Markdown path before the file is finished writing; the asset query
 otherwise caches the not-found response while opening the same path in the image viewer explicitly
 refreshes it. Retries require the filesystem read permission and stop after the short backoff or a
-successful signed URL. The retry identity uses the environment and resource value, so streaming renders do not restart the retry budget and a different resource receives its own budget. Reopening a file preview without a workspace revision refreshes its cached URL or failure.
+successful signed URL. The retry identity uses the environment and resource value, so streaming renders do not restart the retry budget and a different resource receives its own budget. Chat images use upstream's thread workspace mutation id, or `null` when no edits exist, and reuse the cached URL across mounts. Only file previews opt into `refreshUnrevisioned` to refresh a cached URL or failure when reopened without a revision. `ChatMarkdownMedia` recognizes an explicit `null` workspace-mutation prop as a file preview; an absent prop uses the thread's id.
 
 **Implementation evidence:** `apps/web/src/components/chat/ChatMarkdownMedia.tsx`,
-`apps/web/src/assets/assetUrls.ts`, and `apps/web/src/components/ChatMarkdown.assets.browser.test.tsx`.
+`apps/web/src/assets/assetUrls.ts`, `apps/web/src/components/files/FilePreviewPanel.tsx`, `packages/client-runtime/src/state/assets.ts`, `packages/client-runtime/src/state/assets.test.ts`, and `apps/web/src/components/ChatMarkdown.assets.browser.test.tsx`.
 
-**Recorded validation:** focused ChatMarkdown asset tests.
+**Recorded validation:** focused ChatMarkdown asset tests and client-runtime asset tests, including "re-mints an unrevisioned read on every mount only when asked".
 
-**Last updated:** 2026-10-25
+**Last updated:** 2026-11-07
 
 ### DL046 — Worktree submodules initialize local file URLs safely
 
@@ -826,7 +825,7 @@ Before undo, redo, or a diff reads content, missing blobs are recovered from mat
 
 Upstream never removes checkpoint snapshots. The hourly storage cleanup, and **Delete now**, now remove snapshots that no thread needs. `storageCleanup.snapshotsAfterDays` sets the idle limit (default 15 days, `null` keeps idle threads' snapshots). It sits under **Settings → Maintenance → Snapshots** on web and mobile.
 
-A snapshot is kept when its checkpoint belongs to a thread that is not deleted and is either busy or active within the limit. Because forks and subagents read their ancestors' checkpoints, every checkpoint of a kept thread's fork and parent ancestry is kept too, even if that ancestor is deleted or idle. If a projection read fails, that sweep skips snapshot cleanup.
+Snapshot retention uses `threadIdle`, without the worktree requirement in `storageCleanupThreadIdle`, so idle current-checkout threads also lose expired snapshots. Web and mobile settings honor the managed policy lock for `storageCleanup.snapshotsAfterDays`. A snapshot is kept when its checkpoint belongs to a thread that is not deleted and is either busy or active within the limit. Because forks and subagents read their ancestors' checkpoints, every checkpoint of a kept thread's fork and parent ancestry is kept too, even if that ancestor is deleted or idle. If a projection read fails, that sweep skips snapshot cleanup.
 
 Captures reach projections only after their run, so the sweep computes one cutoff. Nothing captured after it is deleted: the cutoff is the earlier of 24 hours ago and the start of any run that is active or finished within the last 24 hours. Git commit times have one-second resolution, so the cutoff is rounded down to the second minus one.
 
@@ -856,7 +855,7 @@ Legacy checkpoint refs inside project repositories are never touched.
   - Every checkpoint of a thread active in the last 15 days kept its snapshot, and its turn diff still rendered.
   - An expired thread's diff showed the removal message.
 
-**Last updated:** 2026-10-30
+**Last updated:** 2026-11-07
 
 ### DL052 — Windows desktop keeps the default profile's safe-storage key
 
@@ -902,16 +901,6 @@ Upstream refuses file restore for every current-checkout thread and for any non-
 
 **Last updated:** 2026-11-01
 
-### DL056 — Working shelf holds running threads through a reconnect
-
-Upstream (#26195) lists a running thread outside the web sidebar's Working shelf as soon as its environment is reconnecting or its shell is resyncing, so a thread whose state is unknown is not hidden in a collapsed shelf. Every brief reconnect then moved running threads into the inbox and back. The fork keeps them on the shelf until the environment has been disconnected for 20 seconds, the same delay after which the composer offers to disconnect a server; longer outages still list them in the inbox. Environments already disconnected when the sidebar mounts count as disconnected at once, so a remount mid-outage does not hide their threads again. Mobile has no such placement rule, so it is unchanged.
-
-**Implementation evidence:** `useEnvironmentsHeldFor` in `apps/web/src/hooks/useEnvironmentDisconnectDelay.ts` and its case in `useEnvironmentDisconnectDelay.browser.test.tsx`; the `disconnectedEnvironmentIds` wiring in `useSidebarThreads` (`apps/web/src/components/Sidebar.tsx`).
-
-**Recorded validation:** The hook case passes and fails when the delay is skipped. In a seeded dev app with a running Claude Haiku thread in the collapsed Working shelf, refusing the app socket for 4 seconds moved the thread into the inbox before the fix (for about 6 seconds, until reconnect) and left it on the shelf after. A 25-second outage still moved it to the inbox at about 21 seconds and back to the shelf after reconnecting.
-
-**Last updated:** 2026-11-02
-
 ### DL057 — Official T3 Connect link with a running fork
 
 Fork release builds include the public T3 Connect identifiers from `.env.example`, including in the Windows WSL runtime. A running backend checks for changes to the CLI's desired link and reconciles them through the existing guarded relay path. This lets the official npm `t3 connect link` authorize the same T3 home without restarting the fork. Runtime configuration still overrides build values.
@@ -935,6 +924,47 @@ Project-specific checks every upstream sync runs, in addition to the full test s
 ## Merge History
 
 This is an append-only decision record, newest first, with one entry per upstream sync. It explains past integrations but does not by itself establish a current divergence; use the Divergence Log for that. Sync with upstream only when the user explicitly asks. Do not edit past entries.
+
+### 2026-11-07 — Merge upstream/main through `006d7e38f0`
+
+**Merge commit:** this commit
+**Parents:** `48d668698d07ea5e5ecfb69d55243e3d64e217d3` (fork) and `006d7e38f0485431c314a1afcc39fa823f379092` (upstream/main); 807 upstream commits since `955e2bfbb5`.
+
+The sync keeps 43 divergence entries. One was retired by explicit decision: DL056.
+
+User decisions:
+
+- Retire DL056. Upstream reverted #26195 (`34701646e3`), so the Working shelf keeps running threads through any disconnect. The fork's 20-second hold and its `useEnvironmentsHeldFor` hook are gone.
+
+Other decisions:
+
+- Keep DL037's redemption request; upstream did not change that path.
+- Adopt upstream's removal of the `migrate-dev-db` migration-slot warning (#24665), which was upstream code. The fork still prunes its checkpoint sidecar tables and `auto_resume_jobs`.
+- Adopt upstream's 100,000-record cap per transcript in session scanning, beside the fork's byte and transcript budgets.
+- Fork code follows upstream's Effect 4.1.2 upgrade: `effect/Crypto` users moved to `SecureRandom` and `Digest`, including management API keys (DL031).
+- Upstream's new `chat.newLocal` shortcut row expects the fork's project picker (DL041).
+- The agent-context budget records the measured values. The fork adds the same 224 Codex and 819 MCP bytes over upstream as before the sync.
+- Keep canonical upstream migration IDs through 080 and fork IDs 1–15.
+
+Integration repairs:
+
+- Split view never renders a thread hidden by upstream's tag filter. Its check had compared `:`-joined keys against upstream's `\u0000`-joined hidden keys (DL008).
+- Prompt suggestion ghost text reads the last message from the thread's turn items, because upstream's timeline entries no longer include assistant messages (DL034). Its settings description fits upstream's 200-character lint.
+- Chat images cache like upstream again; only file previews refresh an unrevisioned URL. Upstream's `??` had also stopped file previews from refreshing (DL045).
+- Delegated task completion again waits for unawaited background commands (DL018).
+- Snapshot retention expires idle current-checkout threads again, and web and mobile honor upstream's managed policy lock (DL051).
+- DL020, DL032 and DL008 regression tests follow upstream's fixtures and keep the fork's assertions.
+- Removed a Claude effort helper the merge left unused, and updated the fork release workflow's version example to `0.1.7`.
+
+Validation:
+
+- Repository-wide `vp check` (0 errors, the same 6 warnings as pre-merge `dev`) and `vp run typecheck` pass. `vp run lint:mobile` passes.
+- Every package suite ran after the merge and was compared with a pre-merge baseline. No new deterministic failure remains. Pre-existing failures: mobile `SettingsServerControlsRouteScreen` (`__DEV__`), server `UsageService` removed-directory case, and web `bundledDev`. Full-run failures that pass alone also pass on pre-merge `dev`.
+- A read-only snapshot of the live database applied upstream migrations 077–080 in 1.4 seconds, reran idempotently, matched the migration manifest, kept fork ledger 1–15, and passed `foreign_key_check` and `quick_check`.
+- Independent client (Claude Opus 5.5) and server (GPT 6.1 Sol) audits checked every divergence entry; their findings were fixed above.
+- A paired web client on seeded real data loaded long history and completed live Codex Luna turns. It verified `/clear`, ordering, the Chat: New Local picker, group-scoped model search, and the Maintenance, provider, gateway, Secrets and Threads settings. In a Luna thread in its own worktree, undo and redo removed and restored its file, with the Changes count following. Prompt-suggestion ghost text showed and Tab accepted it. Tagging a split thread with hiding on collapsed the split to the visible thread and redirected its URL; turning hiding off restored the split.
+- Desktop and web production builds pass. The Linux AppImage built, launched under Xvfb with isolated state, created its window, started its backend, and migrated a fresh database to canonical 80 and fork 15.
+- Not covered: live Claude turns through the Claude CPA gateway fail with `400 messages[4].name ... named conversation participants`. A minimal SDK script outside T3 reproduces it on both the merged (0.3.316) and pre-merge (0.3.276) SDK, so it is not from this merge. DL013's optional Codex discovery errors still fail the provider probe, as before the merge. Native mobile runtime and Windows/macOS installers were not exercised. No deployment was performed.
 
 ### 2026-11-01 — Merge upstream/main through `955e2bfbb5`
 

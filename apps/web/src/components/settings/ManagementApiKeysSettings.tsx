@@ -14,6 +14,7 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import { EnvironmentId } from "@t3tools/contracts";
 import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestampFormat";
@@ -121,8 +122,10 @@ function formatLastUsed(value: string | null, nowMs: number): string {
   return `Used ${elapsed}${elapsed === "just now" ? "" : " ago"}`;
 }
 
+const isManagementApiKeyRequestError = Schema.is(ManagementApiKeyRequestError);
+
 function readErrorMessage(error: unknown): string {
-  if (error instanceof ManagementApiKeyRequestError) {
+  if (isManagementApiKeyRequestError(error)) {
     if (error.status === 401 || error.status === 403) {
       return "You need access-management permission to manage API keys.";
     }

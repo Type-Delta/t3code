@@ -306,6 +306,10 @@ it.effect("converts every deployed 59-67 fork collision before upstream migratio
       [74, "ExcludeAttachmentPlaceholdersFromSearch"],
       [75, "SubagentDeliveryState"],
       [76, "ProjectionProjectsPinArchive"],
+      [77, "RepairBooleanSettledOverride"],
+      [78, "DropOrchestrationEventCorrelationIndex"],
+      [79, "DelegatedRecoveryIndexes"],
+      [80, "ScheduledTaskThreadMode"],
     ]);
     const effectRows = yield* sql<{ migration_id: number; name: string }>`
       SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 48 ORDER BY migration_id`;
