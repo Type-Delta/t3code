@@ -31,7 +31,9 @@ const write = (message) => process.stdout.write(JSON.stringify(message) + "\n");
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method } = JSON.parse(line);
   if (id === undefined) return;
-  if (method === "initialize") {
+  if ((process.env.FAKE_FAIL_METHODS ?? "").split(",").includes(method)) {
+    write({ id, error: { code: -32603, message: method + " failed" } });
+  } else if (method === "initialize") {
     write({ id, result: { userAgent: "codex/0.162.0", codexHome: process.env.CODEX_HOME, platformFamily: "unix", platformOs: "macos" } });
   } else if (method === "account/read") {
     write({ id, result: { account: { type: "chatgpt", email: "test@example.com", planType: "promax" }, requiresOpenaiAuth: false } });
@@ -47,9 +49,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
-const solServiceTiers = Effect.fn("solServiceTiers")(function* (
+const probeFakeCodex = Effect.fn("probeFakeCodex")(function* (
   ultrafastEntitled: boolean,
   refreshDelayMs = 300,
+  failMethods = "",
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -81,15 +84,23 @@ const solServiceTiers = Effect.fn("solServiceTiers")(function* (
   );
 
   const { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: _ambient, ...environment } = process.env;
-  const provider = yield* checkCodexProviderStatus(
+  return yield* checkCodexProviderStatus(
     decodeCodexSettings({ binaryPath, homePath: dir }),
     undefined,
     {
       ...environment,
       FAKE_ULTRAFAST_ENTITLED: ultrafastEntitled ? "1" : "0",
       FAKE_REFRESH_DELAY_MS: String(refreshDelayMs),
+      FAKE_FAIL_METHODS: failMethods,
     },
   );
+});
+
+const solServiceTiers = Effect.fn("solServiceTiers")(function* (
+  ultrafastEntitled: boolean,
+  refreshDelayMs?: number,
+) {
+  const provider = yield* probeFakeCodex(ultrafastEntitled, refreshDelayMs);
   const serviceTier = provider.models
     .find((model) => model.slug === "gpt-6.1-sol")
     ?.capabilities?.optionDescriptors?.find((descriptor) => descriptor.id === "serviceTier");
@@ -113,6 +124,21 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("Codex catalog disco
     Effect.gen(function* () {
       const tiers = yield* solServiceTiers(true, 3_500);
       assert.deepStrictEqual(tiers, ["default", "priority"]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps a signed-in Codex when skills or model discovery fails", () =>
+    Effect.gen(function* () {
+      const skillsFailed = yield* probeFakeCodex(true, 300, "skills/list");
+      assert.strictEqual(skillsFailed.status, "ready");
+      assert.strictEqual(skillsFailed.auth.status, "authenticated");
+      assert.deepStrictEqual(skillsFailed.skills, []);
+      assert.isTrue(skillsFailed.models.some((model) => model.slug === "gpt-6.1-sol"));
+
+      const modelsFailed = yield* probeFakeCodex(true, 300, "model/list");
+      assert.strictEqual(modelsFailed.status, "warning");
+      assert.strictEqual(modelsFailed.auth.status, "authenticated");
+      assert.strictEqual(modelsFailed.message, "Codex did not return its model catalog.");
     }).pipe(Effect.scoped),
   );
 });

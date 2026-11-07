@@ -178,13 +178,13 @@ Upstream now keeps the optimistic prompt visible while a draft becomes its serve
 
 ### DL013 — Codex availability through catalog and turn failures
 
-Codex model and skill discovery shares the authenticated app-server probe's 20-second budget, ending 250 ms before its outer deadline. A discovery timeout keeps the account result with missing enrichment. ChatGPT model discovery waits up to three seconds for the startup catalog refresh, then uses the first catalog if no refresh arrives. Skills discovery has no separate three-second deadline. A skills/list or model-list RPC error still fails the probe and reports provider status `error`, even after successful authentication.
+Codex model and skill discovery shares the authenticated app-server probe's 20-second budget, ending 250 ms before its outer deadline. A discovery timeout keeps the account result with missing enrichment. ChatGPT model discovery waits up to three seconds for the startup catalog refresh, then uses the first catalog if no refresh arrives. Skills discovery has no separate three-second deadline. A skills/list or model-list RPC error reply is handled like a timeout: the probe logs a warning and keeps the account result, with no skills or a `warning` status saying Codex did not return its model catalog. App-server process or transport failure still fails the probe.
 
 App-server errors are classified by scope: retryable transport errors remain warnings, while a typed non-retryable turn error emits the terminal failed-turn lifecycle needed to release the thread for a follow-up message. Actual process or transport failure still marks the session unavailable. The V2 adapter has no equivalent of the former 30-minute root collaboration-wait watchdog. Upstream terminal-state, hard-stop, tool-identity, and liveness behavior remains in place.
 
-**Implementation evidence:** `apps/server/src/provider/CodexProvider.ts`, `apps/server/src/provider/CodexProvider.test.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`, and `packages/contracts/src/providerRuntime.ts`.
+**Implementation evidence:** `apps/server/src/provider/CodexProvider.ts`, `apps/server/src/provider/CodexProvider.test.ts`, `apps/server/src/provider/CodexProvider.catalog.test.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`, `apps/server/src/orchestration-v2/ProviderEventIngestor.ts`, and `packages/contracts/src/providerRuntime.ts`.
 
-**Recorded validation:** focused Codex provider, adapter, and provider-runtime ingestion suites; `vp check`; and `vp run typecheck`. Optional discovery RPC failures remain a known limitation.
+**Recorded validation:** focused Codex provider, adapter, and provider-runtime ingestion suites; `vp check`; and `vp run typecheck`. The catalog suite injects `skills/list` and `model/list` RPC errors into a fake app-server, and a live check through a Codex shim showed the configured instance staying available when either RPC failed.
 
 **Last updated:** 2026-11-07
 

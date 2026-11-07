@@ -395,6 +395,18 @@ const withCodexDiscoveryDeadline = Effect.fnUntraced(function* <A, E, R>(
   );
 });
 
+// An RPC error reply degrades like a timeout; a dead process still fails the probe.
+const optionalCodexDiscovery = <A, R>(
+  label: string,
+  effect: Effect.Effect<A | undefined, CodexErrors.CodexAppServerError, R>,
+) =>
+  effect.pipe(
+    Effect.catchTags({
+      CodexAppServerRequestError: (cause) =>
+        Effect.logWarning(`Codex ${label} discovery failed.`, { cause }).pipe(Effect.as(undefined)),
+    }),
+  );
+
 /**
  * Every Codex client on the machine shares that file, and the backend tailors
  * the catalog to each client's originator: the plain CLI does not get Sol
@@ -429,8 +441,10 @@ const requestCodexChatGptModels = Effect.fn("requestCodexChatGptModels")(functio
     return models;
   }
   return (
-    (yield* withCodexDiscoveryDeadline(requestAllCodexModels(input.client), input.deadlineMs)) ??
-    models
+    (yield* optionalCodexDiscovery(
+      "model",
+      withCodexDiscoveryDeadline(requestAllCodexModels(input.client), input.deadlineMs),
+    )) ?? models
   );
 });
 
@@ -542,15 +556,24 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   const deadlineMs = spawnedAtMs + CODEX_AUTH_PROBE_TIMEOUT_MS - CODEX_DISCOVERY_MARGIN_MS;
   const [skillsResponse, models, serviceTier, rateLimits] = yield* Effect.all(
     [
-      withCodexDiscoveryDeadline(client.request("skills/list", { cwds: [input.cwd] }), deadlineMs),
-      accountResponse.account?.type === "chatgpt"
-        ? requestCodexChatGptModels({
-            client,
-            codexHome: initialize.codexHome,
-            spawnedAtMs,
-            deadlineMs,
-          })
-        : withCodexDiscoveryDeadline(requestAllCodexModels(client), deadlineMs),
+      optionalCodexDiscovery(
+        "skills",
+        withCodexDiscoveryDeadline(
+          client.request("skills/list", { cwds: [input.cwd] }),
+          deadlineMs,
+        ),
+      ),
+      optionalCodexDiscovery(
+        "model",
+        accountResponse.account?.type === "chatgpt"
+          ? requestCodexChatGptModels({
+              client,
+              codexHome: initialize.codexHome,
+              spawnedAtMs,
+              deadlineMs,
+            })
+          : withCodexDiscoveryDeadline(requestAllCodexModels(client), deadlineMs),
+      ),
       // The shared catalog must exclude config from the server's launch project.
       withCodexDiscoveryDeadline(
         client.request("config/read", { includeLayers: false }),
@@ -899,7 +922,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       ...(accountStatus.message
         ? { message: accountStatus.message }
         : snapshot.models === undefined
-          ? { message: "Codex did not return its model catalog in time." }
+          ? { message: "Codex did not return its model catalog." }
           : {}),
       ...(managedAuth ? {} : { usageLimits }),
     },
