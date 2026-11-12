@@ -209,9 +209,15 @@ async function setup() {
   stack.use(fakeTimers());
   const registry = AtomRegistry.make();
   stack.defer(() => registry.dispose());
+  const routeListeners = new Set<() => void>();
+  let previousActive = { ...state.active };
   const router = {
     state: { matches: [{ params: state.active }] },
     navigate: state.navigate,
+    subscribe: (_event: string, listener: () => void) => {
+      routeListeners.add(listener);
+      return () => routeListeners.delete(listener);
+    },
   };
   const refresh = () =>
     registry.set(shellAtom, {
@@ -221,6 +227,13 @@ async function setup() {
   let started = false;
   const rerender = async () => {
     router.state.matches[0]!.params = state.active;
+    if (
+      previousActive.environmentId !== state.active.environmentId ||
+      previousActive.threadId !== state.active.threadId
+    ) {
+      previousActive = { ...state.active };
+      for (const listener of routeListeners) listener();
+    }
     registry.set(
       requestsAtom,
       new Map(state.delegatedChild === "approval" ? [["thread-1", "approval"]] : []),

@@ -32,11 +32,15 @@ import {
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as SecureRandom from "effect/crypto/SecureRandom";
-import * as Duration from "effect/Duration";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 
-import { EnvironmentSupervisor } from "../connection/supervisor.ts";
-import { EnvironmentRpcUnavailableError, getInitialServerConfig, request } from "../rpc/client.ts";
+import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { getInitialServerConfig, isRpcClientError, request } from "../rpc/client.ts";
 
 interface CommandMetadata {
   readonly commandId?: CommandId;
@@ -193,6 +197,8 @@ export interface StartThreadTurnInput extends ThreadCommandInput {
   readonly dispatchMode?: "auto" | "queue" | "steer" | "restart" | "start";
   /** Start a new provider session; needs the server's `freshContext` capability. */
   readonly freshContext?: boolean;
+  /** Defaults to true. Callers with their own retry queue opt out so a dead socket fails fast. */
+  readonly resendAfterSocketLoss?: boolean;
 }
 
 export interface InterruptThreadTurnInput extends ThreadCommandInput {
@@ -290,35 +296,47 @@ const allocateCommandId = Effect.fn("EnvironmentCommands.allocateCommandId")(fun
   return CommandId.make(yield* random.uuidV4());
 });
 
-const ORCHESTRATION_DISPATCH_TIMEOUT = Duration.seconds(10);
+const dispatch = (command: OrchestrationV2Command) =>
+  request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command);
 
-/**
- * A lost WebSocket reply must fail into the caller's visible failure path
- * (which restores the composer draft) instead of leaving an optimistic message
- * pending until refresh.
- */
-const withAckTimeout = Effect.fn("EnvironmentCommands.withAckTimeout")(function* <A, E, R>(
-  effect: Effect.Effect<A, E, R>,
+// The socket can close after the server accepted the frame but before it answered.
+// The server replays an accepted commandId from its receipt, so the same command
+// waits out reconnect backoff until the supervisor stops trying. The resend cap
+// stops a frame that kills the socket from looping.
+const MAX_LOST_TRANSPORT_RESENDS = 2;
+
+const dispatchMessage = Effect.fn("EnvironmentCommands.dispatchMessage")(function* (
+  command: Extract<OrchestrationV2Command, { type: "message.dispatch" }>,
+  resendAfterSocketLoss: boolean,
 ) {
-  const supervisor = yield* EnvironmentSupervisor;
-  return yield* effect.pipe(
-    Effect.timeoutOrElse({
-      duration: ORCHESTRATION_DISPATCH_TIMEOUT,
-      orElse: () =>
-        Effect.fail(
-          new EnvironmentRpcUnavailableError({
-            environmentId: supervisor.target.environmentId,
-            message: `${supervisor.target.label} did not acknowledge the command within 10 seconds.`,
-          }),
+  if (!resendAfterSocketLoss) return yield* dispatch(command);
+  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  for (let resends = 0; ; resends += 1) {
+    const attemptSession = yield* SubscriptionRef.get(supervisor.session);
+    const exit = yield* Effect.exit(dispatch(command));
+    if (Exit.isSuccess(exit)) return exit.value;
+    // Closing the session interrupts the request, which can beat the protocol error.
+    const lostTransport =
+      Cause.hasInterruptsOnly(exit.cause) ||
+      exit.cause.reasons.some((reason) => reason._tag === "Fail" && isRpcClientError(reason.error));
+    if (!lostTransport || resends >= MAX_LOST_TRANSPORT_RESENDS) return yield* exit;
+    const replacement = yield* Effect.raceFirst(
+      SubscriptionRef.changes(supervisor.session).pipe(
+        Stream.filter(
+          (session) =>
+            Option.isSome(session) &&
+            !(Option.isSome(attemptSession) && session.value === attemptSession.value),
         ),
-    }),
-  );
-});
-
-const dispatch = Effect.fn("EnvironmentCommands.dispatch")(function* (
-  command: OrchestrationV2Command,
-) {
-  return yield* withAckTimeout(request(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, command));
+        Stream.runHead,
+      ),
+      SubscriptionRef.changes(supervisor.state).pipe(
+        Stream.filter((state) => state.phase === "available" || state.phase === "blocked"),
+        Stream.runHead,
+        Effect.as(Option.none()),
+      ),
+    );
+    if (Option.isNone(replacement)) return yield* exit;
+  }
 });
 
 const getProjection = (threadId: ThreadId) =>
@@ -769,85 +787,92 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
                 ? {}
                 : { branch: bootstrap.branch }),
             };
-    return yield* withAckTimeout(
-      request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
-        commandId,
-        creationSource: input.creationSource ?? "web",
-        threadId: input.threadId,
-        ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
-        projectId: thread.projectId,
-        title: input.titleSeed ?? thread.title,
-        generateTitle: input.titleSeed !== undefined,
-        modelSelection: input.modelSelection ?? thread.modelSelection,
-        runtimeMode: input.runtimeMode,
-        interactionMode: input.interactionMode,
-        ...(input.promptSuggestion === undefined
-          ? {}
-          : { promptSuggestion: input.promptSuggestion }),
-        workspaceStrategy,
-        initialMessage: {
-          messageId: input.message.messageId,
-          text: input.message.text,
-          ...(context ? { context } : {}),
-          attachments,
-        },
-      }),
-    );
+    return yield* request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
+      commandId,
+      creationSource: input.creationSource ?? "web",
+      threadId: input.threadId,
+      ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
+      projectId: thread.projectId,
+      title: input.titleSeed ?? thread.title,
+      generateTitle: input.titleSeed !== undefined,
+      modelSelection: input.modelSelection ?? thread.modelSelection,
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
+      ...(input.promptSuggestion === undefined ? {} : { promptSuggestion: input.promptSuggestion }),
+      workspaceStrategy,
+      initialMessage: {
+        messageId: input.message.messageId,
+        text: input.message.text,
+        ...(context ? { context } : {}),
+        attachments,
+      },
+    });
   }
 
   const requestedMode = input.dispatchMode ?? "auto";
+  const resendAfterSocketLoss = input.resendAfterSocketLoss ?? true;
   if (requestedMode === "start") {
-    return yield* dispatch({
-      type: "message.dispatch",
-      commandId,
-      createdBy: "user",
-      creationSource: input.creationSource ?? "web",
-      threadId: input.threadId,
-      messageId: input.message.messageId,
-      ...(input.manualContinuationOfRunId === undefined
-        ? {}
-        : { manualContinuationOfRunId: input.manualContinuationOfRunId }),
-      text: input.message.text,
-      ...(context ? { context } : {}),
-      ...(input.message.idleCompaction === undefined
-        ? {}
-        : { idleCompaction: input.message.idleCompaction }),
-      attachments,
-      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-      ...(input.promptSuggestion === undefined ? {} : { promptSuggestion: input.promptSuggestion }),
-      ...(input.sourceProposedPlan === undefined
-        ? {}
-        : { sourcePlanRef: input.sourceProposedPlan }),
-      ...(input.freshContext ? { freshContext: true } : {}),
-      dispatchMode: { type: "start_immediately" },
-    });
+    return yield* dispatchMessage(
+      {
+        type: "message.dispatch",
+        commandId,
+        createdBy: "user",
+        creationSource: input.creationSource ?? "web",
+        threadId: input.threadId,
+        messageId: input.message.messageId,
+        ...(input.manualContinuationOfRunId === undefined
+          ? {}
+          : { manualContinuationOfRunId: input.manualContinuationOfRunId }),
+        text: input.message.text,
+        ...(context ? { context } : {}),
+        ...(input.message.idleCompaction === undefined
+          ? {}
+          : { idleCompaction: input.message.idleCompaction }),
+        attachments,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.promptSuggestion === undefined
+          ? {}
+          : { promptSuggestion: input.promptSuggestion }),
+        ...(input.sourceProposedPlan === undefined
+          ? {}
+          : { sourcePlanRef: input.sourceProposedPlan }),
+        ...(input.freshContext ? { freshContext: true } : {}),
+        dispatchMode: { type: "start_immediately" },
+      },
+      resendAfterSocketLoss,
+    );
   }
 
   const dispatchMode =
     requestedMode === "queue"
       ? ({ type: "queue_after_active" } as const)
       : ({ type: "start_immediately" } as const);
-  return yield* dispatch({
-    type: "message.dispatch",
-    commandId,
-    createdBy: "user",
-    creationSource: input.creationSource ?? "web",
-    threadId: input.threadId,
-    messageId: input.message.messageId,
-    text: input.message.text,
-    ...(context ? { context } : {}),
-    ...(input.message.idleCompaction === undefined
-      ? {}
-      : { idleCompaction: input.message.idleCompaction }),
-    attachments,
-    ...(input.titleSeed === undefined ? {} : { titleSeed: input.titleSeed }),
-    ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-    ...(input.promptSuggestion === undefined ? {} : { promptSuggestion: input.promptSuggestion }),
-    ...(input.sourceProposedPlan === undefined ? {} : { sourcePlanRef: input.sourceProposedPlan }),
-    ...(input.freshContext ? { freshContext: true } : {}),
-    ...(requestedMode !== "queue" ? { deliveryIntent: requestedMode } : {}),
-    dispatchMode,
-  });
+  return yield* dispatchMessage(
+    {
+      type: "message.dispatch",
+      commandId,
+      createdBy: "user",
+      creationSource: input.creationSource ?? "web",
+      threadId: input.threadId,
+      messageId: input.message.messageId,
+      text: input.message.text,
+      ...(context ? { context } : {}),
+      ...(input.message.idleCompaction === undefined
+        ? {}
+        : { idleCompaction: input.message.idleCompaction }),
+      attachments,
+      ...(input.titleSeed === undefined ? {} : { titleSeed: input.titleSeed }),
+      ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+      ...(input.promptSuggestion === undefined ? {} : { promptSuggestion: input.promptSuggestion }),
+      ...(input.sourceProposedPlan === undefined
+        ? {}
+        : { sourcePlanRef: input.sourceProposedPlan }),
+      ...(input.freshContext ? { freshContext: true } : {}),
+      ...(requestedMode !== "queue" ? { deliveryIntent: requestedMode } : {}),
+      dispatchMode,
+    },
+    resendAfterSocketLoss,
+  );
 });
 
 export const interruptThreadTurn = Effect.fn("EnvironmentCommands.interruptThreadTurn")(function* (
@@ -1024,7 +1049,12 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
           ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
           : candidate.appRunOrdinal === input.turnCount,
       );
-    if (checkpoint === undefined || checkpoint.status !== "ready") {
+    if (
+      checkpoint === undefined ||
+      // Missing snapshots support conversation rewind only.
+      (checkpoint.status !== "ready" &&
+        !(input.restoreFiles === false && checkpoint.status === "missing"))
+    ) {
       const target =
         input.checkpointId === undefined
           ? `run ordinal ${input.turnCount ?? "unknown"}`

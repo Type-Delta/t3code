@@ -97,6 +97,7 @@ export type UserInputAttachmentAnswerPayload = typeof UserInputAttachmentAnswerP
 
 export const PromptSuggestionPreference = Schema.Struct({
   enabled: Schema.Boolean,
+  claudeNative: Schema.optionalKey(Schema.Boolean),
   instructions: Schema.optionalKey(TrimmedString),
 });
 export type PromptSuggestionPreference = typeof PromptSuggestionPreference.Type;

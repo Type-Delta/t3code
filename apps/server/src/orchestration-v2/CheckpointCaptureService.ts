@@ -82,6 +82,7 @@ export const layer: Layer.Layer<
         scope,
         providerThread,
         readyCheckpointOrdinals,
+        preservedCheckpointOrdinals,
         staleCheckpointOrdinals = [],
         abandonedRunOrdinals = [],
       } = yield* projections.getCheckpointCaptureContext(input.threadId, input);
@@ -128,8 +129,8 @@ export const layer: Layer.Layer<
       )
         ? latestReady
         : Math.max(0, run.ordinal - 1);
-      const hasReadyCheckpoint = (ordinalWithinScope: number) =>
-        readyCheckpointOrdinals.includes(ordinalWithinScope);
+      const isPreserved = (ordinalWithinScope: number) =>
+        preservedCheckpointOrdinals.includes(ordinalWithinScope);
       // The baselines this capture materializes are attributed to the run materializing them. The
       // thread's scope may already be a later run's: one queued meanwhile, or sent after Stop.
       const materializeBaseline = (ordinalWithinScope: number) =>
@@ -141,10 +142,8 @@ export const layer: Layer.Layer<
           forceMissing: sideChat,
         });
       const threadStartCheckpoint =
-        baselineOrdinalWithinScope === 0 || hasReadyCheckpoint(0)
-          ? null
-          : yield* materializeBaseline(0);
-      const baselineCheckpoint = hasReadyCheckpoint(baselineOrdinalWithinScope)
+        baselineOrdinalWithinScope === 0 || isPreserved(0) ? null : yield* materializeBaseline(0);
+      const baselineCheckpoint = isPreserved(baselineOrdinalWithinScope)
         ? null
         : yield* materializeBaseline(baselineOrdinalWithinScope);
       const captured = yield* checkpoints.capture({

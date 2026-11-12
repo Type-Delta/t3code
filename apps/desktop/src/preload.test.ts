@@ -18,6 +18,7 @@ vi.mock("electron", () => ({
 
 describe("desktop preload", () => {
   it("forwards the selected environment when requesting its bearer token", async () => {
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, value: null });
     await import("./preload.ts");
     const bridge = electron.exposeInMainWorld.mock.calls.find(
       ([name]) => name === "desktopBridge",

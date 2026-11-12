@@ -28,7 +28,13 @@ vi.mock(import("../../state/queries"), () => ({
 }));
 vi.mock(import("../../state/pullRequests"), () => ({
   pullRequestEnvironment: { detail: vi.fn() } as never,
-  usePullRequestList: () => ({ data: null, error: null, isPending: false, refresh: () => {} }),
+  usePullRequestList: () => ({
+    data: null,
+    error: null,
+    isPending: false,
+    observations: [],
+    refresh: () => {},
+  }),
 }));
 vi.mock(import("../../state/query"), () => ({
   useEnvironmentQuery: () => ({
@@ -103,7 +109,6 @@ function OpenCheckpointMenu() {
     pullRequestProjectId: null,
     pullRequestRepository: null,
     threadPullRequests: undefined,
-    planModeUiEnabled: false,
     compactSlashCommandAvailable: false,
     freshSessionAvailable: false,
     selectedProvider: ProviderDriverKind.make("codex"),
@@ -112,6 +117,7 @@ function OpenCheckpointMenu() {
     showSkillsInSlashMenu: false,
     checkpointNavigationDisabledReason,
     workspaceSkillsScanning: false,
+    modelMentions: { instanceEntries: [], modelOptionsByInstance: new Map() },
     sideChatAvailable: false,
     sideChatDisabledReason: null,
   });

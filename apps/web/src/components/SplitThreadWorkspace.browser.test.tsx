@@ -38,8 +38,7 @@ it("leaves a thread the tag filter hides out of the split", async () => {
   const hidden = { ...threadWithHistory("thread-hidden", 1), tags: ["private"] };
   const shown = threadWithHistory("thread-shown", 1);
   using _environment = installFakeEnvironment([hidden, shown], {
-    hideTaggedThreads: true,
-    hiddenThreadTags: ["private"],
+    settings: { hideTaggedThreads: true, hiddenThreadTags: ["private"] },
   });
   __setClientSettingsForTests({
     ...DEFAULT_CLIENT_SETTINGS,

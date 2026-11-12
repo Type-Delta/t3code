@@ -22,21 +22,25 @@ import {
   type ProjectMutation,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as TestClock from "effect/testing/TestClock";
+import { RpcClientError } from "effect/rpc";
 
 import {
   AVAILABLE_CONNECTION_STATE,
   PrimaryConnectionTarget,
   type PreparedConnection,
+  type SupervisorConnectionState,
 } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
-import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import { v2Now, v2Projection, v2ThreadId } from "../state/orchestrationV2TestFixtures.ts";
@@ -62,13 +66,18 @@ const TARGET = new PrimaryConnectionTarget({
   wsBaseUrl: "wss://environment.example.test",
 });
 
+const CONNECTED_STATE: SupervisorConnectionState = {
+  ...AVAILABLE_CONNECTION_STATE,
+  desired: true,
+  phase: "connected",
+};
+
 const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(function* (input: {
   readonly commands: OrchestrationV2Command[];
   readonly projects: ProjectMutation[];
   readonly launches?: OrchestrationV2ThreadLaunchInput[];
   readonly projection?: OrchestrationV2ThreadProjection;
   readonly projectionRequests?: ThreadId[];
-  readonly launchStalled?: boolean;
   readonly advertiseServerResolvedCommandContext?: boolean;
   readonly advertiseThreadStop?: boolean;
 }) {
@@ -86,16 +95,14 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
         return input.projection ?? v2Projection;
       }),
     [ORCHESTRATION_V2_WS_METHODS.launchThread]: (launchInput: OrchestrationV2ThreadLaunchInput) =>
-      input.launchStalled
-        ? Effect.never
-        : Effect.sync(() => {
-            input.launches?.push(launchInput);
-            return {
-              threadId: launchInput.threadId ?? v2ThreadId,
-              projection: input.projection ?? v2Projection,
-              resumed: false,
-            };
-          }),
+      Effect.sync(() => {
+        input.launches?.push(launchInput);
+        return {
+          threadId: launchInput.threadId ?? v2ThreadId,
+          projection: input.projection ?? v2Projection,
+          resumed: false,
+        };
+      }),
     [WS_METHODS.projectsMutate]: (mutation: ProjectMutation) =>
       Effect.sync(() => {
         input.projects.push(mutation);
@@ -135,7 +142,7 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
   };
   return EnvironmentSupervisor.EnvironmentSupervisor.of({
     target: TARGET,
-    state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+    state: yield* SubscriptionRef.make(CONNECTED_STATE),
     session: yield* SubscriptionRef.make(Option.some(session)),
     prepared: yield* SubscriptionRef.make(Option.none<PreparedConnection>()),
     connect: Effect.void,
@@ -180,33 +187,6 @@ describe("V2 environment commands", () => {
       expect(commands).toEqual([
         { type: "thread.archive", commandId: "queued-command", threadId: "thread-1" },
       ]);
-    }).pipe(Effect.provide(layerTestRandom)),
-  );
-
-  it.effect("fails an unacknowledged command instead of leaving it pending forever", () =>
-    Effect.gen(function* () {
-      const supervisor = yield* makeSupervisor({ commands: [], projects: [] });
-      const session = Option.getOrThrow(yield* SubscriptionRef.get(supervisor.session));
-      const stalledSupervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
-        ...supervisor,
-        session: yield* SubscriptionRef.make(
-          Option.some({
-            ...session,
-            client: {
-              ...session.client,
-              [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: () => Effect.never,
-            } as unknown as WsRpcProtocolClient,
-          }),
-        ),
-      });
-      const fiber = yield* archiveThread({ threadId: ThreadId.make("thread-1") }).pipe(
-        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, stalledSupervisor),
-        Effect.flip,
-        Effect.forkChild,
-      );
-
-      yield* TestClock.adjust("10 seconds");
-      expect(yield* Fiber.join(fiber)).toBeInstanceOf(EnvironmentRpcUnavailableError);
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
@@ -274,7 +254,11 @@ describe("V2 environment commands", () => {
         },
         runtimeMode: "full-access",
         interactionMode: "default",
-        promptSuggestion: { enabled: true, instructions: "Keep the next check focused." },
+        promptSuggestion: {
+          enabled: true,
+          claudeNative: false,
+          instructions: "Keep the next check focused.",
+        },
         titleSeed: "Implement the plan",
         sourceProposedPlan: {
           threadId: ThreadId.make("thread-plan"),
@@ -288,7 +272,11 @@ describe("V2 environment commands", () => {
         commandId: "implement-plan",
         threadId: v2ThreadId,
         titleSeed: "Implement the plan",
-        promptSuggestion: { enabled: true, instructions: "Keep the next check focused." },
+        promptSuggestion: {
+          enabled: true,
+          claudeNative: false,
+          instructions: "Keep the next check focused.",
+        },
         sourcePlanRef: { threadId: "thread-plan", planId: "plan-1" },
         deliveryIntent: "auto",
         dispatchMode: { type: "start_immediately" },
@@ -337,46 +325,6 @@ describe("V2 environment commands", () => {
           branch: "feature",
         },
       });
-    }).pipe(Effect.provide(layerTestRandom)),
-  );
-
-  it.effect("times out a launch acknowledgement without waiting for workspace setup", () =>
-    Effect.gen(function* () {
-      const supervisor = yield* makeSupervisor({
-        commands: [],
-        projects: [],
-        launchStalled: true,
-      });
-      const fiber = yield* startThreadTurn({
-        commandId: CommandId.make("launch-timeout"),
-        threadId: v2ThreadId,
-        message: {
-          messageId: MessageId.make("message-launch-timeout"),
-          role: "user",
-          text: "Start",
-          attachments: [],
-        },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        bootstrap: {
-          createThread: {
-            projectId: v2Projection.thread.projectId,
-            title: v2Projection.thread.title,
-            modelSelection: v2Projection.thread.modelSelection,
-            runtimeMode: v2Projection.thread.runtimeMode,
-            interactionMode: v2Projection.thread.interactionMode,
-            branch: null,
-            worktreePath: null,
-            createdAt: String(v2Projection.thread.createdAt),
-          },
-        },
-      }).pipe(
-        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
-        Effect.flip,
-        Effect.forkChild,
-      );
-      yield* TestClock.adjust("10 seconds");
-      expect(yield* Fiber.join(fiber)).toBeInstanceOf(EnvironmentRpcUnavailableError);
     }).pipe(Effect.provide(layerTestRandom)),
   );
 
@@ -453,6 +401,182 @@ describe("V2 environment commands", () => {
         });
       }
       expect(projectionRequests).toEqual([]);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  // A dead socket reaches the caller as a protocol error, or as an interrupt when
+  // the supervisor closes the session before the protocol reports the error.
+  it.effect.each([
+    [
+      "protocol error",
+      new RpcClientError.RpcClientError({
+        reason: new RpcClientError.RpcClientDefect({
+          message: "socket closed",
+          cause: new Error("socket closed"),
+        }),
+      }),
+    ],
+    ["session close", Effect.failCause(Cause.interrupt())],
+  ] as const)("retries a message dispatch lost to a %s with the same command id", ([, loss]) =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const healthySession = Option.getOrThrow(yield* SubscriptionRef.get(supervisor.session));
+      const firstAttemptLost = yield* Deferred.make<void>();
+      const lostClient = {
+        ...healthySession.client,
+        [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
+          Effect.gen(function* () {
+            commands.push(command);
+            yield* SubscriptionRef.set(supervisor.session, Option.none());
+            yield* Deferred.succeed(firstAttemptLost, undefined);
+            return yield* loss;
+          }),
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(
+        supervisor.session,
+        Option.some({ ...healthySession, client: lostClient }),
+      );
+
+      const sendFiber = yield* startThreadTurn({
+        commandId: CommandId.make("command-lost-ack"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-lost-ack"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(firstAttemptLost);
+      yield* SubscriptionRef.set(supervisor.session, Option.some(healthySession));
+      const exit = yield* Fiber.await(sendFiber);
+
+      expect(commands.map((command) => [command.type, command.commandId])).toEqual([
+        ["message.dispatch", "command-lost-ack"],
+        ["message.dispatch", "command-lost-ack"],
+      ]);
+      expect(Exit.isSuccess(exit)).toBe(true);
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect("stops resending a message whose dispatch keeps losing the socket", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const healthySession = Option.getOrThrow(yield* SubscriptionRef.get(supervisor.session));
+      const dyingClient: WsRpcProtocolClient = {
+        ...healthySession.client,
+        [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
+          Effect.gen(function* () {
+            commands.push(command);
+            yield* SubscriptionRef.set(
+              supervisor.session,
+              Option.some({ ...healthySession, client: dyingClient }),
+            );
+            return yield* new RpcClientError.RpcClientError({
+              reason: new RpcClientError.RpcClientDefect({
+                message: "socket closed",
+                cause: new Error("socket closed"),
+              }),
+            });
+          }),
+      } as unknown as WsRpcProtocolClient;
+      yield* SubscriptionRef.set(
+        supervisor.session,
+        Option.some({ ...healthySession, client: dyingClient }),
+      );
+
+      const error = yield* startThreadTurn({
+        commandId: CommandId.make("command-socket-killer"),
+        threadId: v2ThreadId,
+        message: {
+          messageId: MessageId.make("message-socket-killer"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.flip,
+      );
+
+      expect(commands.map((command) => command.commandId)).toEqual([
+        "command-socket-killer",
+        "command-socket-killer",
+        "command-socket-killer",
+      ]);
+      expect(error._tag).toBe("RpcClientError");
+    }).pipe(Effect.provide(layerTestRandom)),
+  );
+
+  it.effect("holds a lost message through reconnect backoff until disconnect", () =>
+    Effect.gen(function* () {
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [] });
+      const healthySession = Option.getOrThrow(yield* SubscriptionRef.get(supervisor.session));
+      const lostClient = {
+        ...healthySession.client,
+        [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
+          Effect.gen(function* () {
+            commands.push(command);
+            yield* SubscriptionRef.set(supervisor.session, Option.none());
+            return yield* new RpcClientError.RpcClientError({
+              reason: new RpcClientError.RpcClientDefect({
+                message: "socket closed",
+                cause: new Error("socket closed"),
+              }),
+            });
+          }),
+      } as unknown as WsRpcProtocolClient;
+      const send = (resendAfterSocketLoss: boolean) =>
+        Effect.gen(function* () {
+          yield* SubscriptionRef.set(
+            supervisor.session,
+            Option.some({ ...healthySession, client: lostClient }),
+          );
+          return yield* startThreadTurn({
+            commandId: CommandId.make(`command-host-gone-${resendAfterSocketLoss}`),
+            threadId: v2ThreadId,
+            message: {
+              messageId: MessageId.make(`message-host-gone-${resendAfterSocketLoss}`),
+              role: "user",
+              text: "hello",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            resendAfterSocketLoss,
+          }).pipe(
+            Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+            Effect.flip,
+            Effect.forkChild,
+          );
+        });
+
+      const optedOut = yield* send(false);
+      expect((yield* Fiber.join(optedOut))._tag).toBe("RpcClientError");
+
+      const waiting = yield* send(true);
+      yield* SubscriptionRef.set(supervisor.state, {
+        ...CONNECTED_STATE,
+        phase: "backoff" as const,
+      });
+      yield* TestClock.adjust("2 minutes");
+      expect(waiting.pollUnsafe()).toBeUndefined();
+      yield* SubscriptionRef.set(supervisor.state, AVAILABLE_CONNECTION_STATE);
+      expect((yield* Fiber.join(waiting))._tag).toBe("RpcClientError");
+      expect(commands.map((command) => command.commandId)).toEqual([
+        "command-host-gone-false",
+        "command-host-gone-true",
+      ]);
     }).pipe(Effect.provide(layerTestRandom)),
   );
 

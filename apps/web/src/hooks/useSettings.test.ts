@@ -411,20 +411,24 @@ describe("mergeEnvironmentSettings", () => {
     const serverSettings = {
       ...DEFAULT_SERVER_SETTINGS,
       enablePromptSuggestion: false,
+      claudeNativePromptSuggestions: true,
       promptSuggestionInstructions: "server value",
     } as typeof DEFAULT_SERVER_SETTINGS & {
       enablePromptSuggestion: boolean;
+      claudeNativePromptSuggestions: boolean;
       promptSuggestionInstructions: string;
     };
     const clientSettings = {
       ...DEFAULT_CLIENT_SETTINGS,
       enablePromptSuggestion: true,
+      claudeNativePromptSuggestions: false,
       promptSuggestionInstructions: "client value",
     };
 
     const settings = mergeEnvironmentSettings(serverSettings, clientSettings);
 
     expect(settings.enablePromptSuggestion).toBe(true);
+    expect(settings.claudeNativePromptSuggestions).toBe(false);
     expect(settings.promptSuggestionInstructions).toBe("client value");
   });
 });

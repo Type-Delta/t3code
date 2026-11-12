@@ -204,6 +204,7 @@ describe("DesktopTray authentication integration", () => {
           }),
           backendReady: yield* Ref.make(false),
           quitting: yield* Ref.make(false),
+          canInstallUpdates: yield* Ref.make(false),
         });
         const baseLayer = Layer.mergeAll(
           assetsLayer,

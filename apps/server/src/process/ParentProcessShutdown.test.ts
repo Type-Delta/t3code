@@ -15,7 +15,7 @@ import { SERVICE_LAUNCHER_CONTEXT_ENV } from "../cloud/serviceProtocol.ts";
 import * as ParentProcessShutdown from "./ParentProcessShutdown.ts";
 
 it.layer(NodeServices.layer)("parent process shutdown", (it) => {
-  for (const mode of ["service", "desktop", "web", "linux-desktop"] as const) {
+  for (const mode of ["service", "service-stop", "desktop", "web", "linux-desktop"] as const) {
     it.effect(`handles parent shutdown for ${mode}`, () =>
       Effect.gen(function* () {
         const config = yield* ServerConfig.ServerConfig;
@@ -40,8 +40,8 @@ it.layer(NodeServices.layer)("parent process shutdown", (it) => {
             messages.emit("message", { type: "update-accepted", updateId: "update-1" });
             yield* Effect.yieldNow;
             assert.isUndefined(request.pollUnsafe());
-            messages.emit("message", { type: "shutdown" });
-            if (mode === "service") {
+            messages.emit("message", { type: mode === "service-stop" ? "stop" : "shutdown" });
+            if (mode === "service" || mode === "service-stop") {
               yield* Fiber.join(request);
             } else if (mode === "desktop") {
               assert.isUndefined(request.pollUnsafe());
@@ -58,7 +58,9 @@ it.layer(NodeServices.layer)("parent process shutdown", (it) => {
           Effect.provideService(HostProcess.Platform, mode === "linux-desktop" ? "linux" : "win32"),
           Effect.provideService(
             HostProcess.Environment,
-            mode === "service" ? { [SERVICE_LAUNCHER_CONTEXT_ENV]: "managed" } : {},
+            mode === "service" || mode === "service-stop"
+              ? { [SERVICE_LAUNCHER_CONTEXT_ENV]: "managed" }
+              : {},
           ),
           Effect.provideService(ServerConfig.ServerConfig, {
             ...config,

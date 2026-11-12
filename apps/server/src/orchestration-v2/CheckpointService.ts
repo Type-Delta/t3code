@@ -285,8 +285,19 @@ export const layer: Layer.Layer<
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
       workspaceLocks.withLock(cwd, effect);
 
-    const isGitCheckpointable = (cwd: string) =>
-      checkpointStore.isGitRepository(cwd).pipe(Effect.orElseSucceed(() => false));
+    // A failed probe is an operational error, not proof that the workspace has no repository.
+    const probeRepository = (scope: OrchestrationV2CheckpointScope) =>
+      checkpointStore.isGitRepository(scope.cwd).pipe(
+        Effect.map((isRepository) =>
+          isRepository ? ("repository" as const) : ("missing" as const),
+        ),
+        Effect.catch((cause) =>
+          Effect.logWarning("orchestration V2 checkpoint repository probe failed", {
+            scopeId: scope.id,
+            cause: String(cause),
+          }).pipe(Effect.as("error" as const)),
+        ),
+      );
 
     // Boundaries a capture is writing right now, waiting on the workspace lock
     // included. A run's baseline is its previous run's capture boundary.
@@ -307,7 +318,7 @@ export const layer: Layer.Layer<
             (yield* findBoundaryRef(input.scope, input.ordinalWithinScope)) !== null
           );
         });
-        if (!(yield* isGitCheckpointable(input.scope.cwd)) || (yield* baselineExists)) {
+        if (!(yield* checkpointStore.isGitRepository(input.scope.cwd)) || (yield* baselineExists)) {
           return;
         }
         yield* withWorkspaceLock(
@@ -346,21 +357,26 @@ export const layer: Layer.Layer<
               scopeId: input.scope.id,
               ordinalWithinScope: input.ordinalWithinScope,
             });
-            const checkpointable =
-              input.forceMissing !== true && (yield* isGitCheckpointable(input.scope.cwd));
-            const storedRef = checkpointable
-              ? yield* findBoundaryRef(input.scope, input.ordinalWithinScope).pipe(
-                  Effect.catch((cause) =>
-                    Effect.logWarning("orchestration V2 baseline ref lookup failed", {
-                      scopeId: input.scope.id,
-                      ordinalWithinScope: input.ordinalWithinScope,
-                      cause: String(cause),
-                    }).pipe(Effect.as(null)),
-                  ),
-                )
-              : null;
-            const available = storedRef !== null;
-            const checkpointRef = storedRef ?? legacyRef;
+            const repository =
+              input.forceMissing === true ? "missing" : yield* probeRepository(input.scope);
+            const stored =
+              repository === "repository"
+                ? yield* findBoundaryRef(input.scope, input.ordinalWithinScope).pipe(
+                    Effect.map((ref) => ({
+                      ref,
+                      status: ref === null ? ("missing" as const) : ("ready" as const),
+                    })),
+                    Effect.catch((cause) =>
+                      Effect.logWarning("orchestration V2 baseline ref lookup failed", {
+                        scopeId: input.scope.id,
+                        ordinalWithinScope: input.ordinalWithinScope,
+                        cause: String(cause),
+                      }).pipe(Effect.as({ ref: null, status: "error" as const })),
+                    ),
+                  )
+                : { ref: null, status: repository };
+            const checkpointRef = stored.ref ?? legacyRef;
+            const status = stored.status;
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,
@@ -370,7 +386,7 @@ export const layer: Layer.Layer<
               ordinalWithinScope: input.ordinalWithinScope,
               appRunOrdinal: null,
               ref: checkpointRef,
-              status: available ? "ready" : "missing",
+              status,
               files: [],
               capturedAt: input.capturedAt,
             });
@@ -402,7 +418,9 @@ export const layer: Layer.Layer<
                   ordinalWithinScope: baselineOrdinal,
                 })
               : null;
-          if (input.forceMissing === true || !(yield* isGitCheckpointable(input.scope.cwd))) {
+          const repository =
+            input.forceMissing === true ? "missing" : yield* probeRepository(input.scope);
+          if (repository !== "repository") {
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,
@@ -412,7 +430,7 @@ export const layer: Layer.Layer<
               ordinalWithinScope: input.ordinalWithinScope,
               appRunOrdinal: input.appRunOrdinal,
               ref: yield* legacyRefFor(input.scope, input.ordinalWithinScope),
-              status: "missing",
+              status: repository,
               files: [],
               capturedAt: input.capturedAt,
             });

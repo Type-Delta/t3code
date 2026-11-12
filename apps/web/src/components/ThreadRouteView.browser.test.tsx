@@ -13,6 +13,7 @@ vi.mock("../state/threads", async () => {
   const { Atom } = await import("effect/reactivity");
   return {
     environmentThreadShells: { hiddenThreadKeysAtom: Atom.make(new Set<string>()) },
+    threadFamilies: { mount: () => () => {} },
     useEnvironmentThread: () => ({ data: Option.none() }),
   };
 });

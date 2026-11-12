@@ -57,6 +57,22 @@ function parseDetectionCacheKey(key: string): {
   };
 }
 
+// True when some folder from the cwd up to the filesystem root holds `.git`.
+// Walks the real path, as git does, so a symlinked workspace finds its repository.
+export const hasGitEntryAbove = Effect.fn("VcsDriverRegistry.hasGitEntryAbove")(function* (
+  cwd: string,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  let folder = yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => path.resolve(cwd)));
+  while (true) {
+    if (yield* fileSystem.exists(path.join(folder, ".git"))) return true;
+    const parent = path.dirname(folder);
+    if (parent === folder) return false;
+    folder = parent;
+  }
+});
+
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -85,7 +101,16 @@ export const make = Effect.gen(function* () {
     driver: VcsDriver.VcsDriver["Service"],
     cwd: string,
   ) {
-    const repository = yield* driver.detectRepository(cwd);
+    // Status, review and source control show a repository Git cannot read as none at all.
+    // Checkpoints need the failure, so CheckpointStore asks the driver directly.
+    const repository = yield* driver.detectRepository(cwd).pipe(
+      Effect.catchTags({
+        VcsProcessExitError: (error) =>
+          error.operation === GitVcsDriver.WORK_TREE_PROBE_OPERATION
+            ? Effect.succeed(null)
+            : Effect.fail(error),
+      }),
+    );
     if (!repository) {
       return null;
     }
@@ -94,20 +119,6 @@ export const make = Effect.gen(function* () {
       repository,
       driver,
     } satisfies VcsDriverHandle;
-  });
-
-  // True when some folder from the cwd up to the filesystem root holds `.git`.
-  // Walks the real path, as git does, so a symlinked workspace finds its repository.
-  const hasGitEntryAbove = Effect.fn("VcsDriverRegistry.hasGitEntryAbove")(function* (cwd: string) {
-    let folder = yield* fileSystem
-      .realPath(cwd)
-      .pipe(Effect.orElseSucceed(() => path.resolve(cwd)));
-    while (true) {
-      if (yield* fileSystem.exists(path.join(folder, ".git"))) return true;
-      const parent = path.dirname(folder);
-      if (parent === folder) return false;
-      folder = parent;
-    }
   });
 
   const detectResolvedKind = Effect.fn("VcsDriverRegistry.detectResolvedKind")(function* (input: {
@@ -121,7 +132,11 @@ export const make = Effect.gen(function* () {
     // cwd there is no repository, so stats answer it before git is spawned.
     if (
       kind === "git" &&
-      !(yield* hasGitEntryAbove(input.cwd).pipe(Effect.orElseSucceed(() => true)))
+      !(yield* hasGitEntryAbove(input.cwd).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+        Effect.orElseSucceed(() => true),
+      ))
     ) {
       return null;
     }

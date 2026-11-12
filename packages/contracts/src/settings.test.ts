@@ -419,16 +419,20 @@ describe("ClientSettings notifications", () => {
 describe("ClientSettings prompt suggestions", () => {
   it("defaults to disabled and keeps the preference in the client settings", () => {
     expect(decodeClientSettings({}).enablePromptSuggestion).toBe(false);
+    expect(decodeClientSettings({}).claudeNativePromptSuggestions).toBe(true);
     expect(decodeClientSettings({}).promptSuggestionInstructions).toBe("");
 
     const settings = decodeClientSettings({
       enablePromptSuggestion: true,
+      claudeNativePromptSuggestions: false,
       promptSuggestionInstructions: " Suggest a focused next step. ",
     });
     expect(settings.enablePromptSuggestion).toBe(true);
+    expect(settings.claudeNativePromptSuggestions).toBe(false);
     expect(settings.promptSuggestionInstructions).toBe("Suggest a focused next step.");
     expect(encodeClientSettings(settings)).toMatchObject({
       enablePromptSuggestion: true,
+      claudeNativePromptSuggestions: false,
       promptSuggestionInstructions: "Suggest a focused next step.",
     });
   });
@@ -437,10 +441,12 @@ describe("ClientSettings prompt suggestions", () => {
     expect(
       decodeClientSettingsPatch({
         enablePromptSuggestion: true,
+        claudeNativePromptSuggestions: false,
         promptSuggestionInstructions: " Suggest one idea. ",
       }),
     ).toEqual({
       enablePromptSuggestion: true,
+      claudeNativePromptSuggestions: false,
       promptSuggestionInstructions: "Suggest one idea.",
     });
   });
@@ -450,13 +456,16 @@ describe("ServerSettings prompt suggestions", () => {
   it("ignores the retired server-wide prompt suggestion fields", () => {
     const decoded = decodeServerSettings({
       enablePromptSuggestion: true,
+      claudeNativePromptSuggestions: false,
       promptSuggestionInstructions: "This belongs to a client.",
     });
     expect(decoded).not.toHaveProperty("enablePromptSuggestion");
+    expect(decoded).not.toHaveProperty("claudeNativePromptSuggestions");
     expect(decoded).not.toHaveProperty("promptSuggestionInstructions");
     expect(
       decodeServerSettingsPatch({
         enablePromptSuggestion: true,
+        claudeNativePromptSuggestions: false,
         promptSuggestionInstructions: "This belongs to a client.",
       }),
     ).toEqual({});
@@ -622,18 +631,6 @@ describe("ClientSettings sidebar", () => {
   });
 });
 
-describe("ClientSettings context window meter", () => {
-  it("defaults off and preserves an explicit legacy opt-in", () => {
-    expect(decodeClientSettings({}).contextWindowMeterEnabled).toBe(false);
-    expect(
-      decodeClientSettings({ contextWindowMeterEnabled: true }).contextWindowMeterEnabled,
-    ).toBe(true);
-    expect(
-      decodeClientSettingsPatch({ contextWindowMeterEnabled: true }).contextWindowMeterEnabled,
-    ).toBe(true);
-  });
-});
-
 describe("ClientSettings send shortcut", () => {
   it("defaults to Enter and validates the supported choices", () => {
     expect(decodeClientSettings({}).sendShortcut).toBe("enter");
@@ -659,9 +656,9 @@ describe("ClientSettings follow-up behavior", () => {
 });
 
 describe("ServerSettings thread settlement", () => {
-  it("defaults merge settlement on and inactivity settlement to three days", () => {
+  it("defaults merge settlement on and inactivity settlement to seven days", () => {
     const settings = decodeServerSettings({});
-    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
+    expect(settings.sidebarAutoSettleAfterDays).toBe(7);
     expect(settings.sidebarAutoSettleOnMerge).toBe(true);
   });
 
@@ -947,14 +944,6 @@ describe("voice settings", () => {
     expect(() => decodeClientSettingsPatch({ speechCorrectionWord: "x".repeat(51) })).toThrow();
     expect(DEFAULT_SERVER_SETTINGS.speechProjectCustomWords).toEqual([]);
     expect(PROJECT_SCOPED_SERVER_SETTING_KEYS).toContain("speechProjectCustomWords");
-  });
-
-  it("stores the transcription model and resources on the environment", () => {
-    expect(DEFAULT_SERVER_SETTINGS).toMatchObject({
-      speechModelId: "handy-computer/parakeet-unified-en-0.6b-gguf",
-      speechAcceleration: "auto",
-      speechModelUnloadTimeout: "min_15",
-    });
   });
 });
 

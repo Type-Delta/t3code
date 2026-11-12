@@ -287,30 +287,10 @@ it.effect("converts every deployed 59-67 fork collision before upstream migratio
         VALUES (${id}, ${name})`;
     }
     const executed = yield* runMigrations();
-    assert.deepStrictEqual(executed, [
-      [59, "McpAppModelContext"],
-      [60, "ThreadSnapshotWindowIndexes"],
-      [61, "PullRequestReviewGuides"],
-      [62, "ThreadFailureLookupIndex"],
-      [63, "DropUnusedV1Projections"],
-      [64, "CanonicalizeThreadPullRequestLinks"],
-      [65, "CodexUsageNativeTurnIndex"],
-      [66, "RepairClientSettlementTimestamps"],
-      [67, "WebhookDedupe"],
-      [68, "ShellStopRequestIndex"],
-      [69, "ThreadMessageSearch"],
-      [70, "PeerLinks"],
-      [71, "PeerLinkFence"],
-      [72, "WaitingLinkRequestIndex"],
-      [73, "ActiveTurnItemIndexes"],
-      [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-      [75, "SubagentDeliveryState"],
-      [76, "ProjectionProjectsPinArchive"],
-      [77, "RepairBooleanSettledOverride"],
-      [78, "DropOrchestrationEventCorrelationIndex"],
-      [79, "DelegatedRecoveryIndexes"],
-      [80, "ScheduledTaskThreadMode"],
-    ]);
+    assert.deepStrictEqual(
+      executed,
+      migrationManifest.filter(([id]) => id >= 59),
+    );
     const effectRows = yield* sql<{ migration_id: number; name: string }>`
       SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 48 ORDER BY migration_id`;
     assert.deepEqual(

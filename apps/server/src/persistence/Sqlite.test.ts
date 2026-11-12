@@ -5,14 +5,21 @@ import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 import type * as NodeWorkerThreads from "node:worker_threads";
 
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import { vi } from "vite-plus/test";
 
+import * as ServerConfig from "../config.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as ServerOwnership from "../serverOwnership.ts";
+import { migrationManifest, runMigrations } from "./Migrations.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
 
 const workers = vi.hoisted((): Array<NodeWorkerThreads.Worker> => []);
@@ -181,5 +188,104 @@ it.effect("drops planner statistics a database already has", () => {
     }).pipe(Effect.provide(persistence()));
   }).pipe(
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
+const ownT3Home = Effect.fn(function* () {
+  const { serverRuntimeStatePath } = yield* ServerConfig.ServerConfig;
+  // An empty home, so no boot service installed on this machine is read.
+  const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+  yield* ServerOwnership.acquireServerOwnership(serverRuntimeStatePath).pipe(
+    Effect.provide(ProcessRunner.layer),
+    Effect.provideService(HostProcess.HomeDirectory, home),
+    Effect.provideService(HostProcess.Environment, {}),
+  );
+});
+
+const migrateTo = (toMigrationInclusive?: number) =>
+  Effect.gen(function* () {
+    const { dbPath } = yield* ServerConfig.ServerConfig;
+    yield* runMigrations({ toMigrationInclusive }).pipe(
+      Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
+    );
+  });
+
+const latestRecordedMigrationId = Effect.gen(function* () {
+  const { dbPath } = yield* ServerConfig.ServerConfig;
+  const rows = yield* Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    return yield* sql<{ readonly id: number }>`
+      SELECT MAX(migration_id) AS id FROM effect_sql_migrations
+    `;
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+  return rows[0]?.id;
+});
+
+const layerT3Home = ServerConfig.layerTest(process.cwd(), { prefix: "t3-sqlite-cli-" });
+
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("layerCliConfig", (it) => {
+  it.effect.each([
+    { pending: "upstream migration" },
+    { pending: "fork-only migration" },
+    { pending: "upstream ledger gap" },
+    { pending: "fork ledger conversion" },
+    { pending: "legacy management-key columns" },
+    { pending: "missing checkpoint provider metadata" },
+  ])("does not apply $pending while a running server owns the T3 home", ({ pending }) =>
+    Effect.gen(function* () {
+      const latest = Math.max(...migrationManifest.map(([id]) => id));
+      const recorded = pending === "upstream migration" ? latest - 1 : latest;
+      yield* migrateTo(pending === "upstream migration" ? recorded : undefined);
+      const { dbPath } = yield* ServerConfig.ServerConfig;
+      const before = yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        if (pending === "fork-only migration") {
+          yield* sql`DELETE FROM fork_sql_migrations WHERE migration_id = 15`;
+        } else if (pending === "upstream ledger gap") {
+          yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 81`;
+        } else if (pending === "fork ledger conversion") {
+          yield* sql`INSERT INTO effect_sql_migrations (migration_id, name)
+            VALUES (${latest + 1}, 'ProjectionThreadMessageSuggestions')`;
+        } else if (pending === "legacy management-key columns") {
+          yield* sql`ALTER TABLE management_api_keys ADD COLUMN maximum_runtime_mode TEXT`;
+        } else if (pending === "missing checkpoint provider metadata") {
+          yield* sql`ALTER TABLE checkpoint_capture_jobs DROP COLUMN provider_cursor_json`;
+        }
+        return yield* sql<{ readonly name: string; readonly sql: string | null }>`
+          SELECT name, sql FROM sqlite_schema ORDER BY name
+        `;
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+      yield* ownT3Home();
+
+      const opened = yield* Effect.void.pipe(
+        Effect.provide(SqlitePersistence.layerCliConfig),
+        Effect.result,
+      );
+
+      assert.equal(
+        yield* latestRecordedMigrationId,
+        pending === "fork ledger conversion" ? latest + 1 : recorded,
+      );
+      assert.equal(opened._tag, "Failure");
+      if (opened._tag === "Failure") {
+        assert.instanceOf(opened.failure, SqlitePersistence.ServerOwnsDatabaseError);
+      }
+      const after = yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql<{ readonly name: string; readonly sql: string | null }>`
+          SELECT name, sql FROM sqlite_schema ORDER BY name
+        `;
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+      assert.deepEqual(after, before);
+    }).pipe(Effect.scoped, Effect.provide(layerT3Home)),
+  );
+
+  it.effect("opens a current T3 home while a running server owns it", () =>
+    Effect.gen(function* () {
+      yield* migrateTo();
+      yield* ownT3Home();
+
+      yield* Effect.void.pipe(Effect.provide(SqlitePersistence.layerCliConfig));
+    }).pipe(Effect.scoped, Effect.provide(layerT3Home)),
   );
 });

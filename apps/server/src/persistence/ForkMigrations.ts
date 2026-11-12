@@ -188,6 +188,61 @@ const readHistory = Effect.gen(function* () {
     : yield* sql<MigrationRow>`SELECT migration_id, name, created_at FROM effect_sql_migrations ORDER BY migration_id`;
 });
 
+const needsForkHistoryConversion = (rows: ReadonlyArray<MigrationRow>, manifest: Manifest) => {
+  const byName = new Map(manifest.map(([id, name]) => [name, id]));
+  return rows.some(
+    (row) =>
+      (row.migration_id >= 59 && historicalForkRecordNames.has(row.name)) ||
+      (forkMigrationManifest.some(([, name]) => name === row.name) && !byName.has(row.name)) ||
+      row.name === "ThreadSummaryTimeline" ||
+      (byName.has(row.name) && byName.get(row.name) !== row.migration_id),
+  );
+};
+
+export const hasPendingForkMigrations = Effect.fn("hasPendingForkMigrations")(function* (
+  manifest: Manifest,
+) {
+  if (needsForkHistoryConversion(yield* readHistory, manifest)) return true;
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (
+      'fork_sql_migrations', 'checkpoint_capture_jobs', 'management_api_keys'
+    )
+  `;
+  const names = new Set(tables.map((table) => table.name));
+  if (!names.has("fork_sql_migrations")) return true;
+  const applied = yield* sql<{ readonly migration_id: number }>`
+    SELECT migration_id FROM fork_sql_migrations
+  `;
+  const appliedIds = new Set(applied.map((row) => Number(row.migration_id)));
+  if (forkMigrationManifest.some(([id]) => !appliedIds.has(id))) return true;
+  if (names.has("checkpoint_capture_jobs")) {
+    const columns = yield* sql<{
+      readonly name: string;
+    }>`PRAGMA table_info(checkpoint_capture_jobs)`;
+    if (
+      !columns.some((column) => column.name === "provider_binding_json") ||
+      !columns.some((column) => column.name === "provider_cursor_json")
+    )
+      return true;
+  }
+  if (names.has("management_api_keys")) {
+    const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(management_api_keys)`;
+    if (
+      columns.some(
+        (column) =>
+          column.name === "default_runtime_mode" || column.name === "maximum_runtime_mode",
+      )
+    )
+      return true;
+  }
+  const legacyKeys = yield* sql<{ readonly table: string }>`
+    SELECT "table" FROM pragma_foreign_key_list('checkpoint_legacy_migrations')
+    WHERE "table" = 'projection_turns'
+  `;
+  return legacyKeys.length > 0;
+});
+
 /**
  * Effect's migrator only considers IDs above the recorded high-water mark.
  * Reconciliation can deliberately remove a fork row from an upstream slot,
@@ -235,14 +290,7 @@ export const backupMigrationHistory = Effect.fn("backupMigrationHistory")(functi
   manifest: Manifest,
 ) {
   const rows = yield* readHistory;
-  const byName = new Map(manifest.map(([id, name]) => [name, id]));
-  const needsConversion = rows.some(
-    (row) =>
-      (row.migration_id >= 59 && historicalForkRecordNames.has(row.name)) ||
-      (forkMigrationManifest.some(([, name]) => name === row.name) && !byName.has(row.name)) ||
-      row.name === "ThreadSummaryTimeline" ||
-      (byName.has(row.name) && byName.get(row.name) !== row.migration_id),
-  );
+  const needsConversion = needsForkHistoryConversion(rows, manifest);
   if (!needsConversion) return;
   const sql = yield* SqlClient.SqlClient;
   const databases = yield* sql<{ name: string; file: string }>`PRAGMA database_list`;
@@ -263,13 +311,7 @@ export const reconcileForkMigrationHistory = Effect.fn("reconcileForkMigrationHi
   const upstreamByName = new Map(manifest.map(([id, name]) => [name, id]));
   const upstreamNames = new Map(manifest);
   const forkNames = new Map<string, number>(forkMigrationManifest.map(([id, name]) => [name, id]));
-  const needsConversion = rows.some(
-    (row) =>
-      (row.migration_id >= 59 && historicalForkRecordNames.has(row.name)) ||
-      (forkNames.has(row.name) && !upstreamByName.has(row.name)) ||
-      row.name === "ThreadSummaryTimeline" ||
-      (upstreamByName.has(row.name) && upstreamByName.get(row.name) !== row.migration_id),
-  );
+  const needsConversion = needsForkHistoryConversion(rows, manifest);
   if (!needsConversion) return;
   const sql = yield* SqlClient.SqlClient;
   yield* sql.withTransaction(

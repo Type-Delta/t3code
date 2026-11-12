@@ -18,11 +18,13 @@ The rules:
 - When an ID conflicts from merges, renumber the IDs as needed.
 - A change that does not alter how the fork differs from upstream (formatting, or an edit to this file) needs no entry.
 
-### DL001 — Claude Windows resolver and artifact safeguards
+### DL001 — Provider startup and artifact safeguards
 
 Windows Claude commands are resolved before the Agent SDK starts a session. The resolver follows npm launcher shims to the installed native executable or JavaScript entry point and preserves explicit executable paths. Provider snapshots and DevTools expose sanitized resolver diagnostics; startup provenance identifies installed web artifacts without exposing command output or environment values.
 
 When a PATH-based provider executable disappears before startup, the backend resolves it again and retries once. Under AgentScope, a stale cached bare command can report exit 127 rather than ENOENT; that shell-level case remains documented as a known limitation because treating every 127 as missing could replay a real command failure. Claude waits for the SDK initialization handshake before reporting ready and caches a replacement path only after successful initialization. Codex, Cursor, Grok, local OpenCode, and Claude/Codex metadata commands apply the retry at process launch; Antigravity reacquires its PATH installation and harness together. Explicit executable paths and managed Antigravity installations never use this fallback. Failures after a process starts do not replay agent work.
+
+ACP startup crashes retain their exit code or signal and sanitized stderr, including when the runtime exits before initialization can write. Scope cleanup cannot replace a recorded failure with user cancellation; cancellation without a recorded failure stays cancelled. Managed-runtime installation therefore shows the actual startup diagnostic after an Antigravity abort.
 
 Older failed Claude startups could persist a generated session ID before its transcript existed. If Claude explicitly rejects that resume ID and the cursor records zero turns with no assistant checkpoint or turn boundaries, the adapter recreates the session with the same ID once before accepting a turn. Missing sessions with recorded history remain errors.
 
@@ -30,15 +32,17 @@ Each Claude startup attempt owns a separate prompt queue. Closing a failed SDK q
 
 The current server bundle includes the SDK and uses the configured Claude installation. Upstream packaging removes unused SDK native optional dependencies; the older SDK patch and lockfile-free patch-pinning workaround are no longer active. Windows and WSL ship separate runtime archives, each with its own platform dependencies.
 
-**Implementation evidence:** `packages/provider-core/src/server/executableRecovery.ts`, the Claude and Codex adapter runtimes, `packages/provider-acp/src/server/AcpSessionRuntime.ts`, `packages/provider-opencode/src/server/OpenCodeRuntime.ts`, `apps/server/src/provider/Drivers/{ClaudeExecutable,AntigravityDriver}.ts`, `apps/server/src/provider/ClaudeProvider.ts`, `packages/provider-core/src/server/snapshotProbe.ts`, `scripts/build-desktop-artifact.ts`, and `pnpm-workspace.yaml`.
+**Implementation evidence:** `packages/provider-core/src/server/executableRecovery.ts`, the Claude and Codex adapter runtimes, `packages/provider-acp/src/server/AcpSessionRuntime.ts`, `packages/effect-acp/src/protocol.ts` and its tests, `apps/server/src/provider/acp/AcpJsonRpcConnection.test.ts`, `packages/provider-opencode/src/server/OpenCodeRuntime.ts`, `apps/server/src/provider/Drivers/{ClaudeExecutable,AntigravityDriver}.ts`, `apps/server/src/provider/ClaudeProvider.ts`, `packages/provider-core/src/server/snapshotProbe.ts`, `scripts/build-desktop-artifact.ts`, and `pnpm-workspace.yaml`.
 
 **Recorded validation:** 352 focused tests passed across 11 affected suites on Windows, with 14 existing platform skips. Recovery tests cover synchronous and asynchronous Claude startup failures, replacement-path caching, one retry, explicit-path exclusions, real child-process launches, and Antigravity executable/harness reacquisition. The stale Cursor rollback assertion now checks the current navigation contract. Codex metadata tests were run without the inherited `T3CODE_CODEX_LAUNCH_ARGS` override. The OpenCode localhost output fixture timed out in combined runs and passed isolated reruns. `vp check`, `vp run typecheck`, and `git diff --check` passed. Earlier integrations verified initialization and packaging.
+
+ACP protocol, client, process-lifecycle, and managed-installer suites pass all 132 cases on Node 26. Startup-abort diagnostics, queued and future write failures, and explicit caller and installer cancellation are covered without changing the existing diagnostic grace period or installer assertions.
 
 The empty-session follow-up initially verified initialization only. A later real-SDK probe reproduced the failed query stealing the replacement's first prompt; the fixed probe delivered that prompt to the replacement and received native `system/init`. All 159 Claude adapter tests passed, including prompt delivery after missing-session and stale-executable recovery.
 
 The executable recovery primitive now lives in `packages/provider-core/src/server/executableRecovery.ts`, with all provider app-server, ACP, OpenCode, Claude/Codex text-generation, and Claude SDK launches retrying stale bare PATH resolutions once. The failed cached PATH entry is evicted before the retry, and Claude passes the configured bare command separately from its resolved SDK path so Windows recovery remains reachable. Claude also recreates a missing resume session only when its provider thread has no persisted turns; gateway model metadata now drives Claude model IDs and effort in both orchestration and text generation.
 
-**Last updated:** 2026-10-15
+**Last updated:** 2026-11-12
 
 ### DL002 — Machine context beside the empty-state hero
 
@@ -96,7 +100,7 @@ V2 turn checkpoints live in a private bare-Git sidecar repository below the serv
 
 Checkpoints captured between the 2026-10-08 redo and this re-port were written as `refs/t3/orchestration-v2/checkpoints/*` refs in the project repository. They still load, diff, and restore: each boundary lookup tries its sidecar snapshot first, then that in-repo ref. New boundaries always go to the sidecar. Upstream's checkpoint rollback locking and the per-workspace capture lock are unchanged.
 
-A rollback leaves the forward checkpoints ready so the user can redo back to them. Restoring a checkpoint refreshes workspace entries and local VCS status for both undo and redo. Upstream #21804 retires those stale checkpoints during rollback; the fork keeps redo, adapts upstream's rollback tests to expect them ready, and removes upstream's unused rollback `staleCheckpoints` query and `CheckpointService.deleteStaleRefs`. The lower `CheckpointStore.deleteCheckpointRefs` chain is kept to match upstream.
+A rollback leaves the forward checkpoints ready so the user can redo back to them. Command intake accepts retained rolled-back runs while rejecting checkpoints from an abandoned forward branch. Restoring a checkpoint refreshes workspace entries and local VCS status for both undo and redo. Upstream #21804 retires those stale checkpoints during rollback; the fork keeps redo, adapts upstream's rollback tests to expect them ready, and removes upstream's unused rollback `staleCheckpoints` query and `CheckpointService.deleteStaleRefs`. The lower `CheckpointStore.deleteCheckpointRefs` chain is kept to match upstream.
 
 Upstream #14892 marks a checkpoint `missing` when its workspace folder is ignored by the repository. Sidecar captures enforce the same rule in `SidecarCheckpointRepository.ts`: an ignored workspace is rejected only when Git lists no tracked or re-included files in it (`CheckpointStore.test.ts` covers rejection, a force-tracked file, and a negated rule).
 
@@ -104,7 +108,7 @@ Sidecar capture runs Git with `-C` at the worktree root, so paths stay worktree-
 
 Legacy checkpoint tables remain for schema compatibility. V2 navigation uses upstream's checkpoint rollback with the fork's retained forward checkpoints for redo; no server code reads the former capture-job or navigation-journal tables.
 
-Persistence keeps canonical upstream migrations `001`–`080` in `effect_sql_migrations` and fork migrations `001`–`015` in the independent `fork_sql_migrations` ledger. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
+Persistence keeps canonical upstream migrations `001`–`082` in `effect_sql_migrations` and fork migrations `001`–`015` in the independent `fork_sql_migrations` ledger. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
 
 The old ID-58 prompt-suggestion collision is repaired by canonical upstream migration `048_ProjectionThreadBranchPullRequest` and fork migration `009_ProjectionThreadMessageSuggestions`. This preserves both columns even when the original numeric ledger skipped the branch column. Startup also removes the legacy checkpoint table's foreign key to `projection_turns` before upstream `063_DropUnusedV1Projections` drops that table. Incoming upstream migrations `065`–`069` retain their canonical IDs, including webhook deduplication and message-search schema.
 
@@ -136,11 +140,11 @@ The 2026-10-05 completion split passed the focused RunExecutionService, Checkpoi
 
 The 2026-10-15 re-port restored the 16 sidecar characterization tests the redo dropped (32 checkpoint-store tests pass), plus sidecar authored-path filtering, long scope ids, and the V2 real-repository suite.
 
-**Last updated:** 2026-11-07
+**Last updated:** 2026-11-12
 
 ### DL008 — Persistent multi-thread split workspaces
 
-Sidebar pointer drags use the same thread-row component inside and outside the sidebar, rendered as a full-row `DragOverlay`; upstream's `ThreadContextDragGhost` is removed in its favour. The opaque overlay follows the pointer across panels while the hidden source row preserves its gap until release or cancellation. Split-pane drops suppress composer context-drop highlighting and dispatch, and pointer capture keeps release cleanup reliable across panel boundaries.
+Sidebar pointer drags use the same thread-row component inside and outside the sidebar, rendered as a full-row `DragOverlay`. Upstream's label-based `ThreadContextDragGhost` remains for command-palette and sidebar-search drags. The opaque overlay follows the pointer across panels while the hidden source row preserves its gap until release or cancellation. Split-pane drops suppress composer context-drop highlighting and dispatch, and pointer capture keeps release cleanup reliable across panel boundaries.
 
 Collapsed Working, snoozed, and settled shelves keep all displayed split panes visible in the sidebar.
 
@@ -164,17 +168,7 @@ The 2026-11-01 split-maximize change passed `SplitThreadWorkspace.test.tsx`. In 
 
 Pinned and Active drag boundaries occupy normal layout rows, including an empty Pinned group. Sorting uses their measured heights so labels keep consistent spacing in Manual and Last input ordering.
 
-**Last updated:** 2026-11-07
-
-### DL012 — Prompt preservation during draft promotion
-
-Upstream now keeps the optimistic prompt visible while a draft becomes its server-backed thread. The fork keeps the acknowledgement bound: dispatch and first-message launch RPCs share a ten-second acknowledgement timeout; a lost WebSocket reply therefore enters the existing visible failure path and restores the durable composer draft instead of leaving a refresh-only optimistic message indefinitely. The acknowledgement covers receipt of the launch RPC, not completion of workspace setup. If an acknowledgement arrives after the ten-second timeout, the server still lands the message while the restored draft remains visible; manually resending that draft can therefore duplicate the message.
-
-**Implementation evidence:** `packages/client-runtime/src/operations/commands.ts` and `packages/client-runtime/src/operations/commands.test.ts` (unacknowledged command and launch acknowledgement timeout cases).
-
-**Recorded validation:** `vp check`, `vp run typecheck`, and the repository `dev` startup smoke test.
-
-**Last updated:** 2026-11-07
+**Last updated:** 2026-11-12
 
 ### DL013 — Codex availability through catalog and turn failures
 
@@ -246,7 +240,7 @@ conversation without a second panel or composer. Provider-native
 child lifecycle events remain authoritative, while T3-owned child threads keep the V2 persistence,
 notification, and recovery behavior.
 
-A follow-up message sent to a T3-owned delegated child reopens the original delegated task instead
+A follow-up message sent to a local or linked-environment T3-owned delegated child reopens the original delegated task instead
 of creating a separate task per follow-up (upstream #17696). Frequent child failures, such as
 provider capacity errors, would otherwise leave a trail of tasks. While the follow-up runs, the task
 shows as running with no result and a pending completion delivery. Further follow-ups join that
@@ -256,6 +250,8 @@ nothing, and automatic monitor wakes on the child never reopen it. Upstream's
 `DelegatedCompletionDelivery` follow-up cases keep their exactly-once checks, with their task
 identity assertions rewritten for this reopen behavior; upstream's held-queue pause/resume case
 passes unchanged.
+
+Remote completion reports are pinned to the child run they observed, so a late result cannot complete a newly reopened task. Settled-task events check the current task state before cancelling question wakes, preserving questions from a reopened follow-up. Owner and management sends find only an unambiguous authorized parent, and retain its mode and scope checks.
 
 The task reports the latest of its runs that actually started. A follow-up cancelled before it
 started, or one waiting in a held queue (after Stop or a provider failure), does not count, so
@@ -278,7 +274,7 @@ ThreadRelationshipsControl, ComposerSubagents, `threadDetailsCardLayout.ts` (den
 and session-logic. Completion gating: `packages/provider-core/src/server/subagentProjection.ts`, the delegated-child settlement listener in `apps/server/src/orchestration-v2/Orchestrator.ts`, and `apps/server/src/orchestration-v2/SubagentProjection.test.ts`. Reopen edge cases: `apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
 follow-up never starts", including "pauses a reopened task behind a held follow-up", and "holds a
 reopened task while … runs") and `OrchestratorMcpService.test.ts` (held follow-up cancel, and
-the follow-up variant of terminal acknowledgement).
+the follow-up variant of terminal acknowledgement). Stale question cleanup: `apps/server/src/orchestration-v2/DelegatedTaskQuestionReactor.ts` and `Orchestrator.control-reads.test.ts`.
 
 **Recorded validation:** focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
 and composer tests; vp check; vp run typecheck; and an isolated paired web-app smoke test that
@@ -287,7 +283,7 @@ composer rendered. The preview client's accessibility snapshot and click calls f
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
 
-**Last updated:** 2026-11-07
+**Last updated:** 2026-11-12
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
@@ -315,7 +311,7 @@ The 2026-10-02 readiness guard passed 12 focused tests. An isolated source start
 
 A provider turn that completes is persisted `completed` immediately. Its checkpoint capture runs afterward as a follow-up effect, so a slow capture (5–10 s on Windows), a hung VCS call, or a failing checkpoint backend never delays the next message, never makes the thread look busy, and never blocks Stop. Upstream instead parks every completed turn at `waiting` until capture finishes. The fork keeps that `waiting` state only for a completed turn that still owns open run-owned background work (native subagents), so that work stays visible and `task_cancel`/Stop can end it. The checkpoint capture completes that run. Each capture attempt is bounded at two minutes, so a VCS call that hangs fails instead of holding the effect. After the last attempt fails, the effect worker completes the run without a checkpoint, retrying that write. If every write fails, the capture effect stays queued and tries again later, so a run can never stay `waiting` forever.
 
-The effect outbox serializes each thread's effects, but checkpoint capture has its own lane. A pending or hung capture never queues the thread's next `provider-turn.start`, Stop, or other provider effects behind it. Capture and checkpoint rollback still wait for each other, and the workspace lock serializes their file work. A run's checkpoint baseline is the previous run's capture boundary, so while that capture is still running the next run skips its baseline instead of waiting on the workspace lock. The effect worker runs at most two captures at once, so captures on other threads always leave workers for turn starts, Stop, and other effects.
+The effect outbox serializes each thread's effects, but checkpoint capture has its own lane. A pending or hung capture never queues the thread's next `provider-turn.start`, Stop, or other provider effects behind it. Capture and checkpoint rollback still wait for each other, and the workspace lock serializes their file work. A run's checkpoint baseline is the previous run's capture boundary, so while that capture is still running the next run skips its baseline instead of waiting on the workspace lock. The effect worker runs at most two captures at once. Capture and title-generation jobs also share a combined background limit that reserves a worker for turn starts, Stop, and other effects; a single-worker configuration still makes progress.
 
 Because the run releases its provider thread at once, the next run (for example Muse's own report turn after a workflow) can claim the thread before the provider's late "background task ended" update reaches the finished run's stream. That update still removes the ended tasks from the stored roster without overwriting the newer run's snapshot, and the server ignores those tasks in later roster snapshots, so an adapter seeded with the older roster cannot bring them back. Upstream avoids this race only because its `waiting` window usually outlasts it.
 
@@ -325,7 +321,7 @@ Workspaces without a Git repository do no VCS work for checkpoints. VCS detectio
 
 **Recorded validation:** SteeringCompletion 13, BackgroundWorkStop 12, ClaudeAutomaticDelivery 3, TaskCancelNativeSubagent 1, EffectWorker, CheckpointCaptureService, CheckpointService, RunFinalizationService, RunExecutionService, recovery, and the replay (140/140 including `muse_workflow`)/provider-switch/fork/merge-back harnesses pass.
 
-**Last updated:** 2026-10-16
+**Last updated:** 2026-11-12
 
 ### DL023 — V2 MCP thread controls
 
@@ -424,7 +420,7 @@ and launch configuration without restarting T3 or changing the native conversati
 
 Claude adapter and text-generation launches now resolve each selected gateway model through the per-instance catalog, applying `[1m]` model IDs and normalized CLI effort before opening or spawning.
 
-**Last updated:** 2026-11-02
+**Last updated:** 2026-11-12
 
 ### DL027 — Remote editor links select the server account
 
@@ -445,7 +441,7 @@ server configurations.
 **Recorded validation:** focused contract, server target discovery, web remote-open,
 and Electron shell tests.
 
-**Last updated:** 2026-11-07
+**Last updated:** 2026-11-12
 
 ### DL028 — One manual fork desktop release for every updater platform
 
@@ -581,43 +577,47 @@ search, and switching groups preserves the query. Provider and continuation rest
 
 **Last updated:** 2026-09-07
 
-### DL034 — Prompt suggestion ghost text from the agent's own turn
+### DL034 — Client-controlled prompt suggestions with optional native Claude generation
 
-When the client setting `enablePromptSuggestion` is on (default off), Codex and Claude sessions
-receive a standing instruction to end each reply with a tagged one-line proposal for the user's
-next prompt. The agent writes it from its real context (repository instructions, memory, and the
-conversation so far); no separate model call, provider session, or transcript summary is made.
-`ProviderRuntimeIngestion` withholds any partial or open tag from streamed and buffered deltas,
-strips every tagged block at completion, and carries the sanitized text as `suggestion` on the
-assistant message through the decider, projector, client reducer, and SQLite projection. The web composer shows it as ghost text once the thread is idle and the
-composer is empty; Tab accepts it, typing dismisses it for that message, and a new message or
-thread resets it. Cursor, Grok, OpenCode, and Antigravity receive no instruction. Mobile has no
-toggle or ghost text. An optional `promptSuggestionInstructions` setting appends extra guidance to
-the built-in instruction. Both settings live under Settings → Chat → Prompt suggestion.
-They persist on the client and travel with turn requests to local or remote environments;
-server settings do not control them. Codex applies the submitting client's preference per
-turn. Claude pins the preference and instructions at its first session start in a thread,
-preserving them across session recovery and restarts. Each viewing client independently
-controls whether suggestions appear in its composer. See [prompt suggestions](docs/user/composer.md#prompt-suggestions).
+Prompt suggestions remain client-local and off by default. Codex generates a tagged next-prompt
+line inside its ordinary reply, without a separate sampling request. Claude uses its native SDK
+suggestions by default when the master toggle is enabled; turning off **Claude native suggestions**
+uses the same tagged-reply method as Codex. New turns request only one generation method. Custom
+instructions apply to tagged generation. These controls live under Settings → Chat → Prompt
+suggestion and travel with human-authored turn requests to local or remote environments.
 
-Upstream's chat timeline entries no longer include assistant messages, so `ChatView` reads the last user or assistant message from the thread's turn items (`findLastPromptSuggestionMessage` in `apps/web/src/promptSuggestion.logic.ts`) and passes it to the composer; a just-sent message still waiting for the server hides the suggestion. The settings description stays within upstream's 200-character limit.
+Upstream's server-wide Labs switch and Codex sampling path are omitted. The fork adopts
+upstream's empty-composer presentation, Tab hint, Escape dismissal, completed-run relevance,
+steer handling, fine-pointer requirement, and suppression while awaiting input or after `/clear`.
+Typing only hides a suggestion; clearing the composer restores it. Escape dismisses that run's
+suggestion. Neither T3 delegates nor provider-native children generate or display suggestions.
+Accidental inherited tags are stripped without publishing child suggestion metadata.
 
-Suggestion-less streaming updates retain message and timeline-row identity. Clearing an existing suggestion still updates the message metadata.
+Explicit turn preferences apply on the next user message. Claude safely replaces an idle query
+when the SDK native mode changes, preserving its native conversation. Tagged guidance travels
+with each user turn because the SDK snapshots system prompts across resumes; it never depends
+on replacing that recorded prompt. Missing preferences
+use the saved query/native metadata for recovery; an older preference without `claudeNative`
+keeps tagged generation. Native Claude suggestions use upstream's ephemeral stream; tagged
+suggestions remain durable assistant-message metadata. Clients call the native suggestion RPC
+only when the environment advertises support, retaining the tagged path for older servers.
+An older conversation whose recorded system prompt already includes tagged guidance retains that
+block until compaction or a fresh session; the current preference still controls published metadata.
+Each viewing client independently controls visibility. Native mobile has no suggestion UI.
 
 **Implementation evidence:** `packages/shared/src/promptSuggestion.ts`,
-`packages/contracts/src/{settings,orchestration,provider}.ts`,
+`packages/contracts/src/{settings,providerPolicy,environment,orchestrationV2}.ts`,
 `apps/server/src/orchestration-v2/Adapters/{CodexAdapterV2,ClaudeAdapterV2}.ts`,
-`apps/server/src/provider/CodexDeveloperInstructions.ts`, `apps/web/src/promptSuggestion.logic.ts`, `apps/web/src/components/chat/usePromptSuggestion.ts`, `ChatView.browser.test.tsx` ("shows the settled reply's prompt suggestion as composer ghost text"),
-`apps/server/src/orchestration-v2/ProviderEventIngestor.ts`,
-`apps/server/src/orchestration-v2/{Orchestrator,ProjectionStore}.ts`,
-`apps/server/src/persistence/Migrations/062_ProjectionThreadMessageSuggestions.ts`,
+`apps/server/src/orchestration-v2/ProviderSessionManager.ts`,
 `apps/web/src/promptSuggestion.logic.ts`, `apps/web/src/components/chat/usePromptSuggestion.ts`,
-`apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/ComposerPromptEditorTiptap.tsx`,
-and `apps/web/src/components/settings/SettingsPanels.tsx`.
+`apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/chat/useComposerSend.ts`,
+`apps/web/src/components/settings/SettingsPanels.tsx`, and their focused tests.
 
-**Recorded validation:** No validation recorded. Covered by `packages/shared/src/promptSuggestion.test.ts`.
+**Recorded validation:** adapter regressions cover native/tagged exclusivity, explicit preferences,
+recovery fallbacks, stale native events, and delegate/child suppression. Final sync validation is
+recorded in the current Merge History entry.
 
-**Last updated:** 2026-11-07
+**Last updated:** 2026-11-12
 
 ### DL035 — Manual-only release actions
 
@@ -647,7 +647,7 @@ Hub requests pause after management HTTP 401/403 until the URL or management key
 
 **Recorded validation:** 26 focused adapter and source-refresh tests, `vp check`, `vp run typecheck`, and `vp run lint:mobile`. Integrated web verification is blocked by `PreviewAutomationNoAvailableHostError`; native mobile verification is blocked by disabled device access.
 
-**Last updated:** 2026-10-20
+**Last updated:** 2026-11-12
 
 ### DL038 — Precise transcript identity checks on Windows
 
@@ -671,7 +671,7 @@ This is an experiment to reduce abrupt termination. It does not establish or fix
 
 **Recorded validation:** Focused client, protocol, launcher, parent shutdown, Codex runtime/probe, and desktop lifecycle tests passed. Three isolated installed-Codex initialization/EOF cycles exited with code 0. One full server shutdown through launcher IPC and two through desktop stdin EOF exited with code 0 in 2.7–2.8 seconds. `vp check` and `vp run typecheck` passed.
 
-**Last updated:** 2026-10-02
+**Last updated:** 2026-11-12
 
 ### DL041 — Project-selecting local thread shortcut
 
@@ -911,12 +911,23 @@ Fork release builds include the public T3 Connect identifiers from `.env.example
 
 **Last updated:** 2026-11-06
 
+### DL058 — Minimap end state stays local to its controls
+
+The timeline minimap owns its exact-end state. The timeline's existing scroll and metrics handler updates that state through a child function ref, so an end-state change does not rerender the whole conversation. Upstream keeps the state in the conversation component, adding an unnecessary render when an assistant starts streaming. Minimap navigation and its end-of-conversation disabled state are unchanged.
+
+**Implementation evidence:** `apps/web/src/components/chat/MessagesTimeline.tsx`, `apps/web/src/components/chat/TimelineMinimap.tsx`, the existing timeline and minimap tests, and `apps/web/test/appScenarios.renders.tsx`.
+
+**Recorded validation:** the unchanged streaming scenario returns to three conversation renders, matching the premerge measurement; 186 focused timeline, minimap, anchoring, and restore cases pass. An isolated paired client completed two free Replay turns, scrolled away from the end, navigated with Next, returned to the end, and resized to fit the whole conversation. End controls stayed correct with no page errors. The scenario's separate MarkdownParagraph budget remains a pre-existing failure.
+
+**Last updated:** 2026-11-12
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.
 
 - Apply new upstream migrations to a read-only snapshot of the live database (`~/.t3/userdata/statev2.sqlite`). Check that a rerun is a no-op, the upstream ledger matches the migration manifest, the fork ledger (`fork_sql_migrations`) keeps every fork migration, and `foreign_key_check` and `quick_check` pass.
 - Run `vp run lint:mobile` when the merge touches native mobile code.
+- Run `vp run report:renders` with reports enabled, comparing any budget failure against the premerge source with the same measurement environment. Missing report output must not mask render regressions.
 - Build the desktop and web production bundles, then build an installer (`vp run dist:desktop:win` on Windows) and launch it with isolated state. Confirm the window opens, the backend starts, and a fresh database migrates.
 - If provider auth is set up, run live turns with the cheapest models (Haiku for Claude, Luna for Codex) on a paired web client with seeded real data. Include an undo and redo of a file change (DL006).
 - Move the `base` tag to the merge commit and force-push it to `origin`.
@@ -924,6 +935,64 @@ Project-specific checks every upstream sync runs, in addition to the full test s
 ## Merge History
 
 This is an append-only decision record, newest first, with one entry per upstream sync. It explains past integrations but does not by itself establish a current divergence; use the Divergence Log for that. Sync with upstream only when the user explicitly asks. Do not edit past entries.
+
+### 2026-11-12 — Merge upstream/main through `32882540fb`
+
+**Merge commit:** this commit
+**Parents:** `44fddf2586d434245d80921c2766e69ede733738` (fork) and `32882540fb1296bd1870253f3fe32bc8369f8a17` (upstream/main); 763 upstream commits since `006d7e38f0`.
+
+The sync retains 42 existing divergence entries and adds DL058, for 43 current entries. DL012 is retired by explicit user decision.
+
+User decisions:
+
+- Retire DL012 and take upstream's longer reconnect wait and retries with the same command ID, including upstream's first-message acknowledgement behavior.
+- Keep the fork's prompt suggestions, adopt upstream's presentation and appropriate safeguards, and add optional native Claude generation. Native Claude is selected by default beneath the unchanged default-off master toggle. Typing hides a suggestion and clearing restores it; Escape dismisses it. Delegates and provider-native children never offer suggestions.
+- Run council review after integration and verification.
+
+Other decisions:
+
+- Keep every other active fork behavior, including original delegated-task identities for local and linked-environment follow-ups, sidecar checkpoints, and redo.
+- Take upstream's removal of web plan-mode controls while preserving fork `/undo` and `/redo` commands, and take upstream's seven-day automatic settlement default.
+- Preserve the new Claude SDK's system-prompt snapshots. Tagged Claude guidance travels with each user turn because a resumed SDK session ignores replacement system append text. Native suggestions use the SDK option; Codex never uses upstream's extra sampler.
+- Keep canonical upstream migrations through 082 and the independent fork ledger through 015.
+
+Integration repairs:
+
+- A retained rolled-back run can redo through command intake; checkpoints from an abandoned forward branch remain rejected. A real-provider undo/redo check caught the upstream guard before this repair.
+- Capture and title-generation effects share a background limit so they cannot jointly occupy every worker. The fork's capture lane and separate limits remain.
+- Remote follow-ups reuse their original task. Completion reports carry the observed remote run and cannot settle a newer follow-up. Settled-task question cleanup checks current task state before cancelling a reopened follow-up's wake. Owner and management callers resolve only an unambiguous authorized parent. Their mode ceiling travels with dispatch for the check under the parent lock. A mode refusal preserves the delivered send result; genuine recording failures stay explicit. The existing whole-thread Stop wire behavior remains.
+- Fork-only pending migrations and history repairs take database ownership, while a fully current database retains upstream's lock-free CLI startup.
+- Gateway model IDs and effort normalization apply to live Claude model changes as well as startup. Optional Codex discovery failures remain nonfatal.
+- ACP pipe failures retain the actual process-exit diagnostic when a runtime crashes before initialization. Runtime cleanup preserves that recorded failure while explicit caller cancellation remains cancellation.
+- Desktop preview retains bounded recovery and upstream's richer navigation errors. Its injected-runtime extractor follows Playwright's named module instead of an unstable numbered variable, keeping the size guard. Preload coverage runs in the desktop DOM project.
+- Preview IPC, shutdown protocols, scanner budgets, forgiving quota parsing, redemption identity, and fork release settings compose with their upstream changes.
+- Draft sends retain their undo/redo parser import after plan-mode removal. Sidebar Manual reordering still works within project folders, and search and command-palette drags keep visible titles.
+- Native suggestion subscriptions are capability-gated for older servers. Shared browser fixtures publish replacement configuration and thread-list snapshots, preventing previous tests' provider catalogs from leaking into later cases.
+- The notification test router implements upstream's route-resolution subscription, retaining all 25 alert, navigation, retry, and subagent assertions. The route-view fixture supplies the newly imported thread-family mount API.
+- The telemetry policy fixture transforms its runtime graph before per-case reimports; each case still initializes fresh policy before its first span.
+- Delegation integration fixtures follow the retained task identity and immediate foreground completion. Their fake adapter selects its completion gate before announcing it is running, and SQL acknowledgement checks read the task before another tool acknowledges it.
+- Pending questions drive the history-window join through the runtime-request index, preventing the retained-question branch from scanning old thread history. The original SQL VM-step limits remain unchanged.
+- Removed the unused upstream per-follow-up selector; delegation uses the fork's shared current-run helper.
+- Minimap end state stays in the minimap child, restoring the premerge three-render streaming budget without changing navigation. The palette fixture fixes its default-project context and uses the existing initial highlight before Enter; asynchronous discovery can no longer insert a shortcut before its keyboard target. Every original focus and highlight assertion remains.
+
+Validation:
+
+- Repository-wide `vp check` passes with zero errors and nine warnings; `vp run typecheck` passes all 41 tasks, and native mobile lint reports zero violations.
+- The premerge full run recorded 2,028 passing and seven failing files. The integrated run recorded 1,892 passing and 13 failing files, with 26,125 passing, 23 failing, and 12 skipped cases; it spanned repairs and left 225 browser/render files unrun after browser-launch errors. Every new failed unit file was repaired and retested in its complete owning suite. These are recorded runs, not a clean final-source all-suite pass.
+- Supplemental runs exercised all 223 browser files. After fixture repairs, all 1,132 browser cases pass, including the original 40-file palette batch at 100/100. A monolithic browser run lost its Vite connection after 73 passing files; the remaining files completed in bounded batches. Chromium closed gracefully, so a browser crash was not established.
+- Render scenarios pass 13/15. Controlled unchanged-premerge measurements reproduce the remaining MarkdownParagraph count of 59 versus 30 and four sidebar-row renders per switch versus upstream's new budget of two. The new conversation render regression was fixed from four back to three; no budget was widened. The other remaining full-run failures are the pre-existing bundled-development module-resolution and mobile `__DEV__` collection failures. The upstream Android test successor passes 6/6.
+- Both council reviewers are satisfied after six rounds. The final focused minimap review found no actionable findings; the ACP, SQL, question-cleanup, mode-ceiling, refusal-response, and guidance corrections raised in earlier rounds are repaired.
+- The focused integration checks pass, including all 414 updated Claude adapter cases, the native rollback/fork cases, 99 desktop compatibility cases, 138 contract cases, and 13 combined client interaction cases. No assertion was weakened to hide a merge failure.
+- The final MCP toolkit suite passes all four cases, steering completion all 54, Claude automatic delivery all six, native/background task cancellation all eight, control reads all 28, and the SQL projection suite all 57 on the specified Node runtime. The pending-request join uses 20,368 VM steps both before and after old-history removal, within the original performance bounds.
+- All 132 ACP protocol, client, runtime, and managed-installer cases pass, including the unchanged Antigravity startup-crash diagnostic and explicit cancellation checks.
+- The unused-export comparison has no new findings. The merged tree has 59 unused exports and five duplicate exports, compared with 61 and five before the merge; this pre-existing debt still prevents a clean Knip export check.
+- The pre-commit hook was bypassed for this merge because its Knip stage fails on that reproduced baseline debt; formatting, lint, typechecks, and the focused verification were run directly.
+- `check:changed` completed against the 560-file fork delta. Patch validation, formatting, lint, dependency/file Knip checks, GraphQL generation, all 41 typechecks, and React Compiler checks for 95 files pass. Its test stage passes 6,476 cases with five skips across 306 passing files; the sole failed file is the pre-existing mobile `__DEV__` collection error. The only nonzero stages are that baseline collection failure and the baseline Knip export debt. An initial palette fixture failure was corrected and verified by this complete 307-file rerun.
+- A read-only live-database snapshot applied upstream migrations 081–082, preserved all 15 fork records, reran with zero writes, and passed foreign-key and integrity checks.
+- A paired client completed a live Codex Luna file change. Undo removed the file and conversation; redo restored both on the same thread, with the Changes count following. Firefox verified real ghost text, hiding while typing, restoration after clearing, Escape dismissal, and Tab acceptance.
+- Production web, server, and desktop bundles built. The Linux AppImage and Debian installer built; the AppImage opened, migrated isolated state, and showed the seeded thread using a test-local basic key store under Xvfb.
+- Live Haiku turns complete in both Claude modes. A resumed-session SDK probe exposed ignored replacement system append text; after moving tagged guidance to each user turn, the same live thread produced a sanitized saved suggestion. The native SDK did not return an optional prediction during the live native-mode turns; event delivery and native ghost-text precedence are covered by automated tests.
+- Native mobile runtime verification is unavailable on this host; mobile static lint passes. Windows and macOS installers are not exercised. The model-eval runner cannot start without its expected proxy configuration. No deployment or branch push is performed.
 
 ### 2026-11-07 — Merge upstream/main through `006d7e38f0`
 

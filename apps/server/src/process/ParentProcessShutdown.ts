@@ -50,7 +50,8 @@ const make = Effect.gen(function* () {
 
   if (environment[SERVICE_LAUNCHER_CONTEXT_ENV] !== undefined) {
     const onMessage = (value: unknown) => {
-      if (decodeServiceLauncherParentMessage(value)?.type === "shutdown") request();
+      const type = decodeServiceLauncherParentMessage(value)?.type;
+      if (type === "shutdown" || type === "stop") request();
     };
     host.onMessage(onMessage);
     yield* Effect.addFinalizer(() => Effect.sync(() => host.offMessage(onMessage)));

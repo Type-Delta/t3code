@@ -1,61 +1,43 @@
-import type {
-  ThreadStructureTurnItem,
-  ThreadStructureVisibleTurnItem,
-} from "@t3tools/client-runtime/state/models";
+import type { PromptSuggestionPreference, RunId } from "@t3tools/contracts";
+import type { ClientSettings } from "@t3tools/contracts/settings";
+import type { ThreadStructureVisibleTurnItem } from "@t3tools/client-runtime/state/models";
 
-import type { ComposerTrigger } from "./composer-logic";
+/** A predicted next prompt and the run that produced it. */
+export interface PromptSuggestionCandidate {
+  readonly runId: RunId;
+  readonly text: string;
+}
 
-export type PromptSuggestionMessage = Extract<
-  ThreadStructureTurnItem,
-  { readonly type: "user_message" | "assistant_message" }
->;
-
-/** The thread's last message. The structure drops assistant text but keeps its suggestion. */
-export function findLastPromptSuggestionMessage(
+/**
+ * The suggestion an agent tagged at the end of the thread's last message, if that message is a
+ * settled assistant reply. The structure drops assistant text but keeps its suggestion, so this
+ * survives reloads and servers without native suggestions.
+ */
+export function findTaggedPromptSuggestion(
   rows: ReadonlyArray<ThreadStructureVisibleTurnItem>,
-): PromptSuggestionMessage | null {
+): PromptSuggestionCandidate | null {
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const item = rows[index]!.item;
-    if (item.type === "user_message" || item.type === "assistant_message") return item;
+    if (item.type === "user_message") return null;
+    if (item.type !== "assistant_message") continue;
+    const text = item.suggestion?.trim();
+    return !item.streaming && item.runId !== null && text ? { runId: item.runId, text } : null;
   }
   return null;
 }
 
-/**
- * A prompt suggestion is a whole next message, not a continuation of what the
- * user is writing, so it is only shown while the composer is empty and nothing
- * else is competing for the composer (menus, approvals, a running turn).
- */
-export function shouldShowPromptSuggestion(input: {
-  enabled: boolean;
-  disabled: boolean;
-  threadIdle: boolean;
-  prompt: string;
-  trigger: ComposerTrigger | null;
-}): boolean {
-  if (!input.enabled || input.disabled || !input.threadIdle) return false;
-  if (input.trigger !== null) return false;
-  return input.prompt.length === 0;
-}
-
-/** Suggestions belong to the message that carried them, so a new message invalidates them. */
-export function createPromptSuggestionKey(input: {
-  threadId: string;
-  lastMessageId: string;
-}): string {
-  return `${input.threadId}:${input.lastMessageId}`;
-}
-
-/**
- * Typing dismisses the suggestion for the current message, and the dismissal
- * survives erasing that text. A new key (new message or thread) clears it.
- */
-export function resolveDismissedPromptSuggestionKey(input: {
-  currentKey: string | null;
-  dismissedKey: string | null;
-  prompt: string;
-}): string | null {
-  if (input.currentKey === null) return null;
-  if (input.prompt.length > 0) return input.currentKey;
-  return input.dismissedKey === input.currentKey ? input.dismissedKey : null;
+/** What a human-sent turn asks the agent for; the server applies it from that turn on. */
+export function promptSuggestionPreference(
+  settings: Pick<
+    ClientSettings,
+    "enablePromptSuggestion" | "claudeNativePromptSuggestions" | "promptSuggestionInstructions"
+  >,
+): PromptSuggestionPreference {
+  return {
+    enabled: settings.enablePromptSuggestion,
+    claudeNative: settings.claudeNativePromptSuggestions,
+    ...(settings.promptSuggestionInstructions.length > 0
+      ? { instructions: settings.promptSuggestionInstructions }
+      : {}),
+  };
 }

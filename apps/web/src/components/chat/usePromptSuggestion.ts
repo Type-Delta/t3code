@@ -1,72 +1,113 @@
-import type { ThreadId } from "@t3tools/contracts";
-import { useState } from "react";
-
-import type { ComposerTrigger } from "../../composer-logic";
 import {
-  createPromptSuggestionKey,
-  resolveDismissedPromptSuggestionKey,
-  shouldShowPromptSuggestion,
-  type PromptSuggestionMessage,
-} from "../../promptSuggestion.logic";
+  type EnvironmentId,
+  isDelegatedAppThread,
+  type OrchestrationV2Run,
+  type RunId,
+} from "@t3tools/contracts";
+import { useSyncExternalStore } from "react";
+
+import type { Thread } from "../../types";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { useClientSettings } from "../../hooks/useSettings";
+import type { PromptSuggestionCandidate } from "../../promptSuggestion.logic";
+import { useServerConfigs } from "../../state/entities";
+import { orchestrationEnvironment } from "../../state/orchestration";
+import { useEnvironmentQuery } from "../../state/query";
+import { announcedRun } from "@t3tools/client-runtime/state/thread-activity-announcement";
+
+// Dismissed suggestions, keyed by environment and run, shared by every mounted composer and kept
+// across remounts. Run ids derive from thread ids, which can repeat across environments.
+let dismissedKeys: ReadonlySet<string> = new Set();
+const listeners = new Set<() => void>();
+const subscribeDismissed = (listener: () => void) => {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+};
+const readDismissed = () => dismissedKeys;
+const dismissKey = (environmentId: EnvironmentId, runId: RunId) => `${environmentId}\u0000${runId}`;
 
 /**
- * Surfaces the suggestion the server attached to the settled assistant reply as
- * composer ghost text. Nothing is requested here: the text already arrived with
- * the message, so this only decides whether it is still relevant.
+ * The suggestion while the run that produced it is the thread's latest completed run. A message
+ * promoted to Steer leaves its queued run cancelled before it started, still the latest run, so
+ * the comparison skips to the last run that ran. Detail can lag the shell, so it skips only once
+ * the runs include that cancelled run.
+ */
+export function offeredPromptSuggestion<Suggestion extends { readonly runId: RunId }>(
+  suggestion: Suggestion | null | undefined,
+  latestRun: Thread["latestRun"] | undefined,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+): Suggestion | null {
+  const run = announcedRun(latestRun ?? null, runs);
+  const skippedUnseenRun =
+    latestRun != null &&
+    run?.runId !== latestRun.runId &&
+    !runs.some(
+      (candidate) =>
+        candidate.id === latestRun.runId &&
+        candidate.status === "cancelled" &&
+        candidate.startedAt === null,
+    );
+  return suggestion &&
+    !skippedUnseenRun &&
+    run?.runId === suggestion.runId &&
+    run.status === "completed"
+    ? suggestion
+    : null;
+}
+
+/**
+ * The agent's predicted next prompt while the run that produced it is the thread's latest
+ * completed run and Escape has not dismissed it. Claude's native prediction arrives over an
+ * unpersisted subscription; the reply's tagged suggestion is the durable fallback, so older
+ * servers, Codex, and reloads still offer one. Threads another agent drives never show one.
  */
 export function usePromptSuggestion(input: {
-  enabled: boolean;
-  disabled: boolean;
-  threadIdle: boolean;
-  threadId: ThreadId | null;
-  lastMessage: PromptSuggestionMessage | null;
-  prompt: string;
-  trigger: ComposerTrigger | null;
-}): { ghostText: string | null; accept: () => string | null } {
-  const [storedDismissedKey, setDismissedKey] = useState<string | null>(null);
-
-  const key =
-    input.threadId && input.lastMessage
-      ? createPromptSuggestionKey({
-          threadId: input.threadId,
-          lastMessageId: input.lastMessage.messageId,
-        })
-      : null;
-
-  // Typing dismisses the current suggestion and a new key clears it, so the
-  // stored dismissal is reconciled during render rather than in an effect.
-  const dismissedKey = resolveDismissedPromptSuggestionKey({
-    currentKey: key,
-    dismissedKey: storedDismissedKey,
-    prompt: input.prompt,
-  });
-  if (dismissedKey !== storedDismissedKey) {
-    setDismissedKey(dismissedKey);
-  }
-
-  const settledAssistantMessage =
-    input.lastMessage?.type === "assistant_message" && !input.lastMessage.streaming
-      ? input.lastMessage
-      : null;
-  const suggestion = settledAssistantMessage?.suggestion?.trim() || null;
-
-  const visible =
-    key !== null &&
-    suggestion !== null &&
-    dismissedKey !== key &&
-    shouldShowPromptSuggestion({
-      enabled: input.enabled,
-      disabled: input.disabled,
-      threadIdle: input.threadIdle,
-      prompt: input.prompt,
-      trigger: input.trigger,
+  readonly environmentId: EnvironmentId;
+  readonly thread: Thread | undefined;
+  readonly runs: ReadonlyArray<OrchestrationV2Run>;
+  readonly tagged: PromptSuggestionCandidate | null;
+  /** The thread runs on Claude, the only provider with native suggestions. */
+  readonly claudeThread: boolean;
+}): { readonly suggestion: string | null; readonly dismiss: () => void } {
+  const { environmentId, thread, runs } = input;
+  const settings = useClientSettings((clientSettings) => ({
+    enabled: clientSettings.enablePromptSuggestion,
+    claudeNative: clientSettings.claudeNativePromptSuggestions,
+  }));
+  const nativeSupported =
+    useServerConfigs().get(environmentId)?.environment.capabilities.promptSuggestions === true;
+  // Tab is the only way to accept one, so skip devices with no mouse or trackpad at all.
+  const hasFinePointer = useMediaQuery("(any-pointer: fine)");
+  const enabled =
+    settings.enabled &&
+    hasFinePointer &&
+    thread !== undefined &&
+    !isDelegatedAppThread({
+      lineage: thread.lineage,
+      delegatedFrom: thread.delegatedFrom ?? undefined,
     });
-
-  const accept = (): string | null => {
-    if (!visible || key === null || suggestion === null) return null;
-    setDismissedKey(key);
-    return suggestion;
+  const native = enabled && settings.claudeNative && input.claudeThread && nativeSupported;
+  const { data } = useEnvironmentQuery(
+    // A local draft has no run, and so no suggestion, until its first send.
+    native && thread?.latestRun
+      ? orchestrationEnvironment.v2.promptSuggestion({
+          environmentId,
+          input: { threadId: thread.id },
+        })
+      : null,
+  );
+  const dismissed = useSyncExternalStore(subscribeDismissed, readDismissed);
+  const offered = enabled
+    ? (offeredPromptSuggestion(native ? data : null, thread?.latestRun, runs) ??
+      offeredPromptSuggestion(input.tagged, thread?.latestRun, runs))
+    : null;
+  return {
+    suggestion:
+      offered && !dismissed.has(dismissKey(environmentId, offered.runId)) ? offered.text : null,
+    dismiss: () => {
+      if (offered === null) return;
+      dismissedKeys = new Set(dismissedKeys).add(dismissKey(environmentId, offered.runId));
+      for (const listener of listeners) listener();
+    },
   };
-
-  return { ghostText: visible ? suggestion : null, accept };
 }

@@ -10,7 +10,8 @@ import * as Schema from "effect/Schema";
 const require = NodeModule.createRequire(import.meta.url);
 const encodeUnknownJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const PLAYWRIGHT_PACKAGE_SPECIFIER = "playwright-core/package.json";
-const PLAYWRIGHT_SOURCE_MARKER = "source3 = ";
+const PLAYWRIGHT_SOURCE_MARKER =
+  '"packages/playwright-core/src/generated/injectedScriptSource.ts"() {';
 const PLAYWRIGHT_SOURCE_TERMINATOR = ";\n  }\n});";
 const PLAYWRIGHT_SOURCE_MINIMUM_LENGTH = 100_000;
 const PLAYWRIGHT_SOURCE_EVALUATION_TIMEOUT_MS = 1_000;
@@ -130,14 +131,22 @@ export const extractPlaywrightInjectedRuntimeSource = Effect.fn(
       marker: PLAYWRIGHT_SOURCE_MARKER,
     });
   }
-  const literalStart = start + PLAYWRIGHT_SOURCE_MARKER.length;
-  const literalEnd = coreBundle.indexOf(PLAYWRIGHT_SOURCE_TERMINATOR, literalStart);
+  const literalEnd = coreBundle.indexOf(PLAYWRIGHT_SOURCE_TERMINATOR, start);
   if (literalEnd < 0) {
     return yield* new PlaywrightSourceTerminatorNotFoundError({
       bundlePath,
       terminator: PLAYWRIGHT_SOURCE_TERMINATOR,
     });
   }
+  // Playwright's bundler renumbers source variables when generated modules are added.
+  const assignment = /\bsource\d*\s*=\s*/.exec(coreBundle.slice(start, literalEnd));
+  if (assignment === null) {
+    return yield* new PlaywrightSourceMarkerNotFoundError({
+      bundlePath,
+      marker: "source assignment",
+    });
+  }
+  const literalStart = start + assignment.index + assignment[0].length;
   const literal = coreBundle.slice(literalStart, literalEnd);
   const source = yield* Effect.try({
     try: () =>

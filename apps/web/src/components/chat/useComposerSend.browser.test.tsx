@@ -1,4 +1,4 @@
-import { DEFAULT_UNIFIED_SETTINGS, ProviderDriverKind } from "@t3tools/contracts";
+import { ProviderDriverKind } from "@t3tools/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { AsyncResult } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
@@ -21,10 +21,6 @@ vi.mock(import("../../state/session"), async (original) => ({
 vi.mock(import("../../hooks/useSettings"), async (original) => ({
   ...(await original()),
   useClientSettingsHydrated: () => true,
-  useEnvironmentSettings: ((
-    _id: unknown,
-    select: (settings: typeof DEFAULT_UNIFIED_SETTINGS) => unknown,
-  ) => select({ ...DEFAULT_UNIFIED_SETTINGS, planModeEnabled: false })) as never,
 }));
 vi.mock(import("../../hooks/useHandleNewThread"), async (original) => ({
   ...(await original()),
@@ -58,8 +54,6 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
       selectedProvider: ProviderDriverKind.make("codex"),
       selectedModel: thread.modelSelection.model,
       selectedProviderModels: [],
-      interactionMode: "default" as const,
-      interactionModeEnabled: false,
       shownPendingApprovalIds: [],
     }),
     validateProviderInput: () => true,
@@ -88,7 +82,6 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
       updatedAt: thread.updatedAt,
     },
     activeProjectDefaultModelSelection: null,
-    activeProposedPlan: null,
     activeMessageCount: 2,
     isServerThread: true,
     isLocalDraftThread: false,
@@ -118,7 +111,6 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
     panelAnimationDurationMs: 0,
     keepFullHistory: false,
     resumeCompactionTokens: null,
-    showPlanFollowUpPrompt: false,
     usageLimitsKey: null,
     usageLimitsOffered: false,
     openUsageLimits: vi.fn(),
@@ -144,7 +136,7 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
     setKeepFullHistory: vi.fn(),
     anchorNewTurn: vi.fn(),
     acknowledgeActiveThreadWoke: vi.fn(),
-    handleInteractionModeChange: vi.fn(),
+    linkCheckoutPullRequest: vi.fn(),
     handleNewThreadInActiveProject: vi.fn(),
     persistThreadSettingsForNextTurn: async () => AsyncResult.success(undefined),
   };
@@ -163,23 +155,20 @@ function Sender({ input, finished }: { input: Input; finished: () => void }) {
   );
 }
 
-it.each(["undo", "redo"] as const)(
-  "submits /%s locally when plan controls are unavailable",
-  async (command) => {
-    calls.provider.mockClear();
-    const navigation = vi.fn(async () => {});
-    const finished = vi.fn();
-    const input = inputFor(`/${command} `, navigation);
-    await using screen = await render(<Sender input={input} finished={finished} />);
-    await screen.getByRole("button", { name: "Send", exact: true }).click();
-    await vi.waitFor(() => expect(finished).toHaveBeenCalledOnce());
-    expect(calls.provider).not.toHaveBeenCalled();
-    expect(navigation).toHaveBeenCalledExactlyOnceWith(command);
-    expect(input.promptRef.current).toBe("");
-  },
-);
+it.each(["undo", "redo"] as const)("submits /%s locally instead of sending it", async (command) => {
+  calls.provider.mockClear();
+  const navigation = vi.fn(async () => {});
+  const finished = vi.fn();
+  const input = inputFor(`/${command} `, navigation);
+  await using screen = await render(<Sender input={input} finished={finished} />);
+  await screen.getByRole("button", { name: "Send", exact: true }).click();
+  await vi.waitFor(() => expect(finished).toHaveBeenCalledOnce());
+  expect(calls.provider).not.toHaveBeenCalled();
+  expect(navigation).toHaveBeenCalledExactlyOnceWith(command);
+  expect(input.promptRef.current).toBe("");
+});
 
-it("keeps prompts that merely start with /undo on the provider send path", async () => {
+it("sends prompts that merely start with /undo, with the client's suggestion preference", async () => {
   calls.provider.mockClear();
   const navigation = vi.fn(async () => {});
   const finished = vi.fn();
@@ -192,6 +181,7 @@ it("keeps prompts that merely start with /undo on the provider send path", async
     expect.objectContaining({
       input: expect.objectContaining({
         message: expect.objectContaining({ text: "/undo this change in a new way" }),
+        promptSuggestion: { enabled: false, claudeNative: true },
       }),
     }),
   );

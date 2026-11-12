@@ -174,12 +174,19 @@ export const remoteSchemeForEditor = (id: EditorId): string | undefined => {
   return editor === undefined ? undefined : remoteSchemeOf(editor);
 };
 
-/**
- * Builds a remote deep link (including optional SSH username where supported)
- * that opens `absolutePath` on the local editor over SSH. JetBrains IDEs use
- * the Toolbox App gateway URL; VS Code-compatible editors and Zed use their
- * native remote URI shapes. Returns undefined for unsupported editors.
- */
+// `goto` editors share VS Code's `file:line:col` addressing, so their remote schemes also open
+// a local file as `<scheme>://file/<absolute path>[:line[:col]]`. Zed and JetBrains differ.
+export const LOCAL_FILE_LINK_SCHEMES: ReadonlyArray<string> = EDITORS.flatMap((editor) =>
+  editor.launchStyle === "goto" && "remoteScheme" in editor ? [editor.remoteScheme] : [],
+);
+
+export const isLocalEditorFileUrl = (url: URL): boolean =>
+  LOCAL_FILE_LINK_SCHEMES.includes(url.protocol.slice(0, -1)) &&
+  url.host === "file" &&
+  url.username.length === 0 &&
+  url.password.length === 0 &&
+  url.pathname.length > 1;
+
 export const buildRemoteOpenUrl = (input: {
   readonly editor: EditorId;
   readonly host: string;
@@ -220,11 +227,15 @@ export const buildRemoteOpenUrl = (input: {
     return `${scheme}://ssh/${zedDestination}${encodedZedPath}`;
   }
   const encodedPath = rootedPath.split("/").map(encodeURIComponent).join("/");
-  // The @ belongs inside the Remote-SSH authority, not in URL userinfo. Keep
-  // it raw as the authority separator; VS Code's URI handler expects this form
-  // (`ssh-remote+user@host`) and Electron can still reject true URL userinfo.
-  const remoteAuthority =
-    input.username === undefined
+  const plainDestination =
+    input.username === undefined ? input.host : `${input.username}@${input.host}`;
+  // Remote-SSH splits decoded authorities on "+"; its hex JSON form keeps embedded pluses intact.
+  const remoteAuthority = plainDestination.includes("+")
+    ? Array.from(
+        new TextEncoder().encode(JSON.stringify({ hostName: input.host, user: input.username })),
+        (byte) => byte.toString(16).padStart(2, "0"),
+      ).join("")
+    : input.username === undefined
       ? encodeURIComponent(input.host)
       : `${encodeURIComponent(input.username)}@${encodeURIComponent(input.host)}`;
   return `${scheme}://vscode-remote/ssh-remote+${remoteAuthority}${encodedPath}${input.isFile ? ":1:1" : ""}`;

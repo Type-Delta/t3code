@@ -114,11 +114,13 @@ describe("orchestration V2 contracts", () => {
       contextHandoffId: null,
       promptSuggestion: {
         enabled: true,
+        claudeNative: true,
         instructions: "Suggest a focused next step.",
       },
     });
     expect(run.promptSuggestion).toEqual({
       enabled: true,
+      claudeNative: true,
       instructions: "Suggest a focused next step.",
     });
     expect(decodeOrchestrationV2RunJson(encodeOrchestrationV2RunJson(run))).toEqual(run);

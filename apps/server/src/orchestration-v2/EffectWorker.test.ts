@@ -24,6 +24,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import {
@@ -101,6 +102,7 @@ function layerExecutorFor(input: {
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
         interrupt: input.interrupt ?? (() => Effect.void),
         steer: () => Effect.void,
+        applyModelSelection: () => Effect.void,
         interruptAndAwaitTerminal: (request) =>
           record(
             request.replacementProviderSessionId === undefined
@@ -122,6 +124,7 @@ function layerExecutorFor(input: {
         detach: () => record("detach"),
         otherWorkingThreads: () => Effect.succeed([]),
         releaseUnlessBusy: () => Effect.succeed(true),
+        subscribePromptSuggestion: () => Stream.empty,
       }),
     ),
     Layer.succeed(
@@ -489,7 +492,7 @@ it.effect("requeues a claim when a pre-execution worker check fails", () =>
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
-      Effect.flatMap((worker) => worker.runOnce),
+      Effect.flatMap((worker) => worker.runOnce()),
       Effect.provide(layerWorker),
       Effect.exit,
     );
@@ -559,7 +562,7 @@ it.effect("arms cancellation before the durable pre-execution check", () =>
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
-      Effect.flatMap((worker) => worker.runOnce),
+      Effect.flatMap((worker) => worker.runOnce()),
       Effect.provide(layerWorker),
       Effect.exit,
     );
@@ -625,7 +628,7 @@ it.effect("terminalizes a process-bound claim when success settlement fails", ()
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
-      Effect.flatMap((worker) => worker.runOnce),
+      Effect.flatMap((worker) => worker.runOnce()),
       Effect.provide(layerWorker),
       Effect.exit,
     );
@@ -782,7 +785,7 @@ it.effect("starts a new turn and Stop while the previous run's capture hangs", (
           },
         },
       ]);
-      const captureWorker = yield* Effect.forkChild(worker.runOnce);
+      const captureWorker = yield* Effect.forkChild(worker.runOnce());
       yield* Deferred.await(captureStarted);
 
       yield* outbox.enqueue([
@@ -793,7 +796,7 @@ it.effect("starts a new turn and Stop while the previous run's capture hangs", (
           request: { type: "provider-turn.start", runId: RunId.make("run:effect-worker-next") },
         },
       ]);
-      assert.isTrue(yield* worker.runOnce);
+      assert.isTrue(yield* worker.runOnce());
       assert.equal(yield* Deferred.await(started), "provider-turn.start");
 
       yield* outbox.enqueue([
@@ -809,7 +812,7 @@ it.effect("starts a new turn and Stop while the previous run's capture hangs", (
           },
         },
       ]);
-      assert.isTrue(yield* worker.runOnce);
+      assert.isTrue(yield* worker.runOnce());
       assert.equal(
         Option.map(yield* outbox.get("effect:hung-capture:c-stop"), (effect) => effect.status).pipe(
           Option.getOrUndefined,
@@ -968,7 +971,7 @@ it.effect("keeps a capture queued while its run cannot be completed", () =>
         },
       ]);
       const runAttempt = Effect.gen(function* () {
-        const attempt = yield* Effect.forkChild(worker.runOnce);
+        const attempt = yield* Effect.forkChild(worker.runOnce());
         yield* TestClock.adjust("1 minute");
         assert.isTrue(yield* Fiber.join(attempt));
       });

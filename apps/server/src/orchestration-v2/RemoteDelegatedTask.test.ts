@@ -225,6 +225,101 @@ it.layer(layerTest)("a delegated task in a linked environment", (it) => {
     }),
   );
 
+  it.effect("reopens the same remote task and ignores a result from its previous run", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const remoteChild = {
+        environmentId: EnvironmentId.make("environment:reopen-pinned"),
+        threadId: ThreadId.make("thread:reopen-pinned-remote"),
+        label: "Box",
+      };
+      const parent = yield* seedLiveParent("reopen-pinned");
+      const firstRunId = RunId.make("remote-run:first");
+      const nextRunId = RunId.make("remote-run:next");
+      const request = {
+        type: "delegated_task.remote.request" as const,
+        parentThreadId: parent.threadId,
+        parentRunId: parent.runId,
+        parentNodeId: parent.rootNodeId,
+        task: "Run the suite there.",
+        driver,
+        modelSelection,
+        remoteChild: { ...remoteChild, runId: firstRunId },
+        completionWake: "always" as const,
+      };
+      assert.isNull(yield* projections.findRemoteDelegatedTaskParent(remoteChild));
+      yield* orchestrator.dispatch({ ...request, commandId: CommandId.make("remote:first") });
+      const before = yield* orchestrator.getThreadProjection(parent.threadId);
+      const task = before.subagents[0]!;
+      const item = before.turnItems.find((item) => item.type === "subagent")!;
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.complete",
+        commandId: CommandId.make("remote:first-complete"),
+        parentThreadId: parent.threadId,
+        taskId: task.id,
+        expectedRemoteRunId: firstRunId,
+        status: "completed",
+        result: "First result",
+      });
+      assert.equal(yield* projections.findRemoteDelegatedTaskParent(remoteChild), parent.threadId);
+      yield* orchestrator.dispatch({
+        ...request,
+        commandId: CommandId.make("remote:followup"),
+        remoteChild: { ...remoteChild, runId: nextRunId },
+        task: "Check once more.",
+      });
+      const reopened = yield* orchestrator.getThreadProjection(parent.threadId);
+      assert.lengthOf(reopened.subagents, 1);
+      assert.equal(reopened.subagents[0]!.id, task.id);
+      assert.isNull(reopened.subagents[0]!.result);
+      assert.equal(reopened.subagents[0]!.completionDelivery?.state, "pending");
+      assert.equal(reopened.turnItems.find((row) => row.type === "subagent")?.id, item.id);
+      yield* orchestrator
+        .dispatch({
+          type: "delegated_task.remote.complete",
+          commandId: CommandId.make("remote:stale-complete"),
+          parentThreadId: parent.threadId,
+          taskId: task.id,
+          expectedRemoteRunId: firstRunId,
+          status: "completed",
+          result: "Stale result",
+        })
+        .pipe(Effect.ignore);
+      assert.isNull(
+        (yield* orchestrator.getThreadProjection(parent.threadId)).subagents[0]!.result,
+      );
+      yield* orchestrator.dispatch({
+        type: "delegated_task.remote.complete",
+        commandId: CommandId.make("remote:next-complete"),
+        parentThreadId: parent.threadId,
+        taskId: task.id,
+        expectedRemoteRunId: nextRunId,
+        status: "completed",
+        result: "Latest result",
+      });
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(parent.threadId)).subagents[0]!.result,
+        "Latest result",
+      );
+      const other = yield* seedLiveParent("reopen-ambiguous");
+      yield* orchestrator.dispatch({
+        ...request,
+        commandId: CommandId.make("remote:ambiguous"),
+        parentThreadId: other.threadId,
+        parentRunId: other.runId,
+        parentNodeId: other.rootNodeId,
+      });
+      assert.isNull(yield* projections.findRemoteDelegatedTaskParent(remoteChild));
+      assert.isNull(
+        yield* projections.findRemoteDelegatedTaskParent({
+          ...remoteChild,
+          environmentId: EnvironmentId.make("other-box"),
+        }),
+      );
+    }),
+  );
+
   it.effect("keeps a newer stop recoverable after an older acknowledgement", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

@@ -1,85 +1,36 @@
+import type { ThreadStructureVisibleTurnItem } from "@t3tools/client-runtime/state/models";
+import { RunId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  createPromptSuggestionKey,
-  resolveDismissedPromptSuggestionKey,
-  shouldShowPromptSuggestion,
-} from "./promptSuggestion.logic";
+import { findTaggedPromptSuggestion } from "./promptSuggestion.logic";
 
-const idleEmptyComposer = {
-  enabled: true,
-  disabled: false,
-  threadIdle: true,
-  prompt: "",
-  trigger: null,
-};
+const RUN = RunId.make("run-1");
+const reply = (fields: { suggestion?: string; streaming?: boolean; runId?: RunId | null }) =>
+  ({
+    item: {
+      type: "assistant_message",
+      runId: fields.runId === undefined ? RUN : fields.runId,
+      streaming: fields.streaming ?? false,
+      ...(fields.suggestion === undefined ? {} : { suggestion: fields.suggestion }),
+    },
+  }) as ThreadStructureVisibleTurnItem;
+const user = { item: { type: "user_message", runId: RUN } } as ThreadStructureVisibleTurnItem;
+const reasoning = { item: { type: "reasoning", runId: RUN } } as ThreadStructureVisibleTurnItem;
 
-describe("prompt suggestion", () => {
-  it("only shows on an idle thread with an empty composer", () => {
-    expect(shouldShowPromptSuggestion(idleEmptyComposer)).toBe(true);
-    expect(shouldShowPromptSuggestion({ ...idleEmptyComposer, enabled: false })).toBe(false);
-    expect(shouldShowPromptSuggestion({ ...idleEmptyComposer, threadIdle: false })).toBe(false);
-    expect(shouldShowPromptSuggestion({ ...idleEmptyComposer, disabled: true })).toBe(false);
-    expect(shouldShowPromptSuggestion({ ...idleEmptyComposer, prompt: "run tests" })).toBe(false);
-    expect(shouldShowPromptSuggestion({ ...idleEmptyComposer, prompt: " " })).toBe(false);
+describe("findTaggedPromptSuggestion", () => {
+  it("takes the suggestion of a settled last reply, skipping later non-message rows", () => {
+    expect(
+      findTaggedPromptSuggestion([user, reply({ suggestion: " Run tests " }), reasoning]),
+    ).toEqual({ runId: RUN, text: "Run tests" });
   });
 
   it.each([
-    { kind: "slash-command", query: "m", rangeStart: 0, rangeEnd: 2 },
-    { kind: "skill", query: "review", rangeStart: 0, rangeEnd: 7 },
-    { kind: "path", query: "src", rangeStart: 0, rangeEnd: 4 },
-  ] as const)("stays out of the way of the $kind menu", (trigger) => {
-    expect(shouldShowPromptSuggestion({ ...idleEmptyComposer, trigger })).toBe(false);
-  });
-
-  it("keys a suggestion to the message that carried it", () => {
-    expect(
-      createPromptSuggestionKey({ threadId: "thread-a", lastMessageId: "message-1" }),
-    ).not.toBe(createPromptSuggestionKey({ threadId: "thread-a", lastMessageId: "message-2" }));
-    expect(createPromptSuggestionKey({ threadId: "thread-a", lastMessageId: "message-1" })).toBe(
-      createPromptSuggestionKey({ threadId: "thread-a", lastMessageId: "message-1" }),
-    );
-  });
-
-  it("keeps a message dismissed after typing is erased and resets for a new message", () => {
-    const firstKey = createPromptSuggestionKey({
-      threadId: "thread-a",
-      lastMessageId: "message-1",
-    });
-    const secondKey = createPromptSuggestionKey({
-      threadId: "thread-a",
-      lastMessageId: "message-2",
-    });
-
-    const afterTyping = resolveDismissedPromptSuggestionKey({
-      currentKey: firstKey,
-      dismissedKey: null,
-      prompt: " ",
-    });
-    expect(afterTyping).toBe(firstKey);
-    expect(
-      resolveDismissedPromptSuggestionKey({
-        currentKey: firstKey,
-        dismissedKey: afterTyping,
-        prompt: "",
-      }),
-    ).toBe(firstKey);
-    expect(
-      resolveDismissedPromptSuggestionKey({
-        currentKey: secondKey,
-        dismissedKey: afterTyping,
-        prompt: "",
-      }),
-    ).toBeNull();
-  });
-
-  it("has nothing to dismiss without a thread or message", () => {
-    expect(
-      resolveDismissedPromptSuggestionKey({
-        currentKey: null,
-        dismissedKey: "thread-a:message-1",
-        prompt: "typing",
-      }),
-    ).toBeNull();
+    { name: "a newer user message", rows: [reply({ suggestion: "Run tests" }), user] },
+    { name: "a streaming reply", rows: [reply({ suggestion: "Run tests", streaming: true })] },
+    { name: "a reply without a run", rows: [reply({ suggestion: "Run tests", runId: null })] },
+    { name: "a newer reply without one", rows: [reply({ suggestion: "Run tests" }), reply({})] },
+    { name: "an empty thread", rows: [] },
+  ])("offers none after $name", ({ rows }) => {
+    expect(findTaggedPromptSuggestion(rows)).toBeNull();
   });
 });

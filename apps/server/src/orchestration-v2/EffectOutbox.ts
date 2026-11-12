@@ -3,6 +3,7 @@ import {
   CheckpointScopeId,
   CommandId,
   MessageId,
+  ModelSelection,
   NodeId,
   ProviderSessionId,
   RunAttemptId,
@@ -46,6 +47,12 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     revokeMcpCredential: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
+    type: Schema.Literal("provider-session.apply-model-selection"),
+    providerSessionId: ProviderSessionId,
+    providerThreadId: ProviderThreadId,
+    modelSelection: ModelSelection,
+  }),
+  Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
     runId: RunId,
   }),
@@ -62,6 +69,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
     messageId: MessageId,
+    modelSelection: Schema.optional(ModelSelection),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.restart"),
@@ -142,6 +150,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
 export const PROCESS_BOUND_EFFECT_TYPES = [
+  "provider-session.apply-model-selection",
   "provider-turn.start",
   "provider-turn.interrupt",
   "provider-turn.steer",
@@ -231,9 +240,13 @@ export interface EffectOutboxV2Shape {
     readonly workerId: string;
     readonly excludeRestartContinuations?: boolean;
     readonly excludeCheckpointCaptures?: boolean;
+    readonly maxRunningTitleGenerations?: number;
+    readonly maxRunningBackgroundEffects?: number;
   }) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
   readonly nextClaimableAt: (input?: {
     readonly excludeCheckpointCaptures?: boolean;
+    readonly maxRunningTitleGenerations?: number;
+    readonly maxRunningBackgroundEffects?: number;
   }) => Effect.Effect<Option.Option<DateTime.Utc>, EffectOutboxError>;
   readonly succeed: (input: {
     readonly effectId: string;
@@ -323,6 +336,8 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
     const claimableCandidatePredicate = (
       availableBefore?: string,
       excludeRestartContinuations = false,
+      maxRunningTitleGenerations?: number,
+      maxRunningBackgroundEffects?: number,
     ) =>
       sql`
         ${
@@ -370,6 +385,32 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               )
             )
         )
+        AND ${
+          maxRunningTitleGenerations === undefined
+            ? sql`1 = 1`
+            : sql`(
+                candidate.effect_type != 'thread-title.generate'
+                OR (
+                  SELECT COUNT(*)
+                  FROM orchestration_v2_effect_outbox AS running_title
+                  WHERE running_title.status = 'running'
+                    AND running_title.effect_type = 'thread-title.generate'
+                ) < ${maxRunningTitleGenerations}
+              )`
+        }
+        AND ${
+          maxRunningBackgroundEffects === undefined
+            ? sql`1 = 1`
+            : sql`(
+                candidate.effect_type NOT IN ('thread-title.generate', 'checkpoint.capture')
+                OR (
+                  SELECT COUNT(*)
+                  FROM orchestration_v2_effect_outbox AS running_background
+                  WHERE running_background.status = 'running'
+                    AND running_background.effect_type IN ('thread-title.generate', 'checkpoint.capture')
+                ) < ${maxRunningBackgroundEffects}
+              )`
+        }
       `;
 
     const cancellationSignal = (effectId: string) => {
@@ -543,6 +584,8 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           workerId,
           excludeRestartContinuations = false,
           excludeCheckpointCaptures = false,
+          maxRunningTitleGenerations,
+          maxRunningBackgroundEffects,
         }) {
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
@@ -558,7 +601,12 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             WHERE effect_id = (
               SELECT candidate.effect_id
               FROM orchestration_v2_effect_outbox AS candidate
-              WHERE ${claimableCandidatePredicate(nowIso, excludeRestartContinuations)}
+              WHERE ${claimableCandidatePredicate(
+                nowIso,
+                excludeRestartContinuations,
+                maxRunningTitleGenerations,
+                maxRunningBackgroundEffects,
+              )}
                 AND ${excludeRestartContinuations ? sql`candidate.effect_type != 'provider-runtime.continue'` : sql`1 = 1`}
                 AND ${excludeCheckpointCaptures ? sql`candidate.effect_type != 'checkpoint.capture'` : sql`1 = 1`}
               ORDER BY candidate.available_at ASC, candidate.created_at ASC, candidate.effect_id ASC
@@ -578,11 +626,17 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       nextClaimableAt: Effect.fnUntraced(
         function* ({
           excludeCheckpointCaptures = false,
-        }: { readonly excludeCheckpointCaptures?: boolean } = {}) {
+          maxRunningTitleGenerations,
+          maxRunningBackgroundEffects,
+        }: {
+          readonly excludeCheckpointCaptures?: boolean;
+          readonly maxRunningTitleGenerations?: number;
+          readonly maxRunningBackgroundEffects?: number;
+        } = {}) {
           const rows = yield* sql<{ readonly available_at: string | null }>`
           SELECT MIN(candidate.available_at) AS available_at
           FROM orchestration_v2_effect_outbox AS candidate
-          WHERE ${claimableCandidatePredicate()}
+          WHERE ${claimableCandidatePredicate(undefined, false, maxRunningTitleGenerations, maxRunningBackgroundEffects)}
             AND ${excludeCheckpointCaptures ? sql`candidate.effect_type != 'checkpoint.capture'` : sql`1 = 1`}
         `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
           const availableAt = rows[0]?.available_at;

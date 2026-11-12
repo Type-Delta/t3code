@@ -12,6 +12,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { useNavigate } from "@tanstack/react-router";
 import { newMessageId } from "~/lib/utils";
 import { collapseExpandedComposerCursor } from "../../composer-logic";
+import { promptSuggestionPreference } from "../../promptSuggestion.logic";
 import {
   type ComposerThreadTarget,
   composerDraftHasUserContent,
@@ -25,6 +26,7 @@ import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
+import { DEFAULT_INTERACTION_MODE } from "../../types";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   boundAttachmentIds,
@@ -76,12 +78,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
     setThreadError,
   } = input;
   const navigate = useNavigate();
-  const promptSuggestion = useClientSettings((settings) => ({
-    enabled: settings.enablePromptSuggestion,
-    ...(settings.promptSuggestionInstructions.length > 0
-      ? { instructions: settings.promptSuggestionInstructions }
-      : {}),
-  }));
+  const promptSuggestion = useClientSettings(promptSuggestionPreference);
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
@@ -182,14 +179,14 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                   promptSuggestion,
                   titleSeed: title,
                   runtimeMode,
-                  interactionMode: target.interactionMode,
+                  interactionMode: DEFAULT_INTERACTION_MODE,
                   bootstrap: {
                     createThread: {
                       projectId: project.id,
                       title,
                       modelSelection: target.selection,
                       runtimeMode,
-                      interactionMode: target.interactionMode,
+                      interactionMode: DEFAULT_INTERACTION_MODE,
                       branch,
                       worktreePath: null,
                       createdAt: createdAt,

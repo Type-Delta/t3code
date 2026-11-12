@@ -9,7 +9,9 @@ import {
 } from "./PlaywrightInjectedRuntime.ts";
 
 const bundleWithSourceLiteral = (literal: string): string =>
-  `const source3 = ${literal};\n  }\n});`;
+  `const source3 = "coverage";
+  "packages/playwright-core/src/generated/injectedScriptSource.ts"() {
+    source5 = ${literal};\n  }\n});`;
 
 describe("playwright injected runtime", () => {
   effectIt.effect("extracts the pinned runtime from playwright-core", () =>
@@ -37,7 +39,7 @@ describe("playwright injected runtime", () => {
       expect(error).toMatchObject({
         _tag: "PlaywrightSourceMarkerNotFoundError",
         bundlePath: "/tmp/coreBundle.js",
-        marker: "source3 = ",
+        marker: '"packages/playwright-core/src/generated/injectedScriptSource.ts"() {',
       });
       expect("cause" in error).toBe(false);
     }),

@@ -10,6 +10,7 @@ import * as Layer from "effect/Layer";
 import { assert, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -285,6 +286,8 @@ describe("AcpSessionRuntime", () => {
         .pipe(Effect.forkChild);
       yield* Deferred.await(dispatched);
       yield* Fiber.interrupt(prompt);
+      const interrupted = yield* Fiber.await(prompt);
+      expect(Exit.isFailure(interrupted) && Cause.hasInterruptsOnly(interrupted.cause)).toBe(true);
       const events = yield* runtime.getEvents().pipe(
         Stream.filter((event) => event._tag === "ConnectionTerminated"),
         Stream.take(1),
@@ -336,18 +339,33 @@ describe("AcpSessionRuntime", () => {
             code: undefined,
             signal: "SIGTERM",
           },
+          {
+            name: "immediate abort",
+            terminate: undefined,
+            code: undefined,
+            signal: "SIGABRT",
+          },
         ]),
   ])("retains the $name and sanitized stderr when ACP exits before initialize", (testCase) =>
     Effect.gen(function* () {
+      const diagnostic =
+        "Invalid project config: Unrecognized key in cli.json\nAuthorization: Bearer secret-token-value\n";
       const runtime = yield* AcpSessionRuntime.make({
         ...mockRuntimeOptions,
-        spawn: {
-          command: process.execPath,
-          args: [
-            "-e",
-            `process.stderr.write("Invalid project config: Unrecognized key in cli.json\\nAuthorization: Bearer secret-token-value\\n", () => { ${testCase.terminate}; });`,
-          ],
-        },
+        ...(testCase.terminate === undefined ? { onStderr: () => Effect.void } : {}),
+        spawn:
+          testCase.terminate === undefined
+            ? {
+                command: "sh",
+                args: ["-c", "printf '%s' \"$1\" >&2; kill -ABRT $$", "sh", diagnostic],
+              }
+            : {
+                command: process.execPath,
+                args: [
+                  "-e",
+                  `process.stderr.write("Invalid project config: Unrecognized key in cli.json\\nAuthorization: Bearer secret-token-value\\n", () => { ${testCase.terminate}; });`,
+                ],
+              },
       });
       const error = yield* runtime.start().pipe(Effect.flip);
       assert.instanceOf(error, EffectAcpErrors.AcpProcessExitedError);
@@ -359,14 +377,14 @@ describe("AcpSessionRuntime", () => {
           "Invalid project config: Unrecognized key in cli.json\nAuthorization: Bearer [redacted]",
       });
       expect(error.message).toBe(
-        `${testCase.signal ? "ACP process exited after signal SIGTERM" : "ACP process exited with code 1"}\nInvalid project config: Unrecognized key in cli.json\nAuthorization: Bearer [redacted]`,
+        `${testCase.signal ? `ACP process exited after signal ${testCase.signal}` : "ACP process exited with code 1"}\nInvalid project config: Unrecognized key in cli.json\nAuthorization: Bearer [redacted]`,
       );
       if (testCase.signal) {
         expect(error.cause).toMatchObject({
           reason: {
             module: "ChildProcess",
             method: "exitCode",
-            cause: new Error("Process interrupted due to receipt of signal: 'SIGTERM'"),
+            cause: new Error(`Process interrupted due to receipt of signal: '${testCase.signal}'`),
           },
         });
       }

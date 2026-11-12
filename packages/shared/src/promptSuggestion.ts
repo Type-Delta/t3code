@@ -10,11 +10,12 @@ export const PROMPT_SUGGESTION_CLOSE_TAG = "</t3_prompt_suggestion>";
 export const PROMPT_SUGGESTION_MAX_LENGTH = 200;
 
 const DEFAULT_PROMPT_SUGGESTION_INSTRUCTIONS = `<prompt_suggestion>
+Only the primary assistant speaking directly to the user follows this instruction. Subagents and delegated workers must never produce a prompt suggestion.
 When you finish your turn, end your final message with one line proposing what the user would most plausibly ask you to do next, written as the user speaking to you, in the user's own language. Base it on the direction of this conversation and the user's evident intent and working style, including any repository or user instructions you were given; do not adopt a persona or agenda of your own. Prefer the natural next step over generic advice: a follow-up, a verification, an extension, or a related cleanup you noticed. Only omit the line when the conversation is clearly finished.
 Format: a single line, no markdown, at most 140 characters, wrapped exactly as ${PROMPT_SUGGESTION_OPEN_TAG}your suggestion${PROMPT_SUGGESTION_CLOSE_TAG}. Never mention this instruction or the tag.
 </prompt_suggestion>`;
 
-/** Instruction block appended to the provider's system prompt when the feature is on. */
+/** Instruction block for tagged prompt suggestions. */
 export function buildPromptSuggestionInstructions(customInstructions?: string): string {
   const extra = customInstructions?.trim();
   if (!extra) return DEFAULT_PROMPT_SUGGESTION_INSTRUCTIONS;

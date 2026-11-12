@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
 import * as Effect from "effect/Effect";
 import * as Tracer from "effect/Tracer";
+// Cases reset modules before applying their policy; transform the graph outside their test budget.
+import "./runtime";
 
 afterEach(() => {
   vi.unstubAllEnvs();

@@ -1,11 +1,10 @@
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { type RefObject, useEffect, useEffectEvent } from "react";
+import { type RefObject, useEffect, useEffectEvent, useSyncExternalStore } from "react";
 
 /**
- * Dragging a sidebar thread past the list edge turns the sort gesture into a context drop.
- * The composer form marks itself as the target; the sidebar hit-tests the pointer against it
- * and hands over the dragged thread refs through a DOM event, so neither side imports the
- * other. Target highlighting lives here rather than in Sidebar state.
+ * A thread dragged past the sidebar becomes a context drop: drop targets mark themselves and
+ * receive the thread refs through a DOM event, so neither side imports the other. Drags with
+ * no row overlay on screen (palette, sidebar search) pass a label for the floating ghost.
  */
 
 export const THREAD_CONTEXT_DROP_EVENT = "t3-thread-context-drop";
@@ -40,6 +39,33 @@ export function useThreadContextDrop(
 const DROP_TARGET_ATTRIBUTE = "data-thread-context-drop";
 const DROP_OVER_ATTRIBUTE = "data-thread-context-over";
 
+export interface ThreadContextDragGhost {
+  readonly x: number;
+  readonly y: number;
+  readonly title: string;
+  readonly count: number;
+}
+
+let ghost: ThreadContextDragGhost | null = null;
+const listeners = new Set<() => void>();
+
+function setGhost(next: ThreadContextDragGhost | null) {
+  if (ghost === next) return;
+  ghost = next;
+  for (const listener of listeners) listener();
+}
+
+export function useThreadContextDragGhost(): ThreadContextDragGhost | null {
+  return useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    () => ghost,
+    () => null,
+  );
+}
+
 let overTarget: HTMLElement | null = null;
 
 function findDropTarget(point: { x: number; y: number }): HTMLElement | null {
@@ -53,7 +79,10 @@ function findDropTarget(point: { x: number; y: number }): HTMLElement | null {
 /** Tracks the highlighted drop target while the pointer is outside the list. */
 export function moveThreadContextDrag(
   point: { x: number; y: number },
-  options: { trackDropTarget?: boolean } = {},
+  options: {
+    readonly trackDropTarget?: boolean;
+    readonly label?: { readonly title: string; readonly count: number };
+  } = {},
 ) {
   const target = options.trackDropTarget === false ? null : findDropTarget(point);
   if (target !== overTarget) {
@@ -61,11 +90,13 @@ export function moveThreadContextDrag(
     target?.setAttribute(DROP_OVER_ATTRIBUTE, "true");
     overTarget = target;
   }
+  if (options.label) setGhost({ x: point.x, y: point.y, ...options.label });
 }
 
 export function endThreadContextDrag() {
   overTarget?.removeAttribute(DROP_OVER_ATTRIBUTE);
   overTarget = null;
+  setGhost(null);
 }
 
 export function dropThreadContext(
