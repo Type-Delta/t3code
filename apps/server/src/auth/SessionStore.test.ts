@@ -85,6 +85,154 @@ const makeDiskSessionStoreLayer = Effect.fn("makeDiskSessionStoreLayer")(functio
 });
 
 it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.layer", (it) => {
+  it.effect(
+    "extends interactive sessions across the signed expiry and stops at inactivity expiry",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const issued = yield* sessions.issue({ subject: "one-time-token", rolling: true });
+        for (let day = 0; day < 3; day++) {
+          yield* TestClock.adjust(Duration.days(12));
+          expect((yield* sessions.verify(issued.token)).sessionId).toBe(issued.sessionId);
+        }
+        yield* TestClock.adjust(Duration.days(14));
+        expect((yield* Effect.flip(sessions.verify(issued.token)))._tag).toBe(
+          "SessionTokenExpiredError",
+        );
+        expect((yield* Effect.flip(sessions.recordActivity(issued.sessionId)))._tag).toBe(
+          "SessionTokenExpiredError",
+        );
+      }).pipe(Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
+  );
+  it.effect("concurrent activity keeps the latest expiry without renewing fixed sessions", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const sql = yield* SqlClient.SqlClient;
+      const rolling = yield* sessions.issue({ rolling: true });
+      const boundary = yield* sessions.issue({ rolling: true });
+      const fixed = yield* sessions.issue({ ttl: Duration.days(30) });
+      yield* sql`CREATE TRIGGER reject_redundant_renewal BEFORE UPDATE OF expires_at ON auth_sessions BEGIN SELECT RAISE(ABORT, 'unexpected renewal'); END`;
+      yield* sessions.recordActivity(rolling.sessionId);
+      yield* sessions.verify(rolling.token);
+      yield* sql`DROP TRIGGER reject_redundant_renewal`;
+      yield* TestClock.adjust(Duration.days(13));
+      yield* Effect.all(
+        Array.from({ length: 8 }, () => sessions.recordActivity(rolling.sessionId)),
+        {
+          concurrency: "unbounded",
+        },
+      );
+      yield* sessions.recordActivity(fixed.sessionId);
+      expect((yield* sessions.verify(fixed.token)).expiresAt?.epochMilliseconds).toBe(
+        fixed.expiresAt.epochMilliseconds,
+      );
+      yield* TestClock.adjust(Duration.minutes(30));
+      yield* Effect.all([
+        sessions.recordActivity(rolling.sessionId),
+        sessions.recordActivity(boundary.sessionId),
+      ]);
+      yield* TestClock.adjust(Duration.millis(Duration.toMillis(Duration.days(14)) - 1));
+      expect((yield* sessions.verify(rolling.token)).sessionId).toBe(rolling.sessionId);
+      yield* TestClock.adjust(Duration.millis(1));
+      expect((yield* Effect.flip(sessions.verify(boundary.token)))._tag).toBe(
+        "SessionTokenExpiredError",
+      );
+      yield* TestClock.adjust(Duration.millis(Duration.toMillis(Duration.days(14)) - 1));
+      expect((yield* Effect.flip(sessions.verify(rolling.token)))._tag).toBe(
+        "SessionTokenExpiredError",
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(layerSessionStore(), SqlitePersistence.layerMemory, TestClock.layer()),
+      ),
+    ),
+  );
+  it.effect("keeps a socket until its renewed expiry and rejects activity after revocation", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue({ subject: "one-time-token", rolling: true });
+      const invalidated = yield* Deferred.make<void>();
+      yield* sessions
+        .awaitInvalidation(issued.sessionId)
+        .pipe(
+          Effect.andThen(Deferred.succeed(invalidated, undefined)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+      yield* TestClock.adjust(Duration.days(13));
+      yield* sessions.recordActivity(issued.sessionId);
+      yield* TestClock.adjust(Duration.days(1));
+      expect(yield* Deferred.isDone(invalidated)).toBe(false);
+      yield* sessions.revoke(issued.sessionId);
+      yield* Deferred.await(invalidated);
+      expect((yield* Effect.flip(sessions.recordActivity(issued.sessionId)))._tag).toBe(
+        "SessionTokenRevokedError",
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
+  );
+  it.effect("does not extend a WebSocket ticket when its session is active", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue({ rolling: true });
+      const ticket = yield* sessions.issueWebSocketToken(issued.sessionId);
+      yield* TestClock.adjust(Duration.minutes(5));
+      yield* sessions.recordActivity(issued.sessionId);
+      expect((yield* Effect.flip(sessions.verifyWebSocketToken(ticket.token)))._tag).toBe(
+        "WebSocketTokenExpiredError",
+      );
+    }).pipe(Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
+  );
+  it.effect(
+    "adopts legacy pairings without shortening their existing grant and excludes peer links",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const sql = yield* SqlClient.SqlClient;
+        const pair = yield* sessions.issue({
+          subject: "one-time-token",
+          method: "bearer-access-token",
+        });
+        const peer = yield* sessions.issue({
+          subject: "one-time-token",
+          method: "bearer-access-token",
+          peerLink: true,
+        });
+        yield* sql`UPDATE auth_sessions SET rolling = 2 WHERE session_id IN (${pair.sessionId}, ${peer.sessionId})`;
+        const verified = yield* sessions.verify(pair.token);
+        expect(verified.expiresAt?.epochMilliseconds).toBe(pair.expiresAt.epochMilliseconds);
+        yield* sessions.verify(peer.token);
+        yield* TestClock.adjust(Duration.days(20));
+        yield* sessions.verify(pair.token);
+        yield* TestClock.adjust(Duration.days(11));
+        expect((yield* sessions.verify(pair.token)).sessionId).toBe(pair.sessionId);
+        expect((yield* Effect.flip(sessions.verify(peer.token)))._tag).toBe(
+          "SessionTokenExpiredError",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(layerSessionStore(), SqlitePersistence.layerMemory, TestClock.layer()),
+        ),
+      ),
+  );
+  it.effect("persists rolling expiry across a store restart", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-rolling-session-" });
+      const first = yield* makeDiskSessionStoreLayer(baseDir);
+      const issued = yield* Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const session = yield* sessions.issue({ rolling: true });
+        yield* TestClock.adjust(Duration.days(13));
+        yield* sessions.recordActivity(session.sessionId);
+        return session;
+      }).pipe(Effect.provide(first), Effect.scoped);
+      yield* TestClock.adjust(Duration.days(2));
+      const reopened = yield* makeDiskSessionStoreLayer(baseDir);
+      yield* Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        expect((yield* sessions.verify(issued.token)).sessionId).toBe(issued.sessionId);
+      }).pipe(Effect.provide(reopened), Effect.scoped);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
   it.effect.each(["revoke", "revokeAllExcept", "replace"] as const)(
     "invalidates every connection for a session on %s and leaves other sessions active",
     (operation) =>

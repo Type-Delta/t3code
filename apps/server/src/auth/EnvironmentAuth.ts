@@ -891,6 +891,7 @@ export const make = Effect.gen(function* () {
         method: "browser-session-cookie",
         subject: grant.subject,
         scopes: grant.scopes,
+        rolling: grant.method === "one-time-token",
         ...(previousSession?.method === "browser-session-cookie"
           ? { replaceSessionId: previousSession.sessionId }
           : {}),
@@ -980,6 +981,7 @@ export const make = Effect.gen(function* () {
                 method: input?.proofKeyThumbprint ? "dpop-access-token" : "bearer-access-token",
                 subject: grant.subject,
                 scopes: grantedScopes,
+                rolling: grant.method === "one-time-token" && !input?.proofKeyThumbprint,
                 ...(input?.proofKeyThumbprint
                   ? {
                       proofKeyThumbprint: input.proofKeyThumbprint,

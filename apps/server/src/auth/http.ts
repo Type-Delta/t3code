@@ -24,6 +24,7 @@ import { parseOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
@@ -202,10 +203,13 @@ export const failEnvironmentInternal =
     return yield* new EnvironmentInternalError({ code: "internal_error", reason, traceId });
   });
 
-const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateTime.DateTime) =>
+// An open WebSocket cannot refresh its cookie; access still expires in the session store.
+const BROWSER_COOKIE_RETENTION = Duration.days(365);
+
+const appendSessionCookie = (cookieName: string, token: string) =>
   Effect.fromResult(
     Cookies.set(Cookies.empty, cookieName, token, {
-      expires: DateTime.toDate(expiresAt),
+      maxAge: BROWSER_COOKIE_RETENTION,
       httpOnly: true,
       path: "/",
       sameSite: "lax",
@@ -233,6 +237,7 @@ export const layerAuthenticatedAuth = Layer.effect(
   EnvironmentAuthenticatedAuth,
   Effect.gen(function* () {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+    const sessions = yield* SessionStore.SessionStore;
     return (httpEffect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
@@ -249,6 +254,19 @@ export const layerAuthenticatedAuth = Layer.effect(
           ),
         );
         const endTime = yield* Clock.currentTimeNanos;
+        const credential = EnvironmentAuth.selectRequestCredential(
+          request,
+          sessions.cookieName,
+          sessions.legacyCookieName,
+        );
+        if (
+          (credential?.source === "cookie" || credential?.source === "legacy-cookie") &&
+          session.method === "browser-session-cookie" &&
+          session.expiresAt
+        ) {
+          yield* appendSessionCookie(sessions.cookieName, credential.token);
+          yield* appendCredentialResponseHeaders;
+        }
         const handler = httpEffect.pipe(
           Effect.provideService(EnvironmentAuthenticatedPrincipal, {
             ...session,
@@ -283,12 +301,12 @@ export const layer = HttpApiBuilder.group(
               sessions.legacyCookieName,
             );
             if (
-              credential?.source === "legacy-cookie" &&
+              (credential?.source === "cookie" || credential?.source === "legacy-cookie") &&
               result.authenticated &&
               result.sessionMethod === "browser-session-cookie" &&
               result.expiresAt
             ) {
-              yield* appendSessionCookie(sessions.cookieName, credential.token, result.expiresAt);
+              yield* appendSessionCookie(sessions.cookieName, credential.token);
               yield* appendCredentialResponseHeaders;
             }
             return result;
@@ -320,7 +338,9 @@ export const layer = HttpApiBuilder.group(
             const cookieName = result.cookieName ?? sessions.cookieName;
             const selectedCookie = yield* Effect.fromResult(
               Cookies.set(Cookies.empty, cookieName, result.sessionToken, {
-                expires: DateTime.toDate(result.response.expiresAt),
+                ...(result.cookieName
+                  ? { expires: DateTime.toDate(result.response.expiresAt) }
+                  : { maxAge: BROWSER_COOKIE_RETENTION }),
                 httpOnly: true,
                 path: "/",
                 sameSite: "lax",

@@ -106,6 +106,11 @@ created in Settings can only be copied from the client that created them while
 its Sharing & access page stays open. If you leave or reload that page, create
 another link to share.
 
+Direct pairings stay authorized while the device makes authenticated requests
+within 14 days. After 14 days without activity, pair the device again. Existing
+unexpired pairings adopt renewal when used, retaining their original expiry if
+it is later. Revoking a device's session still ends its access immediately.
+
 ### Reach one machine several ways
 
 A machine can have more than one route: LAN, Tailscale, another VPN, a public

@@ -8,11 +8,14 @@ import {
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -28,6 +31,13 @@ import * as AuthHttp from "./http.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
 const DEV_TOKEN = "reusable-dev-auth-token-that-is-long-enough";
+const unusedSecretStore = ServerSecretStore.ServerSecretStore.of({
+  get: () => Effect.succeedNone,
+  set: () => Effect.void,
+  create: () => Effect.void,
+  getOrCreateRandom: () => Effect.die("Not used by these routes."),
+  remove: () => Effect.void,
+});
 class AuthTestApi extends HttpApi.make("environment").add(EnvironmentHttpApi.groups.auth) {}
 
 const layerConfig = Layer.effect(
@@ -75,13 +85,6 @@ const postJson = (path: string, body: unknown, headers?: Readonly<Record<string,
 it.effect("sets the selected browser session cookies through the HTTP route", () =>
   Effect.gen(function* () {
     const random = yield* SecureRandom.SecureRandom;
-    const unusedSecretStore = ServerSecretStore.ServerSecretStore.of({
-      get: () => Effect.succeedNone,
-      set: () => Effect.void,
-      create: () => Effect.void,
-      getOrCreateRandom: () => Effect.die("Not used by these routes."),
-      remove: () => Effect.void,
-    });
     const requestContext = Context.make(SecureRandom.SecureRandom, random).pipe(
       Context.add(ServerSecretStore.ServerSecretStore, unusedSecretStore),
     );
@@ -120,6 +123,7 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           const devCookie = devCookies.find((cookie) => cookie.startsWith("t3_dev_session_"));
           expect(devCookie).toContain("HttpOnly");
           expect(devCookie).toContain(`=${DEV_TOKEN};`);
+          expect(devCookie).not.toContain("Max-Age=31536000");
           expect(devCookies).toContainEqual(
             expect.stringMatching(/^t3_session_[^=]*=;.*Max-Age=0/),
           );
@@ -152,6 +156,72 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(restrictedCookies).toHaveLength(1);
           expect(restrictedCookies[0]).toMatch(/^t3_session_/);
           expect(restrictedCookies[0]).not.toContain("t3_dev_session_");
+          expect(restrictedCookies[0]).toContain("Max-Age=31536000");
+          const pairedCookie = restrictedCookies[0]!.split(";", 1)[0]!;
+          const sessionResponse = await environmentA.handler(
+            new Request("http://127.0.0.1/api/auth/session", {
+              headers: { cookie: pairedCookie },
+            }),
+            requestContext,
+          );
+          const refreshedCookie = sessionResponse.headers.getSetCookie()[0];
+          expect(sessionResponse.status).toBe(200);
+          expect(await sessionResponse.json()).toMatchObject({
+            authenticated: true,
+            expiresAt: expect.any(String),
+          });
+          expect(refreshedCookie).toContain(`${pairedCookie};`);
+          expect(refreshedCookie).toContain("HttpOnly");
+          expect(refreshedCookie).toContain("SameSite=Lax");
+          expect(refreshedCookie).toContain("Max-Age=31536000");
+          const deniedResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/pairing-token",
+              { scopes: ["orchestration:read"] },
+              { cookie: pairedCookie },
+            ),
+            requestContext,
+          );
+          expect(deniedResponse.status).toBe(403);
+          expect(deniedResponse.headers.getSetCookie()[0]).toContain(`${pairedCookie};`);
+
+          const mobilePairingResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/pairing-token",
+              { scopes: ["orchestration:read"] },
+              { cookie: devCookieHeader },
+            ),
+            requestContext,
+          );
+          const mobilePairing = (await mobilePairingResponse.json()) as { credential: string };
+          const exchange = await environmentA.handler(
+            new Request("http://127.0.0.1/oauth/token", {
+              method: "POST",
+              body: new URLSearchParams({
+                grant_type: AuthTokenExchangeGrantType,
+                subject_token: mobilePairing.credential,
+                subject_token_type: AuthEnvironmentBootstrapTokenType,
+                requested_token_type: AuthAccessTokenType,
+              }),
+            }),
+            requestContext,
+          );
+          expect(exchange.status).toBe(200);
+          const access = (await exchange.json()) as { access_token: string };
+          for (let i = 0; i < 2; i++) {
+            const response = await environmentA.handler(
+              new Request("http://127.0.0.1/api/auth/session", {
+                headers: { authorization: `Bearer ${access.access_token}` },
+              }),
+              requestContext,
+            );
+            expect(response.status).toBe(200);
+            expect(await response.json()).toMatchObject({
+              authenticated: true,
+              sessionMethod: "bearer-access-token",
+            });
+            expect(response.headers.getSetCookie()).toEqual([]);
+          }
         }),
       ([environmentA, environmentB]) =>
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),
@@ -159,16 +229,67 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
+it.effect("rejects a retained browser cookie after the session expires", () =>
+  Effect.gen(function* () {
+    const random = yield* SecureRandom.SecureRandom;
+    const clock = yield* TestClock.make();
+    const requestContext = Context.make(SecureRandom.SecureRandom, random).pipe(
+      Context.add(Clock.Clock, clock),
+      Context.add(ServerSecretStore.ServerSecretStore, unusedSecretStore),
+    );
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => HttpRouter.toWebHandler(layerRoutes, { disableLogger: true })),
+      (environment) =>
+        Effect.gen(function* () {
+          const send = (request: Request) =>
+            Effect.promise(() => environment.handler(request, requestContext));
+          const dev = yield* send(postJson("/api/auth/browser-session", { credential: DEV_TOKEN }));
+          const devCookie = dev.headers
+            .getSetCookie()
+            .find((cookie) => cookie.startsWith("t3_dev_session_"))!
+            .split(";", 1)[0]!;
+          const pairing = yield* send(
+            postJson(
+              "/api/auth/pairing-token",
+              { scopes: ["orchestration:read"] },
+              { cookie: devCookie },
+            ),
+          );
+          const grant = (yield* Effect.promise(() => pairing.json())) as { credential: string };
+          const browser = yield* send(
+            postJson("/api/auth/browser-session", { credential: grant.credential }),
+          );
+          expect(yield* Effect.promise(() => browser.json())).toMatchObject({
+            expiresAt: "1970-01-15T00:00:00.000Z",
+          });
+          const cookie = browser.headers.getSetCookie()[0]!;
+          expect(cookie).toContain("Max-Age=31536000");
+          const cookieHeader = cookie.split(";", 1)[0]!;
+          const initial = yield* send(
+            new Request("http://127.0.0.1/api/auth/session", { headers: { cookie: cookieHeader } }),
+          );
+          expect(yield* Effect.promise(() => initial.json())).toMatchObject({
+            authenticated: true,
+          });
+          yield* TestClock.adjust(Duration.days(15)).pipe(
+            Effect.provideService(Clock.Clock, clock),
+          );
+          const response = yield* send(
+            new Request("http://127.0.0.1/api/auth/session", { headers: { cookie: cookieHeader } }),
+          );
+          expect(yield* Effect.promise(() => response.json())).toMatchObject({
+            authenticated: false,
+          });
+          expect(response.headers.getSetCookie()).toEqual([]);
+        }),
+      (environment) => Effect.promise(() => environment.dispose()),
+    );
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
 it.effect.each(["DPoP", "dpop"])("challenges a refused %s request with DPoP", (scheme) =>
   Effect.gen(function* () {
     const random = yield* SecureRandom.SecureRandom;
-    const unusedSecretStore = ServerSecretStore.ServerSecretStore.of({
-      get: () => Effect.succeedNone,
-      set: () => Effect.void,
-      create: () => Effect.void,
-      getOrCreateRandom: () => Effect.die("Not used by these routes."),
-      remove: () => Effect.void,
-    });
     const requestContext = Context.make(SecureRandom.SecureRandom, random).pipe(
       Context.add(ServerSecretStore.ServerSecretStore, unusedSecretStore),
     );

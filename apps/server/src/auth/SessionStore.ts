@@ -382,10 +382,14 @@ export class SessionStore extends Context.Service<
       readonly proofKeyThumbprint?: string;
       readonly runtimeModeCeiling?: RuntimeMode;
       readonly peerLink?: boolean;
+      readonly rolling?: boolean;
       readonly replaceActiveForSubjectAndMethod?: boolean;
       readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
+    readonly recordActivity: (
+      sessionId: AuthSessionId,
+    ) => Effect.Effect<void, SessionCredentialError>;
     readonly issueWebSocketToken: (
       sessionId: AuthSessionId,
       input?: {
@@ -426,6 +430,7 @@ export class SessionStore extends Context.Service<
 
 const SIGNING_SECRET_NAME = "server-signing-key";
 const DEFAULT_SESSION_TTL = Duration.days(30);
+const ROLLING_SESSION_TTL = Duration.days(14);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
 
 const SessionClaims = Schema.Struct({
@@ -649,8 +654,12 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause }))),
       );
       const issuedAt = yield* DateTime.now;
+      const rolling =
+        input?.rolling === true && !input.ttl && !input.proofKeyThumbprint && !input.peerLink;
       const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
+        milliseconds: Duration.toMillis(
+          rolling ? ROLLING_SESSION_TTL : (input?.ttl ?? DEFAULT_SESSION_TTL),
+        ),
       });
       const claims: SessionClaims = {
         v: 1,
@@ -697,6 +706,7 @@ const make = Effect.gen(function* () {
         },
         issuedAt,
         expiresAt,
+        rolling: rolling ? 1 : 0,
       } satisfies AuthSessions.CreateAuthSessionInput;
       const replacedSessionIds = yield* (
         input?.replaceSessionId !== undefined || input?.replaceActiveForSubjectAndMethod
@@ -748,6 +758,61 @@ const make = Effect.gen(function* () {
       } satisfies IssuedSession;
     },
   );
+
+  const refreshSession = Effect.fn("SessionStore.refreshSession")(function* (
+    sessionId: AuthSessionId,
+    adopt: boolean,
+    initial?: AuthSessions.AuthSessionRecord,
+  ) {
+    const now = yield* DateTime.now;
+    const read = () =>
+      authSessions
+        .getById({ sessionId })
+        .pipe(
+          Effect.mapError((cause) => new SessionCredentialVerificationError({ sessionId, cause })),
+        );
+    const check = (row: Option.Option<AuthSessions.AuthSessionRecord>) => {
+      if (Option.isNone(row)) return Effect.fail(new UnknownSessionTokenError({ sessionId }));
+      if (row.value.revokedAt !== null)
+        return Effect.fail(
+          new SessionTokenRevokedError({ sessionId, revokedAt: row.value.revokedAt }),
+        );
+      if (row.value.expiresAt.epochMilliseconds <= now.epochMilliseconds)
+        return Effect.fail(
+          new SessionTokenExpiredError({
+            sessionId,
+            expiresAt: row.value.expiresAt,
+            observedAt: now,
+          }),
+        );
+      return Effect.succeed(row.value);
+    };
+    const row = yield* check(initial === undefined ? yield* read() : Option.some(initial));
+    const expiresAt = DateTime.add(now, { milliseconds: Duration.toMillis(ROLLING_SESSION_TTL) });
+    if (
+      (row.rolling === 1 && row.expiresAt.epochMilliseconds < expiresAt.epochMilliseconds) ||
+      (row.rolling === 2 && adopt)
+    ) {
+      const renewed = yield* authSessions
+        .renew({
+          sessionId,
+          now,
+          expiresAt,
+          adopt,
+        })
+        .pipe(
+          Effect.mapError((cause) => new SessionCredentialVerificationError({ sessionId, cause })),
+        );
+      return yield* check(
+        Option.isSome(renewed)
+          ? Option.some({ ...row, rolling: 1, expiresAt: renewed.value.expiresAt })
+          : yield* read(),
+      );
+    }
+    return row;
+  });
+  const recordActivity: SessionStore["Service"]["recordActivity"] = (sessionId) =>
+    refreshSession(sessionId, false).pipe(Effect.asVoid);
 
   const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
     function* (token) {
@@ -808,14 +873,6 @@ const make = Effect.gen(function* () {
           expirationClaim: claims.exp,
         });
       }
-      if (claims.exp <= observedAt.epochMilliseconds) {
-        return yield* new SessionTokenExpiredError({
-          sessionId: claims.sid,
-          expiresAt: expiresAt.value,
-          observedAt,
-        });
-      }
-
       const row = yield* authSessions
         .getById({ sessionId: claims.sid })
         .pipe(
@@ -833,12 +890,29 @@ const make = Effect.gen(function* () {
         });
       }
 
+      const eligible =
+        row.value.rolling === 1 ||
+        (row.value.rolling === 2 &&
+          !claims.jkt &&
+          !claims.plk &&
+          !claims.rtc &&
+          claims.sub === "one-time-token" &&
+          claims.exp > observedAt.epochMilliseconds);
+      if (!eligible && claims.exp <= observedAt.epochMilliseconds) {
+        return yield* new SessionTokenExpiredError({
+          sessionId: claims.sid,
+          expiresAt: expiresAt.value,
+          observedAt,
+        });
+      }
+      const active = yield* refreshSession(claims.sid, eligible, row.value);
+
       return {
         sessionId: claims.sid,
         token,
         method: claims.method,
         client: toClientMetadata(row.value.client),
-        expiresAt: expiresAt.value,
+        expiresAt: active.expiresAt,
         subject: claims.sub,
         scopes: row.value.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
@@ -1071,6 +1145,7 @@ const make = Effect.gen(function* () {
         while (true) {
           const rows = yield* Effect.forEach(chain, readRow);
           if (rows.some((row) => Option.isNone(row) || row.value.revokedAt !== null)) return;
+          current = Option.getOrThrow(rows[chain.length - 1]!);
           const now = yield* DateTime.now;
           const remaining = current.expiresAt.epochMilliseconds - now.epochMilliseconds;
           if (remaining > 0) {
@@ -1103,6 +1178,7 @@ const make = Effect.gen(function* () {
     legacyCookieName,
     issue,
     verify,
+    recordActivity,
     issueWebSocketToken,
     verifyWebSocketToken,
     listActive,

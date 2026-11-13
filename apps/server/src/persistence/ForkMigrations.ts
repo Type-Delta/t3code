@@ -12,6 +12,7 @@ import CheckpointCaptureProviderMetadata from "./Migrations/038_CheckpointCaptur
 import ManagementApiKeys from "./Migrations/050_ManagementApiKeys.ts";
 import AutoResumeJobs from "./Migrations/051_AutoResumeJobs.ts";
 import ProjectionThreadMessageSuggestions from "./Migrations/062_ProjectionThreadMessageSuggestions.ts";
+import RollingPairingSessions from "./Migrations/ForkRollingPairingSessions.ts";
 
 const noOp = Effect.void;
 
@@ -121,6 +122,7 @@ export const forkMigrationEntries = [
   [13, "ReconcileUpstream41History", noOp],
   [14, "ReconcileUpstream47History", noOp],
   [15, "ReconcileBranchPullRequestHistory", noOp],
+  [16, "RollingPairingSessions", RollingPairingSessions],
 ] as const;
 
 export const forkMigrationManifest = forkMigrationEntries.map(([id, name]) => [id, name] as const);

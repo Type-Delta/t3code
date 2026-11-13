@@ -921,6 +921,18 @@ The timeline minimap owns its exact-end state. The timeline's existing scroll an
 
 **Last updated:** 2026-11-12
 
+### DL059 — Direct pairings renew with regular use
+
+Directly paired browser, desktop, and mobile clients keep their existing signed credential while the server renews access after authenticated activity. Renewable sessions expire after 14 days without activity; HTTP requests and incoming authorized WebSocket RPCs count, while server broadcasts do not. This supports official clients that cannot replace their stored token through a new refresh flow. Browser responses refresh a year-long credential cookie; the server's inactivity deadline remains authoritative even when the browser retains the credential longer. Renewal persists each advancing deadline so restarts cannot shorten the inactivity window, and the atomic update returns its deadline without another read.
+
+The fork migration identifies unexpired legacy pairing candidates without reviving expired or revoked grants. Signature verification confirms eligibility before adoption, and adoption preserves a later existing expiry. T3 Connect, MCP and peer links, desktop bootstrap credentials, and explicitly time-limited sessions retain their fixed expiry rules. Revocation still ends existing connections.
+
+**Implementation evidence:** `apps/server/src/auth/SessionStore.ts`, `EnvironmentAuth.ts`, `http.ts`, `RpcAuthorization.ts`, `apps/server/src/ws.ts`, and the auth-session persistence and fork migration tests.
+
+**Recorded validation:** 113 focused authentication and migration tests pass, covering renewal beyond the signed expiry, restart persistence, legacy adoption, inactivity, short-lived WebSocket tickets, retained-cookie rejection, and revocation. The query refinement passes another 49 focused tests. An isolated running server and paired Chrome client verified browser access, unchanged mobile-style token exchange, bearer reuse, incoming WebSocket RPC renewal, and revocation closing an open socket with no browser errors. A pre-upgrade database fixture migrated through the fork ledger, adopted the same unexpired credential through real HTTP, rejected expired and revoked credentials, and passed SQLite integrity checks. Local HTTP probes checked the renewal cost. `vp check` and `vp run typecheck` pass. Compatibility was verified at the protocol level; the official iOS binary was not exercised.
+
+**Last updated:** 2026-11-13
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.

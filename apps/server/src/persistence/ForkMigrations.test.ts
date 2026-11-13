@@ -52,6 +52,14 @@ it.effect.each([0, 64])(
         migrationManifest.filter(([id]) => id > fromId),
       );
       yield* assertCurrentSchema;
+      assert.deepStrictEqual(
+        yield* sql`SELECT migration_id, name FROM fork_sql_migrations WHERE migration_id = 16`,
+        [{ migration_id: 16, name: "RollingPairingSessions" }],
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT migration_id FROM effect_sql_migrations WHERE name = 'RollingPairingSessions'`,
+        [],
+      );
       const before = yield* sql`SELECT type, name, sql FROM sqlite_master ORDER BY type, name`;
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(

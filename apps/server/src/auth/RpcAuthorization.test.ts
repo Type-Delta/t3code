@@ -12,6 +12,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
+  EnvironmentAuthorizationError,
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
   WS_METHODS,
@@ -106,6 +107,49 @@ describe("RPC scope middleware", () => {
     ),
   );
 
+  it.effect("checks session activity before invoking an authorized RPC", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      let valid = true;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.serverProbe, () =>
+              Effect.sync(() => {
+                calls.push("handler");
+                return {};
+              }),
+            ),
+            group.toLayerHandler(WS_METHODS.serverRetryResourceTelemetry, () => Effect.never),
+            RpcAuthorization.layer([AuthOrchestrationReadScope], undefined, () =>
+              Effect.sync(() => {
+                calls.push("activity");
+              }).pipe(
+                Effect.andThen(() =>
+                  valid
+                    ? Effect.void
+                    : Effect.fail(
+                        new EnvironmentAuthorizationError({
+                          message: "The authenticated session is no longer valid.",
+                          requiredScope: AuthOrchestrationReadScope,
+                        }),
+                      ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      yield* client[WS_METHODS.serverProbe]({});
+      expect(calls).toEqual(["activity", "handler"]);
+      valid = false;
+      expect(yield* client[WS_METHODS.serverProbe]({}).pipe(Effect.flip)).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+      });
+      expect(calls).toEqual(["activity", "handler", "activity"]);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect.each([
     { scopes: [AuthOrchestrationReadScope], missing: AuthEnvironmentMaintainScope },
     {
@@ -154,6 +198,7 @@ it.effect.each([WS_METHODS.subscribeVcsBranch, WS_METHODS.subscribeVcsStatus] as
         ),
       );
       let handled = 0;
+      let activity = 0;
       const handlers = Layer.mergeAll(
         group.toLayerHandler(WS_METHODS.subscribeVcsBranch, () =>
           Stream.fromEffect(
@@ -172,7 +217,16 @@ it.effect.each([WS_METHODS.subscribeVcsBranch, WS_METHODS.subscribeVcsStatus] as
         ),
       );
       const denied = yield* RpcTest.makeClient(group).pipe(
-        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([]))),
+        Effect.provide(
+          Layer.merge(
+            handlers,
+            RpcAuthorization.layer([], undefined, () =>
+              Effect.sync(() => {
+                activity++;
+              }),
+            ),
+          ),
+        ),
       );
       expect(
         yield* Stream.runDrain(
@@ -182,8 +236,18 @@ it.effect.each([WS_METHODS.subscribeVcsBranch, WS_METHODS.subscribeVcsStatus] as
         ).pipe(Effect.flip),
       ).toMatchObject({ requiredPermission: AuthOrchestrationReadScope });
       expect(handled).toBe(0);
+      expect(activity).toBe(0);
       const granted = yield* RpcTest.makeClient(group).pipe(
-        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthOrchestrationReadScope]))),
+        Effect.provide(
+          Layer.merge(
+            handlers,
+            RpcAuthorization.layer([AuthOrchestrationReadScope], undefined, () =>
+              Effect.sync(() => {
+                activity++;
+              }),
+            ),
+          ),
+        ),
       );
       yield* Stream.runDrain(
         method === WS_METHODS.subscribeVcsBranch
@@ -191,6 +255,7 @@ it.effect.each([WS_METHODS.subscribeVcsBranch, WS_METHODS.subscribeVcsStatus] as
           : granted[method]({ cwd: "/repo" }).pipe(Stream.drain),
       );
       expect(handled).toBe(1);
+      expect(activity).toBe(1);
     }).pipe(Effect.scoped),
 );
 

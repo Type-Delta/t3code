@@ -1,6 +1,7 @@
 import * as Context from "effect/Context";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -41,6 +42,7 @@ export const AuthSessionRecord = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  rolling: Schema.Number,
 });
 export type AuthSessionRecord = typeof AuthSessionRecord.Type;
 
@@ -52,6 +54,7 @@ export const CreateAuthSessionInput = Schema.Struct({
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  rolling: Schema.optionalKey(Schema.Number),
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
 
@@ -119,6 +122,15 @@ export class AuthSessionRepository extends Context.Service<
     readonly setLastConnectedAt: (
       input: SetAuthSessionLastConnectedAtInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
+    readonly renew: (input: {
+      readonly sessionId: AuthSessionId;
+      readonly now: DateTime.Utc;
+      readonly expiresAt: DateTime.Utc;
+      readonly adopt: boolean;
+    }) => Effect.Effect<
+      Option.Option<{ readonly expiresAt: DateTime.Utc }>,
+      AuthSessionRepositoryError
+    >;
   }
 >()("t3/persistence/AuthSessions/AuthSessionRepository") {}
 
@@ -137,6 +149,7 @@ const AuthSessionDbRow = Schema.Struct({
   expiresAt: Schema.DateTimeUtcFromString,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+  rolling: Schema.Number,
 });
 
 const AuthSessionRawDbRow = Schema.Struct({
@@ -154,6 +167,7 @@ const AuthSessionRawDbRow = Schema.Struct({
   expiresAt: Schema.Unknown,
   lastConnectedAt: Schema.Unknown,
   revokedAt: Schema.Unknown,
+  rolling: Schema.Unknown,
 });
 
 const decodeAuthSessionDbRow = Schema.decodeUnknownEffect(AuthSessionDbRow);
@@ -176,6 +190,7 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionReco
     expiresAt: row.expiresAt,
     lastConnectedAt: row.lastConnectedAt,
     revokedAt: row.revokedAt,
+    rolling: row.rolling,
   };
 }
 
@@ -216,6 +231,7 @@ export const make = Effect.gen(function* () {
           client_browser,
           issued_at,
           expires_at,
+          rolling,
           revoked_at
         )
         VALUES (
@@ -231,6 +247,7 @@ export const make = Effect.gen(function* () {
           ${input.client.browser},
           ${input.issuedAt},
           ${input.expiresAt},
+          ${input.rolling ?? 0},
           NULL
         )
         ${ignoreExisting ? sql`ON CONFLICT(session_id) DO NOTHING` : sql``}
@@ -258,7 +275,8 @@ export const make = Effect.gen(function* () {
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          revoked_at AS "revokedAt",
+          rolling AS "rolling"
         FROM auth_sessions
         WHERE session_id = ${sessionId}
       `,
@@ -302,7 +320,8 @@ export const make = Effect.gen(function* () {
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          revoked_at AS "revokedAt",
+          rolling AS "rolling"
         FROM auth_sessions
         WHERE revoked_at IS NULL
           AND (expires_at > ${now} OR ${sql.in("session_id", connectedSessionIds)})
@@ -319,6 +338,24 @@ export const make = Effect.gen(function* () {
         WHERE session_id = ${sessionId}
           AND revoked_at IS NULL
       `,
+  });
+
+  const renewRow = SqlSchema.findOneOption({
+    Request: Schema.Struct({
+      sessionId: AuthSessionId,
+      now: Schema.DateTimeUtcFromString,
+      expiresAt: Schema.DateTimeUtcFromString,
+      adopt: Schema.Boolean,
+    }),
+    Result: Schema.Struct({ expiresAt: Schema.DateTimeUtcFromString }),
+    execute: ({ sessionId, now, expiresAt, adopt }) => sql`
+      UPDATE auth_sessions
+      SET rolling = 1, expires_at = CASE WHEN expires_at < ${expiresAt} THEN ${expiresAt} ELSE expires_at END
+      WHERE session_id = ${sessionId} AND revoked_at IS NULL AND expires_at > ${now}
+        AND (rolling = 1 OR (rolling = 2 AND ${adopt ? 1 : 0} = 1))
+        AND (rolling = 2 OR expires_at < ${expiresAt})
+      RETURNING expires_at AS "expiresAt"
+    `,
   });
 
   const revokeSessionRows = SqlSchema.findAll({
@@ -480,6 +517,17 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const renew: AuthSessionRepository["Service"]["renew"] = (input) =>
+    renewRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.renew:query",
+          "AuthSessionRepository.renew:encodeRequest",
+          { sessionId: input.sessionId },
+        ),
+      ),
+    );
+
   return {
     create,
     createReplacingActive,
@@ -489,6 +537,7 @@ export const make = Effect.gen(function* () {
     revoke,
     revokeAllExcept,
     setLastConnectedAt,
+    renew,
   } satisfies AuthSessionRepository["Service"];
 });
 
