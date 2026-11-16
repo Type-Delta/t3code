@@ -58,6 +58,8 @@ Projectless drafts retain upstream's scratch-project picker beside the machine c
 
 ### DL004 — Preview navigation and automation hardening
 
+Windows server preview tabs use headless Chromium even when the desktop app is attached. This removes their dependency on Electron guest compositing when displays are off. The desktop shows these tabs through the existing preview stream. Windows must remain awake for agents and remote connections to run.
+
 The fork hardens desktop collaborative preview control. A debugger detach invalidates the cached Chrome DevTools Protocol attachment, URL-bearing `preview_open` waits for new and reused tab readiness, and a committed `LoadFailed` state is returned as an automation failure rather than a successful load.
 
 Automation also retries dynamic click/type targets, re-resolves click targets after cursor movement, keeps snapshots coherent across DOM mutations, bounds guest viewport work, and quarantines an unresponsive host so later requests can fail over and recover without reconnecting the environment. Hung native control work now times out below the broker deadline and detaches only its cached debugger session, so the same tab can reattach instead of retaining a blocked control permit.
@@ -70,9 +72,9 @@ Browser development's single-origin Vite proxy behavior, including shared and Ta
 
 Upstream owns the pinned Electron debugger reference and bounded screenshot retries. Those fixes compose with the fork's stale-session detection and control deadlines; a screenshot that succeeds on retry keeps its debugger session. Upstream #17525 reattaches a tab as soon as Chromium drops its debugger; the fork keeps the lazy detach of a stale or hung session next to it, so both paths reach the same fresh attachment.
 
-**Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage, including same-tab recovery from stalled CDP and capture work, stale-host failover, acknowledged slow-operation recovery, timeout cleanup races, and `LoadFailed`; `vp check` and `vp run typecheck`. An isolated Electron run reproduced a full-load timeout against a page with a never-ending image request, then confirmed same-tab evaluate and snapshot remained available. The 2026-09-01 merge-focused suites reran the affected desktop, server, and web preview recovery paths.
+**Recorded validation:** focused desktop preview, web readiness/viewport, broker, MCP, and dev-runner coverage, including same-tab recovery from stalled CDP and capture work, stale-host failover, acknowledged slow-operation recovery, timeout cleanup races, and `LoadFailed`; `vp check` and `vp run typecheck`. An isolated Electron run reproduced a full-load timeout against a page with a never-ending image request, then confirmed same-tab evaluate and snapshot remained available. The 2026-09-01 merge-focused suites reran the affected desktop, server, and web preview recovery paths. The 2026-11-16 Windows pass covered 123 server browser and context tests, real Chromium automation through the broker with an available desktop channel, and streamed page input in an isolated web client. Browser profile fixtures use host-native paths, and the desktop upload fixture connects directly to Chromium's announced WebSocket endpoint.
 
-**Last updated:** 2026-10-20
+**Last updated:** 2026-11-16
 
 ### DL005 — Windows portability in CLI fixtures, Git, and tests
 

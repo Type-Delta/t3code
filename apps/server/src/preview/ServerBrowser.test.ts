@@ -526,7 +526,10 @@ const dependencies = Layer.mergeAll(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-server-browser-" })),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
-const layer = ServerBrowser.layer.pipe(Layer.provideMerge(dependencies));
+const layer = ServerBrowser.layer.pipe(
+  Layer.provideMerge(dependencies),
+  Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
+);
 const ready = Effect.gen(function* () {
   const browser = yield* ServerBrowser.ServerBrowser;
   const broker = yield* Broker.PreviewAutomationBroker;
@@ -942,25 +945,35 @@ it.effect.each(["desktop" as const, undefined])(
     ).pipe(Effect.provide(layer)),
 );
 
-it.effect("a tab the desktop does not draw is marked headless, so the desktop streams it", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const { broker, tabId } = yield* ready;
-      const manager = yield* Manager.PreviewManager;
-      desktopRendersNext = true;
-      const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
-        scope,
-        operation: "open",
-        input: { reuseExistingTab: false, show: false },
-      });
-      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
-      const headlessOf = (id: string | null) =>
-        sessions.find((session) => session.tabId === id)?.headless;
+it.effect.each(["darwin", "linux", "win32"] as const)(
+  "%s agent tabs use headless Chromium on Windows and otherwise reuse the desktop when attached",
+  (platform) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { broker, tabId } = yield* ready;
+        const manager = yield* Manager.PreviewManager;
+        desktopRendersNext = true;
+        const desktopTab = yield* broker.invoke<PreviewAutomationStatus>({
+          scope,
+          operation: "open",
+          input: { reuseExistingTab: false, show: false },
+        });
+        const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+        const headlessOf = (id: string | null) =>
+          sessions.find((session) => session.tabId === id)?.headless;
 
-      expect(headlessOf(tabId)).toBe(true);
-      expect(headlessOf(desktopTab.tabId)).toBeUndefined();
-    }),
-  ).pipe(Effect.provide(layer)),
+        expect(headlessOf(tabId)).toBe(true);
+        expect(headlessOf(desktopTab.tabId)).toBe(platform === "win32" ? true : undefined);
+        expect(desktopConnections).toHaveLength(platform === "win32" ? 0 : 1);
+      }),
+    ).pipe(
+      Effect.provide(
+        ServerBrowser.layer.pipe(
+          Layer.provideMerge(dependencies),
+          Layer.provide(Layer.succeed(HostProcess.Platform, platform)),
+        ),
+      ),
+    ),
 );
 
 it.effect("a server started without the desktop browser channel marks its tabs headless", () =>

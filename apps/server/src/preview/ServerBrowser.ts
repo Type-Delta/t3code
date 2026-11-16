@@ -1038,7 +1038,8 @@ const make = Effect.gen(function* () {
   };
 
   const desktopRenders = (snapshot: PreviewSessionSnapshot) =>
-    desktopChannel.available && !snapshot.headless
+    // Windows can stop compositing Electron guests when displays power off.
+    host.platform !== "win32" && desktopChannel.available && !snapshot.headless
       ? runPromise(
           Effect.gen(function* () {
             const key = { threadId: snapshot.threadId, tabId: snapshot.tabId };

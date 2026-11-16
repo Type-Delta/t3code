@@ -180,11 +180,13 @@ describe("ServerBrowserContexts", () => {
     expect(await pool.contextFor("work/team")).toBe(persistent);
     expect(await pool.contextFor("work/team", "agent")).not.toBe(persistent);
     expect(launches.persistent).toHaveBeenCalledExactlyOnceWith(
-      "/test/profiles/work%2Fteam",
+      NodePath.join("/test/profiles", "work%2Fteam"),
       expect.objectContaining({ chromiumSandbox: true, executablePath: "/test/chromium-launcher" }),
     );
     expect(release).toHaveBeenCalledTimes(2);
-    expect(launches.mkdir).toHaveBeenCalledWith("/test/profiles/work%2Fteam", { recursive: true });
+    expect(launches.mkdir).toHaveBeenCalledWith(NodePath.join("/test/profiles", "work%2Fteam"), {
+      recursive: true,
+    });
     await pool.close();
     expect(human.close).toHaveBeenCalledTimes(1);
   });
@@ -226,16 +228,19 @@ describe("ServerBrowserContexts", () => {
     });
     await pool.clearProfile("work/team");
     expect(onContextClose).toHaveBeenCalledExactlyOnceWith(persistent);
-    expect(launches.rm).toHaveBeenCalledExactlyOnceWith("/test/profiles/work%2Fteam", {
-      recursive: true,
-      force: true,
-    });
+    expect(launches.rm).toHaveBeenCalledExactlyOnceWith(
+      NodePath.join("/test/profiles", "work%2Fteam"),
+      {
+        recursive: true,
+        force: true,
+      },
+    );
     expect(await pool.contextFor("work/team", "agent")).toBe(agent);
     expect(browser.created[0]?.close).not.toHaveBeenCalled();
     launches.persistent.mockResolvedValue(makeContext() as unknown as BrowserContext);
     expect(await pool.contextFor("work/team")).not.toBe(persistent);
     await pool.clearProfile("never-opened");
-    expect(launches.rm).toHaveBeenLastCalledWith("/test/profiles/never-opened", {
+    expect(launches.rm).toHaveBeenLastCalledWith(NodePath.join("/test/profiles", "never-opened"), {
       recursive: true,
       force: true,
     });
@@ -258,10 +263,13 @@ describe("ServerBrowserContexts", () => {
 
     expect(deletionsBeforeClose).toBe(0);
     expect(human.close).toHaveBeenCalledTimes(1);
-    expect(launches.rm).toHaveBeenCalledExactlyOnceWith("/test/profiles/work%2Fteam", {
-      recursive: true,
-      force: true,
-    });
+    expect(launches.rm).toHaveBeenCalledExactlyOnceWith(
+      NodePath.join("/test/profiles", "work%2Fteam"),
+      {
+        recursive: true,
+        force: true,
+      },
+    );
     await pool.close();
   });
 
@@ -360,14 +368,16 @@ describe("ServerBrowserContexts", () => {
     try {
       const desktop = await launchPersistentChromium(userDataDir, {
         headless: true,
-        args: ["--remote-debugging-port=0"],
+        args: ["--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1"],
       });
       try {
-        const [port] = NodeFS.readFileSync(
+        const [port, browserPath] = NodeFS.readFileSync(
           NodePath.join(userDataDir, "DevToolsActivePort"),
           "utf8",
         ).split("\n");
-        const { browser, page } = await pool.connectDesktopPage(`http://127.0.0.1:${port}`);
+        const { browser, page } = await pool.connectDesktopPage(
+          `ws://127.0.0.1:${port}${browserPath}`,
+        );
         try {
           const file = NodePath.join(directory, "large.bin");
           NodeFS.writeFileSync(file, "");
