@@ -164,11 +164,20 @@ jobs:
           set -euo pipefail
           channel=latest
           if [[ "$PRERELEASE" == true ]]; then channel=nightly; fi
+          appimage=$(node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { parseUpdateManifest } from "./scripts/lib/update-manifest.ts";
+            const manifest = parseUpdateManifest(readFileSync(process.argv[1], "utf8"), process.argv[1], "Linux");
+            if (manifest.version !== process.argv[2]) throw new Error("Linux update manifest version does not match the release");
+            const files = manifest.files.filter(file => /^T3-Code-[^/]+\.AppImage$/.test(file.url));
+            if (files.length !== 1) throw new Error("Expected one Linux AppImage in the update manifest");
+            process.stdout.write(files[0].url);
+          ' "release-assets/$channel-linux.yml" "$VERSION")
           for file in "$channel.yml" "$channel-mac.yml" "$channel-mac-x64.yml" "$channel-linux.yml" \
             "T3-Code-$VERSION-x64.exe" "T3-Code-$VERSION-x64.exe.blockmap" \
             "T3-Code-$VERSION-arm64.dmg" "T3-Code-$VERSION-arm64.zip" \
             "T3-Code-$VERSION-x64.dmg" "T3-Code-$VERSION-x64.zip" \
-            "T3-Code-$VERSION-x86_64.AppImage" "T3-Code-$VERSION-amd64.deb"; do
+            "$appimage" "T3-Code-$VERSION-amd64.deb"; do
             [[ -s "release-assets/$file" ]] || { echo "::error::Missing release asset: $file"; exit 1; }
           done
           node scripts/merge-update-manifests.ts --platform mac "release-assets/$channel-mac.yml" "release-assets/$channel-mac-x64.yml"

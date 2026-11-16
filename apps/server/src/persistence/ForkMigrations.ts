@@ -22,7 +22,7 @@ const noOp = Effect.void;
  * must identify them by name and move them to the fork ledger before the
  * upstream migrator's id-clash guard runs.
  */
-const historicalForkRecordNames = new Set([
+export const historicalForkRecordNames = new Set([
   "ProjectionThreadsActiveOrderKey",
   "ProjectionThreadPullRequests",
   "ProjectionThreadMessageContext",

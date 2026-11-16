@@ -198,36 +198,64 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
       }),
     );
 
-    it.effect("returns full oversized checkpoint diffs without truncation", () =>
-      Effect.gen(function* () {
-        const tmp = yield* makeTmpDir();
-        yield* initRepoWithCommit(tmp);
-        const checkpointStore = yield* CheckpointStore.CheckpointStore;
-        const threadId = ThreadId.make("thread-checkpoint-store");
-        const fromCheckpointRef = checkpointRefForThreadTurn(threadId, 0);
-        const toCheckpointRef = checkpointRefForThreadTurn(threadId, 1);
+    it.effect.each(["legacy", "sidecar"] as const)(
+      "returns full oversized $0 checkpoint diffs and honors an explicit output cap",
+      (storage) =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          const checkpointStore = yield* CheckpointStore.CheckpointStore;
+          const threadId = ThreadId.make("thread-checkpoint-store");
+          const fromCheckpointRef =
+            storage === "sidecar"
+              ? yield* makeSidecarRef(tmp, "cap-from")
+              : checkpointRefForThreadTurn(threadId, 0);
+          const toCheckpointRef =
+            storage === "sidecar"
+              ? yield* makeSidecarRef(tmp, "cap-to")
+              : checkpointRefForThreadTurn(threadId, 1);
 
-        yield* checkpointStore.captureCheckpoint({
-          cwd: tmp,
-          checkpointRef: fromCheckpointRef,
-        });
-        yield* writeTextFile(NodePath.join(tmp, "README.md"), buildLargeText());
-        yield* checkpointStore.captureCheckpoint({
-          cwd: tmp,
-          checkpointRef: toCheckpointRef,
-        });
+          yield* checkpointStore.captureCheckpoint({
+            cwd: tmp,
+            checkpointRef: fromCheckpointRef,
+          });
+          yield* writeTextFile(NodePath.join(tmp, "README.md"), buildLargeText());
+          yield* checkpointStore.captureCheckpoint({
+            cwd: tmp,
+            checkpointRef: toCheckpointRef,
+          });
 
-        const diff = yield* checkpointStore.diffCheckpoints({
-          cwd: tmp,
-          fromCheckpointRef,
-          toCheckpointRef,
-          ignoreWhitespace: true,
-        });
+          const diff = yield* checkpointStore.diffCheckpoints({
+            cwd: tmp,
+            fromCheckpointRef,
+            toCheckpointRef,
+            ignoreWhitespace: true,
+          });
 
-        expect(diff).toContain("diff --git");
-        expect(diff).not.toContain("[truncated]");
-        expect(diff).toContain("+line 04999");
-      }),
+          expect(diff).toContain("diff --git");
+          expect(diff).not.toContain("[truncated]");
+          expect(diff).toContain("+line 04999");
+          const limited = yield* checkpointStore.diffCheckpoints({
+            cwd: tmp,
+            fromCheckpointRef,
+            toCheckpointRef,
+            ignoreWhitespace: true,
+            maxOutputBytes: 1024,
+          });
+          expect(Buffer.byteLength(limited)).toBeLessThanOrEqual(1024);
+          expect(limited).not.toContain("+line 04999");
+          const incompleteSummary = yield* Effect.flip(
+            checkpointStore.diffCheckpoints({
+              cwd: tmp,
+              fromCheckpointRef,
+              toCheckpointRef,
+              ignoreWhitespace: true,
+              format: "numstat",
+              maxOutputBytes: 1,
+            }),
+          );
+          expect(incompleteSummary._tag).toBe("VcsProcessOutputLimitError");
+        }),
     );
 
     it.effect("keeps the patch format clients parse when the repository changes it", () =>
@@ -608,6 +636,147 @@ it.layer(layerTest)("CheckpointStore.layer", (it) => {
           new Set(["README.md", "shared.txt"]),
         );
       }),
+    );
+
+    it.effect.each(["legacy", "sidecar"] as const)(
+      "leaves out fetched commits newer than the $0 checkpoint, keeping local ones",
+      (storage) =>
+        Effect.gen(function* () {
+          const root = yield* makeTmpDir();
+          const upstream = NodePath.join(root, "upstream");
+          const primary = NodePath.join(root, "primary");
+          const cwd = NodePath.join(root, "turn");
+          yield* (yield* FileSystem.FileSystem).makeDirectory(upstream);
+          yield* initRepoWithCommit(upstream);
+          yield* git(root, ["clone", upstream, primary]);
+          yield* git(primary, ["config", "user.email", "test@test.com"]);
+          yield* git(primary, ["config", "user.name", "Test"]);
+          yield* git(primary, ["worktree", "add", cwd, "-b", "turn"]);
+          const checkpointStore = yield* CheckpointStore.CheckpointStore;
+          const threadId = ThreadId.make("checkpoint-authored-paths-fetched");
+          const refs = {
+            cwd,
+            fromCheckpointRef:
+              storage === "sidecar"
+                ? yield* makeSidecarRef(cwd, "fetch-from")
+                : checkpointRefForThreadTurn(threadId, 0),
+            toCheckpointRef:
+              storage === "sidecar"
+                ? yield* makeSidecarRef(cwd, "fetch-to")
+                : checkpointRefForThreadTurn(threadId, 1),
+          };
+          yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: refs.fromCheckpointRef });
+
+          const commitFile = (repo: string, file: string) =>
+            Effect.gen(function* () {
+              yield* writeTextFile(NodePath.join(repo, file), `${file}\n`);
+              yield* git(repo, ["add", "."]);
+              yield* git(repo, ["commit", "-m", file]);
+            });
+
+          yield* git(upstream, ["checkout", "-b", "release"]);
+          yield* commitFile(upstream, "first.txt");
+          yield* git(cwd, ["fetch", "origin"]);
+          yield* commitFile(upstream, "second.txt");
+          // The primary worktree's HEAD reflog is the only record that this commit was made here.
+          yield* git(primary, ["checkout", "--detach"]);
+          yield* commitFile(primary, "own.txt");
+          yield* git(primary, ["push", "origin", "HEAD:refs/heads/pushed"]);
+          yield* git(upstream, ["merge", "pushed", "--no-edit"]);
+
+          yield* git(cwd, ["fetch", "origin"]);
+          yield* git(cwd, ["merge", "--ff-only", "origin/release"]);
+          yield* commitFile(cwd, "local.txt");
+          // Pushing imported commits to another branch must not make them look local.
+          yield* git(cwd, ["push", "origin", "HEAD:refs/heads/mirror"]);
+          yield* checkpointStore.captureCheckpoint({ cwd, checkpointRef: refs.toCheckpointRef });
+
+          expect(yield* checkpointStore.listAuthoredPaths(refs)).toEqual(
+            new Set(["local.txt", "own.txt"]),
+          );
+        }),
+    );
+
+    it.effect.each(
+      ["legacy", "sidecar", "mixed"].flatMap((storage) => [
+        { storage, committed: "before the turn" },
+        { storage, committed: "during the turn" },
+      ]),
+    )(
+      "starts a turn that switched branches from the branch it landed on ($storage, committed $committed)",
+      ({ committed, storage }) =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          yield* initRepoWithCommit(tmp);
+          const checkpointStore = yield* CheckpointStore.CheckpointStore;
+          const threadId = ThreadId.make("checkpoint-branch-switch");
+          const refs = yield* Effect.forEach([0, 1, 2, 3], (turn) =>
+            storage === "sidecar" || (storage === "mixed" && turn > 0)
+              ? makeSidecarRef(tmp, `switch-${turn}`)
+              : Effect.succeed(checkpointRefForThreadTurn(threadId, turn)),
+          );
+          const [first, second, third, afterCommit] = refs as [
+            CheckpointRef,
+            CheckpointRef,
+            CheckpointRef,
+            CheckpointRef,
+          ];
+          const capture = (checkpointRef: CheckpointRef, previousCheckpointRef?: CheckpointRef) =>
+            Effect.gen(function* () {
+              const fs = yield* FileSystem.FileSystem;
+              const before = yield* fs.readFile(NodePath.join(tmp, ".git/index"));
+              yield* checkpointStore.captureCheckpoint({
+                cwd: tmp,
+                checkpointRef,
+                ...(previousCheckpointRef === undefined ? {} : { previousCheckpointRef }),
+              });
+              expect(yield* fs.readFile(NodePath.join(tmp, ".git/index"))).toEqual(before);
+              if (storage === "sidecar")
+                expect(yield* git(tmp, ["for-each-ref", "--format=%(refname)", "refs/t3"])).toBe(
+                  "",
+                );
+            });
+          const changedSince = (fromCheckpointRef: CheckpointRef, toCheckpointRef: CheckpointRef) =>
+            Effect.gen(function* () {
+              const refs = { cwd: tmp, fromCheckpointRef, toCheckpointRef };
+              return {
+                patch: yield* checkpointStore.diffCheckpoints({ ...refs, ignoreWhitespace: false }),
+                authored: yield* checkpointStore.listAuthoredPaths(refs),
+              };
+            });
+          const commitOnA = git(tmp, ["commit", "-am", "work on a"]);
+
+          yield* git(tmp, ["branch", "b"]);
+          yield* git(tmp, ["checkout", "-b", "a"]);
+          yield* writeTextFile(NodePath.join(tmp, "a.txt"), "a\n");
+          yield* writeTextFile(NodePath.join(tmp, "README.md"), "# on a\n");
+          yield* git(tmp, ["add", "."]);
+          if (committed === "before the turn") yield* commitOnA;
+          yield* capture(first);
+
+          if (committed === "during the turn") yield* commitOnA;
+          yield* git(tmp, ["checkout", "b"]);
+          yield* writeTextFile(NodePath.join(tmp, "README.md"), "# on b\n");
+          yield* writeTextFile(NodePath.join(tmp, "b.txt"), "b\n");
+          yield* capture(second, first);
+
+          const switched = yield* changedSince(first, second);
+          expect(switched.patch).not.toContain("a.txt");
+          expect(switched.patch).toContain("-# test\n+# on b\n");
+          expect(switched.patch).toContain("b/b.txt");
+          expect(switched.authored).toBeNull();
+
+          // A reset also moves HEAD off a commit, and what it removed is the turn's doing.
+          yield* git(tmp, ["add", "."]);
+          yield* git(tmp, ["commit", "-m", "work on b"]);
+          yield* capture(afterCommit, first);
+          yield* git(tmp, ["reset", "--hard", "HEAD~1"]);
+          yield* capture(third, afterCommit);
+
+          const reset = yield* changedSince(afterCommit, third);
+          expect(reset.patch).toContain("--- a/b.txt\n+++ /dev/null");
+          expect(reset.authored).toEqual(new Set(["README.md", "b.txt"]));
+        }),
     );
 
     it.effect("keeps paths from signed commits under log.showSignature", () =>

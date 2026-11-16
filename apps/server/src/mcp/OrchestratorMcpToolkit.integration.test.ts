@@ -1,5 +1,6 @@
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation";
+import { ToolSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   EventId,
   IsoDateTime,
@@ -182,7 +183,9 @@ const delegatedResult = "Delegated API boundary inspected.";
 const cancellationPrompt = "Remain active until the parent cancels this delegated task.";
 const queuedFollowupPrompt = "Complete the queued follow-up and return the final result.";
 const queuedFollowupResult = "Queued delegated follow-up completed.";
+const longFollowupResult = "Long delegated follow-up line. ".repeat(1_500);
 
+const decodeThreadRead = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
 const decodeDelegateTaskResult = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskResult);
 const decodeThreadInterruptResult = Schema.decodeUnknownEffect(
   OrchestratorMcpThreadInterruptResult,
@@ -729,7 +732,7 @@ describe("orchestrator MCP toolkit", () => {
               Layer.mock(ProjectService.ProjectService)({
                 getById: (id) =>
                   Effect.succeed(
-                    id === projectId
+                    id === projectId || id === ProjectId.make("project:mcp-foreign")
                       ? Option.some({ id, defaultModelSelection: null } as never)
                       : Option.none(),
                   ),
@@ -1108,10 +1111,14 @@ describe("orchestrator MCP toolkit", () => {
               pendingAfterWait.runs.find((run) => run.id === directRead.queuedRun.id)?.status,
             ).toBe("queued");
 
-            const childPromptReadCall = yield* invoke("t3_thread_read", {
-              threadId: directChildThreadId,
-              limit: 1,
-            });
+            const childPromptReadCall = yield* invokeAs(
+              { ...invocation, thread: undefined },
+              "t3_thread_read",
+              {
+                threadId: directChildThreadId,
+                limit: 1,
+              },
+            );
             const childPromptRead = yield* decodeThreadReadResult(
               childPromptReadCall.structuredContent,
             ).pipe(Effect.orDie);
@@ -1145,12 +1152,16 @@ describe("orchestrator MCP toolkit", () => {
 
             const firstChunk = truncatedResultRead.items[0]!;
             expect(firstChunk.nextTextOffset).toBe(1);
-            const remainderCall = yield* invoke("t3_thread_read", {
-              threadId: directChildThreadId,
-              itemId: firstChunk.itemId,
-              textOffset: firstChunk.nextTextOffset,
-              maxCharsPerItem: 50_000,
-            });
+            const remainderCall = yield* invokeAs(
+              { ...invocation, thread: undefined },
+              "t3_thread_read",
+              {
+                threadId: directChildThreadId,
+                itemId: firstChunk.itemId,
+                textOffset: firstChunk.nextTextOffset,
+                maxCharsPerItem: 50_000,
+              },
+            );
             const remainder = yield* decodeThreadReadResult(remainderCall.structuredContent).pipe(
               Effect.orDie,
             );
@@ -1289,7 +1300,8 @@ describe("orchestrator MCP toolkit", () => {
             expect(declaredFailure(missingThreadQueue)).toMatchObject({
               _tag: "OrchestratorMcpFailure",
               code: "thread_not_found",
-              message: "The thread was not found.",
+              message:
+                "The thread was not found. Thread ids belong to one environment: for a thread on a linked one, find it with `t3_environment_links` and pass its `environmentId` to a tool that takes one.",
             });
             expect(missingThreadQueue.structuredContent).toBeUndefined();
             expect(validateQueue({ items: "invalid", nextCursor: null }).valid).toBe(false);
@@ -1484,6 +1496,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(threadSendTool?.tool.annotations?.destructiveHint).toBe(true);
             const threadWaitTool = server.tools.find(({ tool }) => tool.name === "t3_thread_wait");
             expect(threadWaitTool?.tool.annotations?.readOnlyHint).toBe(true);
+            expect(() => ToolSchema.parse(threadWaitTool?.tool)).not.toThrow();
             const threadInterruptTool = server.tools.find(
               ({ tool }) => tool.name === "t3_thread_interrupt",
             );
@@ -2171,7 +2184,7 @@ describe("orchestrator MCP toolkit", () => {
             const cancellable = yield* decodeDelegateTaskResult(
               cancellableCall.structuredContent,
             ).pipe(Effect.orDie);
-            expect(cancellable.status).toBe("running");
+            expect(["starting", "running"]).toContain(cancellable.status);
             expect(cancellable.hasPendingChildRuns).toBe(false);
             yield* waitForProjection(
               orchestrator,
@@ -2550,10 +2563,14 @@ describe("orchestrator MCP toolkit", () => {
               ),
             ).toHaveLength(2);
 
-            const promptedReadCall = yield* invoke("t3_thread_read", {
-              threadId: promptedThread.threadId,
-              limit: 1,
-            });
+            const promptedReadCall = yield* invokeAs(
+              { ...invocation, thread: undefined },
+              "t3_thread_read",
+              {
+                threadId: promptedThread.threadId,
+                limit: 1,
+              },
+            );
             const promptedRead = yield* decodeThreadReadResult(
               promptedReadCall.structuredContent,
             ).pipe(Effect.orDie);
@@ -2573,6 +2590,10 @@ describe("orchestrator MCP toolkit", () => {
               afterPosition: promptedRead.nextPosition,
               limit: 1,
             });
+            expect(
+              promptedReadNextCall.isError,
+              JSON.stringify(promptedReadNextCall.content),
+            ).not.toBe(true);
             const promptedReadNext = yield* decodeThreadReadResult(
               promptedReadNextCall.structuredContent,
             ).pipe(Effect.orDie);
@@ -2610,6 +2631,7 @@ describe("orchestrator MCP toolkit", () => {
             const forkedReadCall = yield* invoke("t3_thread_read", {
               threadId: forkedThreadId,
             });
+            expect(forkedReadCall.isError, JSON.stringify(forkedReadCall.content)).not.toBe(true);
             const forkedRead = yield* decodeThreadReadResult(forkedReadCall.structuredContent).pipe(
               Effect.orDie,
             );
@@ -2858,7 +2880,7 @@ describe("orchestrator MCP toolkit", () => {
             const upgradedDelegated = yield* decodeDelegateTaskResult(
               upgradedCall.structuredContent,
             ).pipe(Effect.orDie);
-            expect(upgradedDelegated.status).toBe("running");
+            expect(["starting", "running"]).toContain(upgradedDelegated.status);
             yield* waitForProjection(
               orchestrator,
               localChild(upgradedDelegated.childThreadId),
@@ -4035,6 +4057,7 @@ describe("orchestrator MCP toolkit", () => {
     { label: "distinct", result: queuedFollowupResult, latestSummary: null },
     { label: "identical", result: delegatedResult, latestSummary: null },
     { label: "emoji", result: "😀", latestSummary: null },
+    { label: "long", result: longFollowupResult, latestSummary: null },
   ])("reports $label child results", ({ result, latestSummary }) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -4390,6 +4413,14 @@ describe("orchestrator MCP toolkit", () => {
           expect(finalProjection.runs.find((run) => run.id === queuedFollowup.runId)?.status).toBe(
             "completed",
           );
+          expect(
+            finalProjection.turnItems.find(
+              (item) =>
+                item.runId === runningFollowup.runId && item.type === "run_interrupt_result",
+            ),
+          ).toMatchObject({
+            message: "Stopped by an agent: Allow the queued replay follow-up to run.",
+          });
           // Fork DL018: the reopened task publishes exactly once, after the last follow-up settles.
           yield* waitForProjection(orchestrator, parentThreadId, (projection) =>
             projection.subagents.some(
@@ -4526,11 +4557,41 @@ describe("orchestrator MCP toolkit", () => {
           const read = yield* invoke("t3_thread_read", {
             threadId: delegated.childThreadId,
             limit: 100,
-            maxCharsPerItem: result === "😀" ? 1 : 20_000,
+            ...(result === "😀" ? { maxCharsPerItem: 1 } : {}),
           }).pipe(Effect.withTracer(tracer));
           expect(read.isError).not.toBe(true);
           expect(transferReads.length).toBeGreaterThan(0);
-          expect(read.structuredContent).toEqual(parentlessRead.structuredContent);
+          const firstPage = yield* decodeThreadRead(read.structuredContent);
+          const finalItem = firstPage.items.find(
+            (item) => item.text === result.slice(0, result === "😀" ? 2 : 500),
+          );
+          expect(finalItem).toBeDefined();
+          if (result.length > 500) {
+            yield* invoke("t3_thread_read", {
+              threadId: delegated.childThreadId,
+              itemId: finalItem!.itemId,
+              textOffset: result.length,
+            });
+          }
+          let text = finalItem!.text ?? "";
+          let nextTextOffset = finalItem?.nextTextOffset ?? null;
+          while (nextTextOffset !== null) {
+            const beforeContinuation = yield* orchestrator.getThreadProjection(parentThreadId);
+            expect(
+              beforeContinuation.subagents.find((task) => task.id === delegated.taskId)
+                ?.completionDelivery?.state,
+            ).toBe(deliveryBeforeParentlessRead);
+            const continuation = yield* invoke("t3_thread_read", {
+              threadId: delegated.childThreadId,
+              itemId: finalItem!.itemId,
+              textOffset: nextTextOffset,
+              maxCharsPerItem: 50_000,
+            }).pipe(Effect.withTracer(tracer));
+            const nextPage = yield* decodeThreadRead(continuation.structuredContent);
+            text += nextPage.items[0]?.text ?? "";
+            nextTextOffset = nextPage.items[0]?.nextTextOffset ?? null;
+          }
+          expect(text).toBe(result);
           // The acknowledgement reads the task and its spawning run by id, not the parent's history.
           expect(acknowledgementReads.length).toBeGreaterThan(0);
           expect(

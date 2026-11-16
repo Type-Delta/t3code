@@ -70,6 +70,7 @@ const makeToolkit = (
     NodeCrypto.layer,
     Layer.succeed(McpInvocationContext.McpInvocationContext, invocation),
     Layer.mock(ThreadManagement.ThreadManagementService)({
+      listActiveShellIndex: () => Effect.succeed([]),
       getThreadRecords: (threadId) => Effect.succeed(projectionFor(threadId)),
       getThreadShell: (threadId) =>
         Effect.succeed(

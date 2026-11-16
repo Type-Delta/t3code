@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { runMigrations } from "../Migrations.ts";
 import { runForkMigrations } from "../ForkMigrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
@@ -13,7 +14,7 @@ layer("052_RemoveManagementApiKeyRuntimeModes", (it) => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
 
-      yield* runForkMigrations();
+      yield* runMigrations();
       // Simulate an installation that already ran the original migration 50.
       yield* sql`
         ALTER TABLE management_api_keys

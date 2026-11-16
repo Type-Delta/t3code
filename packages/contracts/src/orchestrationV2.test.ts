@@ -30,6 +30,7 @@ import * as Schema from "effect/Schema";
 import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2CheckpointFileSummary,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
@@ -70,6 +71,7 @@ const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
 const decodeOrchestrationV2TurnItemJson = Schema.decodeUnknownSync(OrchestrationV2TurnItemJson);
 const encodeOrchestrationV2TurnItemJson = Schema.encodeSync(OrchestrationV2TurnItemJson);
 const decodeOrchestrationV2Subagent = Schema.decodeUnknownSync(OrchestrationV2Subagent);
+const decodeCheckpointFileSummary = Schema.decodeSync(OrchestrationV2CheckpointFileSummary);
 const encodeOrchestrationV2SubagentJson = Schema.encodeSync(OrchestrationV2SubagentJson);
 const decodeOrchestrationV2ProviderThreadJson = Schema.decodeUnknownSync(
   OrchestrationV2ProviderThreadJson,
@@ -1282,6 +1284,14 @@ describe("orchestration V2 contracts", () => {
     expect(CheckpointRef.make("git-ref-1")).toBe("git-ref-1");
     expect(ContextTransferId.make("context-transfer-1")).toBe("context-transfer-1");
   });
+  it.each([" leading.ts", "src/trailing.ts "])(
+    "decodes the checkpoint file path %j exactly",
+    (path) => {
+      expect(
+        decodeCheckpointFileSummary({ path, kind: "added", additions: 1, deletions: 0 }).path,
+      ).toBe(path);
+    },
+  );
 
   it("decodes historical provider-thread JSON without pendingBackgroundTasks as empty roster", () => {
     const providerThread = decodeOrchestrationV2ProviderThreadJson({

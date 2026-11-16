@@ -41,9 +41,15 @@ const canonicalPath = (cwd: string): string => {
     }
   }
 };
-const inside = (parent: string, child: string) =>
-  child === parent ||
-  ["/", "\\"].some((sep) => child.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`));
+const inside = (parent: string, child: string) => {
+  const relative = NodePath.relative(parent, child);
+  return (
+    relative === "" ||
+    (!NodePath.isAbsolute(relative) &&
+      relative !== ".." &&
+      !relative.startsWith(`..${NodePath.sep}`))
+  );
+};
 const overlaps = (left: string, right: string) => inside(left, right) || inside(right, left);
 
 const conflicts = (left: Omit<Holder, "released">, right: Omit<Holder, "released">) =>

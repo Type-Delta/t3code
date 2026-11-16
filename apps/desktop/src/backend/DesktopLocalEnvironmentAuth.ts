@@ -17,11 +17,9 @@ import * as HttpClient from "effect/http/HttpClient";
 
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
 
-// A loopback /oauth/token exchange can fail transiently while the backend
-// settles (a 502-504, a refused or reset connection, a timeout). Retry those
-// for as long as the renderer's own bootstrap does; a rejected credential or a
-// server error is final.
-const BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT = Duration.seconds(15);
+// Each /oauth/token attempt may take 10 s, so a backend busy after ready needs several attempts.
+// Rejected credentials and non-transient server errors still fail immediately.
+const BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT = Duration.seconds(60);
 const BOOTSTRAP_TRANSIENT_RETRY_INTERVAL = Duration.millis(500);
 const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
 

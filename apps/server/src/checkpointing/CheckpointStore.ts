@@ -20,6 +20,8 @@ import * as SidecarCheckpointRepository from "./SidecarCheckpointRepository.ts";
 export interface CaptureCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
+  /** The checkpoint this one follows, so a turn that switched branches starts where it landed. */
+  readonly previousCheckpointRef?: CheckpointRef;
 }
 
 export interface AllocateCheckpointRefInput {

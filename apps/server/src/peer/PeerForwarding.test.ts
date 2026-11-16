@@ -14,10 +14,12 @@ import {
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
@@ -96,6 +98,7 @@ const boxThreads = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>, idleFirst
     getProjectThreadRecords: (input) => projectionOf(input.threadId),
     getThreadRecords: (threadId) => projectionOf(threadId),
     listProjectThreads: () => linked.pipe(Effect.map((shell) => [shell] as never)),
+    getShellSnapshot: () => linked.pipe(Effect.map((shell) => ({ threads: [shell] }) as never)),
     sendToThread: (input) =>
       Ref.update(seen, (current) => ({ ...current, sends: [...current.sends, input] })).pipe(
         Effect.as({ run: run("running"), delivery: "started" } as never),
@@ -425,6 +428,12 @@ it.effect("an agent here works on a linked environment's threads within its own 
       });
       expect(sent.isError).toBe(false);
       expect(sent.structuredContent).toMatchObject({ threadId: boxThread, delivery: "started" });
+      // The box records which thread here sent it.
+      expect((yield* Ref.get(seen)).sends[0]?.linkedSender).toEqual({
+        environmentId: laptop.environmentId,
+        threadId: "thread:laptop-full",
+        title: "thread:laptop-full",
+      });
 
       // A plan-mode agent here may not steer that thread there: the box
       // refuses it, because the call carries the agent's own modes.
@@ -475,18 +484,11 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
       expect(waited.structuredContent).toMatchObject({
         threadId: boxThread,
         runId: boxRun,
-        status: "completed",
-        timedOut: false,
+        status: "running",
+        timedOut: true,
       });
-      // Three pieces of at most 50 s each, the later ones pinned to the run
-      // the first one found.
-      expect(
-        (yield* Ref.get(seen)).waits.map(({ timeoutMs, runId }) => [timeoutMs, runId]),
-      ).toEqual([
-        [PeerForwarding.FORWARDED_WAIT_CHUNK_MS, undefined],
-        [PeerForwarding.FORWARDED_WAIT_CHUNK_MS, boxRun],
-        [PeerForwarding.FORWARDED_WAIT_CHUNK_MS, boxRun],
-      ]);
+      // One capped piece, so the caller's MCP request returns before its client times out.
+      expect((yield* Ref.get(seen)).waits.map(({ timeoutMs }) => timeoutMs)).toEqual([45_000]);
 
       yield* Ref.update(seen, (current) => ({ ...current, waits: [] }));
       const batch = yield* a.call("thread:laptop-full", "t3_thread_wait", {
@@ -495,14 +497,35 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
         timeoutMs: 600_000,
       });
       expect(batch.structuredContent).toMatchObject({
-        timedOut: false,
+        timedOut: true,
         results: [
           { threadId: boxThread, runId: boxRun },
           { threadId: usersThread, runId: boxRun },
         ],
       });
       const batchWaits = (yield* Ref.get(seen)).waits;
-      expect(batchWaits.map(({ runId }) => runId)).toEqual([undefined, undefined, boxRun, boxRun]);
+      expect(batchWaits.map(({ runId }) => runId)).toEqual([undefined, undefined]);
+      expect(batchWaits.map(({ timeoutMs }) => timeoutMs)).toEqual([45_000, 45_000]);
+      const resumed = yield* a.call("thread:laptop-full", "t3_thread_wait", {
+        environmentId: box.environmentId,
+        targets: [
+          { threadId: boxThread, runId: boxRun },
+          { threadId: usersThread, runId: boxRun },
+        ],
+      });
+      expect(resumed.structuredContent).toMatchObject({
+        timedOut: false,
+        results: [
+          { threadId: boxThread, runId: boxRun, status: "completed" },
+          { threadId: usersThread, runId: boxRun, status: "completed" },
+        ],
+      });
+      expect(
+        (yield* Ref.get(seen)).waits.slice(2).map(({ runId, timeoutMs }) => ({ runId, timeoutMs })),
+      ).toEqual([
+        { runId: boxRun, timeoutMs: 30_000 },
+        { runId: boxRun, timeoutMs: 30_000 },
+      ]);
 
       const send = (caller: string, clientRequestId: string) =>
         a.call(caller, "t3_thread_send", {
@@ -525,7 +548,7 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect("retains an idle target while another target waits across chunks", () =>
+it.effect("returns an idle target while another target can resume its short wait", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const seen = yield* Ref.make<Seen>(nothingSeen);
@@ -540,12 +563,27 @@ it.effect("retains an idle target while another target waits across chunks", () 
         timeoutMs: 150_000,
       });
       expect(result.structuredContent).toMatchObject({
-        timedOut: false,
+        timedOut: true,
         results: [
           { threadId: usersThread, runId: null, status: "idle", timedOut: false },
-          { threadId: boxThread, runId: boxRun, timedOut: false },
+          { threadId: boxThread, runId: boxRun, status: "running", timedOut: true },
         ],
       });
+      const resumed = yield* a.call("thread:laptop-full", "t3_thread_wait", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        runId: boxRun,
+        timeoutMs: 5_000,
+      });
+      expect(resumed.structuredContent).toMatchObject({
+        threadId: boxThread,
+        runId: boxRun,
+        status: "completed",
+        timedOut: false,
+      });
+      expect((yield* Ref.get(seen)).waits.map(({ timeoutMs }) => timeoutMs)).toEqual([
+        45_000, 45_000, 5_000,
+      ]);
       expect(
         (yield* Ref.get(seen)).waits.filter((wait) => wait.threadId === usersThread),
       ).toHaveLength(1);
@@ -759,6 +797,39 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
         expect(failureOf(relayed), name).toMatchObject({ code: "capability_denied" });
       }
       expect(yield* Ref.get(b.bearers)).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("refuses a launch there above the link's access, naming the link", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<Seen>(nothingSeen);
+      const linkSession = yield* Ref.make("");
+      const b = yield* serveBox(seen, linkSession);
+      const a = yield* makeLaptop;
+      yield* linkTo(a.links, b, "auto");
+      yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
+
+      // A full-access agent here asks for more than the link allows there.
+      const launchAboveLink = a.call("thread:laptop-full", "t3_thread_launch", {
+        environmentId: box.environmentId,
+        projectId: boxProject,
+        title: "Run the suite there",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        message: "Run the suite.",
+        runtimeMode: "full-access",
+      });
+      const { message } = failureOf(yield* launchAboveLink);
+      expect(message).toContain('"Box"');
+      expect(message).toContain("auto");
+      expect(message).toContain("full-access");
+      expect(message).not.toContain("parent mode");
+      expect((yield* Ref.get(seen)).launches).toEqual([]);
+
+      // Once the link has expired, that is what the agent needs to hear.
+      yield* TestClock.adjust(Duration.days(31));
+      expect(failureOf(yield* launchAboveLink).message).toContain("expired");
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

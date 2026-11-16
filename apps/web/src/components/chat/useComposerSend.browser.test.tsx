@@ -57,6 +57,7 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
       shownPendingApprovalIds: [],
     }),
     validateProviderInput: () => true,
+    hasPendingAttachments: () => false,
     resetCursorState: vi.fn(),
   } as Partial<ChatComposerHandle> as ChatComposerHandle;
   return {
@@ -81,6 +82,7 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
     },
+    activeProjectIsScratch: false,
     activeProjectDefaultModelSelection: null,
     activeMessageCount: 2,
     isServerThread: true,
@@ -117,10 +119,11 @@ function inputFor(prompt: string, navigate: Input["onCheckpointNavigation"]): In
     clearUsageLimitsFor: vi.fn(),
     needsLoadBalancing: false,
     loadBalancing: { pending: false } as Input["loadBalancing"],
+    refreshBeforeSend: () => null,
     readPendingEnvironmentChange: () => null,
     pendingApprovals: [],
     respondingRequestIds: [],
-    activePendingProgress: null,
+    activePendingUserInput: null,
     onAdvanceActivePendingUserInput: vi.fn(),
     onRespondToApproval: vi.fn(),
     beginLocalDispatch: vi.fn(),

@@ -20,11 +20,12 @@ import { useClientSettings } from "../../hooks/useSettings";
 import { releaseComposerDraftUploads } from "../../lib/composerDraftUploads";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
 import { readLocalApi } from "../../localApi";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { hostRightPanel, useRightPanelStore } from "../../rightPanelStore";
 import { useQuietThreadProjection, useQuietThreadShell } from "../../state/entities";
 import { useEnvironmentScope } from "../../state/session";
 import { useEnvironmentShellHasSnapshot } from "../../state/shell";
-import { threadEnvironment } from "../../state/threads";
+import { threadEnvironment, threadFamilies } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import ChatView from "../ChatView";
 import { Button } from "../ui/button";
@@ -45,6 +46,13 @@ export default function SideChatPane(props: {
   useEffect(
     () => hostRightPanel(scopeThreadRef(parentRef.environmentId, threadId), parentRef),
     [parentRef, threadId],
+  );
+  // Side chats are intentionally omitted from the main shell list; retain this pane's family
+  // read while it is mounted so direct tab selection can still resolve the shell.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- retains the side chat's family row while its pane is mounted
+  useEffect(
+    () => threadFamilies.mount(appAtomRegistry, parentRef.environmentId, parentRef.threadId),
+    [parentRef.environmentId, parentRef.threadId],
   );
   const shell = useQuietThreadShell(threadRef);
   const parent = useQuietThreadShell(parentRef);
@@ -127,7 +135,7 @@ export default function SideChatPane(props: {
   };
 
   return (
-    <div data-side-chat-pane className="flex h-full min-h-0 flex-col">
+    <div data-side-chat-pane={threadId} className="flex h-full min-h-0 flex-col">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border pr-1 pl-3">
         <span className="min-w-0 flex-1 truncate text-xs font-medium">
           {shell?.title ?? "Side chat"}

@@ -1,13 +1,16 @@
 import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
+import type * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -39,6 +42,10 @@ import { makeManagedServerProvider } from "@t3tools/provider-core/server/managed
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
 import { makeGatewayModelCatalog } from "../GatewayModelCatalog.ts";
+import {
+  makeClaudeCodeModelRoutes,
+  resolveClaudeModelSettingsKey,
+} from "../ClaudeCodeModelRoutes.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -170,6 +177,26 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     });
 
     const scopedLimitNames = yield* makeClaudeScopedLimitNames;
+    // The SDK's user source is the host's home, not a custom one; same rule as the adapter.
+    const customHome =
+      effectiveConfig.homePath.trim().length > 0 ||
+      processEnv.CLAUDE_CONFIG_DIR !== (yield* HostProcess.Environment).CLAUDE_CONFIG_DIR;
+    // Only a successful probe records routes, so a failed one never sends turns back to slugs
+    // the backend rejects.
+    const modelRoutes = yield* makeClaudeCodeModelRoutes(
+      (cwd) =>
+        resolveClaudeModelSettingsKey(
+          customHome ? ["project", "local"] : ["user", "project", "local"],
+          cwd,
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        ),
+      stateDir,
+    );
+    // Retain reports until the registry subscribes; end its listener on teardown.
+    const workspaceRescans = yield* Queue.unbounded<string, Cause.Done>();
+    yield* Effect.addFinalizer(() => Queue.end(workspaceRescans));
     const orchestrationAdapter = yield* createClaudeAdapterV2(
       {
         instanceId,
@@ -183,7 +210,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         resolveModel,
         scopedLimitNames,
         onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+        onSessionInit: (cwd) => Queue.offer(workspaceRescans, cwd).pipe(Effect.asVoid),
         modelCatalog,
+        routeModelCatalog: modelRoutes.route,
       },
     ).pipe(
       Effect.mapError(
@@ -201,6 +230,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       processEnv,
       modelCatalog,
       resolveModel,
+      modelRoutes.route,
     );
 
     // Per-instance capabilities cache: keyed on binary + resolved HOME so
@@ -219,7 +249,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               })),
             ),
           ),
-          Effect.tap(({ capabilities }) => Ref.set(lastGoodCapabilities, capabilities)),
+          Effect.tap(({ capabilities }) =>
+            Ref.set(lastGoodCapabilities, capabilities).pipe(
+              Effect.andThen(modelRoutes.record(capabilities.models ?? [])),
+            ),
+          ),
+          Effect.ensuring(modelRoutes.settle),
           Effect.catch((error) =>
             Ref.getAndSet(lastGoodCapabilities, undefined).pipe(
               Effect.flatMap((capabilities) =>
@@ -291,6 +326,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           : Effect.void,
       ),
       Effect.map(stampIdentity),
+      // Disabled, failed version checks and interruption never reach the probe.
+      Effect.ensuring(modelRoutes.settle),
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
@@ -383,25 +420,24 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           }),
       ),
       Effect.tap((outcome) =>
-        Effect.gen(function* () {
-          const before = (yield* snapshot.getSnapshot).usageLimits?.checkedAt;
-          yield* Cache.invalidateAll(capabilitiesProbeCache);
-          const refreshed = yield* snapshot.refresh;
-          const after = refreshed.usageLimits?.checkedAt;
-          if (
-            outcome === "reset" &&
-            (after === undefined ||
-              after === before ||
-              refreshed.usageLimits?.unavailable?.reason === "probeFailed")
-          ) {
-            return yield* new ProviderDriverError({
-              driver: DRIVER_KIND,
-              instanceId,
-              detail:
-                "The reset was applied, but Claude could not confirm the new limits. Refresh to check.",
-            });
-          }
-        }),
+        ResetCreditCoordinator.refreshAfterRedemption({
+          outcome,
+          getSnapshot: snapshot.getSnapshot,
+          refresh: Cache.invalidateAll(capabilitiesProbeCache).pipe(
+            Effect.andThen(snapshot.refresh),
+          ),
+        }).pipe(
+          Effect.filterOrFail(
+            (confirmed) => confirmed,
+            () =>
+              new ProviderDriverError({
+                driver: DRIVER_KIND,
+                instanceId,
+                detail:
+                  "The reset was applied, but Claude could not confirm the new limits. Refresh to check.",
+              }),
+          ),
+        ),
       ),
     );
 
@@ -417,6 +453,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       enabled,
       snapshot,
       invalidateCaches: Cache.invalidateAll(capabilitiesProbeCache),
+      workspaceRescans: Stream.fromQueue(workspaceRescans),
       snapshotForCwd: (cwd: string) =>
         snapshot.getSnapshot.pipe(
           Effect.flatMap((machineSnapshot) =>

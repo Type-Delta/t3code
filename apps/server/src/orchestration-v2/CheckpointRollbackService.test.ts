@@ -7,7 +7,6 @@ import {
 } from "../checkpointing/Errors.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { assessCheckpointRestore } from "./CheckpointRestoreSafety.ts";
-import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
 import {
@@ -30,6 +29,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Deferred from "effect/Deferred";
@@ -540,12 +540,58 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
   }).pipe(Effect.provide(layerTest));
 });
 
-it.effect.each([
+it.effect.each<{
+  order: string;
+  restoreFiles: boolean;
+  unmanaged?: boolean;
+  leavesFolder?: boolean;
+  shared?: boolean;
+  createFails?: boolean;
+  preparationFails?: string;
+  failureAt?: string;
+  interrupt?: boolean;
+  compensationFails?: "remove" | "rename";
+}>([
   { order: "cleanup-first", restoreFiles: true },
   { order: "rollback-first", restoreFiles: true },
   { order: "cleanup-first", restoreFiles: false, unmanaged: true },
-])("locks rollback with %s", ({ order, restoreFiles, unmanaged = false }) =>
+  { order: "cleanup-first", restoreFiles: true, leavesFolder: true },
+  { order: "cleanup-first", restoreFiles: false, leavesFolder: true },
+  { order: "cleanup-first", restoreFiles: true, leavesFolder: true, shared: true },
+  { order: "cleanup-first", restoreFiles: true, leavesFolder: true, createFails: true },
+  { order: "cleanup-first", restoreFiles: true, leavesFolder: true, preparationFails: "snapshot" },
+  { order: "cleanup-first", restoreFiles: true, leavesFolder: true, preparationFails: "network" },
+  ...["create", "prepare", "policy", "open", "navigation", "restore", "projection"].flatMap(
+    (failureAt) =>
+      [false, true].map((interrupt) => ({
+        order: "cleanup-first",
+        restoreFiles: true,
+        leavesFolder: true,
+        failureAt,
+        interrupt,
+      })),
+  ),
+  ...(["remove", "rename"] as const).map((compensationFails) => ({
+    order: "cleanup-first",
+    restoreFiles: true,
+    leavesFolder: true,
+    failureAt: "open",
+    compensationFails,
+  })),
+])("locks rollback with %s", (row) =>
   Effect.gen(function* () {
+    const {
+      order,
+      restoreFiles,
+      unmanaged,
+      leavesFolder,
+      shared,
+      createFails,
+      preparationFails,
+      failureAt,
+      interrupt,
+      compensationFails,
+    } = row;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const workspaceRoot = yield* fileSystem.realPath(
@@ -573,9 +619,31 @@ it.effect.each([
     const branch = "feature/rollback";
     const release = Deferred.makeUnsafe<void>();
     const openEntered = Deferred.makeUnsafe<void>();
+    const sentinel = new Uint8Array([0, 255, 13, 10, 107, 101, 101, 112]);
+    const unavailable =
+      preparationFails === "network"
+        ? new CheckpointObjectsUnavailableError({
+            operation: "restore",
+            reason: "network",
+            remote: "origin",
+            objectCount: 1,
+          })
+        : new CheckpointSnapshotUnavailableError();
+    const failureEntered = yield* Deferred.make<void>();
+    const failAt = (stage: string) =>
+      failureAt !== stage
+        ? Effect.void
+        : interrupt
+          ? Deferred.succeed(failureEntered, undefined).pipe(Effect.andThen(Effect.never))
+          : Effect.die(stage);
     const calls: string[] = [];
     let cleanupEntered = false;
-    const providerThread = { id: providerThreadId, providerSessionId, providerInstanceId };
+    const providerThread = {
+      id: providerThreadId,
+      providerSessionId,
+      providerInstanceId,
+      ...(failureAt ? { lastRunOrdinal: 1 } : {}),
+    };
     const projection = {
       thread: {
         id: threadId,
@@ -601,6 +669,19 @@ it.effect.each([
           ThreadCommandExecutor.layer,
           Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
           layerVcs,
+          Layer.succeed(FileSystem.FileSystem, {
+            ...fileSystem,
+            remove: (target, options) =>
+              compensationFails === "remove" && target === worktreePath && calls.includes("create")
+                ? Effect.die("workspace compensation removal failed")
+                : fileSystem.remove(target, options),
+            rename: (from, to) =>
+              compensationFails === "rename" &&
+              to === worktreePath &&
+              from.endsWith(path.join("folder"))
+                ? Effect.die("workspace compensation rename failed")
+                : fileSystem.rename(from, to),
+          }),
           Layer.mock(ServerConfig.ServerConfig)({ worktreesDir } as never),
           ServerSettings.layerTest(),
           Layer.mock(ProjectStore.ProjectStoreV2)({
@@ -623,6 +704,8 @@ it.effect.each([
                   path: worktreePath,
                 });
                 calls.push("create");
+                yield* failAt("create");
+                if (createFails) return yield* Effect.die("the branch is gone");
                 yield* fileSystem.makeDirectory(worktreePath);
                 yield* vcsProcess.run({
                   operation: "test.init",
@@ -634,19 +717,39 @@ it.effect.each([
               }).pipe(Effect.orDie),
           }),
           Layer.mock(CheckpointService.CheckpointServiceV2)({
-            prepareRestore: () => Effect.void,
+            prepareRestore: () =>
+              preparationFails
+                ? Effect.fail(
+                    new CheckpointService.CheckpointRestoreError({
+                      scopeId,
+                      checkpointId,
+                      cause: unavailable,
+                    }),
+                  )
+                : failAt("prepare"),
             restore: () =>
               Effect.gen(function* () {
-                assert.isTrue(yield* fileSystem.exists(worktreePath).pipe(Effect.orDie));
+                assert.isTrue(
+                  yield* fileSystem.exists(path.join(worktreePath, ".git")).pipe(Effect.orDie),
+                );
+                if (failureAt)
+                  yield* fileSystem
+                    .writeFileString(path.join(worktreePath, "restored.txt"), "checkpoint bytes")
+                    .pipe(Effect.orDie);
+                yield* failAt("restore");
                 calls.push("files");
               }),
           }),
           Layer.mock(EventSink.EventSinkV2)({
             write: () =>
-              Effect.sync(() => {
-                calls.push("projection");
-                return [];
-              }),
+              failAt("projection").pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    calls.push("projection");
+                  }),
+                ),
+                Effect.as([]),
+              ),
           }),
           IdAllocator.layer,
           layerUnusedPositions,
@@ -658,27 +761,54 @@ it.effect.each([
               Effect.succeed({
                 schemaVersion: 1,
                 snapshotSequence: 0,
-                threads: [],
+                threads: shared
+                  ? [
+                      {
+                        id: ThreadId.make("rollback-worktree-sharer"),
+                        projectId,
+                        worktreePath,
+                        deletedAt: null,
+                        lineage: {},
+                      },
+                    ]
+                  : [],
                 archivedThreads: [],
-              }),
+              } as never),
+            getCheckpointContext: () => Effect.succeed({ checkpointScopes: [] } as never),
+            getThreadProviderContext: () => Effect.succeed({ providerSessions: [] } as never),
           }),
           Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
             open: (input) =>
               Effect.gen(function* () {
                 assert.equal(input.runtimePolicy.cwd, worktreePath);
                 if (!(yield* fileSystem.exists(worktreePath).pipe(Effect.orDie))) {
-                  return yield* new ProviderWorkspaceMissingError({ threadId, cwd: worktreePath });
+                  return yield* new ProviderWorkspaceMissingError({
+                    threadId,
+                    cwd: worktreePath,
+                  });
                 }
+                if (failureAt === "open" && !interrupt)
+                  return yield* new ProviderSessionManager.ProviderSessionOpenError({
+                    instanceId: providerInstanceId,
+                    providerSessionId,
+                    cause: "provider startup failed",
+                  });
+                yield* failAt("open");
                 calls.push("session");
                 yield* Deferred.succeed(openEntered, undefined);
                 if (order === "rollback-first") yield* Deferred.await(release);
-                return {} as never;
+                return failureAt
+                  ? ({
+                      rollbackThread: () =>
+                        failAt("navigation").pipe(Effect.as({ providerThread })),
+                    } as never)
+                  : ({} as never);
               }),
           }),
           Layer.mock(RuntimePolicy.RuntimePolicyV2)({
             resolve: ({ thread }) => {
               assert.equal(thread.worktreePath, worktreePath);
-              return Effect.succeed({ cwd: thread.worktreePath } as never);
+              return failAt("policy").pipe(Effect.as({ cwd: thread.worktreePath } as never));
             },
           }),
         ),
@@ -692,6 +822,11 @@ it.effect.each([
           cleanupEntered = true;
           if (order === "cleanup-first") yield* Deferred.await(release);
           yield* fileSystem.remove(worktreePath, { recursive: true, force: true });
+          // A failed `git worktree remove` can leave the folder without its checkout.
+          if (leavesFolder) {
+            yield* fileSystem.makeDirectory(worktreePath);
+            yield* fileSystem.writeFile(path.join(worktreePath, "unsaved.txt"), sentinel);
+          }
           calls.push("cleanup");
         }),
       );
@@ -711,10 +846,85 @@ it.effect.each([
       if (order === "rollback-first") assert.isFalse(cleanupEntered);
       yield* Deferred.succeed(release, undefined);
       if (cleanup !== undefined) yield* Fiber.join(cleanup);
-      if (unmanaged) {
+      if (unmanaged || shared) {
         const error = yield* Fiber.join(rollback).pipe(Effect.flip);
         assert.equal(error._tag, "CheckpointRollbackExecutionError");
         assert.deepEqual(calls, ["cleanup"]);
+        if (shared) {
+          assert.equal(error.reason, "shared-workspace");
+          assert.isTrue(yield* fileSystem.exists(path.join(worktreePath, "unsaved.txt")));
+        }
+        return;
+      }
+      if (failureAt) {
+        if (interrupt) {
+          yield* Deferred.await(failureEntered);
+          yield* Fiber.interrupt(rollback);
+        }
+        const outcome = yield* Fiber.join(rollback).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(outcome));
+        assert.deepEqual(calls, [
+          "cleanup",
+          "prune",
+          "create",
+          ...(["navigation", "restore", "projection"].includes(failureAt) ? ["session"] : []),
+          ...(failureAt === "projection" ? ["files"] : []),
+        ]);
+        if (failureAt !== "projection" && !compensationFails) {
+          assert.deepEqual(yield* fileSystem.readDirectory(worktreePath), ["unsaved.txt"]);
+          assert.deepEqual(
+            yield* fileSystem.readFile(path.join(worktreePath, "unsaved.txt")),
+            sentinel,
+          );
+          assert.deepEqual(yield* fileSystem.readDirectory(path.dirname(worktreePath)), [
+            "feature",
+          ]);
+        } else {
+          if (failureAt === "projection") {
+            assert.isTrue(yield* fileSystem.exists(path.join(worktreePath, ".git")));
+            assert.equal(
+              yield* fileSystem.readFileString(path.join(worktreePath, "restored.txt")),
+              "checkpoint bytes",
+            );
+          }
+          const siblings = yield* fileSystem.readDirectory(path.dirname(worktreePath));
+          const aside = siblings.find((entry) => entry.startsWith(".t3-replaced-"));
+          assert.isDefined(aside);
+          assert.deepEqual(
+            yield* fileSystem.readFile(
+              path.join(path.dirname(worktreePath), aside!, "folder", "unsaved.txt"),
+            ),
+            sentinel,
+          );
+          if (!interrupt && !compensationFails) {
+            const error = yield* Fiber.join(rollback).pipe(Effect.flip);
+            assert.equal(error.reason, "files-restored");
+            assert.isTrue(CheckpointRollbackService.isFinalRollbackFailure(error));
+          }
+        }
+        return;
+      }
+      if (preparationFails) {
+        const error = yield* Fiber.join(rollback).pipe(Effect.flip);
+        assert.instanceOf(error.cause, CheckpointService.CheckpointRestoreError);
+        assert.equal((error.cause as CheckpointService.CheckpointRestoreError).cause, unavailable);
+        assert.deepEqual(calls, ["cleanup", "prune", "create"]);
+        assert.deepEqual(yield* fileSystem.readDirectory(worktreePath), ["unsaved.txt"]);
+        assert.deepEqual(
+          yield* fileSystem.readFile(path.join(worktreePath, "unsaved.txt")),
+          sentinel,
+        );
+        assert.deepEqual(yield* fileSystem.readDirectory(path.dirname(worktreePath)), ["feature"]);
+        return;
+      }
+      if (createFails) {
+        yield* Fiber.join(rollback).pipe(Effect.exit);
+        assert.deepEqual(calls, ["cleanup", "prune", "create"]);
+        assert.deepEqual(
+          yield* fileSystem.readFile(path.join(worktreePath, "unsaved.txt")),
+          sentinel,
+        );
+        assert.deepEqual(yield* fileSystem.readDirectory(path.dirname(worktreePath)), ["feature"]);
         return;
       }
       yield* Fiber.join(rollback);
@@ -722,12 +932,16 @@ it.effect.each([
       const rollbackCalls = restoreFiles
         ? ["session", "files", "projection"]
         : ["session", "projection"];
+      const recreates = !leavesFolder || restoreFiles;
       assert.deepEqual(
         calls,
         order === "cleanup-first"
-          ? ["cleanup", "prune", "create", ...rollbackCalls]
+          ? ["cleanup", ...(recreates ? ["prune", "create"] : []), ...rollbackCalls]
           : [...rollbackCalls, "cleanup"],
       );
+      if (!recreates) {
+        assert.isTrue(yield* fileSystem.exists(path.join(worktreePath, "unsaved.txt")));
+      }
     }).pipe(Effect.provide(testLayer));
   }).pipe(
     Effect.scoped,
@@ -773,7 +987,7 @@ it.effect.each([
       let lockedThreads = Effect.succeed<ReadonlyArray<ThreadId>>([]);
       const layerThreadCommands = Layer.effect(
         ThreadCommandExecutor.ThreadCommandExecutor,
-        Effect.tap(KeyedLock.make<ThreadId>(), (lock) =>
+        Effect.tap(ThreadCommandExecutor.make, (lock) =>
           Effect.sync(() => {
             lockedThreads = lock.activeKeys;
           }),

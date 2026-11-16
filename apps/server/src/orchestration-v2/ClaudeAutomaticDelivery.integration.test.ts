@@ -47,11 +47,6 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 
-// DL020: a finished provider turn is persisted `completed` at once instead of
-// waiting for checkpoint capture; it stays `waiting` only while run-owned
-// background work is open. Either status marks the turn as finalized.
-const isTurnFinalized = (status: string) => status === "waiting" || status === "completed";
-
 const sessionId = "automatic-delivery-session";
 const settings = Schema.decodeSync(ClaudeSettings)({});
 const decodeScheduledTask = Schema.decodeEffect(ScheduledTaskUpsertInput);
@@ -131,6 +126,8 @@ const result = (uuid: string, aborted: boolean) =>
     modelUsage: {},
   });
 
+const isTurnFinalized = (status: string) => status === "waiting" || status === "completed";
+
 const deliveries = [
   "child completion",
   "scheduled message",
@@ -141,373 +138,13 @@ const deliveries = [
 it.effect.each(deliveries)(
   "delivers %s with Claude's native pending-tool cancellation behavior",
   (delivery) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const cwd = yield* checkpointWorkspace("claude-automatic-delivery");
-        const sdkMessages = yield* Queue.unbounded<SDKMessage>();
-        const offers: SDKUserMessage[] = [];
-        const nativeQueue: SDKUserMessage[] = [];
-        // @effect-diagnostics-next-line abortControllerInEffect:off - The fake SDK interrupts its batch independently of the test fiber.
-        const batchAbort = new AbortController();
-        const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
-          instanceId: modelSelection.instanceId,
-          settings,
-          environment: {},
-          attachmentsDir: cwd,
-          fileSystem: yield* FileSystem.FileSystem,
-          path: yield* Path.Path,
-          random: yield* SecureRandom.SecureRandom,
-          idAllocator: yield* IdAllocator.IdAllocatorV2,
-          queryRunner: {
-            allocateSessionId: Effect.succeed(sessionId),
-            open: () =>
-              Effect.succeed({
-                messages: Stream.fromQueue(sdkMessages),
-                offer: (message) =>
-                  Effect.sync(() => {
-                    offers.push(message);
-                    nativeQueue.push(message);
-                    // Claude Code 2.1.289 aborts on now-priority commands even while Bash blocks reads.
-                    if (nativeQueue.some((command) => command.priority === "now")) {
-                      batchAbort.abort({ kind: "interrupt" });
-                    }
-                  }),
-                setModel: () => Effect.void,
-                applyFlagSettings: () => Effect.void,
-                setPermissionMode: () => Effect.void,
-                backgroundTasks: () => Effect.succeed(false),
-                mcpServerStatus: Effect.succeed([]),
-                readMcpResource: () => Effect.die("unexpected MCP resource read"),
-                callMcpTool: () => Effect.die("unexpected MCP tool call"),
-                listPermissionRules: Effect.die("unexpected permission rules read"),
-                stopTask: () => Effect.void,
-                interrupt: Effect.die("automatic delivery must never interrupt"),
-                close: Effect.void,
-              }),
-            forkSession: () => Effect.die("unused"),
-            subagentLaunchToolUseId: () => Effect.succeed(null),
-            assertComplete: Effect.void,
-          },
-        });
-        yield* Effect.gen(function* () {
-          const orchestrator = yield* Orchestrator.OrchestratorV2;
-          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          const threadId = ThreadId.make("thread:automatic-delivery");
-          const projectId = ProjectId.make("project:automatic-delivery");
-          const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
-            orchestrator.streamDomainEvents.pipe(
-              Stream.filter(predicate),
-              Stream.take(1),
-              Stream.runDrain,
-              Effect.forkScoped,
-            );
-          yield* orchestrator.dispatch({
-            type: "thread.create",
-            commandId: CommandId.make("create"),
-            threadId,
-            projectId,
-            title: "Automatic delivery",
-            modelSelection,
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            branch: null,
-            worktreePath: cwd,
-            createdBy: "user",
-            creationSource: "web",
-          });
-          const running = yield* watch(
-            (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
-          );
-          yield* orchestrator.dispatch({
-            type: "message.dispatch",
-            commandId: CommandId.make("first"),
-            threadId,
-            messageId: MessageId.make("first"),
-            text: "Build and check all four tasks.",
-            attachments: [],
-            dispatchMode: { type: "start_immediately" },
-            createdBy: "user",
-            creationSource: "web",
-          });
-          yield* worker.drain();
-          yield* Fiber.join(running);
-          const pending = yield* watch(
-            (event) =>
-              event.type === "turn-item.updated" &&
-              event.payload.nativeItemRef?.nativeId === "status-4",
-          );
-          yield* Queue.offer(sdkMessages, batch);
-          yield* Fiber.join(pending);
-          const before = yield* orchestrator.getThreadProjection(threadId);
-          assert.equal(before.turnItems.filter((item) => item.status === "running").length, 5);
-          const parent = before.runs[0]!;
-          if (parent.rootNodeId === null) return yield* Effect.die("parent has no root node");
-          const messageId = MessageId.make("automatic-notice");
-          if (delivery === "child completion") {
-            const taskId = NodeId.make("completed-child");
-            const now = yield* DateTime.now;
-            const sink = yield* EventSink.EventSinkV2;
-            yield* sink.write({
-              events: [
-                {
-                  id: EventId.make("cohort"),
-                  type: "run.updated",
-                  threadId,
-                  runId: parent.id,
-                  occurredAt: now,
-                  payload: {
-                    ...parent,
-                    delegatedCompletion: {
-                      disposition: "open",
-                      nextGeneration: 2,
-                      delivery: { generation: 1, messageId, taskIds: [taskId] },
-                    },
-                  },
-                },
-                {
-                  id: EventId.make("child"),
-                  type: "subagent.updated",
-                  threadId,
-                  runId: parent.id,
-                  nodeId: taskId,
-                  occurredAt: now,
-                  payload: {
-                    id: taskId,
-                    threadId,
-                    runId: parent.id,
-                    parentNodeId: parent.rootNodeId,
-                    origin: "app_owned",
-                    createdBy: "agent",
-                    driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
-                    providerInstanceId: modelSelection.instanceId,
-                    providerThreadId: null,
-                    childThreadId: null,
-                    nativeTaskRef: null,
-                    prompt: "Background work",
-                    title: "Child",
-                    model: null,
-                    completionWake: "always",
-                    completionDelivery: { state: "claimed", observedByRunId: null },
-                    status: "completed",
-                    result: "done",
-                    startedAt: now,
-                    completedAt: now,
-                    updatedAt: now,
-                  },
-                },
-              ],
-            });
-            const command = {
-              type: "message.dispatch" as const,
-              commandId: CommandId.make("completion"),
-              threadId,
-              messageId,
-              text: "Child completed",
-              attachments: [],
-              dispatchMode: { type: "queue_after_active" as const },
-              createdBy: "agent" as const,
-              creationSource: "server" as const,
-              delegatedCompletion: { parentRunId: parent.id, generation: 1, taskIds: [taskId] },
-            };
-            yield* orchestrator.dispatch(command);
-            yield* orchestrator.dispatch(command);
-            yield* orchestrator.recoverDelegatedTasks;
-          } else if (delivery === "scheduled message") {
-            yield* Effect.gen(function* () {
-              const service = yield* ScheduledTaskService.ScheduledTaskService;
-              const { task } = yield* service.upsert(
-                yield* decodeScheduledTask({
-                  title: "Status check",
-                  prompt: "Check the four tasks.",
-                  enabled: true,
-                  schedule: { type: "interval", everyMs: 60_000 },
-                  projectId,
-                  threadId,
-                  workspaceStrategy: { type: "root" },
-                  modelSelection,
-                  runtimeMode: "full-access",
-                  interactionMode: "default",
-                }),
-              );
-              const ran = yield* service.runNow({ id: task.id });
-              assert.equal(ran.task.lastRunStatus, "succeeded");
-            }).pipe(
-              Effect.provide(
-                ScheduledTaskService.layer.pipe(
-                  Layer.provide(ThreadManagementService.layer),
-                  Layer.provide(ServerSettings.layerTest()),
-                  Layer.provide(
-                    Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
-                      ensureTranscript: () =>
-                        Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
-                    }),
-                  ),
-                  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
-                  Layer.provide(ManagedPolicy.layerTest()),
-                  Layer.provide(
-                    Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
-                      namedProjectsRoot: "/projects",
-                      isScratchProject: () => Effect.succeed(false),
-                    }),
-                  ),
-                  Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-                  Layer.provide(
-                    CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
-                  ),
-                  Layer.provide(
-                    Layer.mergeAll(
-                      NodeCrypto.layer,
-                      Scheduler.layer,
-                      SqlitePersistence.layerMemory,
-                    ),
-                  ),
-                ),
-              ),
-            );
-          } else if (delivery === "user steering") {
-            yield* orchestrator.dispatch({
-              type: "message.dispatch",
-              commandId: CommandId.make("steer"),
-              threadId,
-              messageId,
-              text: "Change direction now.",
-              attachments: [],
-              dispatchMode: { type: "steer_active", targetRunId: parent.id },
-              createdBy: "user",
-              creationSource: "web",
-            });
-          } else {
-            yield* orchestrator.dispatch({
-              type: "message.dispatch",
-              commandId: CommandId.make("queue"),
-              threadId,
-              messageId,
-              text: "Change direction now.",
-              attachments: [],
-              dispatchMode: { type: "queue_after_active" },
-              createdBy: "user",
-              creationSource: "web",
-            });
-            const queuedRun = (yield* orchestrator.getThreadProjection(threadId)).runs[1]!;
-            yield* orchestrator.dispatch({
-              type: "queued-message.promote-to-steer",
-              commandId: CommandId.make("promote"),
-              threadId,
-              queuedRunId: queuedRun.id,
-              targetRunId: parent.id,
-            });
-            const promoted = yield* orchestrator.getThreadProjection(threadId);
-            assert.equal(promoted.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
-            assert.equal(
-              promoted.messages.find((message) => message.id === messageId)?.runId,
-              parent.id,
-            );
-            const steer = promoted.turnItems.find(
-              (item) => item.type === "user_message" && item.messageId === messageId,
-            );
-            assert.ok(steer?.type === "user_message");
-            assert.equal(steer.inputIntent, "promoted_queued_to_steer");
-          }
-          yield* worker.drain();
-          const explicitSteer =
-            delivery === "user steering" || delivery === "promoted queued message";
-          assert.equal(batchAbort.signal.aborted, explicitSteer);
-          assert.equal(offers.length, explicitSteer ? 2 : 1);
-          const finished = yield* watch(
-            (event) =>
-              event.type === "run.updated" &&
-              event.payload.id === parent.id &&
-              isTurnFinalized(event.payload.status),
-          );
-          yield* Queue.offer(sdkMessages, toolResult("build", false));
-          for (const id of statusIds)
-            yield* Queue.offer(sdkMessages, toolResult(id, batchAbort.signal.aborted));
-          if (explicitSteer) yield* Queue.offer(sdkMessages, result("aborted", true));
-          yield* Queue.offer(sdkMessages, result("completed", false));
-          yield* Fiber.join(finished);
-          yield* worker.drain();
-          yield* orchestrator.resumeQueuedRuns;
-          yield* worker.drain();
-          if (!explicitSteer) {
-            const queued = (yield* orchestrator.getThreadProjection(threadId)).runs[1]!;
-            const noticeFinished = yield* watch(
-              (event) =>
-                event.type === "run.updated" &&
-                event.payload.id === queued.id &&
-                isTurnFinalized(event.payload.status),
-            );
-            const delivered =
-              delivery === "child completion"
-                ? yield* watch(
-                    (event) =>
-                      event.type === "subagent.updated" &&
-                      event.payload.completionDelivery?.state === "delivered",
-                  )
-                : null;
-            yield* Queue.offer(sdkMessages, result("notice-completed", false));
-            yield* Fiber.join(noticeFinished);
-            yield* worker.drain();
-            if (delivered !== null) yield* Fiber.join(delivered);
-          }
-          const after = yield* orchestrator.getThreadProjection(threadId);
-          const reads = after.turnItems.filter((item) =>
-            statusIds.includes(item.nativeItemRef?.nativeId ?? ""),
-          );
-          assert.equal(reads.length, 4);
-          for (const read of reads) {
-            assert.equal(read.status, explicitSteer ? "cancelled" : "completed");
-            assert.equal(read.toolNonExecutionKind, explicitSteer ? "cancelled" : undefined);
-            assert.equal(read.type === "dynamic_tool" && read.output === refusal, explicitSteer);
-          }
-          assert.equal(offers.length, 2);
-          assert.equal(
-            offers.filter((offer) => offer.priority === "now").length,
-            explicitSteer ? 1 : 0,
-          );
-          if (!explicitSteer) {
-            assert.equal(after.runs.length, 2);
-            if (delivery === "child completion") {
-              assert.equal(after.messages.filter((message) => message.id === messageId).length, 1);
-              assert.equal(after.subagents[0]?.completionDelivery?.state, "delivered");
-            } else {
-              assert.equal(
-                after.messages.filter((message) => message.scheduledTaskId !== undefined).length,
-                1,
-              );
-            }
-          }
-          yield* orchestrator.recoverDelegatedTasks;
-          yield* orchestrator.resumeQueuedRuns;
-          yield* worker.drain();
-          assert.equal(offers.length, 2);
-        }).pipe(
-          Effect.provide(
-            ProviderReplayHarness.layerWithRegistry(
-              { name: "claude-automatic-delivery" },
-              ProviderAdapterRegistry.layerSingle(adapter),
-              { runEffectWorker: false },
-            ),
-          ),
-        );
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            IdAllocator.layer,
-            McpProviderSessions.layer,
-            NodeServices.layer,
-            NodeCrypto.layer,
-          ),
-        ),
-      ),
-    ),
-);
-
-it.effect("applies an effort change to the running Claude query without waiting for a turn", () =>
-  Effect.scoped(
     Effect.gen(function* () {
-      const cwd = yield* checkpointWorkspace("claude-live-effort");
+      const cwd = yield* checkpointWorkspace("claude-automatic-delivery");
       const sdkMessages = yield* Queue.unbounded<SDKMessage>();
-      const flagSettings: unknown[] = [];
+      const offers: SDKUserMessage[] = [];
+      const nativeQueue: SDKUserMessage[] = [];
+      // @effect-diagnostics-next-line abortControllerInEffect:off - The fake SDK interrupts its batch independently of the test fiber.
+      const batchAbort = new AbortController();
       const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
         instanceId: modelSelection.instanceId,
         settings,
@@ -522,47 +159,53 @@ it.effect("applies an effort change to the running Claude query without waiting 
           open: () =>
             Effect.succeed({
               messages: Stream.fromQueue(sdkMessages),
-              offer: () => Effect.void,
-              setModel: () => Effect.void,
-              applyFlagSettings: (flags) =>
+              offer: (message) =>
                 Effect.sync(() => {
-                  flagSettings.push(flags);
+                  offers.push(message);
+                  nativeQueue.push(message);
+                  // Claude Code 2.1.289 aborts on now-priority commands even while Bash blocks reads.
+                  if (nativeQueue.some((command) => command.priority === "now")) {
+                    batchAbort.abort({ kind: "interrupt" });
+                  }
                 }),
+              setModel: () => Effect.void,
+              applyFlagSettings: () => Effect.void,
               setPermissionMode: () => Effect.void,
+              renameSession: () => Effect.void,
               backgroundTasks: () => Effect.succeed(false),
               mcpServerStatus: Effect.succeed([]),
               readMcpResource: () => Effect.die("unexpected MCP resource read"),
               callMcpTool: () => Effect.die("unexpected MCP tool call"),
               listPermissionRules: Effect.die("unexpected permission rules read"),
               stopTask: () => Effect.void,
-              interrupt: Effect.die("an effort change must not interrupt the turn"),
+              interrupt: Effect.die("automatic delivery must never interrupt"),
               close: Effect.void,
             }),
           forkSession: () => Effect.die("unused"),
           subagentLaunchToolUseId: () => Effect.succeed(null),
+          subagentModel: () => Effect.succeed(null),
           assertComplete: Effect.void,
         },
       });
       yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-        const threadId = ThreadId.make("thread:live-effort");
-        const high = { ...modelSelection, options: [{ id: "effort", value: "high" }] };
-        const running = yield* orchestrator.streamDomainEvents.pipe(
-          Stream.filter(
-            (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
-          ),
-          Stream.take(1),
-          Stream.runDrain,
-          Effect.forkScoped,
-        );
+        const threadId = ThreadId.make("thread:automatic-delivery");
+        const projectId = ProjectId.make("project:automatic-delivery");
+        const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+          orchestrator.streamDomainEvents.pipe(
+            Stream.filter(predicate),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
         yield* orchestrator.dispatch({
           type: "thread.create",
           commandId: CommandId.make("create"),
           threadId,
-          projectId: ProjectId.make("project:live-effort"),
-          title: "Live effort",
-          modelSelection: high,
+          projectId,
+          title: "Automatic delivery",
+          modelSelection,
           runtimeMode: "full-access",
           interactionMode: "default",
           branch: null,
@@ -570,12 +213,15 @@ it.effect("applies an effort change to the running Claude query without waiting 
           createdBy: "user",
           creationSource: "web",
         });
+        const running = yield* watch(
+          (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
+        );
         yield* orchestrator.dispatch({
           type: "message.dispatch",
           commandId: CommandId.make("first"),
           threadId,
           messageId: MessageId.make("first"),
-          text: "Keep working.",
+          text: "Build and check all four tasks.",
           attachments: [],
           dispatchMode: { type: "start_immediately" },
           createdBy: "user",
@@ -583,23 +229,255 @@ it.effect("applies an effort change to the running Claude query without waiting 
         });
         yield* worker.drain();
         yield* Fiber.join(running);
-        assert.deepEqual(flagSettings, []);
-
-        yield* orchestrator.dispatch({
-          type: "thread.model-selection.set",
-          commandId: CommandId.make("medium"),
-          threadId,
-          modelSelection: { ...modelSelection, options: [{ id: "effort", value: "medium" }] },
-        });
+        const pending = yield* watch(
+          (event) =>
+            event.type === "turn-item.updated" &&
+            event.payload.nativeItemRef?.nativeId === "status-4",
+        );
+        yield* Queue.offer(sdkMessages, batch);
+        yield* Fiber.join(pending);
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(before.turnItems.filter((item) => item.status === "running").length, 5);
+        const parent = before.runs[0]!;
+        if (parent.rootNodeId === null) return yield* Effect.die("parent has no root node");
+        const messageId = MessageId.make("automatic-notice");
+        if (delivery === "child completion") {
+          const taskId = NodeId.make("completed-child");
+          const now = yield* DateTime.now;
+          const sink = yield* EventSink.EventSinkV2;
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("cohort"),
+                type: "run.updated",
+                threadId,
+                runId: parent.id,
+                occurredAt: now,
+                payload: {
+                  ...parent,
+                  delegatedCompletion: {
+                    disposition: "open",
+                    nextGeneration: 2,
+                    delivery: { generation: 1, messageId, taskIds: [taskId] },
+                  },
+                },
+              },
+              {
+                id: EventId.make("child"),
+                type: "subagent.updated",
+                threadId,
+                runId: parent.id,
+                nodeId: taskId,
+                occurredAt: now,
+                payload: {
+                  id: taskId,
+                  threadId,
+                  runId: parent.id,
+                  parentNodeId: parent.rootNodeId,
+                  origin: "app_owned",
+                  createdBy: "agent",
+                  driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
+                  providerInstanceId: modelSelection.instanceId,
+                  providerThreadId: null,
+                  childThreadId: null,
+                  nativeTaskRef: null,
+                  prompt: "Background work",
+                  title: "Child",
+                  model: null,
+                  completionWake: "always",
+                  completionDelivery: { state: "claimed", observedByRunId: null },
+                  status: "completed",
+                  result: "done",
+                  startedAt: now,
+                  completedAt: now,
+                  updatedAt: now,
+                },
+              },
+            ],
+          });
+          const command = {
+            type: "message.dispatch" as const,
+            commandId: CommandId.make("completion"),
+            threadId,
+            messageId,
+            text: "Child completed",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" as const },
+            createdBy: "agent" as const,
+            creationSource: "server" as const,
+            delegatedCompletion: { parentRunId: parent.id, generation: 1, taskIds: [taskId] },
+          };
+          yield* orchestrator.dispatch(command);
+          yield* orchestrator.dispatch(command);
+          yield* orchestrator.recoverDelegatedTasks;
+        } else if (delivery === "scheduled message") {
+          yield* Effect.gen(function* () {
+            const service = yield* ScheduledTaskService.ScheduledTaskService;
+            const { task } = yield* service.upsert(
+              yield* decodeScheduledTask({
+                title: "Status check",
+                prompt: "Check the four tasks.",
+                enabled: true,
+                schedule: { type: "interval", everyMs: 60_000 },
+                projectId,
+                threadId,
+                workspaceStrategy: { type: "root" },
+                modelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+              }),
+            );
+            const ran = yield* service.runNow({ id: task.id });
+            assert.equal(ran.task.lastRunStatus, "succeeded");
+          }).pipe(
+            Effect.provide(
+              ScheduledTaskService.layer.pipe(
+                Layer.provide(ThreadManagementService.layer),
+                Layer.provide(ServerSettings.layerTest()),
+                Layer.provide(
+                  Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
+                    ensureTranscript: () =>
+                      Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
+                  }),
+                ),
+                Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+                Layer.provide(ManagedPolicy.layerTest()),
+                Layer.provide(
+                  Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                    namedProjectsRoot: "/projects",
+                    isScratchProject: () => Effect.succeed(false),
+                  }),
+                ),
+                Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+                Layer.provide(
+                  CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
+                ),
+                Layer.provide(
+                  Layer.mergeAll(NodeCrypto.layer, Scheduler.layer, SqlitePersistence.layerMemory),
+                ),
+              ),
+            ),
+          );
+        } else if (delivery === "user steering") {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("steer"),
+            threadId,
+            messageId,
+            text: "Change direction now.",
+            attachments: [],
+            dispatchMode: { type: "steer_active", targetRunId: parent.id },
+            createdBy: "user",
+            creationSource: "web",
+          });
+        } else {
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("queue"),
+            threadId,
+            messageId,
+            text: "Change direction now.",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const queuedRun = (yield* orchestrator.getThreadProjection(threadId)).runs[1]!;
+          yield* orchestrator.dispatch({
+            type: "queued-message.promote-to-steer",
+            commandId: CommandId.make("promote"),
+            threadId,
+            queuedRunId: queuedRun.id,
+            targetRunId: parent.id,
+          });
+          const promoted = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(promoted.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
+          assert.equal(
+            promoted.messages.find((message) => message.id === messageId)?.runId,
+            parent.id,
+          );
+          const steer = promoted.turnItems.find(
+            (item) => item.type === "user_message" && item.messageId === messageId,
+          );
+          assert.ok(steer?.type === "user_message");
+          assert.equal(steer.inputIntent, "promoted_queued_to_steer");
+        }
         yield* worker.drain();
-
-        assert.deepEqual(flagSettings, [
-          { effortLevel: "medium", fastMode: null, ultracode: null },
-        ]);
+        const explicitSteer =
+          delivery === "user steering" || delivery === "promoted queued message";
+        assert.equal(batchAbort.signal.aborted, explicitSteer);
+        assert.equal(offers.length, explicitSteer ? 2 : 1);
+        const finished = yield* watch(
+          (event) =>
+            event.type === "run.updated" &&
+            event.payload.id === parent.id &&
+            isTurnFinalized(event.payload.status),
+        );
+        yield* Queue.offer(sdkMessages, toolResult("build", false));
+        for (const id of statusIds)
+          yield* Queue.offer(sdkMessages, toolResult(id, batchAbort.signal.aborted));
+        if (explicitSteer) yield* Queue.offer(sdkMessages, result("aborted", true));
+        yield* Queue.offer(sdkMessages, result("completed", false));
+        yield* Fiber.join(finished);
+        yield* worker.drain();
+        yield* orchestrator.resumeQueuedRuns;
+        yield* worker.drain();
+        if (!explicitSteer) {
+          const queued = (yield* orchestrator.getThreadProjection(threadId)).runs[1]!;
+          const noticeFinished = yield* watch(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id === queued.id &&
+              isTurnFinalized(event.payload.status),
+          );
+          const delivered =
+            delivery === "child completion"
+              ? yield* watch(
+                  (event) =>
+                    event.type === "subagent.updated" &&
+                    event.payload.completionDelivery?.state === "delivered",
+                )
+              : null;
+          yield* Queue.offer(sdkMessages, result("notice-completed", false));
+          yield* Fiber.join(noticeFinished);
+          yield* worker.drain();
+          if (delivered !== null) yield* Fiber.join(delivered);
+        }
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        const reads = after.turnItems.filter((item) =>
+          statusIds.includes(item.nativeItemRef?.nativeId ?? ""),
+        );
+        assert.equal(reads.length, 4);
+        for (const read of reads) {
+          assert.equal(read.status, explicitSteer ? "cancelled" : "completed");
+          assert.equal(read.toolNonExecutionKind, explicitSteer ? "cancelled" : undefined);
+          assert.equal(read.type === "dynamic_tool" && read.output === refusal, explicitSteer);
+        }
+        assert.equal(offers.length, 2);
+        assert.equal(
+          offers.filter((offer) => offer.priority === "now").length,
+          explicitSteer ? 1 : 0,
+        );
+        if (!explicitSteer) {
+          assert.equal(after.runs.length, 2);
+          if (delivery === "child completion") {
+            assert.equal(after.messages.filter((message) => message.id === messageId).length, 1);
+            assert.equal(after.subagents[0]?.completionDelivery?.state, "delivered");
+          } else {
+            assert.equal(
+              after.messages.filter((message) => message.scheduledTaskId !== undefined).length,
+              1,
+            );
+          }
+        }
+        yield* orchestrator.recoverDelegatedTasks;
+        yield* orchestrator.resumeQueuedRuns;
+        yield* worker.drain();
+        assert.equal(offers.length, 2);
       }).pipe(
         Effect.provide(
           ProviderReplayHarness.layerWithRegistry(
-            { name: "claude-live-effort" },
+            { name: "claude-automatic-delivery" },
             ProviderAdapterRegistry.layerSingle(adapter),
             { runEffectWorker: false },
           ),
@@ -615,7 +493,267 @@ it.effect("applies an effort change to the running Claude query without waiting 
         ),
       ),
     ),
+);
+
+it.effect("applies an effort change to the running Claude query without waiting for a turn", () =>
+  Effect.gen(function* () {
+    const cwd = yield* checkpointWorkspace("claude-live-effort");
+    const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+    const flagSettings: unknown[] = [];
+    const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+      instanceId: modelSelection.instanceId,
+      settings,
+      environment: {},
+      attachmentsDir: cwd,
+      fileSystem: yield* FileSystem.FileSystem,
+      path: yield* Path.Path,
+      random: yield* SecureRandom.SecureRandom,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+      queryRunner: {
+        allocateSessionId: Effect.succeed(sessionId),
+        open: () =>
+          Effect.succeed({
+            messages: Stream.fromQueue(sdkMessages),
+            offer: () => Effect.void,
+            setModel: () => Effect.void,
+            applyFlagSettings: (flags) =>
+              Effect.sync(() => {
+                flagSettings.push(flags);
+              }),
+            setPermissionMode: () => Effect.void,
+            renameSession: () => Effect.void,
+            backgroundTasks: () => Effect.succeed(false),
+            mcpServerStatus: Effect.succeed([]),
+            readMcpResource: () => Effect.die("unexpected MCP resource read"),
+            callMcpTool: () => Effect.die("unexpected MCP tool call"),
+            listPermissionRules: Effect.die("unexpected permission rules read"),
+            stopTask: () => Effect.void,
+            interrupt: Effect.die("an effort change must not interrupt the turn"),
+            close: Effect.void,
+          }),
+        forkSession: () => Effect.die("unused"),
+        subagentLaunchToolUseId: () => Effect.succeed(null),
+        subagentModel: () => Effect.succeed(null),
+        assertComplete: Effect.void,
+      },
+    });
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const threadId = ThreadId.make("thread:live-effort");
+      const high = { ...modelSelection, options: [{ id: "effort", value: "high" }] };
+      const running = yield* orchestrator.streamDomainEvents.pipe(
+        Stream.filter(
+          (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create"),
+        threadId,
+        projectId: ProjectId.make("project:live-effort"),
+        title: "Live effort",
+        modelSelection: high,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: cwd,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("first"),
+        threadId,
+        messageId: MessageId.make("first"),
+        text: "Keep working.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* worker.drain();
+      yield* Fiber.join(running);
+      assert.deepEqual(flagSettings, []);
+
+      yield* orchestrator.dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make("medium"),
+        threadId,
+        modelSelection: { ...modelSelection, options: [{ id: "effort", value: "medium" }] },
+      });
+      yield* worker.drain();
+
+      assert.deepEqual(flagSettings, [{ effortLevel: "medium", fastMode: null, ultracode: null }]);
+    }).pipe(
+      Effect.provide(
+        ProviderReplayHarness.layerWithRegistry(
+          { name: "claude-live-effort" },
+          ProviderAdapterRegistry.layerSingle(adapter),
+          { runEffectWorker: false },
+        ),
+      ),
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        IdAllocator.layer,
+        McpProviderSessions.layer,
+        NodeServices.layer,
+        NodeCrypto.layer,
+      ),
+    ),
   ),
+);
+
+const renamedClaudeSessionTitles = (options: { readonly renameDuringStartup: boolean }) =>
+  Effect.gen(function* () {
+    const cwd = yield* checkpointWorkspace("claude-live-rename");
+    const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+    const renames: string[] = [];
+    const startupEntered = yield* Deferred.make<void>();
+    const startupReleased = yield* Deferred.make<void>();
+    const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
+      instanceId: modelSelection.instanceId,
+      settings,
+      environment: {},
+      attachmentsDir: cwd,
+      fileSystem: yield* FileSystem.FileSystem,
+      path: yield* Path.Path,
+      random: yield* SecureRandom.SecureRandom,
+      idAllocator: yield* IdAllocator.IdAllocatorV2,
+      queryRunner: {
+        allocateSessionId: Effect.succeed(sessionId),
+        open: () =>
+          Effect.succeed({
+            messages: Stream.fromQueue(sdkMessages),
+            offer: () => Effect.void,
+            setModel: () => Effect.void,
+            applyFlagSettings: () => Effect.void,
+            setPermissionMode: () => Effect.void,
+            renameSession: (title) =>
+              Effect.sync(() => {
+                renames.push(title);
+              }),
+            backgroundTasks: () => Effect.succeed(false),
+            mcpServerStatus: Effect.succeed([]),
+            readMcpResource: () => Effect.die("unexpected MCP resource read"),
+            callMcpTool: () => Effect.die("unexpected MCP tool call"),
+            listPermissionRules: Effect.die("unexpected permission rules read"),
+            stopTask: () => Effect.void,
+            interrupt: Effect.die("a rename must not interrupt the turn"),
+            close: Effect.void,
+          }),
+        forkSession: () => Effect.die("unused"),
+        subagentLaunchToolUseId: () => Effect.succeed(null),
+        subagentModel: () => Effect.succeed(null),
+        assertComplete: Effect.void,
+      },
+    });
+    return yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const threadId = ThreadId.make("thread:live-rename");
+      const running = yield* orchestrator.streamDomainEvents.pipe(
+        Stream.filter(
+          (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create"),
+        threadId,
+        projectId: ProjectId.make("project:live-rename"),
+        title: "Seed title",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: cwd,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("first"),
+        threadId,
+        messageId: MessageId.make("first"),
+        text: "Keep working.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const rename = orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("rename"),
+        threadId,
+        title: "Renamed title",
+      });
+      if (options.renameDuringStartup) {
+        const starting = yield* worker.drain().pipe(Effect.forkScoped);
+        yield* Deferred.await(startupEntered);
+        yield* rename;
+        yield* Deferred.succeed(startupReleased, undefined);
+        yield* Fiber.join(starting);
+        yield* Fiber.join(running);
+      } else {
+        yield* worker.drain();
+        yield* Fiber.join(running);
+        assert.deepEqual(renames, []);
+        yield* rename;
+      }
+      yield* worker.drain();
+      return renames;
+    }).pipe(
+      Effect.provide(
+        ProviderReplayHarness.layerWithRegistry(
+          { name: "claude-live-rename" },
+          ProviderAdapterRegistry.layerSingle({
+            ...adapter,
+            openSession: (input) =>
+              options.renameDuringStartup
+                ? Deferred.succeed(startupEntered, undefined).pipe(
+                    Effect.andThen(Deferred.await(startupReleased)),
+                    Effect.andThen(adapter.openSession(input)),
+                  )
+                : adapter.openSession(input),
+          }),
+          { runEffectWorker: false },
+        ),
+      ),
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        IdAllocator.layer,
+        McpProviderSessions.layer,
+        NodeServices.layer,
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+
+it.effect("renames the running Claude session when the thread is renamed mid-turn", () =>
+  Effect.gen(function* () {
+    assert.deepEqual(yield* renamedClaudeSessionTitles({ renameDuringStartup: false }), [
+      "Renamed title",
+    ]);
+  }),
+);
+
+it.effect("renames the Claude session when the thread is renamed while it starts", () =>
+  Effect.gen(function* () {
+    assert.deepEqual(yield* renamedClaudeSessionTitles({ renameDuringStartup: true }), [
+      "Renamed title",
+    ]);
+  }),
 );
 
 const backgroundTaskStarted = (taskId: string) =>
@@ -726,6 +864,7 @@ it.effect("offers a continuation for a later wake after a queued continuation is
                   setModel: () => Effect.void,
                   applyFlagSettings: () => Effect.void,
                   setPermissionMode: () => Effect.void,
+                  renameSession: () => Effect.void,
                   backgroundTasks: () => Effect.succeed(false),
                   mcpServerStatus: Effect.succeed([]),
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
@@ -737,6 +876,7 @@ it.effect("offers a continuation for a later wake after a queued continuation is
                 }),
               forkSession: () => Effect.die("unused"),
               subagentLaunchToolUseId: () => Effect.succeed(null),
+              subagentModel: () => Effect.succeed(null),
               assertComplete: Effect.void,
             },
           }).pipe(Effect.provideContext(services));

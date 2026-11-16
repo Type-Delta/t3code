@@ -88,8 +88,9 @@ const CodexUsage = Schema.Struct({
     }),
   ),
 });
+// The usage endpoint can report a window without a utilization, as the CLI's own schema allows.
 const ClaudeWindow = Schema.Struct({
-  utilization: UsageNumber,
+  utilization: forgivingOptional(UsageNumber),
   resets_at: forgivingOptional(Schema.String),
 });
 const ClaudeUsage = Schema.Struct({
@@ -333,10 +334,18 @@ const HUB_PROVIDERS = new Map<string, HubProvider>([
         );
         const rateLimits = {
           five_hour: usage.five_hour
-            ? { ...usage.five_hour, resets_at: usage.five_hour.resets_at ?? null }
+            ? {
+                ...usage.five_hour,
+                utilization: usage.five_hour.utilization ?? null,
+                resets_at: usage.five_hour.resets_at ?? null,
+              }
             : null,
           seven_day: usage.seven_day
-            ? { ...usage.seven_day, resets_at: usage.seven_day.resets_at ?? null }
+            ? {
+                ...usage.seven_day,
+                utilization: usage.seven_day.utilization ?? null,
+                resets_at: usage.seven_day.resets_at ?? null,
+              }
             : null,
           model_scoped,
           spend: usage.spend,

@@ -2,6 +2,7 @@ import { CheckpointScopeId, ProjectId, RunId, ThreadId } from "@t3tools/contract
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FiberMap from "effect/FiberMap";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -64,6 +65,7 @@ const make = Effect.gen(function* () {
   const checkpointCapture = yield* CheckpointCapture.CheckpointCaptureServiceV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const observer = yield* RunFinalizationObserver;
+  const refreshes = yield* FiberSet.make<void>();
 
   const finalize: RunFinalizationService["Service"]["finalize"] = Effect.fn(
     "RunFinalizationService.finalize",
@@ -109,6 +111,7 @@ const make = Effect.gen(function* () {
                 cause,
               }),
           }),
+          FiberSet.run(refreshes),
         );
     }
   });

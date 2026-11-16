@@ -4,10 +4,12 @@ import * as Schema from "effect/Schema";
 import {
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpThreadWaitResult,
 } from "./orchestratorMcp.ts";
 
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
+const decodeThreadWaitResult = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitResult);
 
 describe("orchestrator MCP contracts", () => {
   it("decodes cross-provider delegated task requests and durable results", () => {
@@ -65,5 +67,20 @@ describe("orchestrator MCP contracts", () => {
         pendingApproval: { ...pendingApproval, kind: "user_input" },
       }),
     ).toThrow();
+  });
+
+  it("decodes a running-task next written by another version", () => {
+    const next = "Completion wakes this thread, so end your turn. Do not wait on it or poll it.";
+    const item = {
+      threadId: "thread-child-1",
+      runId: "run-child-1",
+      status: "running",
+      timedOut: true,
+      next,
+    };
+    expect(decodeThreadWaitResult(item)).toEqual({ ...item, results: [item] });
+    const batch = { results: [item, { ...item, threadId: "thread-child-2" }], timedOut: true };
+    expect(decodeThreadWaitResult(batch)).toEqual(batch);
+    expect(() => decodeThreadWaitResult({ timedOut: true, next })).toThrow();
   });
 });

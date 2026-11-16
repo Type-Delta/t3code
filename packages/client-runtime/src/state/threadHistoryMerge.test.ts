@@ -40,6 +40,32 @@ function row(index: number): OrchestrationV2ProjectedTurnItem {
 }
 
 describe("threadHistoryMerge", () => {
+  it.each([true, false])("bounds ordinal reads when paging with overlap=%s", (overlap) => {
+    let ordinalReads = 0;
+    const current = Array.from({ length: 10_000 }, (_, index) => {
+      const entry = row(index);
+      return {
+        ...entry,
+        item: {
+          ...entry.item,
+          get ordinal() {
+            ordinalReads += 1;
+            return index + 1;
+          },
+        },
+      };
+    });
+    const page = Array.from({ length: 100 }, (_, index) => row(index + (overlap ? 9_900 : 10_000)));
+    const merged = mergeOlderHistoryIntoProjection(
+      { ...v2Projection, turnItems: current.map((entry) => entry.item), visibleTurnItems: current },
+      page,
+    );
+    expect(merged.visibleTurnItems).toHaveLength(overlap ? 10_000 : 10_100);
+    expect(merged.visibleTurnItems[0]?.sourceItemId).toBe("item-0");
+    expect(merged.visibleTurnItems.at(-1)?.sourceItemId).toBe(overlap ? "item-9999" : "item-10099");
+    expect(ordinalReads).toBeLessThan(100_000);
+  });
+
   it("fills activity around partial messages in canonical order and preserves live edits", () => {
     const initial = { ...v2Projection, turnItems: [row(4).item], visibleTurnItems: [row(4)] };
     const preview = [row(1), row(3)];
@@ -172,6 +198,44 @@ describe("threadHistoryMerge", () => {
       "item-4",
       "item-5",
       "item-6",
+    ]);
+  });
+
+  it("keeps an older answer before a full page that only covers the later part of a conversation page", () => {
+    const [question, olderAnswer, reasoningA, reasoningB, reasoningC, newerAnswer] = [
+      row(0),
+      row(1),
+      row(2),
+      row(3),
+      row(4),
+      row(5),
+    ];
+    const window = [row(6), row(7)];
+    const projection = {
+      ...v2Projection,
+      turnItems: window.map((entry) => entry.item),
+      visibleTurnItems: window.map((entry, position) => ({ ...entry, position })),
+    };
+    const conversation = mergeOlderHistoryIntoProjection(projection, [
+      question,
+      olderAnswer,
+      newerAnswer,
+    ]);
+    const full = mergeOlderHistoryIntoProjection(conversation, [
+      reasoningA,
+      reasoningB,
+      reasoningC,
+      newerAnswer,
+    ]);
+    expect(full.visibleTurnItems.map((entry) => entry.sourceItemId)).toEqual([
+      "item-0",
+      "item-1",
+      "item-2",
+      "item-3",
+      "item-4",
+      "item-5",
+      "item-6",
+      "item-7",
     ]);
   });
 

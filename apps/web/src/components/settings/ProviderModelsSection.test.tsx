@@ -33,7 +33,7 @@ describe("ProviderModelsSection", () => {
         hiddenModels={[]}
         favoriteModels={[]}
         modelOrder={[]}
-        onChange={() => undefined}
+        onChange={async () => true}
         onModelOverridesChange={() => undefined}
         onHiddenModelsChange={() => undefined}
         onFavoriteModelsChange={() => undefined}

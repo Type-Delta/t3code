@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 
+import * as CodexRpc from "./_generated/meta.gen.ts";
 import * as CodexError from "./errors.ts";
 import { JsonRpcId, JsonRpcResponseEnvelope } from "./_internal/shared.ts";
 const isJsonRpcId = Schema.is(JsonRpcId);
@@ -230,6 +231,26 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         ] as const;
       }).pipe(Effect.flatten);
 
+    // Node ends stdout before it reports the exit of a crashed process, so wait briefly
+    // for the exit status. Pipes can also close while the process keeps running, so the
+    // wait must not hang pending requests.
+    const exitStatusOr = (
+      fallback: CodexError.CodexAppServerError,
+      operation: "read-input-stream" | "write-output-stream",
+    ) =>
+      options.terminationError === undefined
+        ? Effect.succeed(fallback)
+        : options.terminationError.pipe(
+            Effect.timeoutOrElse({
+              duration: EXIT_STATUS_GRACE,
+              orElse: () => Effect.succeed(fallback),
+            }),
+            // A defect here would leave termination marked handled but unfinished.
+            Effect.catchDefect((cause) =>
+              Effect.succeed(new CodexError.CodexAppServerTransportError({ operation, cause })),
+            ),
+          );
+
     const offerOutgoing =
       /* Every protocol write reaches this helper; request spans cover the operation. */
       Effect.fnUntraced(function* (message: Record<string, unknown>) {
@@ -328,7 +349,21 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                 );
               }
 
-              return handler(request).pipe(
+              return Effect.suspend(() => handler(request)).pipe(
+                // Adapter handlers end in Effect.orDie; Codex waits for an answer regardless.
+                Effect.catchDefect(() =>
+                  Effect.logError("Codex request handler failed").pipe(
+                    Effect.annotateLogs({
+                      method:
+                        request.method in CodexRpc.SERVER_REQUEST_PARAMS
+                          ? request.method
+                          : "unknown",
+                    }),
+                    Effect.andThen(
+                      Effect.fail(CodexError.CodexAppServerRequestError.internalError()),
+                    ),
+                  ),
+                ),
                 Effect.matchEffect({
                   onFailure: (error) =>
                     respondError(
@@ -461,20 +496,12 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
             Effect.matchEffect({
               onFailure: (error) => handleTermination(() => Effect.succeed(error)),
               onSuccess: () =>
-                handleTermination(() => {
-                  const ended = new CodexError.CodexAppServerInputStreamEndedError({});
-                  // Node ends stdout before it reports the exit of a crashed process, so
-                  // wait briefly for the exit status. stdout can also close while the
-                  // process keeps running, so the wait must not hang pending requests.
-                  return options.terminationError === undefined
-                    ? Effect.succeed(ended)
-                    : options.terminationError.pipe(
-                        Effect.timeoutOrElse({
-                          duration: EXIT_STATUS_GRACE,
-                          orElse: () => Effect.succeed(ended),
-                        }),
-                      );
-                }),
+                handleTermination(() =>
+                  exitStatusOr(
+                    new CodexError.CodexAppServerInputStreamEndedError({}),
+                    "read-input-stream",
+                  ),
+                ),
             }),
           ),
       }),
@@ -482,7 +509,12 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         Cause.hasInterruptsOnly(cause)
           ? Effect.void
           : handleTermination(() =>
-              Effect.succeed(normalizeIncomingError(Cause.squash(cause), "read-input-stream")),
+              Effect.succeed(
+                new CodexError.CodexAppServerTransportError({
+                  operation: "read-input-stream",
+                  cause: Cause.squash(cause),
+                }),
+              ),
             ),
       ),
       Effect.forkScoped,
@@ -494,7 +526,10 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         Cause.hasInterruptsOnly(cause)
           ? Effect.void
           : handleTermination(() =>
-              Effect.succeed(normalizeIncomingError(Cause.squash(cause), "write-output-stream")),
+              exitStatusOr(
+                normalizeIncomingError(Cause.squash(cause), "write-output-stream"),
+                "write-output-stream",
+              ),
             ),
       ),
       Effect.forkScoped,

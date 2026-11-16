@@ -4,6 +4,7 @@ import {
   CheckpointScopeId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2AppThread,
   ProviderThreadId,
   ThreadId,
   TurnItemId,
@@ -12,6 +13,7 @@ import {
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -178,6 +180,17 @@ export const layer: Layer.Layer<
     const positions = yield* TurnItemPositionStoreV2;
     const restoreDependencies = { fileSystem, projections, projects, path, vcs };
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+    const restoreDependenciesFor = Effect.fn("orchestrationV2.restoreDependenciesFor")(function* (
+      thread: Pick<OrchestrationV2AppThread, "worktreePath" | "branch">,
+    ) {
+      const worktreePath = thread.worktreePath;
+      return worktreePath !== null &&
+        thread.branch !== null &&
+        !(yield* fileSystem.exists(path.join(worktreePath, ".git"))) &&
+        (yield* isManagedWorktreePath(worktreePath))
+        ? { ...restoreDependencies, recreatingWorktreePath: path.resolve(worktreePath) }
+        : restoreDependencies;
+    });
 
     const execute = Effect.fn("orchestrationV2.checkpointRollback.execute")(function* (
       input: {
@@ -263,30 +276,14 @@ export const layer: Layer.Layer<
               };
             });
 
-      const { worktreePath, branch } = context.thread;
-      // Recreated only where the server would have made it, as turn start does.
-      if (
-        worktreePath != null &&
-        branch != null &&
-        !(yield* fileSystem.exists(worktreePath)) &&
-        (yield* isManagedWorktreePath(worktreePath))
-      ) {
-        const project = yield* projects.get(context.thread.projectId);
-        if (Option.isSome(project)) {
-          yield* gitWorkflow.pruneWorktrees({ cwd: project.value.workspaceRoot });
-          yield* gitWorkflow.createWorktree({
-            cwd: project.value.workspaceRoot,
-            refName: branch,
-            path: worktreePath,
-          });
-        }
-      }
-
-      // Runs under the checkout lease, so no overlapping turn can start before the restore ends.
-      const safety =
-        input.restoreFiles === false
-          ? { blockedMessage: null, noticeThreadIds: [] }
-          : yield* assessCheckpointRestore(context.thread, scope, restoreDependencies);
+      const restoreFiles = input.restoreFiles !== false;
+      const safety = restoreFiles
+        ? yield* assessCheckpointRestore(
+            context.thread,
+            scope,
+            yield* restoreDependenciesFor(context.thread),
+          )
+        : { blockedMessage: null, noticeThreadIds: [] };
       if (safety.blockedMessage !== null) {
         return yield* new CheckpointRollbackExecutionError({
           reason: "shared-workspace",
@@ -297,10 +294,77 @@ export const layer: Layer.Layer<
         });
       }
 
+      const { worktreePath, branch } = context.thread;
+      // Recreated only where the server would have made it, as turn start does.
+      if (worktreePath != null && branch != null) {
+        // A failed removal can leave the folder without its checkout; only a file restore replaces it.
+        const leftover =
+          restoreFiles &&
+          (yield* fileSystem.exists(worktreePath)) &&
+          !(yield* fileSystem.exists(path.join(worktreePath, ".git")));
+        if (
+          (leftover || !(yield* fileSystem.exists(worktreePath))) &&
+          (yield* isManagedWorktreePath(worktreePath))
+        ) {
+          const project = yield* projects.get(context.thread.projectId);
+          if (Option.isSome(project)) {
+            const recreate = gitWorkflow.pruneWorktrees({ cwd: project.value.workspaceRoot }).pipe(
+              Effect.andThen(
+                gitWorkflow.createWorktree({
+                  cwd: project.value.workspaceRoot,
+                  refName: branch,
+                  path: worktreePath,
+                }),
+              ),
+            );
+            if (leftover) {
+              // Keep the original folder until the entire rollback succeeds; later failures may need it.
+              yield* Effect.acquireRelease(
+                Effect.gen(function* () {
+                  const aside = yield* fileSystem.makeTempDirectory({
+                    directory: path.dirname(worktreePath),
+                    prefix: ".t3-replaced-",
+                  });
+                  yield* fileSystem.rename(worktreePath, path.join(aside, "folder"));
+                  return aside;
+                }),
+                (aside, exit) =>
+                  Effect.gen(function* () {
+                    if (Exit.isFailure(exit) && restoration.filesRestored) {
+                      yield* Effect.logWarning(
+                        "Checkpoint files were restored; original worktree files remain available for recovery",
+                        {
+                          worktreePath,
+                          setAside: path.join(aside, "folder"),
+                        },
+                      );
+                      return;
+                    }
+                    if (Exit.isFailure(exit)) {
+                      yield* fileSystem.remove(worktreePath, { recursive: true, force: true });
+                      yield* fileSystem.rename(path.join(aside, "folder"), worktreePath);
+                    }
+                    yield* fileSystem.remove(aside, { recursive: true, force: true });
+                  }).pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("Edit from here left a worktree folder set aside", {
+                        worktreePath,
+                        setAside: path.join(aside, "folder"),
+                        cause,
+                      }),
+                    ),
+                  ),
+              );
+            }
+            yield* recreate;
+          }
+        }
+      }
+
       // Evicted file versions are downloaded before the provider conversation
       // changes, so a failed download leaves the thread as it was. They stay
       // pinned until this rollback's scope closes.
-      if (input.restoreFiles !== false) {
+      if (restoreFiles) {
         yield* checkpoints.prepareRestore({ scope, checkpoint });
       }
 
@@ -678,7 +742,10 @@ export const layer: Layer.Layer<
           const checkoutRoot =
             input.restoreFiles === false
               ? null
-              : yield* checkpointRestoreCheckoutRoot(thread, restoreDependencies);
+              : ((yield* checkpointRestoreCheckoutRoot(
+                  thread,
+                  yield* restoreDependenciesFor(thread),
+                )) ?? thread.worktreePath);
           const worktree = thread.worktreePath === null ? [] : [path.resolve(thread.worktreePath)];
           yield* (
             checkoutRoot !== null

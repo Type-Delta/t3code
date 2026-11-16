@@ -839,6 +839,8 @@ function makeReplayQueryRunner(
               mode,
             });
           }),
+        // Recorded sessions already hold their title, and no replay asserts rename frames.
+        renameSession: () => Effect.void,
         stopTask: (taskId) =>
           replayEffect(() => {
             assertNextOutboundFrame({ type: "query.stop_task", taskId });
@@ -944,6 +946,7 @@ function replayQueryRunnerService(
     open: (input) => replay(() => queryRunner.open(input)),
     forkSession: (input) => replay(() => queryRunner.forkSession(input)),
     subagentLaunchToolUseId: (input) => replay(() => queryRunner.subagentLaunchToolUseId(input)),
+    subagentModel: () => Effect.succeed(null),
     assertComplete: replay(() => queryRunner.assertComplete()),
   });
 }

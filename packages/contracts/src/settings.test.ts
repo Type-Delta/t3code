@@ -10,6 +10,7 @@ import {
 import {
   ClientSettingsSchema,
   ClientSettingsPatch,
+  ClientServerSettingsPatch,
   ClaudeSettings,
   CodexSettings,
   DEFAULT_SERVER_SETTINGS,
@@ -38,6 +39,7 @@ const decodeStringOnlyEnvironment = Schema.decodeUnknownSync(
   ),
 );
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+const decodeClientServerSettingsPatch = Schema.decodeUnknownSync(ClientServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
@@ -142,6 +144,18 @@ describe("online snapshots", () => {
   it("defaults existing settings to enabled", () => {
     expect(decodeServerSettings({}).onlineSnapshots).toBe(true);
   });
+});
+
+it("drops theme defaults from a client's settings patch", () => {
+  expect(
+    decodeClientServerSettingsPatch({
+      newWorktreesStartFromOrigin: false,
+      defaultTheme: "grove",
+      defaultThemeSetAt: "2026-11-13T00:00:00.000Z",
+      defaultAppearance: "dark",
+      defaultAppearanceSetAt: "2026-11-13T00:00:00.000Z",
+    }),
+  ).toEqual({ newWorktreesStartFromOrigin: false });
 });
 
 describe("storage cleanup settings", () => {
@@ -688,15 +702,15 @@ describe("ClientSettings pull request merge methods", () => {
     expect(decodeClientSettings({}).pullRequestMergeMethodOverrides).toEqual({});
     expect(
       decodeClientSettingsPatch({
-        pullRequestMergeMethodOverrides: { project: "squash" },
+        pullRequestMergeMethodOverrides: { project: "squash", other: "fast-forward" },
       }).pullRequestMergeMethodOverrides,
-    ).toEqual({ project: "squash" });
+    ).toEqual({ project: "squash", other: "fast-forward" });
   });
 
   it("rejects unsupported project merge methods", () => {
     expect(() =>
       decodeClientSettingsPatch({
-        pullRequestMergeMethodOverrides: { project: "fast-forward" },
+        pullRequestMergeMethodOverrides: { project: "unsupported" },
       }),
     ).toThrow();
   });
@@ -832,17 +846,17 @@ describe("ServerSettings environment icon", () => {
 
 const decodeDeviceHostSettings = Schema.decodeSync(ServerSettings);
 
-// `deviceHosts` as it was decoded before EAS hosts existed: an SSH host needs a target.
+// `deviceHosts` as it was decoded before Expo hosts existed: an SSH host needs a target.
 const decodeOlderDeviceHostSettings = Schema.decodeUnknownSync(
   Schema.Struct({
     deviceHosts: Schema.Array(Schema.Struct({ id: Schema.String, target: Schema.String })),
   }),
 );
 
-it("keeps EAS hosts out of the SSH host list servers and clients before EAS hosts decode", () => {
+it("keeps Expo hosts out of the SSH host list servers and clients before Expo hosts decode", () => {
   const settings = decodeDeviceHostSettings({
     deviceHosts: [{ id: "mini", label: "Mac mini", target: "user@mini" }],
-    easDeviceHosts: [{ kind: "eas", id: "eas", label: "EAS Simulator" }],
+    easDeviceHosts: [{ kind: "eas", id: "eas", label: "Expo Simulators" }],
   });
   const wire = encodeServerSettings(settings);
   expect(decodeOlderDeviceHostSettings(wire).deviceHosts).toEqual([
@@ -853,7 +867,7 @@ it("keeps EAS hosts out of the SSH host list servers and clients before EAS host
 
 it("validates remote device hosts and rejects ambiguous host ids", () => {
   const host = { id: "mini", label: "Mac mini", target: "user@mini", port: 2222 };
-  // Hosts saved before EAS hosts existed have no `kind`; they are SSH hosts.
+  // Hosts saved before Expo hosts existed have no `kind`; they are SSH hosts.
   expect(decodeDeviceHostSettings({ deviceHosts: [host] }).deviceHosts).toEqual([
     { kind: "ssh", ...host },
   ]);

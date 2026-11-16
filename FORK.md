@@ -96,7 +96,7 @@ Server-router and HTTP MCP fixtures use native HTTP clients with OS-assigned loo
 
 ### DL006 — Durable sidecar checkpoints and recoverable navigation
 
-V2 turn checkpoints live in a private bare-Git sidecar repository below the server's checkpoints directory, addressed by opaque `t3-sidecar:v1:` locators bound to the repository and worktree. Capture, restore, and diff never write refs, objects, or an index into the project repository. One sidecar repository serves a repository's linked worktrees. Capture, restore, and diff are serialized per sidecar; background packing (DL050) takes that lock only to swap packs, and storage cleanup (DL051) removes snapshots no thread needs. Capture records the project HEAD in the snapshot so upstream's pull, merge, and rebase filtering keeps working between sidecar boundaries. A scope id too long for a snapshot id is hashed.
+V2 turn checkpoints live in a private bare-Git sidecar repository below the server's checkpoints directory, addressed by opaque `t3-sidecar:v1:` locators bound to the repository and worktree. Capture, restore, and diff never write refs, objects, or an index into the project repository. One sidecar repository serves a repository's linked worktrees. Capture, restore, and diff are serialized per sidecar; background packing (DL050) takes that lock only to swap packs, and storage cleanup (DL051) removes snapshots no thread needs. Capture records project HEAD and its reflog position. When a turn changes branches, a synthetic turn-start tree in the sidecar preserves the authored diff without importing project history or writing project refs. Authored-path filtering distinguishes fetched commits from commits made in linked worktrees through their reflogs. A scope id too long for a snapshot id is hashed.
 
 Checkpoints captured between the 2026-10-08 redo and this re-port were written as `refs/t3/orchestration-v2/checkpoints/*` refs in the project repository. They still load, diff, and restore: each boundary lookup tries its sidecar snapshot first, then that in-repo ref. New boundaries always go to the sidecar. Upstream's checkpoint rollback locking and the per-workspace capture lock are unchanged.
 
@@ -106,9 +106,11 @@ Upstream #14892 marks a checkpoint `missing` when its workspace folder is ignore
 
 Sidecar capture runs Git with `-C` at the worktree root, so paths stay worktree-relative when the server's own working directory is inside the project, as when T3 Code develops itself. An uninitialized submodule, an empty folder at a tracked gitlink, is captured as the gitlink commit the project index records rather than failing the whole capture.
 
+Recreating a managed checkout preserves any leftover folder until rollback completes. Before files are restored, failures or interruptions put the original folder back; a later failure keeps it aside and reports its recovery path rather than deleting uncertain user data.
+
 Legacy checkpoint tables remain for schema compatibility. V2 navigation uses upstream's checkpoint rollback with the fork's retained forward checkpoints for redo; no server code reads the former capture-job or navigation-journal tables.
 
-Persistence keeps canonical upstream migrations `001`–`082` in `effect_sql_migrations` and fork migrations `001`–`015` in the independent `fork_sql_migrations` ledger. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
+Persistence keeps canonical upstream migrations `001`–`096` in `effect_sql_migrations` and fork migrations `001`–`016` in the independent `fork_sql_migrations` ledger. Rolling direct-pairing sessions remain fork migration `016`; upstream Connect device approvals use their canonical migrations `090`–`091`. Startup takes a rollback copy before converting known historical fork rows by name, repairs missing upstream migrations below the recorded high-water mark, and runs the guarded fork migrations. Historical fork records at `059`–`067` can remain in the fork ledger without suppressing lower fork migrations.
 
 The old ID-58 prompt-suggestion collision is repaired by canonical upstream migration `048_ProjectionThreadBranchPullRequest` and fork migration `009_ProjectionThreadMessageSuggestions`. This preserves both columns even when the original numeric ledger skipped the branch column. Startup also removes the legacy checkpoint table's foreign key to `projection_turns` before upstream `063_DropUnusedV1Projections` drops that table. Incoming upstream migrations `065`–`069` retain their canonical IDs, including webhook deduplication and message-search schema.
 
@@ -130,7 +132,9 @@ Standalone checkpoint slash commands dispatch locally even when a provider does 
 
 **Implementation evidence:** `packages/shared/src/orchestrationV2CheckpointNavigation.ts`, `apps/server/src/checkpointing/{SidecarCheckpointRepository,CheckpointRepositoryIdentity,CheckpointStore}.ts`, `apps/server/src/orchestration-v2/CheckpointService.ts`, `apps/server/src/persistence/Migrations/{036_CheckpointDurableState,037_CheckpointLegacyMigration,038_CheckpointCaptureProviderMetadata}.ts`, `apps/server/src/persistence/ForkMigrations.ts` (whose history reconciliation is covered by `Migrations/{039_ReconcileCheckpointAndTitleHistory,046_ReconcileUpstream41History,053_ReconcileUpstream47History}.test.ts`), and their tests. `CheckpointStore.test.ts` holds the sidecar characterization suite, including a comparison of reused-index trees against empty-index `git add` trees across tracked, untracked, deleted, binary, symlinked, ignored, file-to-folder, mode, and attribute changes; `apps/server/src/orchestration-v2/CheckpointService.sidecar.test.ts` runs turns against real temporary repositories and asserts that `git for-each-ref refs/t3` stays empty, that restore works, and that an in-repo checkpoint from the redo period still restores.
 
-**Recorded validation:** migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated. The deletion/rename regression and all 15 sidecar checkpoint tests passed on Windows with the user-index preservation assertion.
+**Recorded validation:** Sidecar branch-switch and imported-commit cases cover legacy, sidecar, and mixed boundaries without changing the project index or refs. All 89 rollback/safety cases pass, including preflight, provider-startup, restore, interruption, and compensation failures. A consistent copy of a real database upgrades to 96 upstream and 16 unchanged fork records, reruns with zero writes, and passes SQLite integrity and foreign-key checks. A paired production client completed a live Luna file change, undo, and redo; a second client observed both transitions.
+
+Earlier validation: migration and durability regression matrices, sidecar characterization (including unborn repositories, submodules, and linked worktrees), orchestration integration including serialized full-turn capture, deterministic post-capture lease release, stale-lease recovery, non-blocking checkpoint degradation, and persisted-message retry, Windows isolation slices, upstream-ledger reconciliation through migration `047`, full `vp test`, `vp check`, `vp run typecheck`, and `git diff --check`. The 2026-09-01 merge-focused server tests also covered checkpoint projection and reactor behavior after upstream bounded activity hydration and provider event-lifecycle fixes were integrated. The deletion/rename regression and all 15 sidecar checkpoint tests passed on Windows with the user-index preservation assertion.
 
 The 2026-10-02 config repair passed all 28 checkpoint-store tests, including exact restored bytes, conditional includes, repeated values, and removed overrides. A single-file capture benchmark measured 3.2–3.4 seconds against 4.6–4.8 seconds for the original fork implementation.
 
@@ -140,7 +144,7 @@ The 2026-10-05 completion split passed the focused RunExecutionService, Checkpoi
 
 The 2026-10-15 re-port restored the 16 sidecar characterization tests the redo dropped (32 checkpoint-store tests pass), plus sidecar authored-path filtering, long scope ids, and the V2 real-repository suite.
 
-**Last updated:** 2026-11-12
+**Last updated:** 2026-11-16
 
 ### DL008 — Persistent multi-thread split workspaces
 
@@ -160,7 +164,9 @@ Maximizing the shared right panel in a split collapses the whole pane column to 
 
 **Implementation evidence:** `apps/web/src/{splitViewStore,splitViewDrag,splitViewNavigation}.ts`, `apps/web/src/components/{SplitThreadWorkspace,ThreadRouteView,SplitPaneDropHint,Sidebar,CommandPalette,RightPanelTabs,ChatView,chat/ChatComposer}.tsx`, `apps/web/src/components/Sidebar.logic.ts`, `apps/web/src/components/SplitThreadWorkspace.test.tsx` (maximize ownership and "never renders a thread the tag filter hides"), `apps/web/src/components/SplitThreadWorkspace.browser.test.tsx`, `apps/web/src/routes/_chat.tsx`, `apps/web/src/index.css`, `apps/web/src/hooks/useThreadActions.ts`, and the chat routes.
 
-**Recorded validation:** 248 focused tests across split state, navigation, native drag events, route history, sidebar logic, workspace, right-panel, notification, and citation behavior; `vp check`; `vp run typecheck`; and `git diff --check`. The 2026-09-28 isolated paired-browser pass confirmed that pointer hints switch between left and right and a left drop places the dragged thread before the original. The Browser panel then lost its automation host, so the remaining live flows and screenshot capture could not be completed. Native legacy drops and route restoration were verified by automated tests. An unrelated existing command-palette sorting test still fails in unchanged code. Earlier integrated checks cover composer shortcut ownership and shared right-panel closing. The 2026-09-29 5x2 extension passed 211 focused tests, `vp check`, `vp run typecheck`, and an isolated paired-browser pass at 2560x1440 showing five full-height columns and a sixth pane below the first. The drop-area correction passed 214 focused tests; an isolated paired-browser pass confirmed top and bottom native drops, and confirmed that a filled column at five columns accepts no drop or hint while an unstacked column still offers the top hint. The 2026-09-29 standalone vertical-drop and group-detach update passed 220 focused tests, including top/bottom native and pointer targets, active/inactive group dissolution, and both sidebar menu paths; the isolated browser pass confirmed the new menu item, top and bottom first-split hints, and the resulting stacked two-pane layout.
+**Recorded validation:** The integrated production client opens a two-pane group from the sidebar context menu, retains the group and both pane drafts after reload, and reports no runtime page errors.
+
+Earlier validation: 248 focused tests across split state, navigation, native drag events, route history, sidebar logic, workspace, right-panel, notification, and citation behavior; `vp check`; `vp run typecheck`; and `git diff --check`. The 2026-09-28 isolated paired-browser pass confirmed that pointer hints switch between left and right and a left drop places the dragged thread before the original. The Browser panel then lost its automation host, so the remaining live flows and screenshot capture could not be completed. Native legacy drops and route restoration were verified by automated tests. An unrelated existing command-palette sorting test still fails in unchanged code. Earlier integrated checks cover composer shortcut ownership and shared right-panel closing. The 2026-09-29 5x2 extension passed 211 focused tests, `vp check`, `vp run typecheck`, and an isolated paired-browser pass at 2560x1440 showing five full-height columns and a sixth pane below the first. The drop-area correction passed 214 focused tests; an isolated paired-browser pass confirmed top and bottom native drops, and confirmed that a filled column at five columns accepts no drop or hint while an unstacked column still offers the top hint. The 2026-09-29 standalone vertical-drop and group-detach update passed 220 focused tests, including top/bottom native and pointer targets, active/inactive group dissolution, and both sidebar menu paths; the isolated browser pass confirmed the new menu item, top and bottom first-split hints, and the resulting stacked two-pane layout.
 
 The 2026-10-07 drag update passed 90 focused drag tests, `vp check`, `vp run typecheck`, and `git diff --check`. Remote user verification confirmed the full thread-row overlay follows the pointer and the source gap remains visible outside the sidebar.
 
@@ -168,7 +174,7 @@ The 2026-11-01 split-maximize change passed `SplitThreadWorkspace.test.tsx`. In 
 
 Pinned and Active drag boundaries occupy normal layout rows, including an empty Pinned group. Sorting uses their measured heights so labels keep consistent spacing in Manual and Last input ordering.
 
-**Last updated:** 2026-11-12
+**Last updated:** 2026-11-16
 
 ### DL013 — Codex availability through catalog and turn failures
 
@@ -262,7 +268,7 @@ returns it to running, and it publishes the follow-up's result once (upstream #2
 running can still be cancelled. The delegation's first run is identified by the spawn transfer's target run. A user
 follow-up also reopens a task the parent had cancelled, re-arming its completion wake.
 
-Delegated task completion waits for the child's own delegates and every nonempty background-work roster, including unawaited commands. Upstream's `backgroundWorkHoldsCompletion` only holds for `awaited: true`. The fork applies the roster check to both the first run and reopened follow-ups, and the delegated-child settlement listener finalizes the task when the roster empties. The task stays
+Successful delegated task completion waits for the child's own delegates and every nonempty background-work roster, including unawaited commands. Upstream's `backgroundWorkHoldsCompletion` only holds for `awaited: true`. The fork applies the roster check to both the first run and reopened follow-ups, and the delegated-child settlement listener finalizes the task when the roster empties. The task stays
 running, and `task_status` reports `waiting_for_children`. While the task is reopened, the
 delegated-completion and background-command wakes that settle that work also carry its task id,
 so the task publishes the wake's result instead of the interim reply. A follow-up that fails, is
@@ -276,14 +282,16 @@ follow-up never starts", including "pauses a reopened task behind a held follow-
 reopened task while … runs") and `OrchestratorMcpService.test.ts` (held follow-up cancel, and
 the follow-up variant of terminal acknowledgement). Stale question cleanup: `apps/server/src/orchestration-v2/DelegatedTaskQuestionReactor.ts` and `Orchestrator.control-reads.test.ts`.
 
-**Recorded validation:** focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
+**Recorded validation:** All 116 delegated-completion and control-read cases pass. The outcome table covers failed, interrupted, and cancelled reopened follow-ups with live descendants or background work, while successful follow-ups retain their completion hold. Original reviewer failure probes pass.
+
+Earlier validation: focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
 and composer tests; vp check; vp run typecheck; and an isolated paired web-app smoke test that
 loaded a V2 thread route, confirmed the Agents/right-transcript surface is absent, and confirmed the
 composer rendered. The preview client's accessibility snapshot and click calls failed after the app
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
 
-**Last updated:** 2026-11-12
+**Last updated:** 2026-11-16
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 
@@ -325,16 +333,15 @@ Workspaces without a Git repository do no VCS work for checkpoints. VCS detectio
 
 ### DL023 — V2 MCP thread controls
 
-t3_thread_wait accepts up to eight targets and applies the upstream one-hour cap. t3_thread_send can
-select a provider instance and model, and rejects a provider caller that targets its own thread.
+t3_thread_wait accepts up to eight targets. MCP waits use upstream's 30-second default and 45-second maximum, returning recoverable handles before transport deadlines; secret requests retain their separate lifetimes. t3_thread_send can select a provider instance and model, and rejects a provider caller that targets its own thread.
 Management keys retain their explicit environment-wide permissions and reviewed tool allowlist. Strict MCP tool schemas advertise and reject unknown parameters.
 
 **Implementation evidence:** `apps/server/src/mcp/OrchestratorMcpService.ts`, the thread toolkit,
 `packages/contracts/src/orchestratorMcp.ts`, and the management API key contracts.
 
-**Recorded validation:** No validation recorded. Covered by `apps/server/src/mcp/OrchestratorMcpService.test.ts` and `OrchestratorMcpToolkit.integration.test.ts`.
+**Recorded validation:** The complete MCP toolkit and HTTP suites pass, including the retained strict-argument, authorization, multi-target, and thread-control behavior.
 
-**Last updated:** 2026-10-28
+**Last updated:** 2026-11-16
 
 ### DL026 — Per-instance API gateway model catalogs
 
@@ -350,7 +357,7 @@ unavailable.
 
 Gateway and manual metadata compose with upstream's custom-model display-name and option-descriptor editor.
 
-Claude's fork-specific model ID and effort normalization applies to gateway, custom, and bundled models with a manual override. Bundled models without overrides use the upstream catalog path, preserving current `xhigh` support (including the 5.5 and Fable 5.1 models); live model switches resolve the effective API ID and effort once and reuse that selection for the process, flags, and query identity.
+Claude's fork-specific model ID and effort normalization applies to gateway, custom, and bundled models with a manual override. Bundled models without overrides use upstream's cwd-scoped Bedrock/Vertex routing and catalog path, preserving current `xhigh` support (including the 5.5 and Fable 5.1 models); live model switches resolve the effective API ID and effort once and reuse that selection for the process, flags, and query identity.
 
 Models carry usable context, theoretical maximum context, maximum output, and metadata provenance.
 Every visible model accepts manual display, context, output, and reasoning overrides; manual values
@@ -420,7 +427,7 @@ and launch configuration without restarting T3 or changing the native conversati
 
 Claude adapter and text-generation launches now resolve each selected gateway model through the per-instance catalog, applying `[1m]` model IDs and normalized CLI effort before opening or spawning.
 
-**Last updated:** 2026-11-12
+**Last updated:** 2026-11-16
 
 ### DL027 — Remote editor links select the server account
 
@@ -449,13 +456,17 @@ The fork publishes desktop builds only through the manual **Fork Release** workf
 
 Preflight accepts only `X.Y.Z` or `X.Y.Z-nightly.YYYYMMDD.N`, because the updater ignores other suffixes. It rejects a tag that already exists here or on upstream, and a stable version that is not newer than the latest stable tag. Fork versions follow upstream patch × 100 + fork build (`0.1.7` → `0.1.701`), so they never equal an upstream version. A blank version input derives the next build from `apps/desktop/package.json` (upstream's `0.1.7`, so `0.1.701` onward) and the fork's tags; a `.0` base starts at build 50 to stay clear of upstream's next patches. Unsigned NSIS updates install because electron-updater skips publisher verification when the build has no `publisherName`.
 
+Published AppImages use upstream's versionless, channel-specific names so installed apps can update in place. The completeness check reads the AppImage filename from the Linux manifest and verifies its version against the selected release, alongside the required platform assets.
+
 The workflow does not publish a `t3` npm package or CLI archives, so `t3 update` and remote server self-update still follow upstream; do not use them on fork servers.
 
 **Implementation evidence:** `.github/workflows/fork-release.yml`, `fork-windows-release.yml`, `fork-macos-release.yml`, `fork-linux-release.yml`, and `WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT` in `scripts/build-desktop-artifact.ts`.
 
-**Recorded validation:** actionlint and `vp fmt --check` on the four workflows. Fork Release run 41066477319 built every platform on hosted runners and published `v0.1.301` with `latest.yml`, a `latest-mac.yml` listing arm64 and x64, and a `latest-linux.yml` listing the AppImage and `.deb`. A two-version update on each OS is not yet recorded.
+**Recorded validation:** The exact workflow manifest reader accepts stable and nightly versionless AppImages and rejects a mismatched release version. Production web, server, and desktop bundles and Linux AppImage/Debian installers build. The AppImage opens, migrates a fresh database to 96 upstream and 16 fork records, retains its backend after its window closes, and reopens at a selected project. Hosted release publication and a two-version update are not exercised by this sync.
 
-**Last updated:** 2026-11-07
+Earlier validation: actionlint and `vp fmt --check` on the four workflows. Fork Release run 41066477319 built every platform on hosted runners and published `v0.1.301` with `latest.yml`, a `latest-mac.yml` listing arm64 and x64, and a `latest-linux.yml` listing the AppImage and `.deb`. A two-version update on each OS is not yet recorded.
+
+**Last updated:** 2026-11-16
 
 ### DL029 — Selectable sidebar thread ordering
 
@@ -653,11 +664,15 @@ Hub requests pause after management HTTP 401/403 until the URL or management key
 
 Session scanning skips parsing completed history from matching file metadata only when the inode is present. Effect 4.0.5 reports inodes as bigints, which import sources store as exact decimal strings; legacy numeric inodes that are not safe integers never match because they may already have lost NTFS file ID precision. Windows can omit inode values, making a replacement file look unchanged. The scanner validates these completed files with a separate bounded budget so retries can import the next batch of new histories. Both budgets allow 100 transcripts and 4 GiB per scan, with 100,000 records per transcript and 10,000,000 records in aggregate. Replacements also consume the new-history budget. Completed files beyond the validation budget remain conservatively skipped; identical-metadata replacements there are not guaranteed to be discovered on retries.
 
+Native-session validation composes with upstream compressed and rewound Codex rollouts through the same bounded transcript reader. Imports from a linked worktree validate against that worktree rather than the main checkout, so retries keep reaching sessions behind the scan budget.
+
 **Implementation evidence:** `apps/server/src/project/AgentSessionScanner.ts`, its replacement identity tests, and bounded retry tests in `AgentSessionImporter.test.ts`. `packages/shared/src/nodeRuntime.ts` falls back to native bigint file IDs when Effect stats report a missing or zero inode; `nodeRuntime.test.ts` covers native, missing, and zero identities.
 
-**Recorded validation:** 100 scanner/importer tests, including 201-history imports across three attempts with missing inodes and exact-string versus rounded legacy inodes. Server typecheck, scoped lint, and formatting passed.
+**Recorded validation:** The complete scanner, importer, scratch-folder, repository-identity, settings-contract, and tagged-version fixture run passes 226 cases. Linked-worktree imports preserve the 100/1 then 1/0 batch counts; compressed rewound transcripts validate and import. This sync ran on Linux.
 
-**Last updated:** 2026-11-07
+Earlier validation: 100 scanner/importer tests, including 201-history imports across three attempts with missing inodes and exact-string versus rounded legacy inodes. Server typecheck, scoped lint, and formatting passed.
+
+**Last updated:** 2026-11-16
 
 ### DL039 — Graceful Codex shutdown before Windows tree termination
 
@@ -823,7 +838,7 @@ Before undo, redo, or a diff reads content, missing blobs are recovered from mat
 
 ### DL051 — Snapshot retention in storage cleanup
 
-Upstream never removes checkpoint snapshots. The hourly storage cleanup, and **Delete now**, now remove snapshots that no thread needs. `storageCleanup.snapshotsAfterDays` sets the idle limit (default 15 days, `null` keeps idle threads' snapshots). It sits under **Settings → Maintenance → Snapshots** on web and mobile.
+The fork stores checkpoint snapshots in sidecars. The hourly storage cleanup, and **Delete now**, remove snapshots that no thread needs. Upstream's cleanup of legacy refs in project repositories is not enabled; those refs remain untouched. `storageCleanup.snapshotsAfterDays` sets the idle limit (default 15 days, `null` keeps idle threads' snapshots). It sits under **Settings → Maintenance → Snapshots** on web and mobile.
 
 Snapshot retention uses `threadIdle`, without the worktree requirement in `storageCleanupThreadIdle`, so idle current-checkout threads also lose expired snapshots. Web and mobile settings honor the managed policy lock for `storageCleanup.snapshotsAfterDays`. A snapshot is kept when its checkpoint belongs to a thread that is not deleted and is either busy or active within the limit. Because forks and subagents read their ancestors' checkpoints, every checkpoint of a kept thread's fork and parent ancestry is kept too, even if that ancestor is deleted or idle. If a projection read fails, that sweep skips snapshot cleanup.
 
@@ -855,7 +870,7 @@ Legacy checkpoint refs inside project repositories are never touched.
   - Every checkpoint of a thread active in the last 15 days kept its snapshot, and its turn diff still rendered.
   - An expired thread's diff showed the removal message.
 
-**Last updated:** 2026-11-07
+**Last updated:** 2026-11-16
 
 ### DL052 — Windows desktop keeps the default profile's safe-storage key
 
@@ -917,9 +932,9 @@ The timeline minimap owns its exact-end state. The timeline's existing scroll an
 
 **Implementation evidence:** `apps/web/src/components/chat/MessagesTimeline.tsx`, `apps/web/src/components/chat/TimelineMinimap.tsx`, the existing timeline and minimap tests, and `apps/web/test/appScenarios.renders.tsx`.
 
-**Recorded validation:** the unchanged streaming scenario returns to three conversation renders, matching the premerge measurement; 186 focused timeline, minimap, anchoring, and restore cases pass. An isolated paired client completed two free Replay turns, scrolled away from the end, navigated with Next, returned to the end, and resized to fit the whole conversation. End controls stayed correct with no page errors. The scenario's separate MarkdownParagraph budget remains a pre-existing failure.
+**Recorded validation:** the unchanged streaming scenario returns to three conversation renders, matching the premerge measurement; 186 focused timeline, minimap, anchoring, and restore cases pass. An isolated paired client completed two free Replay turns, scrolled away from the end, navigated with Next, returned to the end, and resized to fit the whole conversation. End controls stayed correct with no page errors. The complete render suite now passes all 17 scenarios, including 30 MarkdownParagraph renders during streaming. The same-environment premerge run measured 59.
 
-**Last updated:** 2026-11-12
+**Last updated:** 2026-11-16
 
 ### DL059 — Direct pairings renew with regular use
 
@@ -933,13 +948,23 @@ The fork migration identifies unexpired legacy pairing candidates without revivi
 
 **Last updated:** 2026-11-13
 
+### DL060 — Stable sidebar drag callbacks
+
+Sortable sidebar rows keep their sensor callback identities while drag context or navigation changes. Upstream recreates the listener map and rerenders unrelated rows; the fork forwards events to the latest committed listeners through stable wrappers. Listener names and wrappers change together in React state, so a suspended render cannot leave re-enabled dragging without its handlers. Current transforms, disabled state, external drag previews, and Manual ordering remain authoritative.
+
+**Implementation evidence:** `apps/web/src/components/sidebar/SidebarThreadRow.tsx`, `apps/web/src/hooks/useStableCallback.ts`, the sidebar drag, pointer, and render-isolation browser suites, and `apps/web/test/appScenarios.renders.tsx`.
+
+**Recorded validation:** all 17 render scenarios pass without wider budgets. Thread switching renders two sidebar rows per window, and opening a thread from a draft renders one. The suspended-render guard reproducer retains matching state on retry. The actual production client reorders threads through pointer input with Manual ordering and Working off, and preserves the order after reload. Sidebar drag and pointer browser checks pass.
+
+**Last updated:** 2026-11-16
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.
 
 - Apply new upstream migrations to a read-only snapshot of the live database (`~/.t3/userdata/statev2.sqlite`). Check that a rerun is a no-op, the upstream ledger matches the migration manifest, the fork ledger (`fork_sql_migrations`) keeps every fork migration, and `foreign_key_check` and `quick_check` pass.
 - Run `vp run lint:mobile` when the merge touches native mobile code.
-- Run `vp run report:renders` with reports enabled, comparing any budget failure against the premerge source with the same measurement environment. Missing report output must not mask render regressions.
+- Run `vp run report:renders` with reports enabled, comparing any budget failure against the premerge source with the same measurement environment. Set `T3CODE_RENDER_REPORT_DIR` for a full test run that includes render projects. Missing report output must not mask render regressions.
 - Build the desktop and web production bundles, then build an installer (`vp run dist:desktop:win` on Windows) and launch it with isolated state. Confirm the window opens, the backend starts, and a fresh database migrates.
 - If provider auth is set up, run live turns with the cheapest models (Haiku for Claude, Luna for Codex) on a paired web client with seeded real data. Include an undo and redo of a file change (DL006).
 - Move the `base` tag to the merge commit and force-push it to `origin`.
@@ -947,6 +972,48 @@ Project-specific checks every upstream sync runs, in addition to the full test s
 ## Merge History
 
 This is an append-only decision record, newest first, with one entry per upstream sync. It explains past integrations but does not by itself establish a current divergence; use the Divergence Log for that. Sync with upstream only when the user explicitly asks. Do not edit past entries.
+
+### 2026-11-16 — Merge upstream/main through `6b7027b1f4`
+
+**Merge commit:** this commit
+**Parents:** `090175e4dd33d6a2aeb8269fcd81aec70864f571` (fork) and `6b7027b1f43eebc4c7edf5304236a0775b2d8928` (upstream/main); 1,481 upstream commits since `32882540fb`.
+
+All 44 existing divergence entries are retained. DL060 records stable sidebar drag callbacks, bringing the current total to 45. No entries are retired.
+
+User decisions:
+
+- Adopt upstream's 30-second default and 45-second maximum MCP waits, retaining eight targets, recoverable handles, model selection, and management permissions. Secret-request lifetimes remain separate.
+- Preserve legacy checkpoint refs in project repositories; do not enable upstream's deleted-thread ref pruning.
+- Continue the client integration with DeepSeek V4.1 Flash after the configured Claude provider could not start.
+
+Other decisions:
+
+- Keep sidecars, redo and native conversation forks, original local and remote delegated-task handles, independent migration ledgers, gateway catalogs, client-controlled suggestions, split workspaces, Manual ordering, and tray-backed desktop continuity.
+- Keep canonical upstream migrations through 096 and fork migrations through 016, including rolling direct-pairing sessions alongside Connect proof-key approval and revocation.
+- Take compatible upstream changes without replaying completed work or broadening management-key permissions. Sidecar submodules retain their existing content-preservation behavior; incoming legacy submodule restoration is not claimed for sidecar snapshots.
+
+Integration repairs:
+
+- Port branch-switch synthetic baselines and fetched-commit filtering into sidecar capture and diff queries without writing project refs or the project index. Preserve bounded captures, redo intake, overlap leases, and retention pins.
+- Keep leftover managed-worktree files recoverable through the whole rollback. Failures before file restoration put the original folder back; later failures preserve the aside and report its recovery path.
+- Retain current delegated-task identity across follow-ups and descendant wakes. Successful tasks await their background work; failed, interrupted, and cancelled follow-ups settle promptly. Stale release and remote-completion guards remain.
+- Bound child-control reads and pending-question SQL lookups without relaxing their performance assertions. Normalize older single-target wait replies while advertising the normalized object schema accepted by MCP SDK clients.
+- Compose gateway/manual metadata with upstream Claude model routing, startup prompt queues, native suggestions, Codex compaction usage, ACP diagnostics, and graceful process shutdown. Reader defects retain transport classification and their original cause.
+- Validate imported native sessions against the selected linked worktree and read compressed or rewound Codex rollouts through the bounded parser. Adapt Git, identity-cache, merge-method, handoff, and management fixtures to the actual contracts.
+- Fix sparse redo-history page ordering with linear work. Retain omitted side-chat shells while their panes are mounted, renew HTML preview URLs after atomic replacements, and remove the duplicate question-draft subscription. Stable sidebar listeners preserve sensor behavior and render budgets, including suspended renders.
+- Validate channel-specific AppImage names from the Linux manifest and require its version to match the release. Keep the manual cross-platform release and signing policies. Update the measured context budget without cutting model-facing text to fit it.
+
+Validation:
+
+- The final full run completes all 2,244 files: 2,242 pass and two fail, with 30,256 passing cases, one failing case, and 20 skips. Only the premerge mobile settings `__DEV__` collection error and bundled-development `@t3tools/shared` resolution failure remain. There are no new failed files or cases. The cold-cache browser run completes without optimizer reloads or unhandled errors.
+- Source fingerprints captured shortly after launch and after the full run match; no tracked edits were made during the run. The initial capture does not independently cover the short interval before it.
+- `vp check` passes with zero errors and 11 warnings; `vp run typecheck` passes all 41 tasks; `vp run lint:mobile` passes. The complete render report passes 17/17 scenarios. Current Knip findings exactly match the untouched premerge tree: 59 unused exports and five duplicate exports, with dependency/file checks passing. The pre-commit hook passes formatting and lint, then rejects that reproduced Knip debt; the merge uses a one-time hook bypass after the direct checks.
+- Focused repairs pass 536 cases across 16 complete backend, protocol, contract, scanner, and fixture suites; the client regression set passes 165 browser cases. Rollback/safety and delegation/control-read coverage, original reviewer probes, MCP SDK registration, history ordering, and pointer/drag cases pass. Independent reviews identified the lifecycle, schema, and concurrency defects; their original reproductions and the focused post-repair checks pass.
+- `check:changed` completes against the 579-file fork delta. Patch validation, formatting, lint, dependency/file Knip checks, GraphQL, all 41 typechecks, and React Compiler checks for 97 files pass. Tests pass 7,497 cases with 13 skips across 321 files; the sole failed file is the reproduced mobile `__DEV__` collection error. Knip export findings match premerge exactly. The first attempt reached the command’s 900-second test-stage limit; the completed run uses a 3,600-second command limit without changing any test timeout.
+- A consistent copy of real data applies migrations 083–096, retains all 16 fork records unchanged, reruns with zero writes, and passes SQLite integrity and foreign-key checks.
+- Production web, server, and desktop bundles build. Linux AppImage and Debian packages build, and the AppImage opens with isolated state and a freshly migrated database. Closing its window retains the backend, and reopening a selected project works; the first cold CLI activation timed out despite eventually opening the window, while the repeated request succeeded.
+- A paired seeded production client completes real Codex Luna turns, file undo/redo observed by a second client, side-chat tab focus, atomic external HTML renewal, model search, split and draft persistence, and Manual pointer reordering with reload persistence. A 390-pixel viewport has no horizontal overflow. External MCP SDK access accepts all 42 advertised tools; scoped reads work, read-only scope restrictions remain, and both temporary management keys reject reuse after revocation. No page errors occur.
+- Native mobile runtime, Windows/macOS installers and updater hops, official Connect OAuth, and a live credential-bound Online Snapshots remote are not exercised in this sync. The MCP eval dry run passes; a paid eval cannot start with the available proxy configuration. Claude live verification is unavailable through the configured provider. These are not reported as passing checks.
 
 ### 2026-11-12 — Merge upstream/main through `32882540fb`
 

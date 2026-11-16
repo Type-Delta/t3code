@@ -104,6 +104,36 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
         );
       }).pipe(Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
   );
+  it.effect("revokes every persisted proof-key session and invalidates its sockets", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const first = yield* sessions.issue(relaySessionInput);
+      const second = yield* sessions.issue(relaySessionInput);
+      const other = yield* sessions.issue({
+        ...relaySessionInput,
+        proofKeyThumbprint: "other-key",
+      });
+      const direct = yield* sessions.issue({ rolling: true });
+      expect(yield* sessions.proofKeyThumbprintOf(first.sessionId)).toEqual(
+        Option.some(relaySessionInput.proofKeyThumbprint),
+      );
+      const firstSocket = yield* sessions
+        .awaitInvalidation(first.sessionId, relaySessionInput.proofKeyThumbprint)
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      const secondSocket = yield* sessions
+        .awaitInvalidation(second.sessionId, relaySessionInput.proofKeyThumbprint)
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      expect(yield* sessions.revokeByProofKey(relaySessionInput.proofKeyThumbprint)).toBe(2);
+      yield* Fiber.join(firstSocket);
+      yield* Fiber.join(secondSocket);
+      for (const session of [first, second])
+        expect((yield* Effect.flip(sessions.verify(session.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+      expect((yield* sessions.verify(other.token)).sessionId).toBe(other.sessionId);
+      expect((yield* sessions.verify(direct.token)).sessionId).toBe(direct.sessionId);
+    }).pipe(Effect.provide(layerSessionStore())),
+  );
   it.effect("concurrent activity keeps the latest expiry without renewing fixed sessions", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;
@@ -111,6 +141,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
       const rolling = yield* sessions.issue({ rolling: true });
       const boundary = yield* sessions.issue({ rolling: true });
       const fixed = yield* sessions.issue({ ttl: Duration.days(30) });
+      const proofBound = yield* sessions.issue({
+        method: "dpop-access-token",
+        rolling: true,
+        proofKeyThumbprint: "fixed-proof",
+      });
       yield* sql`CREATE TRIGGER reject_redundant_renewal BEFORE UPDATE OF expires_at ON auth_sessions BEGIN SELECT RAISE(ABORT, 'unexpected renewal'); END`;
       yield* sessions.recordActivity(rolling.sessionId);
       yield* sessions.verify(rolling.token);
@@ -123,6 +158,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
         },
       );
       yield* sessions.recordActivity(fixed.sessionId);
+      yield* sessions.recordActivity(proofBound.sessionId);
+      expect((yield* sessions.verify(proofBound.token)).expiresAt?.epochMilliseconds).toBe(
+        proofBound.expiresAt.epochMilliseconds,
+      );
       expect((yield* sessions.verify(fixed.token)).expiresAt?.epochMilliseconds).toBe(
         fixed.expiresAt.epochMilliseconds,
       );

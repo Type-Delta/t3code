@@ -2,6 +2,7 @@ import { type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { attachSidebarTree } from "../lib/sidebarTree";
 import { createSidebarListMotion } from "./Sidebar.motion";
+import { createSidebarShiftGuard } from "./Sidebar.shiftGuard";
 import { type SensorProps } from "@dnd-kit/core";
 import { getOwnerDocument, getWindow } from "@dnd-kit/utilities";
 
@@ -79,9 +80,11 @@ export class SidebarPointerSensor {
   private move = (event: PointerEvent) => {
     if (this.phase === "finished" || event.pointerId !== this.pointer.pointerId) return;
     const coordinates = { x: event.clientX, y: event.clientY };
-    // Desktop may report buttons=0 before pointerup; drop active context drags before cancelling sort.
+    // Desktop may report buttons=0 before pointerup: a pending press is released like pointerup so its
+    // click lands; an active drag drops context before cancelling sort.
     if ((event.buttons & 1) === 0) {
-      if (this.phase === "dragging") this.props.options.onDrop?.(coordinates);
+      if (this.phase === "pending") return this.finish(false);
+      this.props.options.onDrop?.(coordinates);
       return this.cancel();
     }
     if (this.phase === "pending") {
@@ -189,18 +192,23 @@ export function useSidebarListRef(
   listRef: RefObject<HTMLUListElement | null>,
   motionRef: RefObject<ReturnType<typeof createSidebarListMotion> | null>,
   sensorRef: RefObject<SidebarPointerSensor | null>,
+  shiftGuardRef?: RefObject<ReturnType<typeof createSidebarShiftGuard> | null>,
 ) {
   return useStableCallback((node: HTMLUListElement) => {
     listRef.current = node;
     const motion = createSidebarListMotion(node);
     motionRef.current = motion;
     motion.update(false);
+    const shiftGuard = createSidebarShiftGuard(node);
+    if (shiftGuardRef) shiftGuardRef.current = shiftGuard;
     const detachTree = attachSidebarTree(node);
     return () => {
       detachTree?.();
       sensorRef.current?.cancel();
       motion.dispose();
+      shiftGuard.dispose();
       if (motionRef.current === motion) motionRef.current = null;
+      if (shiftGuardRef?.current === shiftGuard) shiftGuardRef.current = null;
       if (listRef.current === node) listRef.current = null;
     };
   });

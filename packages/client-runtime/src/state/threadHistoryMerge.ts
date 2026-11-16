@@ -49,6 +49,76 @@ function renumberVisible(
   return rows.map((row, position) => (row.position === position ? row : { ...row, position }));
 }
 
+// A page is a contiguous history range, so current rows before its first
+// visible row are older than the page start and new page rows sit just
+// before the next row both lists share.
+function interleavePage(
+  current: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
+  page: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
+  pageKeys: ReadonlySet<string>,
+): OrchestrationV2ProjectedTurnItem[] {
+  const currentIndex = new Map(current.map((row, index) => [projectedItemKey(row), index]));
+  const merged: OrchestrationV2ProjectedTurnItem[] = [];
+  let pending: OrchestrationV2ProjectedTurnItem[] = [];
+  let next = 0;
+  let shared = false;
+  const emitCurrentThrough = (end: number) => {
+    for (; next < end; next += 1) {
+      const row = current[next]!;
+      if (!pageKeys.has(projectedItemKey(row))) merged.push(row);
+    }
+  };
+  for (const row of page) {
+    const index = currentIndex.get(projectedItemKey(row));
+    if (index === undefined) {
+      pending.push(row);
+      continue;
+    }
+    shared = true;
+    emitCurrentThrough(index + 1);
+    merged.push(...pending, row);
+    pending = [];
+  }
+  if (!shared) {
+    // Sparse previews can surround a full page without sharing a row. Compare ordinals only
+    // within each source, and leave the ordinary overlapping-page path linear.
+    const boundaries = new Map<
+      string,
+      { ordinal: number; older: number | undefined; newer: number | undefined }
+    >();
+    for (const row of page) {
+      const boundary = boundaries.get(row.sourceThreadId);
+      if (boundary === undefined) {
+        boundaries.set(row.sourceThreadId, {
+          ordinal: row.item.ordinal,
+          older: undefined,
+          newer: undefined,
+        });
+      } else {
+        boundary.ordinal = Math.min(boundary.ordinal, row.item.ordinal);
+      }
+    }
+    current.forEach((row, index) => {
+      const boundary = boundaries.get(row.sourceThreadId);
+      if (boundary === undefined) return;
+      const ordinal = row.item.ordinal;
+      if (ordinal > boundary.ordinal) boundary.newer ??= index;
+      else if (ordinal < boundary.ordinal) boundary.older = index + 1;
+    });
+    let insertionIndex: number | undefined;
+    for (const boundary of boundaries.values()) {
+      const candidate = boundary.newer ?? boundary.older;
+      if (candidate !== undefined)
+        insertionIndex = Math.min(insertionIndex ?? candidate, candidate);
+    }
+    const index = insertionIndex ?? 0;
+    return [...current.slice(0, index), ...pending, ...current.slice(index)];
+  }
+  merged.push(...pending);
+  emitCurrentThrough(current.length);
+  return merged;
+}
+
 export function mergeOlderHistoryIntoProjection(
   projection: OrchestrationV2ThreadProjection,
   olderItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
@@ -150,10 +220,7 @@ export function mergeOlderHistoryIntoProjection(
     ];
     if (anchor.visibility === "local") turnItemById.set(String(updated.item.id), updated.item);
   } else {
-    visible = [
-      ...page,
-      ...projection.visibleTurnItems.filter((row) => !pageKeys.has(projectedItemKey(row))),
-    ];
+    visible = interleavePage(projection.visibleTurnItems, page, pageKeys);
   }
   if (
     visible.length === projection.visibleTurnItems.length &&

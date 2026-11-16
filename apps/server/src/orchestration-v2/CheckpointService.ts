@@ -26,6 +26,9 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 const CHECKPOINT_REFS_PREFIX = "refs/t3/orchestration-v2/checkpoints";
 const ROOT_CHECKPOINT_SCOPE_NAME = "root";
+// The provider turn waits on the baseline, so a workspace too slow for this starts without one.
+// It bounds only the snapshot: waiting on the lock lets an in-flight capture finish the same ref.
+const BASELINE_CAPTURE_BUDGET = "5 seconds";
 
 export class CheckpointRootScopePrepareError extends Schema.TaggedError<CheckpointRootScopePrepareError>()(
   "CheckpointRootScopePrepareError",
@@ -330,7 +333,10 @@ export const layer: Layer.Layer<
                 cwd: input.scope.cwd,
                 checkpointRef: yield* sidecarRefFor(input.scope, input.ordinalWithinScope),
               })
-              .pipe(Effect.catchTags({ VcsUnsupportedOperationError: () => Effect.void }));
+              .pipe(
+                Effect.timeout(BASELINE_CAPTURE_BUDGET),
+                Effect.catchTags({ VcsUnsupportedOperationError: () => Effect.void }),
+              );
           }),
         );
       },
@@ -438,9 +444,24 @@ export const layer: Layer.Layer<
 
           // A workspace its parent repository ignores cannot be captured and
           // records a missing checkpoint instead of an error.
+          const previousCheckpointRef = yield* findBoundaryRef(input.scope, baselineOrdinal).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("orchestration V2 previous checkpoint ref lookup failed", {
+                scopeId: input.scope.id,
+                ordinalWithinScope: input.ordinalWithinScope - 1,
+                cause: String(cause),
+              }).pipe(Effect.as(null)),
+            ),
+          );
           const captured = yield* sidecarRefFor(input.scope, input.ordinalWithinScope).pipe(
             Effect.tap((checkpointRef) =>
-              checkpointStore.captureCheckpoint({ cwd: input.scope.cwd, checkpointRef }),
+              checkpointStore.captureCheckpoint({
+                cwd: input.scope.cwd,
+                checkpointRef,
+                ...(input.ordinalWithinScope > 0 && previousCheckpointRef !== null
+                  ? { previousCheckpointRef }
+                  : {}),
+              }),
             ),
             Effect.map((checkpointRef) => ({ status: "ready" as const, checkpointRef })),
             Effect.catchTags({
@@ -472,15 +493,6 @@ export const layer: Layer.Layer<
           }
 
           const checkpointRef = captured.checkpointRef;
-          const previousCheckpointRef = yield* findBoundaryRef(input.scope, baselineOrdinal).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("orchestration V2 previous checkpoint ref lookup failed", {
-                scopeId: input.scope.id,
-                ordinalWithinScope: input.ordinalWithinScope - 1,
-                cause: String(cause),
-              }).pipe(Effect.as(null)),
-            ),
-          );
           const previousExists = previousCheckpointRef !== null;
           const refs = {
             cwd: input.scope.cwd,

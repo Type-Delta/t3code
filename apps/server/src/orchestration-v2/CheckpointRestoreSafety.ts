@@ -22,6 +22,7 @@ interface CheckpointRestoreDependencies {
   readonly projects: ProjectStore.ProjectStoreV2["Service"];
   readonly path: Path.Path;
   readonly vcs: VcsDriverRegistry.VcsDriverRegistry["Service"];
+  readonly recreatingWorktreePath?: string;
 }
 
 type RestoringThread = Pick<OrchestrationV2AppThread, "id" | "projectId" | "worktreePath">;
@@ -51,9 +52,9 @@ const makeCheckoutResolver = (
     const canonical = path.join(yield* realPath(existing), path.relative(existing, resolved));
     const recreated =
       own &&
-      existing !== resolved &&
       thread.worktreePath !== null &&
-      resolved === path.resolve(thread.worktreePath);
+      resolved === path.resolve(thread.worktreePath) &&
+      (existing !== resolved || dependencies.recreatingWorktreePath === resolved);
     const detected = recreated ? null : yield* vcs.detect({ cwd: existing, requestedKind: "git" });
     const location =
       detected !== null

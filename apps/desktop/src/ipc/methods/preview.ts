@@ -20,6 +20,7 @@ import {
   DesktopPreviewScreenshotArtifactSchema,
   DesktopPreviewSetAudioMutedInputSchema,
   DesktopPreviewSetShownInputSchema,
+  DesktopPreviewSetCaptureDrawnInputSchema,
   DesktopPreviewSetColorSchemeInputSchema,
   DesktopPreviewSetZoomFactorInputSchema,
   BrowserImportResult,
@@ -176,6 +177,11 @@ const refresh = tabMethod(
   "desktop.ipc.preview.refresh",
   (manager, tabId) => manager.refresh(tabId),
 );
+const stopLoading = tabMethod(
+  IpcChannels.PREVIEW_STOP_LOADING_CHANNEL,
+  "desktop.ipc.preview.stopLoading",
+  (manager, tabId) => manager.stopLoading(tabId),
+);
 const zoomIn = tabMethod(
   IpcChannels.PREVIEW_ZOOM_IN_CHANNEL,
   "desktop.ipc.preview.zoomIn",
@@ -235,6 +241,15 @@ const setShown = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.preview.setShown")(function* ({ tabId, shown }) {
     const manager = yield* PreviewManager.PreviewManager;
     yield* manager.setShown(tabId, shown);
+  }),
+});
+const setCaptureDrawn = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_SET_CAPTURE_DRAWN_CHANNEL,
+  payload: DesktopPreviewSetCaptureDrawnInputSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.preview.setCaptureDrawn")(function* ({ tabId, drawn }) {
+    const manager = yield* PreviewManager.PreviewManager;
+    yield* manager.setCaptureDrawn(tabId, drawn);
   }),
 });
 const openDevTools = tabMethod(
@@ -560,6 +575,7 @@ export const methods = [
   goBack,
   goForward,
   refresh,
+  stopLoading,
   zoomIn,
   zoomOut,
   resetZoom,
@@ -570,6 +586,7 @@ export const methods = [
   setZoomFactor,
   setAudioMuted,
   setShown,
+  setCaptureDrawn,
   openDevTools,
   clearCookies,
   clearCache,

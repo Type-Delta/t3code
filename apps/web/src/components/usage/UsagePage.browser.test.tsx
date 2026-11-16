@@ -187,7 +187,10 @@ describe("UsagePage Escape navigation", () => {
       (button) => button.textContent === "Hour",
     )!;
     await act(() => hour.click());
-    const rows = () => [...container.querySelectorAll("tbody tr")].map((row) => row.textContent);
+    const rows = () =>
+      [...container.querySelectorAll('[aria-label="Usage breakdown by time"] tbody tr')].map(
+        (row) => row.textContent,
+      );
     expect(rows()).toHaveLength(2);
     expect(rows()[0]).toContain("$11.00");
     expect(rows()[1]).toContain("$13.00");
@@ -201,7 +204,10 @@ describe("UsagePage Escape navigation", () => {
   it("orders model costs, marks unknown rates, and sorts token totals without mutating data", async () => {
     await using screen = await setup();
     const { container } = screen;
-    const rows = () => [...container.querySelectorAll("tbody tr")].map((row) => row.textContent);
+    const rows = () =>
+      [...container.querySelectorAll('[aria-label="Usage breakdown by model"] tbody tr')].map(
+        (row) => row.textContent,
+      );
     expect(rows()[0]).toContain("expensive-model");
     expect(rows()[1]).toContain("token-heavy-model");
     const unpriced = rows().find((row) => row?.includes("unpriced-model"));
@@ -227,14 +233,24 @@ describe("UsagePage Escape navigation", () => {
 
   it("returns to the page that opened Usage on Escape", async () => {
     const stopTracking = startMainAppLocationTracking({
-      state: { location: { pathname: "/threads/example", href: "/threads/example" } },
+      state: {
+        location: {
+          pathname: "/threads/example",
+          href: "/threads/example",
+          state: { __TSR_index: 0 },
+        },
+        matches: [],
+      },
       subscribe: () => () => {},
     } as never);
     stopTracking();
     await using _screen = await setup();
     await userEvent.keyboard("{Escape}");
     await vi.waitFor(() =>
-      expect(testState.navigate).toHaveBeenCalledWith({ href: "/threads/example" }),
+      expect(testState.navigate).toHaveBeenCalledWith({
+        href: "/threads/example",
+        replace: true,
+      }),
     );
   });
 

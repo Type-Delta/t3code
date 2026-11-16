@@ -32,6 +32,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { PATCH_RENDER_PREFIX_ARGS } from "../vcs/GitVcsDriverCore.ts";
 import * as CheckpointRepositoryIdentity from "./CheckpointRepositoryIdentity.ts";
 import { CheckpointObjectsUnavailableError, CheckpointSnapshotUnavailableError } from "./Errors.ts";
 import * as OnlineObjects from "./SidecarOnlineObjects.ts";
@@ -50,6 +51,7 @@ export interface SidecarCheckpointLocator {
 export interface SidecarCaptureInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
+  readonly previousCheckpointRef?: CheckpointRef;
 }
 
 export interface SidecarCaptureMetadata {
@@ -70,6 +72,7 @@ export interface SidecarDiffInput {
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;
   readonly format?: "patch" | "numstat";
+  readonly maxOutputBytes?: number;
   /** Limits the diff to these repository-relative paths. An empty list yields an empty diff. */
   readonly filePaths?: ReadonlyArray<string>;
   /**
@@ -1621,6 +1624,58 @@ export const make = Effect.gen(function* () {
       );
     });
 
+  const readHeadMoves = (cwd: string) =>
+    git(
+      "SidecarCheckpointRepository.headMoves",
+      cwd,
+      [
+        "-C",
+        cwd,
+        "-c",
+        "log.showSignature=false",
+        "log",
+        "--walk-reflogs",
+        "-n",
+        "512",
+        "--date=unix",
+        "--format=%H %gd %gs",
+        "HEAD",
+        "--",
+      ],
+      { allowNonZeroExit: true, maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES, outputMode: "error" },
+    ).pipe(
+      Effect.map((result) =>
+        result.exitCode !== 0
+          ? []
+          : result.stdout.split("\n").flatMap((line) => {
+              const [, to, at, reason] = /^([0-9a-f]+) HEAD@\{(\d+)\} (.*)$/.exec(line) ?? [];
+              return to === undefined || at === undefined || reason === undefined
+                ? []
+                : [{ to, at, reason }];
+            }),
+      ),
+      Effect.orElseSucceed(() => []),
+    );
+
+  // Synthetic starts are sidecar objects; the source boundary remains unchanged for redo.
+  const adjustedTurnStart = Effect.fn("SidecarCheckpointRepository.adjustedTurnStart")(function* (
+    cwd: string,
+    gitDir: string,
+    root: string,
+    from: string,
+    to: string,
+  ) {
+    const result = yield* git(
+      "SidecarCheckpointRepository.adjustedTurnStart",
+      cwd,
+      sidecarGitArgs(gitDir, root, ["log", "--no-walk", "--format=%H %s", `${to}^`]),
+      { allowNonZeroExit: true, maxOutputBytes: 4096 },
+    );
+    const [start = ""] = result.stdout.trim().split(" ");
+    const source = /(?:^| )from=([0-9a-f]+)(?: |$)/.exec(result.stdout.trim())?.[1];
+    return result.exitCode === 0 && source === from ? start : from;
+  });
+
   const capture: SidecarCheckpointRepository["Service"]["capture"] = Effect.fn(
     "SidecarCheckpointRepository.capture",
   )(function* (input) {
@@ -1931,6 +1986,12 @@ export const make = Effect.gen(function* () {
             { allowNonZeroExit: true, maxOutputBytes: 4_096 },
           );
           const headOid = head.exitCode === 0 ? head.stdout.trim() : "";
+          const headMoves = yield* readHeadMoves(identity.worktreeRoot);
+          const lastMove = headMoves.at(0);
+          const headMark =
+            lastMove !== undefined && lastMove.to === headOid
+              ? `${lastMove.at} ${headMoves.filter((move) => move.at === lastMove.at).length}`
+              : undefined;
           const treeOid = yield* buildTree("initial");
           if (!treeOid)
             return yield* checkpointError(
@@ -1948,16 +2009,181 @@ export const make = Effect.gen(function* () {
               "Checkpoint workspace changed during capture verification.",
             );
           }
+          const turnStart =
+            input.previousCheckpointRef === undefined || headMark === undefined
+              ? null
+              : yield* Effect.gen(function* () {
+                  const previousRef = input.previousCheckpointRef!;
+                  const previous = isSidecarCheckpointRef(previousRef)
+                    ? yield* resolveCommit(
+                        input.cwd,
+                        gitDir,
+                        identity.worktreeRoot,
+                        yield* locatorForIdentity(
+                          "SidecarCheckpointRepository.turnStart",
+                          input.cwd,
+                          previousRef,
+                          identity,
+                        ),
+                      )
+                    : (yield* git(
+                        "SidecarCheckpointRepository.turnStart.legacy",
+                        input.cwd,
+                        [
+                          "-C",
+                          identity.worktreeRoot,
+                          "rev-parse",
+                          "--verify",
+                          `${previousRef}^{commit}`,
+                        ],
+                        { allowNonZeroExit: true, maxOutputBytes: 4096 },
+                      )).stdout.trim();
+                  if (!previous) return null;
+                  const readEnv = {
+                    ...baseEnvironment,
+                    GIT_ALTERNATE_OBJECT_DIRECTORIES: OnlineObjects.alternateObjectDirectories(
+                      path.join(identity.commonDir, "objects"),
+                      hostPlatform,
+                    ),
+                  };
+                  const run = (args: ReadonlyArray<string>, stdin?: string) =>
+                    git(
+                      "SidecarCheckpointRepository.turnStart",
+                      input.cwd,
+                      sidecarGitArgs(gitDir, identity.worktreeRoot, args),
+                      {
+                        env: readEnv,
+                        ...(stdin === undefined ? {} : { stdin }),
+                        maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES,
+                        outputMode: "error",
+                      },
+                    );
+                  const metadata = yield* run([
+                    "log",
+                    "--no-walk",
+                    "--format=%H %T %ct %P%n%B",
+                    previous,
+                  ]);
+                  const [commit = "", tree = "", capturedAt = "", legacyHead = ""] = metadata.stdout
+                    .split("\n")[0]!
+                    .split(" ");
+                  const previousHead =
+                    /(?:^| )head=([0-9a-f]+)(?: |$)/m.exec(metadata.stdout)?.[1] ?? legacyHead;
+                  const [, markedAt, markedCount] =
+                    /^T3-Head-Moved-At: (\d+) (\d+)$/m.exec(metadata.stdout) ?? [];
+                  const oldestMarked = headMoves.findLastIndex((move) => move.at === markedAt);
+                  const since = oldestMarked === 511 ? -1 : oldestMarked - Number(markedCount) + 1;
+                  if (headMoves[since]?.to !== previousHead) return null;
+                  const switches = headMoves
+                    .slice(0, since)
+                    .map((move, index) => ({ ...move, from: headMoves[index + 1]!.to }))
+                    .filter(
+                      (move) =>
+                        move.reason.startsWith("checkout: moving from ") && move.from !== move.to,
+                    )
+                    .toReversed();
+                  const landedOn = switches.at(-1)?.to;
+                  if (landedOn === undefined) return null;
+                  const scratch = yield* fileSystem.makeTempDirectoryScoped({
+                    directory: gitDir,
+                    prefix: "turn-start-",
+                  });
+                  const startEnv = { ...readEnv, GIT_INDEX_FILE: path.join(scratch, "index") };
+                  const write = (args: ReadonlyArray<string>, stdin?: string) =>
+                    git(
+                      "SidecarCheckpointRepository.turnStart",
+                      input.cwd,
+                      sidecarGitArgs(gitDir, identity.worktreeRoot, args),
+                      {
+                        env: startEnv,
+                        ...(stdin === undefined ? {} : { stdin }),
+                        maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES,
+                        outputMode: "error",
+                      },
+                    );
+                  yield* write(["read-tree", tree]);
+                  const destinationBlobs = new Set<string>();
+                  for (const { from, to } of switches) {
+                    const changes = yield* run([
+                      "-c",
+                      "core.quotePath=true",
+                      "diff-tree",
+                      "-r",
+                      "--no-renames",
+                      from,
+                      to,
+                    ]);
+                    const entries = changes.stdout
+                      .split("\n")
+                      .filter((line) => line !== "" && !/^:(?:160000 |[0-7]{6} 160000 )/.test(line))
+                      .map((line) =>
+                        line.replace(
+                          /^:[0-7]{6} ([0-7]{6}) [0-9a-f]+ ([0-9a-f]+) [A-Z]\t/,
+                          "$1 $2\t",
+                        ),
+                      );
+                    for (const entry of entries) {
+                      const [mode, oid] = entry.split(/[ \t]/);
+                      if (mode !== "000000" && oid) destinationBlobs.add(oid);
+                    }
+                    if (entries.length > 0)
+                      yield* write(["update-index", "--index-info"], `${entries.join("\n")}\n`);
+                  }
+                  if (!isSidecarCheckpointRef(previousRef)) {
+                    const legacyBlobs = yield* write(["ls-files", "--stage", "-z"]);
+                    for (const entry of legacyBlobs.stdout.split("\0")) {
+                      const [mode, oid] = entry.split(" ");
+                      if (mode !== "160000" && oid) destinationBlobs.add(oid);
+                    }
+                  }
+                  const missing = yield* missingObjects(
+                    input.cwd,
+                    gitDir,
+                    [...destinationBlobs],
+                    baseEnvironment,
+                  );
+                  if (missing.length > 0) {
+                    yield* run(
+                      ["pack-objects", "-q", path.join(gitDir, "objects", "pack", "pack")],
+                      `${missing.join("\n")}\n`,
+                    );
+                  }
+                  const startTree = (yield* write(["write-tree"])).stdout.trim();
+                  if (startTree === "" || startTree === tree) return null;
+                  const start = yield* git(
+                    "SidecarCheckpointRepository.turnStart.commit",
+                    input.cwd,
+                    sidecarGitArgs(gitDir, identity.worktreeRoot, [
+                      "commit-tree",
+                      startTree,
+                      "-m",
+                      `t3 checkpoint turn start head=${landedOn} from=${commit}`,
+                    ]),
+                    {
+                      env: { ...readEnv, GIT_COMMITTER_DATE: `${capturedAt} +0000` },
+                      maxOutputBytes: 4096,
+                    },
+                  );
+                  return start.stdout.trim() || null;
+                }).pipe(
+                  Effect.scoped,
+                  Effect.catch((cause) =>
+                    Effect.logWarning("sidecar checkpoint branch switch turn start failed", {
+                      cause,
+                    }).pipe(Effect.as(null)),
+                  ),
+                );
           const commit = yield* git(
             "SidecarCheckpointRepository.capture.commitTree",
             input.cwd,
             sidecarGitArgs(gitDir, identity.worktreeRoot, [
               "commit-tree",
               treeOid,
+              ...(turnStart === null ? [] : ["-p", turnStart]),
               "-m",
               `t3 checkpoint schema=v1 snapshot=${locator.snapshotId} worktree=${identity.worktreeKey}${
                 headOid === "" ? "" : ` head=${headOid}`
-              }`,
+              }${headMark === undefined ? "" : `\n\nT3-Head-Moved-At: ${headMark}`}`,
             ]),
             { env: baseEnvironment, maxOutputBytes: 4_096 },
           );
@@ -2329,7 +2555,7 @@ export const make = Effect.gen(function* () {
             );
           },
         );
-        const [fromCommit, toCommit] = yield* Effect.all([
+        let [fromCommit, toCommit] = yield* Effect.all([
           resolveRevision(input.fromCheckpointRef, input.fallbackFromToHead === true),
           resolveRevision(input.toCheckpointRef, false),
         ]);
@@ -2342,6 +2568,13 @@ export const make = Effect.gen(function* () {
             );
           return yield* new CheckpointSnapshotUnavailableError();
         }
+        fromCommit = yield* adjustedTurnStart(
+          input.cwd,
+          gitDir,
+          identity.worktreeRoot,
+          fromCommit,
+          toCommit,
+        );
         const pathspec = input.filePaths
           ? ["--", ...input.filePaths.map((file) => `:(top,literal)${file}`)]
           : [];
@@ -2391,7 +2624,13 @@ export const make = Effect.gen(function* () {
           "SidecarCheckpointRepository.diff",
           input.cwd,
           sidecarGitArgs(gitDir, identity.worktreeRoot, [
+            "-c",
+            "diff.relative=false",
+            "-c",
+            "diff.suppressBlankEmpty=false",
             "diff",
+            ...PATCH_RENDER_PREFIX_ARGS,
+            "--submodule=short",
             ...(input.format === "numstat" ? ["--numstat", "-z"] : ["--binary", "--patch"]),
             "--no-color",
             "--no-ext-diff",
@@ -2404,7 +2643,7 @@ export const make = Effect.gen(function* () {
           {
             env: environment,
             allowNonZeroExit: true,
-            maxOutputBytes: 10_000_000,
+            maxOutputBytes: input.maxOutputBytes ?? 10_000_000,
             outputMode: input.format === "numstat" ? "error" : "truncate",
           },
         );
@@ -2578,7 +2817,7 @@ export const make = Effect.gen(function* () {
     const boundary = Effect.fn("SidecarCheckpointRepository.authoredPaths.boundary")(function* (
       checkpointRef: CheckpointRef,
     ) {
-      if (!isSidecarCheckpointRef(checkpointRef)) {
+      if (!isSidecarCheckpointRef(checkpointRef) && !/^[0-9a-f]{40,64}$/.test(checkpointRef)) {
         // In-repo checkpoints record HEAD as their parent.
         const result = yield* git(
           operation,
@@ -2596,8 +2835,14 @@ export const make = Effect.gen(function* () {
         const [commit = "", head = "", time = ""] = result.stdout.trim().split(" ");
         return result.exitCode === 0 && commit !== "" ? { commit, head, time } : undefined;
       }
-      const locator = yield* locatorForIdentity(operation, input.cwd, checkpointRef, identity);
-      const commit = yield* resolveCommit(input.cwd, gitDir, identity.worktreeRoot, locator);
+      const commit = isSidecarCheckpointRef(checkpointRef)
+        ? yield* resolveCommit(
+            input.cwd,
+            gitDir,
+            identity.worktreeRoot,
+            yield* locatorForIdentity(operation, input.cwd, checkpointRef, identity),
+          )
+        : checkpointRef;
       if (!commit) return undefined;
       const result = yield* git(
         operation,
@@ -2611,54 +2856,147 @@ export const make = Effect.gen(function* () {
         { maxOutputBytes: 4_096 },
       );
       const [time = "", ...subject] = result.stdout.trim().split(" ");
-      const head = /(?:^| )head=([0-9a-f]+)$/.exec(subject.join(" "))?.[1] ?? "";
+      const head = /(?:^| )head=([0-9a-f]+)(?: |$)/.exec(subject.join(" "))?.[1] ?? "";
       return { commit, head, time };
     });
-    const [from, to] = yield* Effect.all([
+    let [from, to] = yield* Effect.all([
       boundary(input.fromCheckpointRef),
       boundary(input.toCheckpointRef),
     ]);
+    if (from && to) {
+      const start = yield* adjustedTurnStart(
+        input.cwd,
+        gitDir,
+        identity.worktreeRoot,
+        from.commit,
+        to.commit,
+      );
+      if (start !== from.commit) from = yield* boundary(CheckpointRef.make(start));
+    }
     if (!from || !to || from.head === "" || to.head === "" || from.head === to.head) return null;
 
     // Read-only queries in the project repository. The sidecar objects are an
     // alternate for this process alone, so nothing is written to the project.
     const environment = {
       ...CheckpointRepositoryIdentity.sanitizedGitEnvironment(),
-      GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(gitDir, "objects"),
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: OnlineObjects.alternateObjectDirectories(
+        path.join(gitDir, "objects"),
+        hostPlatform,
+      ),
     };
-    const listPaths = (args: ReadonlyArray<string>) =>
-      git(
+    const execute = (options: {
+      readonly operation: string;
+      readonly cwd: string;
+      readonly args: ReadonlyArray<string>;
+      readonly stdin?: string;
+      readonly maxOutputBytes: number;
+      readonly outputMode: "error";
+    }) =>
+      git(options.operation, options.cwd, ["-C", identity.worktreeRoot, ...options.args], {
+        env: environment,
+        ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+        maxOutputBytes: options.maxOutputBytes,
+        outputMode: options.outputMode,
+      });
+    const capturedAt = from.time;
+    const startHead = from.head;
+    const endHead = to.head;
+    const turnStart = from.commit;
+    const REF_MOVE_REFLOG_SUBJECT =
+      /^(?:$|(?:checkout|reset|branch|clone|fetch)\b|[^:]*\((?:start|finish|abort|reset)\): |(?:merge|pull|rebase|cherry-pick)\b[^()]*: fast-forward$)/i;
+    const listLines = (args: ReadonlyArray<string>, stdin?: string) =>
+      execute({
         operation,
-        input.cwd,
-        [
-          "-C",
-          identity.worktreeRoot,
+        cwd: input.cwd,
+        // log.showSignature prints verification text into the output.
+        args: ["-c", "log.showSignature=false", ...args],
+        ...(stdin === undefined ? {} : { stdin }),
+        maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES,
+        outputMode: "error",
+      }).pipe(Effect.map((result) => result.stdout.split("\n").filter((line) => line !== "")));
+    const listPaths = (args: ReadonlyArray<string>, stdin?: string) =>
+      execute({
+        operation,
+        cwd: input.cwd,
+        args: [
+          "-c",
+          "diff.relative=false",
+          // log.showSignature prints verification text into the path list.
+          "-c",
+          "log.showSignature=false",
           ...args,
           "--name-only",
           "-z",
           "--no-renames",
           "--no-ext-diff",
         ],
-        { env: environment, maxOutputBytes: 10_000_000, outputMode: "error" },
-      ).pipe(Effect.map((result) => result.stdout.split("\0")));
-    // Uncommitted edits at either boundary, commits that left HEAD, and commits
-    // made after the "from" capture belong to the turn; older commits were imported.
-    const pathLists = yield* Effect.all(
+        ...(stdin === undefined ? {} : { stdin }),
+        maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES,
+        outputMode: "error",
+      }).pipe(Effect.map((result) => result.stdout.split("\0")));
+
+    // A commit is an import when a fetch delivered it since the previous checkpoint and no
+    // reflog in any worktree shows this repository creating it. --all covers every worktree's
+    // HEAD, and with --walk-reflogs --since compares each entry's own time.
+    const listImportedCommits = Effect.gen(function* () {
+      const entries = (yield* listLines([
+        "log",
+        "--walk-reflogs",
+        "--all",
+        `--since=@${capturedAt}`,
+        "--format=%H %gD %gs",
+      ])).map((line) => {
+        const [commit = "", selector = "", ...subject] = line.split(" ");
+        return {
+          commit,
+          fetched: selector.startsWith("refs/remotes/"),
+          subject: subject.join(" "),
+        };
+      });
+      // A push records commits this repository already had.
+      const fetchedTips = new Set(
+        entries
+          .filter((entry) => entry.fetched && entry.subject !== "update by push")
+          .map((entry) => entry.commit),
+      );
+      if (fetchedTips.size === 0) return fetchedTips;
+      // Fetching another branch can deliver a commit that was made here and pushed.
+      const createdHere = new Set(
+        entries
+          .filter((entry) => !entry.fetched && !REF_MOVE_REFLOG_SUBJECT.test(entry.subject))
+          .map((entry) => entry.commit),
+      );
+      const fetched = yield* listLines(
+        ["rev-list", `--since=@${capturedAt}`, "--stdin"],
+        `${[...fetchedTips, `^${startHead}`].join("\n")}\n`,
+      );
+      return new Set(fetched.filter((commit) => !createdHere.has(commit)));
+    });
+
+    // Remerge diffs retain merge conflict fixes while excluding clean upstream changes.
+    const [recentCommits, ...pathLists] = yield* Effect.all(
       [
-        listPaths(["diff", from.head, from.commit]),
-        listPaths(["diff", to.head, to.commit]),
-        listPaths(["log", "--format=", "--diff-merges=remerge", `${to.head}..${from.head}`]),
-        listPaths([
-          "log",
-          "--format=",
-          "--diff-merges=remerge",
-          `--since=@${from.time}`,
-          `${from.head}..${to.head}`,
-        ]),
+        listLines(["rev-list", `--since=@${capturedAt}`, `${startHead}..${endHead}`]),
+        listPaths(["diff", startHead, `${turnStart}^{commit}`]),
+        listPaths(["diff", endHead, to.commit]),
+        listPaths(["log", "--format=", "--diff-merges=remerge", `${endHead}..${startHead}`]),
       ],
       { concurrency: "unbounded" },
     );
-    return new Set(pathLists.flat().filter((entry) => entry.length > 0));
+    // Without readable reflogs every recent commit stays attributed, as before.
+    const importedCommits =
+      recentCommits.length === 0
+        ? new Set<string>()
+        : yield* listImportedCommits.pipe(Effect.orElseSucceed(() => new Set<string>()));
+    const ownCommits = recentCommits.filter((commit) => !importedCommits.has(commit));
+    const ownCommitPaths =
+      ownCommits.length === 0
+        ? []
+        : yield* listPaths(
+            ["log", "--no-walk=unsorted", "--stdin", "--format=", "--diff-merges=remerge"],
+            `${ownCommits.join("\n")}\n`,
+          );
+    return new Set([...pathLists.flat(), ...ownCommitPaths].filter((path) => path.length > 0));
   });
 
   const maintain: SidecarCheckpointRepository["Service"]["maintain"] = Effect.fn(
