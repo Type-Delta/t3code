@@ -960,6 +960,18 @@ Sortable sidebar rows keep their sensor callback identities while drag context o
 
 **Last updated:** 2026-11-16
 
+### DL061 — Windows installer grants Electron sandbox read access
+
+The Windows installer grants `ALL APPLICATION PACKAGES` inheritable Read & Execute access to its installation directory. An inherited package-specific AppContainer entry can otherwise deny Electron's restricted sandbox token access to `icudtl.dat`, causing a native startup crash before the app is ready. The grant preserves existing permissions and applies on installs and updates without changing parent folders or disabling the sandbox. If the grant fails, installation stops with a folder-permissions diagnostic and a nonzero exit code.
+
+Upstream Electron reports this condition but leaves permission repair to installers. The fork supplies the repair in its existing NSIS install hook while electron-builder's equivalent change remains unmerged.
+
+**Implementation evidence:** `apps/desktop/resources/installer.nsh`; fork issue #7.
+
+**Recorded validation:** a compiled NSIS fixture using the real install hook failed before the repair and passed afterward. The fixture checks inherited read access without write access, unchanged parent permissions, preserved NSIS register/stack state, and repeat installation. Electron 44.10.1 rendered with `process.sandboxed === true` after the hook ran. A failed grant aborted silent installation with exit code 2. All 13 focused Windows desktop-packaging tests, `vp check`, and `vp run typecheck` passed.
+
+**Last updated:** 2026-11-16
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.

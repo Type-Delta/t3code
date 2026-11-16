@@ -31,6 +31,17 @@
 !macroend
 
 !macro customInstall
+  # Inherited package-specific ACEs can deny Electron's sandbox access to its own files.
+  Push $0
+  nsExec::ExecToLog `"$SYSDIR\icacls.exe" "$INSTDIR" /grant "*S-1-15-2-1:(OI)(CI)(RX)"`
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_OK|MB_ICONSTOP "T3 Code could not grant sandbox read access to:$\r$\n$INSTDIR$\r$\n$\r$\nCheck the folder permissions and run the installer again." /SD IDOK
+    SetErrorLevel 2
+    Abort
+  ${EndIf}
+  Pop $0
+
   !ifndef DO_NOT_CREATE_START_MENU_SHORTCUT
     ${IfNot} ${FileExists} "$newStartMenuLink"
       !insertmacro createMenuDirectory
