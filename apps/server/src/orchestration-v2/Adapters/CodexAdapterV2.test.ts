@@ -1,3 +1,4 @@
+import { CODEX_FULL_ACCESS_CONTEXT } from "../../provider/CodexDeveloperInstructions.ts";
 import { buildPromptSuggestionInstructions } from "@t3tools/shared/promptSuggestion";
 import * as Redacted from "effect/Redacted";
 import * as ServerConfig from "../../config.ts";
@@ -192,7 +193,10 @@ describe("CodexAdapterV2 runtime policy", () => {
             assert.equal(params.effort, reasoningEffort);
             // Some Responses providers reject `detailed`; `auto` is the most detailed a model supports.
             assert.equal(params.summary, "auto");
-            assert.equal(params.additionalContext !== undefined, hasT3Mcp === true);
+            assert.deepEqual(
+              params.additionalContext?.t3_code_full_access,
+              CODEX_FULL_ACCESS_CONTEXT.t3_code_full_access,
+            );
           }
         }
       }),
@@ -231,6 +235,9 @@ describe("CodexAdapterV2 runtime policy", () => {
       assert.equal(auto.approvalPolicy, "on-request");
       assert.equal(auto.approvalsReviewer, "auto_review");
       assert.equal(auto.sandboxPolicy?.type, "workspaceWrite");
+      for (const params of [approvalRequired, autoAcceptEdits, auto]) {
+        assert.isUndefined(params.additionalContext?.t3_code_full_access);
+      }
       assert.deepEqual(fullAccess.approvalPolicy, {
         granular: {
           mcp_elicitations: true,
@@ -286,6 +293,7 @@ describe("CodexAdapterV2 runtime policy", () => {
         appContext,
       });
       assert.deepEqual(alone.additionalContext, {
+        ...CODEX_FULL_ACCESS_CONTEXT,
         "mcp_app_todos_list_todos_item-1": { kind: "untrusted", value: "Filtered to overdue" },
       });
       const withT3 = yield* CodexAdapterV2.buildCodexTurnStartParams({
@@ -888,7 +896,7 @@ function withConfigReadBeforeTurnStart(
   const result: Array<CodexReplay.CodexAppServerReplayEntry> = [];
   let offset = 0;
   let clientIds = new Map<number, number>();
-  for (const entry of entries) {
+  for (let entry of entries) {
     const frame = entry.type === "runtime_exit" ? undefined : entry.frame;
     if (!Predicate.isObject(frame) || typeof frame.id !== "number") {
       result.push(entry);
@@ -902,6 +910,24 @@ function withConfigReadBeforeTurnStart(
       if (frame.method === "turn/start") {
         const id = frame.id + offset;
         const params = Predicate.isObject(frame.params) ? frame.params : {};
+        if (
+          Predicate.isObject(params.sandboxPolicy) &&
+          params.sandboxPolicy.type === "dangerFullAccess"
+        ) {
+          entry = {
+            ...entry,
+            frame: {
+              ...frame,
+              params: {
+                ...params,
+                additionalContext: {
+                  ...(Predicate.isObject(params.additionalContext) ? params.additionalContext : {}),
+                  ...CODEX_FULL_ACCESS_CONTEXT,
+                },
+              },
+            },
+          };
+        }
         result.push(
           {
             type: "expect_outbound",
@@ -2995,6 +3021,124 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ),
         ),
       ),
+  );
+
+  it.effect("denies forwarded Full access approvals without waiting for a person", () =>
+    Effect.gen(function* () {
+      const nativeThreadId = "full-access-approval-thread";
+      const nativeTurnId = "full-access-approval-turn";
+      const prompt = "Clean up the build output.";
+      const requests = [
+        {
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId: nativeThreadId,
+            turnId: nativeTurnId,
+            itemId: "command",
+            startedAtMs: 1,
+            command: "rm -rf /workspace/build",
+          },
+          result: { decision: "decline" },
+        },
+        {
+          method: "item/fileChange/requestApproval",
+          params: {
+            threadId: nativeThreadId,
+            turnId: nativeTurnId,
+            itemId: "patch",
+            startedAtMs: 1,
+          },
+          result: { decision: "decline" },
+        },
+        {
+          method: "item/permissions/requestApproval",
+          params: {
+            threadId: nativeThreadId,
+            turnId: nativeTurnId,
+            itemId: "permissions",
+            cwd: "/workspace",
+            startedAtMs: 1,
+            permissions: { network: { enabled: true } },
+          },
+          result: { permissions: {}, scope: "turn" },
+        },
+        {
+          method: "execCommandApproval",
+          params: {
+            conversationId: nativeThreadId,
+            callId: "legacy-command",
+            command: ["rm", "-rf", "/workspace/build"],
+            cwd: "/workspace",
+            parsedCmd: [],
+          },
+          result: {
+            decision: {
+              denied: { rejection: CODEX_FULL_ACCESS_CONTEXT.t3_code_full_access.value },
+            },
+          },
+        },
+        {
+          method: "applyPatchApproval",
+          params: { conversationId: nativeThreadId, callId: "legacy-patch", fileChanges: {} },
+          result: {
+            decision: {
+              denied: { rejection: CODEX_FULL_ACCESS_CONTEXT.t3_code_full_access.value },
+            },
+          },
+        },
+      ];
+      const milestone = yield* Deferred.make<void>();
+      const transcript = makeCodexReplayTranscript({
+        scenario: "full-access-forwarded-approvals",
+        entries: [
+          ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+          ...requests.flatMap((request, index): Array<CodexReplay.CodexAppServerReplayEntry> => [
+            {
+              type: "emit_inbound",
+              frame: { id: 100 + index, method: request.method, params: request.params },
+            },
+            { type: "expect_outbound", frame: { id: 100 + index, result: request.result } },
+          ]),
+          {
+            type: "emit_inbound",
+            frame: {
+              method: "turn/completed",
+              params: {
+                threadId: nativeThreadId,
+                turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+              },
+            },
+          },
+        ],
+      });
+      const harness = yield* makeCodexReplayHarness(transcript, (event) =>
+        event.type === "runtime_request.updated" || event.type === "turn.terminal"
+          ? Deferred.succeed(milestone, undefined)
+          : Effect.void,
+      );
+      yield* harness.runtime.startTurn(
+        makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("full-access-forwarded-approvals"),
+          text: prompt,
+        }),
+      );
+      yield* Deferred.await(milestone);
+      assert.isEmpty(harness.events.filter((event) => event.type === "runtime_request.updated"));
+      yield* harness.firstTerminal;
+      assert.equal(harness.terminalEvents()[0]?.status, "completed");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
   );
 
   it.effect("stops asking for commands the user allowed for the session", () =>
@@ -11694,22 +11838,31 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const harness = yield* makeCodexReplayHarness(
           makeCodexReplayTranscript({
             scenario,
-            entries: [...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }), ...entries],
+            entries: [
+              ...codexReplayPreamble({
+                nativeThreadId,
+                nativeTurnId,
+                prompt,
+                turnPolicy: { approvalPolicy: "untrusted", sandboxPolicy: { type: "readOnly" } },
+              }),
+              ...entries,
+            ],
           }),
           (event) =>
             event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending"
               ? Queue.offer(pending, event.runtimeRequest)
               : Effect.void,
         );
-        yield* harness.runtime.startTurn(
-          makeCodexTestTurnInput({
+        yield* harness.runtime.startTurn({
+          ...makeCodexTestTurnInput({
             threadId: harness.threadId,
             providerThread: harness.providerThread,
             now: yield* DateTime.now,
             attemptId: RunAttemptId.make(`${scenario}-attempt`),
             text: prompt,
           }),
-        );
+          runtimePolicy: { ...CODEX_TEST_RUNTIME_POLICY, runtimeMode: "approval-required" },
+        });
         return {
           harness,
           answerNext: Queue.take(pending).pipe(

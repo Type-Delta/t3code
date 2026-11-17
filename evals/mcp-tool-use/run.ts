@@ -763,7 +763,7 @@ const buildCodexBase = (
     return [JSON.parse(clean(JSON.stringify(item))) as Block];
   });
   const context = buildCodexAdditionalContext(
-    { model: options.model, reasoningEffort: effort },
+    { model: options.model, reasoningEffort: effort, runtimeMode: "full-access" },
     { browser: options.browserAccess ?? true, device: options.deviceAccess ?? true },
   );
   input.push(

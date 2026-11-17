@@ -14,6 +14,14 @@ describe("Codex replay fixtures", () => {
   itRunsReplayFixtures("codex", (input) =>
     runReplayFixture({
       ...input,
+      buildInput: () => {
+        const fixture = input.buildInput();
+        const policy = input.driver.runtimePolicyOverride?.approvalPolicy;
+        // Approval fixtures explicitly override native policy; label their threads Supervised too.
+        return policy !== undefined && policy !== "never"
+          ? { ...fixture, runtimeMode: "approval-required" }
+          : fixture;
+      },
       harness: CodexOrchestratorReplayHarness,
       materializeWorkspace: (transcript, workspace) =>
         Effect.succeed(materializeReplayTranscriptWorkspace(transcript, workspace)),

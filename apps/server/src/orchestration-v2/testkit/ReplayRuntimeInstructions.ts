@@ -1,11 +1,39 @@
 import type { ProviderDriverKind, ProviderReplayTranscript } from "@t3tools/contracts";
 
+import { CODEX_FULL_ACCESS_CONTEXT } from "../../provider/CodexDeveloperInstructions.ts";
+
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 
 export function materializeReplayTranscriptRuntimeInstructions(
   transcript: ProviderReplayTranscript,
   runtime: { readonly driver: ProviderDriverKind; readonly model: string },
 ): ProviderReplayTranscript {
+  if (runtime.driver === "codex") {
+    return {
+      ...transcript,
+      entries: transcript.entries.map((entry) => {
+        if (entry.type !== "expect_outbound" || !isRecord(entry.frame)) return entry;
+        const frame = entry.frame;
+        if (frame.method !== "turn/start" || !isRecord(frame.params)) return entry;
+        const params = frame.params;
+        // Older Full access recordings predate the recovery context and granular policy.
+        if (params.approvalPolicy !== "never") return entry;
+        return {
+          ...entry,
+          frame: {
+            ...frame,
+            params: {
+              ...params,
+              additionalContext: {
+                ...(isRecord(params.additionalContext) ? params.additionalContext : {}),
+                ...CODEX_FULL_ACCESS_CONTEXT,
+              },
+            },
+          },
+        };
+      }),
+    };
+  }
   const harness =
     runtime.driver === "cursor"
       ? "Cursor"

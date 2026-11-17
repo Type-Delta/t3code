@@ -116,7 +116,10 @@ import * as PortScanner from "../../preview/PortScanner.ts";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
-import { buildCodexAdditionalContext } from "../../provider/CodexDeveloperInstructions.ts";
+import {
+  buildCodexAdditionalContext,
+  CODEX_FULL_ACCESS_CONTEXT,
+} from "../../provider/CodexDeveloperInstructions.ts";
 import {
   describeMcpElicitation,
   toMcpElicitationResponse,
@@ -868,10 +871,14 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
               },
             }
           : undefined;
+    const fullAccessContext =
+      input.runtimePolicy.runtimeMode === "full-access" ? CODEX_FULL_ACCESS_CONTEXT : undefined;
     const additionalContext =
-      t3Context === undefined && Object.keys(appContext).length === 0
+      t3Context === undefined &&
+      fullAccessContext === undefined &&
+      Object.keys(appContext).length === 0
         ? undefined
-        : { ...t3Context, ...appContext };
+        : { ...t3Context, ...fullAccessContext, ...appContext };
     return yield* decodeCodexTurnStartParams({
       threadId: input.nativeThreadId,
       input: input.codexInput,
@@ -5910,6 +5917,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
+            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+              return {
+                decision: "decline",
+              } satisfies CodexSchema.CommandExecutionRequestApprovalResponse;
+            }
+
             const allowance = sessionAllowance(payload.threadId, context);
             if (allowance.has("command")) {
               return {
@@ -5981,6 +5994,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
+            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+              return {
+                decision: "decline",
+              } satisfies CodexSchema.FileChangeRequestApprovalResponse;
+            }
+
             const allowance = sessionAllowance(payload.threadId, context);
             if (allowance.has("file-change")) {
               return {
@@ -6052,6 +6071,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 `No active Codex turn context for permissions approval turn ${payload.turnId}.`,
                 payload,
               );
+            }
+
+            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+              return {
+                permissions: {},
+                scope: "turn",
+              } satisfies CodexSchema.PermissionsRequestApprovalResponse;
             }
 
             const requestKind = providerRequestKindFromPermissions(payload.permissions);
@@ -6198,6 +6224,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
+            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+              return {
+                decision: {
+                  denied: { rejection: CODEX_FULL_ACCESS_CONTEXT.t3_code_full_access.value },
+                },
+              } satisfies CodexSchema.ExecCommandApprovalResponse;
+            }
+
             const allowance = sessionAllowance(payload.conversationId, context);
             if (allowance.has("command")) {
               return {
@@ -6267,6 +6301,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 payload,
               );
             }
+            if (context.input.runtimePolicy.runtimeMode === "full-access") {
+              return {
+                decision: {
+                  denied: { rejection: CODEX_FULL_ACCESS_CONTEXT.t3_code_full_access.value },
+                },
+              } satisfies CodexSchema.ApplyPatchApprovalResponse;
+            }
+
             const allowance = sessionAllowance(payload.conversationId, context);
             if (allowance.has("file-change")) {
               return {
