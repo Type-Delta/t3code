@@ -1,4 +1,5 @@
 import { checkpointNavigationState } from "@t3tools/shared/orchestrationV2CheckpointNavigation";
+import { subagentHoldsCompletion } from "@t3tools/provider-core/server/subagentProjection";
 export { checkpointNavigationState } from "@t3tools/shared/orchestrationV2CheckpointNavigation";
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
 import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
@@ -54,6 +55,7 @@ import {
   IDLE_COMPACTION_TEXT,
   idleCompactionOf,
   isQueuedProviderThreadPlaceholder,
+  isOrchestrationV2WorkActive,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -1187,6 +1189,7 @@ type ShellThreadRow = {
   readonly latest_run_completed_at: string | null;
   readonly latest_run_stop_requested: number;
   readonly latest_run_background_wake: number;
+  readonly pending_delegated_completion: number;
   readonly active_run_id: string | null;
   readonly auto_retry_pending: number;
   readonly active_run_status: string | null;
@@ -1232,6 +1235,7 @@ type SettlementThreadRow = Pick<
   | "latest_run_completed_at"
   | "latest_user_message_at"
   | "latest_user_authored_message_at"
+  | "pending_delegated_completion"
 >;
 
 type ShellRunItemCountRow = {
@@ -1841,6 +1845,9 @@ export function threadShellFromProjection(
     turnItems: projection.turnItems,
     activeProviderThreadId: projection.thread.activeProviderThreadId,
     runs,
+    awaitingDelegatedCompletion: projection.subagents.some(
+      (task) => !isOrchestrationV2WorkActive(task.status) && subagentHoldsCompletion(task),
+    ),
     pullRequests: projection.thread.pullRequests,
   });
   return {
@@ -7971,6 +7978,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       )`;
     };
 
+    // Match subagentHoldsCompletion for terminal results, using the covering delivery index.
+    const pendingDelegatedCompletionForShell = sql`EXISTS (
+      SELECT 1 FROM orchestration_v2_projection_subagents task
+      WHERE task.thread_id = t.thread_id
+        AND task.status IN ('completed', 'failed', 'interrupted', 'cancelled')
+        AND task.completion_delivery_state IN ('pending', 'claimed')
+    )`;
+
     const selectShellThreadRows = (
       threadId?: ThreadId,
       {
@@ -8014,6 +8029,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND stop_request.type = 'run_interrupt_request'
               ) AS latest_run_stop_requested,
               ${isBackgroundWakeShellRun("presented")} AS latest_run_background_wake,
+              ${pendingDelegatedCompletionForShell} AS pending_delegated_completion,
               active.run_id AS active_run_id,
               active.status AS active_run_status,
               (
@@ -8417,6 +8433,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               r.requested_at AS latest_run_requested_at,
               json_extract(r.payload_json, '$.startedAt') AS latest_run_started_at,
               r.completed_at AS latest_run_completed_at,
+              ${pendingDelegatedCompletionForShell} AS pending_delegated_completion,
               (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
@@ -8539,6 +8556,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
                     activeProviderThreadId: thread.activeProviderThreadId,
                     hasActiveRun: false,
+                    awaitingDelegatedCompletion: row.pending_delegated_completion === 1,
                     pullRequests: thread.pullRequests,
                   }),
                 } satisfies ProjectionSettlementCandidate;
@@ -8766,6 +8784,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             turnItems: pendingTurnItemsByThreadId.get(thread.id) ?? [],
             activeProviderThreadId: thread.activeProviderThreadId,
             hasActiveRun: row.active_run_id !== null,
+            awaitingDelegatedCompletion: row.pending_delegated_completion === 1,
             pullRequests: thread.pullRequests,
           }),
         ];
@@ -9149,6 +9168,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT 1 FROM json_each(t.payload_json, '$.pullRequests') link
               WHERE json_type(link.value, '$.watch') IS NOT NULL
             )
+            OR ${pendingDelegatedCompletionForShell}
           ) AS may_be_live,
           -- One list for the whole read, found through the child_thread_id index. A lookup per
           -- thread would parse the payload of every subagent row.

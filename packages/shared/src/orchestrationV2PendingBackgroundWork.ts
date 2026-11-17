@@ -252,6 +252,7 @@ export function derivePendingBackgroundWork(input: {
   readonly turnItems: ReadonlyArray<PendingBackgroundWorkTurnItem>;
   readonly activeProviderThreadId?: string | null;
   readonly hasActiveRun?: boolean;
+  readonly awaitingDelegatedCompletion?: boolean;
   /** Excludes rolled-back runs; optional only when the caller already filtered them, as SQL shell reads do. */
   readonly runs?: ReadonlyArray<PendingBackgroundWorkRun>;
   readonly pullRequests?: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined;
@@ -306,6 +307,14 @@ export function derivePendingBackgroundWork(input: {
   }
 
   for (const task of pullRequestWatchTasks(input.pullRequests)) byTaskId.set(task.taskId, task);
+
+  if (input.awaitingDelegatedCompletion === true) {
+    byTaskId.set("delegated-completion", {
+      taskId: "delegated-completion",
+      description: "Waiting for delegated results",
+      kind: "background_task",
+    });
+  }
 
   return Array.from(byTaskId.values());
 }

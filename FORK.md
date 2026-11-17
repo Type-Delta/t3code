@@ -277,14 +277,29 @@ so the task publishes the wake's result instead of the interim reply. A follow-u
 stopped, or is cancelled still settles at once. Upstream has the same gap for its per-follow-up tasks (pingdotgg/t3code#21837, partial fix
 in #21877).
 
+Parents remain waiting while a finished delegate's result is pending delivery, including failed,
+interrupted, and cancelled results. The server exposes that delivery as unfinished background work
+until the parent's continuation starts or the result is delivered, acknowledged, or dismissed.
+This prevents a false completed status and completion alert between publishing the child's result
+and resuming the parent. Shell snapshots, mobile activity publishing, shell trimming, and automatic
+settlement share this hold; delegated-work thread waiters already account for unfinished delivery.
+
 **Implementation evidence:** orchestrationV2 contracts and server layers; ChatView, Sidebar,
 ThreadRelationshipsControl, ComposerSubagents, `threadDetailsCardLayout.ts` (density threshold and its test), V2LifecycleRow, V2ItemInspector, rightPanelStore,
-and session-logic. Completion gating: `packages/provider-core/src/server/subagentProjection.ts`, the delegated-child settlement listener in `apps/server/src/orchestration-v2/Orchestrator.ts`, and `apps/server/src/orchestration-v2/SubagentProjection.test.ts`. Reopen edge cases: `apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
+and session-logic. Completion gating: `packages/provider-core/src/server/subagentProjection.ts`, the delegated-child settlement listener in `apps/server/src/orchestration-v2/Orchestrator.ts`, `apps/server/src/orchestration-v2/ProjectionStore.ts` and its terminal-delivery regression, `packages/shared/src/orchestrationV2PendingBackgroundWork.ts`, and `apps/server/src/orchestration-v2/SubagentProjection.test.ts`. Reopen edge cases: `apps/server/src/orchestration-v2/DelegatedCompletionDelivery.test.ts` ("reopened tasks whose
 follow-up never starts", including "pauses a reopened task behind a held follow-up", and "holds a
 reopened task while … runs") and `OrchestratorMcpService.test.ts` (held follow-up cancel, and
 the follow-up variant of terminal acknowledgement). Stale question cleanup: `apps/server/src/orchestration-v2/DelegatedTaskQuestionReactor.ts` and `Orchestrator.control-reads.test.ts`.
 
 **Recorded validation:** All 116 delegated-completion and control-read cases pass. The outcome table covers failed, interrupted, and cancelled reopened follow-ups with live descendants or background work, while successful follow-ups retain their completion hold. Original reviewer failure probes pass.
+
+The terminal-delivery regression fails without the presentation hold and passes for all four
+terminal outcomes, pending and claimed delivery, released delivery, and the parent's continuation.
+All 201 focused projection, background-work, thread-wait, and delegated-completion tests pass.
+An isolated web session with a controlled ACP replay provider exercised a real delegation and
+parent continuation. The delegate finishing caused no completed state or sound; the parent's
+final answer played one completion sound. `vp check` and `vp run typecheck` pass. Native mobile UI
+was not exercised.
 
 Earlier validation: focused V2 projection, provider-adapter, lineage-control, timeline, sidebar,
 and composer tests; vp check; vp run typecheck; and an isolated paired web-app smoke test that
@@ -293,7 +308,7 @@ composer rendered. The preview client's accessibility snapshot and click calls f
 loaded, so child-route interaction and lineage-control behavior were covered by code/tests only; the
 smoke evidence used DOM evaluation and server responses.
 
-**Last updated:** 2026-11-16
+**Last updated:** 2026-11-17
 
 ### DL019 — Desktop backend continuity and owned process-tree cleanup
 

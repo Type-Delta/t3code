@@ -44,6 +44,7 @@ import * as Tracer from "effect/Tracer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Statement from "effect/sql/Statement";
 import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -1345,6 +1346,133 @@ it.effect("record reads filter notification sources without dropping matching me
       })).messages,
       4,
     );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("shells keep parents waiting through terminal delegate result delivery", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    for (const status of ["completed", "failed", "interrupted", "cancelled"] as const) {
+      const threadId = yield* addRolledBackRecoveryCandidate(`delegate-delivery-${status}`);
+      const initial = yield* store.getThreadProjection(threadId);
+      const now = initial.updatedAt;
+      const run = { ...initial.runs[0]!, status: "completed" as const, completedAt: now };
+      yield* store.apply({
+        id: EventId.make(`${threadId}:command-completed`),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...initial.turnItems[0]!, status: "completed", completedAt: now },
+      });
+      yield* store.apply({
+        id: EventId.make(`${threadId}:parent-completed`),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload: run,
+      });
+      const task = {
+        id: NodeId.make(`${threadId}:delegate`),
+        threadId,
+        runId: run.id,
+        parentNodeId: run.rootNodeId!,
+        origin: "app_owned" as const,
+        createdBy: "agent" as const,
+        driver,
+        providerInstanceId,
+        providerThreadId: null,
+        childThreadId: ThreadId.make(`${threadId}:child`),
+        nativeTaskRef: null,
+        prompt: "Review the change",
+        title: "Review",
+        model: null,
+        status,
+        result: "Delegate finished",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      };
+      const update = (state: "pending" | "claimed" | "delivered" | "acknowledged" | "disposed") =>
+        store.apply({
+          id: EventId.make(`${threadId}:${state}`),
+          type: "subagent.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...task, completionDelivery: { state, observedByRunId: null } },
+        });
+      for (const state of [
+        "pending",
+        "claimed",
+        "delivered",
+        "acknowledged",
+        "disposed",
+      ] as const) {
+        yield* update(state);
+        const held = state === "pending" || state === "claimed";
+        const projection = yield* store.getThreadProjection(threadId);
+        const shells = [
+          ProjectionStore.threadShellFromProjection(projection),
+          yield* store.getThreadShell(threadId),
+          (yield* store.getShellSnapshot()).threads.find((thread) => thread.id === threadId),
+        ];
+        for (const shell of shells) {
+          assert.isDefined(shell);
+          assert.equal(
+            backgroundWorkHoldsCompletion(shell!.pendingBackgroundTasks ?? []),
+            held,
+            `${status}:${state}`,
+          );
+          assert.equal(
+            projectThreadAwarenessV2({
+              environmentId: EnvironmentId.make("test"),
+              project: { title: "Test" },
+              thread: shell!,
+            })?.phase,
+            held ? "running" : "completed",
+            `${status}:${state}`,
+          );
+        }
+        const candidate = (yield* store.getSettlementCandidates(threadId))[0];
+        assert.isDefined(candidate);
+        assert.equal(backgroundWorkHoldsCompletion(candidate!.pendingBackgroundTasks ?? []), held);
+        if (held) {
+          assert.isTrue(
+            (yield* store.listActiveShellIndex()).find((thread) => thread.id === threadId)
+              ?.mayBeLive,
+          );
+        }
+        yield* assertShellIndexCoversShells();
+      }
+      yield* update("claimed");
+      const wake = {
+        ...run,
+        id: RunId.make(`${threadId}:wake`),
+        ordinal: 2,
+        status: "running" as const,
+        completedAt: null,
+      };
+      yield* store.apply({
+        id: EventId.make(`${threadId}:wake-started`),
+        type: "run.created",
+        threadId,
+        occurredAt: now,
+        payload: wake,
+      });
+      const active = yield* store.getThreadShell(threadId);
+      assert.equal(active?.activityRunStatus, "running");
+      assert.isFalse(backgroundWorkHoldsCompletion(active?.pendingBackgroundTasks ?? []));
+      yield* update("delivered");
+      yield* store.apply({
+        id: EventId.make(`${threadId}:wake-completed`),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...wake, status: "completed", completedAt: now },
+      });
+      const finished = yield* store.getThreadShell(threadId);
+      assert.equal(finished?.status, "completed");
+      assert.isFalse(backgroundWorkHoldsCompletion(finished?.pendingBackgroundTasks ?? []));
+    }
   }).pipe(Effect.provide(layerTest)),
 );
 
