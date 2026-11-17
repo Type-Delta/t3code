@@ -979,6 +979,16 @@ Upstream Electron reports this condition but leaves permission repair to install
 
 **Last updated:** 2026-11-16
 
+### DL062 — Failed Claude wake responses allow provider switching
+
+An idle Claude response that ends in an API failure no longer counts as running background work merely because its frames remain buffered behind a held continuation. This lets users switch providers after a usage limit when their delegated jobs have finished and the parent run has stopped. Live tasks, a later response still streaming, and successful buffered responses awaiting delivery retain the existing guard.
+
+**Implementation evidence:** `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts` and its adapter tests.
+
+**Recorded validation:** a replay of the observed parent-failure/idle-failure sequence failed against the unchanged adapter and passed with the fix. All 478 applicable adapter tests and two focused provider-switch integration cases passed, including protection for live commands, later wakes, successful buffered responses, and empty lifecycle results after failure. One existing native-fork test also fails against the unchanged adapter on Windows because its fixture compares `/workspace` with `C:\workspace`; the adapter rerun excluded it and retained the suite's existing skip. `vp check`, `vp run typecheck`, and `git diff --check` passed. The generic ACP scenario runner cannot reproduce Claude-specific idle frames or usage-limit-stopped runs.
+
+**Last updated:** 2026-11-17
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.

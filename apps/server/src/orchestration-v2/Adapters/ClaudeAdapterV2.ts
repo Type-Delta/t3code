@@ -14163,6 +14163,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             }
             const buffers = yield* Ref.get(wakeBuffers);
             for (const entry of buffers.values()) {
+              const lastRootFrame = entry.messages.findLast(
+                (message) =>
+                  (message.type === "result" && !isClaudeEmptyTaskNotificationSuccess(message)) ||
+                  isClaudeRootTurnFrame(message),
+              );
+              // An idle API failure can remain buffered behind a usage-limit-held continuation.
+              if (
+                lastRootFrame?.type === "result" &&
+                terminalStatusFromResult(lastRootFrame) === "failed" &&
+                !entry.messages.some(
+                  (message) =>
+                    message.type === "result" &&
+                    !isClaudeEmptyTaskNotificationSuccess(message) &&
+                    terminalStatusFromResult(message) === "completed",
+                )
+              ) {
+                continue;
+              }
               if (
                 entry.messages.some(
                   (message) =>

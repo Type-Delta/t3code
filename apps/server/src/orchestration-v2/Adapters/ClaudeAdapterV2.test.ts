@@ -18024,6 +18024,77 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect.each([
+    ["api_error", false, false],
+    ["api_error", true, false],
+    ["api_error", false, true],
+    ["completed", false, false],
+  ] as const)(
+    "probes an idle wake after %s, later wake=%s, background task=%s",
+    ([terminalReason, laterWake, backgroundTask]) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const errorText = "API Error: Request rejected (429)";
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-claude-idle-usage-limit"),
+            text: "Continue the design.",
+            attachments: [],
+          }),
+        );
+        const failure = makeResultFrame({
+          uuid: "idle-usage-limit-result",
+          result: errorText,
+          terminalReason: "api_error",
+          isError: true,
+          apiErrorStatus: 429,
+        });
+        if (backgroundTask) yield* harness.offerAndWait(wakeTaskStarted);
+        yield* harness.offerAndWait(backgroundTask ? turnOneResult : failure);
+        yield* Queue.take(harness.terminalReceipts);
+        yield* harness.offerAndWait(
+          makeAssistantTextFrame({ uuid: "idle-usage-limit-message", text: errorText }),
+        );
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "idle-usage-limit-wake-result",
+            result: terminalReason === "api_error" ? errorText : "Recovered successfully.",
+            terminalReason,
+            ...(terminalReason === "api_error" ? { isError: true, apiErrorStatus: 429 } : {}),
+          }),
+        );
+        if (laterWake) yield* harness.offerAndWait(wakeTurnInit);
+        assert.equal(
+          yield* harness.hasPendingBackgroundWork,
+          terminalReason !== "api_error" || laterWake || backgroundTask,
+        );
+        if (terminalReason === "completed") {
+          yield* harness.offerAndWait(
+            claudeSdkFrame({ ...failure, uuid: "idle-usage-limit-after-success" }),
+          );
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        }
+        if (terminalReason === "api_error" && !laterWake && !backgroundTask) {
+          yield* harness.offerAndWait(
+            claudeSdkFrame({ ...staleTaskNotificationResult, result: "" }),
+          );
+          assert.isFalse(yield* harness.hasPendingBackgroundWork);
+        }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   it.effect("does not count the echo of a live model switch as background work", () =>
     Effect.gen(function* () {
       const idleUserFrame = (uuid: string, content: string, isReplay: boolean) =>
