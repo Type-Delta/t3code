@@ -14246,6 +14246,80 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect.each([
+    { name: "disabled", preference: { enabled: false } },
+    { name: "tagged", preference: { enabled: true, instructions: "Suggest a follow-up." } },
+  ])(
+    "keeps $name suggestions when native suggestions would interrupt background work",
+    ({ preference }) =>
+      Effect.gen(function* () {
+        let closes = 0;
+        const harness = yield* makeWakeHarnessWithOptions({
+          close: (messages) =>
+            Effect.sync(() => {
+              closes++;
+            }).pipe(Effect.andThen(Queue.shutdown(messages))),
+        });
+        const now = yield* DateTime.now;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("suggestions-background-first"),
+            text: "Start a background build.",
+            attachments: [],
+            promptSuggestion: preference,
+          }),
+        );
+        yield* harness.offerAndWait(wakeTaskStarted);
+        yield* harness.offerAndWait(turnOneResult);
+        yield* harness.awaitTerminal(1);
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("suggestions-background-follow-up"),
+            text: "Continue working.",
+            attachments: [],
+            promptSuggestion: { enabled: true, claudeNative: true },
+            providerTurnOrdinal: 2,
+          }),
+        );
+        yield* harness.offerAndWait(
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000120",
+            result: "Continued working.",
+          }),
+        );
+        yield* harness.awaitTerminal(2);
+
+        assert.equal(harness.terminalEvents()[1]?.status, "completed");
+        assert.equal(closes, 0);
+        assert.lengthOf(harness.processQueues, 1);
+        assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        const content = harness.offeredMessages[1]?.message.content;
+        assert.equal(
+          JSON.stringify(content).includes("<t3_prompt_suggestion>"),
+          preference.enabled,
+        );
+        const persisted = providerThreadRosterEvents(harness.events).at(-1)?.providerThread;
+        assert.deepEqual(persisted?.nativeMetadata?.promptSuggestion, preference);
+        assert.equal(persisted?.pendingBackgroundTasks?.[0]?.taskId, WAKE_TASK_ID);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   it.effect("preserves settled background work until an explicit stop", () =>
     Effect.gen(function* () {
       let closes = 0;

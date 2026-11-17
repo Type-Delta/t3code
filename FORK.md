@@ -607,7 +607,10 @@ suggestion. Neither T3 delegates nor provider-native children generate or displa
 Accidental inherited tags are stripped without publishing child suggestion metadata.
 
 Explicit turn preferences apply on the next user message. Claude safely replaces an idle query
-when the SDK native mode changes, preserving its native conversation. Tagged guidance travels
+when the SDK native mode changes, preserving its native conversation. If enabling native
+suggestions would interrupt background agents or commands, that thread keeps its current
+suggestion mode and accepts the message. Native suggestions can be enabled once the background
+work finishes. Tagged guidance travels
 with each user turn because the SDK snapshots system prompts across resumes; it never depends
 on replacing that recorded prompt. Missing preferences
 use the saved query/native metadata for recovery; an older preference without `claudeNative`
@@ -627,10 +630,14 @@ Each viewing client independently controls visibility. Native mobile has no sugg
 `apps/web/src/components/settings/SettingsPanels.tsx`, and their focused tests.
 
 **Recorded validation:** adapter regressions cover native/tagged exclusivity, explicit preferences,
-recovery fallbacks, stale native events, and delegate/child suppression. Final sync validation is
-recorded in the current Merge History entry.
+recovery fallbacks, preserving disabled/tagged suggestions during background work, stale native
+events, and delegate/child suppression. All 478 Claude adapter tests, `vp check`, and
+`vp run typecheck` pass. An isolated live Claude session accepted a native-suggestion follow-up
+while its background command stayed running, then received the command's completion notification;
+the completed turns survived a server restart. Final sync validation is recorded in the current
+Merge History entry.
 
-**Last updated:** 2026-11-12
+**Last updated:** 2026-11-17
 
 ### DL035 — Manual-only release actions
 

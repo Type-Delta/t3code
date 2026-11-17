@@ -6550,11 +6550,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           requested: PromptSuggestionPreference | undefined,
         ) {
           const sessionPreference = yield* Ref.get(pinnedPromptSuggestion);
-          return (
+          const preference =
             requested ??
             sessionPreference ??
-            promptSuggestionPreferenceOrDisabled(providerThread.nativeMetadata?.promptSuggestion)
-          );
+            promptSuggestionPreferenceOrDisabled(providerThread.nativeMetadata?.promptSuggestion);
+          const live = yield* Ref.get(queryContext);
+          // Native suggestions need a new process; keep background work and the user's message running.
+          if (
+            preference.enabled &&
+            preference.claudeNative === true &&
+            live !== null &&
+            live.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
+            !live.stopping &&
+            !(live.promptSuggestion.enabled && live.promptSuggestion.claudeNative === true) &&
+            (yield* liveProcessRunsBackgroundWork(live))
+          ) {
+            return sessionPreference ?? live.promptSuggestion;
+          }
+          return preference;
         });
 
         const withPinnedPromptSuggestion = (input: {
