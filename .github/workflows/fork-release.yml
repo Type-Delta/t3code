@@ -164,15 +164,12 @@ jobs:
           set -euo pipefail
           channel=latest
           if [[ "$PRERELEASE" == true ]]; then channel=nightly; fi
-          appimage=$(node --input-type=module -e '
-            import { readFileSync } from "node:fs";
-            import { parseUpdateManifest } from "./scripts/lib/update-manifest.ts";
-            const manifest = parseUpdateManifest(readFileSync(process.argv[1], "utf8"), process.argv[1], "Linux");
-            if (manifest.version !== process.argv[2]) throw new Error("Linux update manifest version does not match the release");
-            const files = manifest.files.filter(file => /^T3-Code-[^/]+\.AppImage$/.test(file.url));
-            if (files.length !== 1) throw new Error("Expected one Linux AppImage in the update manifest");
-            process.stdout.write(files[0].url);
-          ' "release-assets/$channel-linux.yml" "$VERSION")
+          # Read directly: electron-builder adds keys such as blockMapSize that upstream's manifest parser rejects.
+          linux_manifest="release-assets/$channel-linux.yml"
+          grep -qx "version: $VERSION" "$linux_manifest" || { echo "::error::Linux update manifest is not version $VERSION"; exit 1; }
+          mapfile -t appimages < <(sed -n 's/^  - url: \(T3-Code-[^/]*\.AppImage\)$/\1/p' "$linux_manifest")
+          [[ ${#appimages[@]} -eq 1 ]] || { echo "::error::Expected one Linux AppImage in the update manifest"; exit 1; }
+          appimage=${appimages[0]}
           for file in "$channel.yml" "$channel-mac.yml" "$channel-mac-x64.yml" "$channel-linux.yml" \
             "T3-Code-$VERSION-x64.exe" "T3-Code-$VERSION-x64.exe.blockmap" \
             "T3-Code-$VERSION-arm64.dmg" "T3-Code-$VERSION-arm64.zip" \
