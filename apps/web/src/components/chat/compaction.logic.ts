@@ -4,7 +4,7 @@ import {
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 
-function providerSupportsManualCompaction(
+export function providerSupportsManualCompaction(
   provider: ProviderInstanceEntry | null | undefined,
 ): boolean {
   return provider?.snapshot.slashCommands.some((command) => command.name === "compact") ?? false;
@@ -34,9 +34,14 @@ export function hasAvailableCompactionProvider(input: {
   );
 }
 
-export function formatContextWindowCompactionMessage(autoCompactThreshold?: number | null): string {
+export function formatContextWindowCompactionMessage(
+  autoCompactThreshold?: number | null,
+  modelDisplayName?: string | null,
+): string {
   if (typeof autoCompactThreshold === "number" && autoCompactThreshold > 0) {
     return `Compacts automatically at about ${autoCompactThreshold.toLocaleString("en-US")} tokens.`;
   }
-  return "Context compacts automatically when needed.";
+  return modelDisplayName
+    ? `Context for ${modelDisplayName} compacts automatically when needed.`
+    : "Context compacts automatically when needed.";
 }

@@ -310,7 +310,11 @@ describe("settings search targets", () => {
     for (const scope of ["all", "environment", "project"] as const) {
       expect(isSettingsSearchScopeAvailable("project-defaults", scope)).toBe(true);
     }
-    for (const id of ["tool-call-visibility", "boring-sidebar"]) {
+    for (const id of [
+      "tool-call-visibility",
+      "boring-sidebar",
+      "legacy-context-window-indicator",
+    ]) {
       expect(getSettingsSearchTargetScope(id)!.scope).toBeNull();
     }
   });
@@ -432,6 +436,10 @@ describe("movedSettingsPath", () => {
     expect(movedSettingsPath("/settings/storage", "")).toBe("/settings/maintenance");
     expect(movedSettingsPath("/settings/integrations", "devices")).toBe("/settings/devices");
     expect(movedSettingsPath("/settings/beta", "")).toBe("/settings/labs");
+    expect(movedSettingsPath("/settings/general", "legacy-features")).toBe("/settings/labs");
+    expect(movedSettingsPath("/settings/general", "legacy-context-window-indicator")).toBe(
+      "/settings/labs",
+    );
   });
 
   it("leaves current pages alone", () => {

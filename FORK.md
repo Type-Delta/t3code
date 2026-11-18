@@ -1000,6 +1000,16 @@ An idle Claude response that ends in an API failure no longer counts as running 
 
 **Last updated:** 2026-11-17
 
+### DL063 — Composer context window ring
+
+Web and desktop retain the original composer context window ring removed by the upstream Labs cleanup in `521ac7c218`. Enable **Context window indicator (legacy)** under **Settings → Labs → Legacy**. The setting defaults to off. The ring uses the thread's reported usage and offers compaction for supported providers. The upstream Thread Details context window setting is independent.
+
+**Implementation evidence:** `apps/web/src/components/chat/ContextWindowMeter.tsx`, `apps/web/src/components/chat/ComposerFooterControls.tsx`, `apps/web/src/components/settings/LabsSettingsPanel.tsx`, `packages/contracts/src/settings.ts`, and the ring, settings search, and desktop settings tests.
+
+**Recorded validation:** 153 focused tests, `vp check`, and `vp run typecheck` passed. A paired web client and an isolated Electron client each showed 40% usage from a replayed ACP turn, retained the Labs opt-in across reload, and hid the ring after opt-out.
+
+**Last updated:** 2026-11-18
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.
