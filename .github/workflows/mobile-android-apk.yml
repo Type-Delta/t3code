@@ -3,7 +3,9 @@ name: Mobile Android APK
 # Checks closed testing hourly. Each new beta gets one versioned prerelease.
 # Unchanged checks publish nothing.
 on:
-  # Fork: manual only (DL035); upstream polls hourly with Play credentials the fork lacks.
+  schedule:
+    # Avoid minute zero, when GitHub scheduled jobs are busiest.
+    - cron: "23 * * * *"
   workflow_dispatch:
 
 concurrency:

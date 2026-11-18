@@ -1,6 +1,14 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "!v*-nightly.*"
+      - "!v*-preview.*"
+  schedule:
+    # Avoid minute zero, when GitHub scheduled jobs are busiest.
+    - cron: "8,38 * * * *"
   workflow_dispatch:
     inputs:
       channel:
@@ -17,12 +25,14 @@ on:
         required: false
         type: string
 
-# Serialize manual nightlies so overlapping runs cannot build the same commit
-# twice or publish out of order. Stable releases get their own group. Running
-# publishers are never canceled, and queue: max keeps every pending run instead of the default
-# newest-wins single slot, so a queued stable release cannot be silently dropped.
+# Serialize nightlies (scheduled and manual) so overlapping runs cannot build
+# the same commit twice or publish out of order. Stable tag releases get their
+# own group so a nightly never blocks them. Running publishers are never
+# canceled, and queue: max keeps every pending run instead of the default
+# newest-wins single slot, so a queued stable tag can never be silently
+# dropped. Automatic nightlies recheck the release gap after leaving the queue.
 concurrency:
-  group: release-${{ (inputs.channel == 'nightly' || inputs.channel == 'preview') && 'nightly' || 'stable' }}
+  group: release-${{ (github.event_name == 'schedule' || inputs.channel == 'nightly' || inputs.channel == 'preview') && 'nightly' || 'stable' }}
   cancel-in-progress: false
   queue: max
 
@@ -34,8 +44,13 @@ permissions:
   id-token: none
 
 jobs:
-  # Picks the commit every later job builds. Manual nightlies and previews build
-  # the triggering commit. Stable releases build the latest published nightly.
+  # Picks the commit every later job builds. Nightlies and tag pushes build the
+  # triggering commit. Manual stable releases build the commit of the latest
+  # published nightly, so stable only ever ships a build that nightly users
+  # have already run. Scheduled runs also decide here whether a nightly is due.
+  # The PAUSE_NIGHTLY repository variable skips scheduled runs only; every later
+  # job needs this one, so a skip here skips the whole run. `update_feed` runs
+  # without it and checks the variable itself.
   resolve_commit:
     name: Resolve release commit
     if: github.repository == 'pingdotgg/t3code' && (github.event_name != 'schedule' || vars.PAUSE_NIGHTLY != 'true')
@@ -44,6 +59,7 @@ jobs:
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}
       nightly_version: ${{ steps.resolve.outputs.nightly_version }}
+      has_changes: ${{ steps.resolve.outputs.has_changes }}
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -62,15 +78,23 @@ jobs:
             const {
               assertCommitOnDefaultBranch,
               assertReleaseSource,
+              shouldReleaseNightly,
               resolveLatestNightlyCommit,
             } = require('./.github/scripts/check-nightly-release.cjs');
 
             const dispatchChannel = process.env.DISPATCH_CHANNEL || 'preview';
-            const releaseChannel = dispatchChannel;
+            const releaseChannel = context.eventName === 'schedule'
+              ? 'nightly'
+              : context.eventName === 'workflow_dispatch'
+                ? dispatchChannel
+                : 'stable';
 
             await assertReleaseSource({ github, context, releaseChannel });
 
-            if (dispatchChannel === 'stable') {
+            if (context.eventName === 'schedule') {
+              core.setOutput('has_changes', await shouldReleaseNightly({ github, context, core }));
+              core.setOutput('ref', context.sha);
+            } else if (context.eventName === 'workflow_dispatch' && dispatchChannel === 'stable') {
               const { tag, sha, version } = await resolveLatestNightlyCommit({ github, context, core });
               await assertCommitOnDefaultBranch({ github, context, sha });
               core.notice(`Stable release builds ${sha}, the commit shipped by ${tag}.`);
@@ -83,7 +107,9 @@ jobs:
   preflight:
     name: Preflight
     needs: [resolve_commit]
-    if: ${{ needs.resolve_commit.result == 'success' }}
+    if: |
+      needs.resolve_commit.result == 'success' &&
+      (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
@@ -126,7 +152,7 @@ jobs:
           NIGHTLY_SHA: ${{ needs.resolve_commit.outputs.ref }}
           NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
         run: |
-          if [[ "${DISPATCH_CHANNEL:-preview}" == "nightly" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" || ( "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CHANNEL:-preview}" == "nightly" ) ]]; then
             nightly_date="$(date -u -d "$NIGHTLY_DATE" +%Y%m%d)"
 
             node scripts/resolve-nightly-release.ts \
@@ -371,7 +397,9 @@ jobs:
     # Consumes only the release commit, not preflight's resolved version, so it
     # runs alongside preflight instead of after it. The condition mirrors preflight's.
     needs: [resolve_commit]
-    if: ${{ needs.resolve_commit.result == 'success' }}
+    if: |
+      needs.resolve_commit.result == 'success' &&
+      (github.event_name != 'schedule' || needs.resolve_commit.outputs.has_changes == 'true')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 5
     # Previews build any branch, but production admits only main and v* tags.
