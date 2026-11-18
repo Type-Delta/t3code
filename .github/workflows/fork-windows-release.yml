@@ -54,9 +54,6 @@ jobs:
 
       - name: Build Linux CLI single-executable
         shell: bash
-        env:
-          # The CLI executable needs a Node release that supports --build-sea.
-          VP_NODE_VERSION: "26.12.1"
         run: |
           set -euo pipefail
           node apps/server/scripts/cli.ts build

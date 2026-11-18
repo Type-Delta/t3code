@@ -63,6 +63,14 @@ jobs:
       - name: Configure public T3 Connect identifiers
         run: cp .env.example .env
 
+      - name: Ensure Rosetta for macOS x64 bytecode generation
+        if: matrix.arch == 'x64'
+        shell: bash
+        run: |
+          if [[ "$(uname -m)" == "arm64" ]] && ! /usr/bin/arch -x86_64 /usr/bin/true; then
+            sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+          fi
+
       - name: Trust macOS signing certificate
         shell: bash
         env:
