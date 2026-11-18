@@ -23,6 +23,7 @@ interface BranchToolbarWorktreeSelectorProps {
   locked: boolean;
   lockedDisplay: WorktreeDisplay | null;
   onWorktreeChange: (worktree: WorktreePickerOption) => void;
+  onOpen: () => void;
 }
 
 function WorktreeIcon({ isPrimary }: { isPrimary: boolean | undefined }) {
@@ -38,6 +39,7 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
   locked,
   lockedDisplay,
   onWorktreeChange,
+  onOpen,
 }: BranchToolbarWorktreeSelectorProps) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const selectedWorktree = model?.options.find((worktree) => worktree.path === model.value);
@@ -62,6 +64,9 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
   return (
     <Select
       modal={false}
+      onOpenChange={(open) => {
+        if (open) onOpen();
+      }}
       value={model.value}
       onValueChange={(value: string | null) => {
         const worktree = model.options.find((option) => option.path === value);

@@ -1,5 +1,6 @@
 import { EnvironmentId, ProviderInstanceId, RunId, type VcsRef } from "@t3tools/contracts";
 import {
+  resolvePreviousWorktreeSeed,
   resolveDraftWorktreeContext,
   resolveLockedWorktreeDisplay,
   resolveSubagentAggregateStatus,
@@ -699,5 +700,32 @@ describe("resolveConfirmedSelectedRef", () => {
     expect(resolveConfirmedSelectedRef(listed, refs === null ? null : { refs }).worktreePath).toBe(
       expected,
     );
+  });
+});
+
+describe("resolvePreviousWorktreeSeed", () => {
+  it("chooses the newest existing worktree, normalizing paths", () => {
+    const threads = [
+      { branch: "gone", worktreePath: "/repo/gone", updatedAt: "2025-01-03" },
+      { branch: "existing", worktreePath: "/repo/existing/", updatedAt: "2025-01-02" },
+      { branch: "older", worktreePath: "/repo/older", updatedAt: "2025-01-01" },
+    ];
+    expect(
+      resolvePreviousWorktreeSeed({
+        threads,
+        currentWorktreePath: null,
+        existingWorktrees: [{ path: "/repo/existing" }, { path: "/repo/older" }],
+      }),
+    ).toEqual({ branch: "existing", worktreePath: "/repo/existing/" });
+    expect(
+      resolvePreviousWorktreeSeed({ threads, currentWorktreePath: null, existingWorktrees: [] }),
+    ).toBeNull();
+    expect(
+      resolvePreviousWorktreeSeed({
+        threads,
+        currentWorktreePath: "/repo/existing",
+        existingWorktrees: [{ path: "/repo/existing" }, { path: "/repo/older" }],
+      }),
+    ).toEqual({ branch: "older", worktreePath: "/repo/older" });
   });
 });

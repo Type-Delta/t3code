@@ -5000,7 +5000,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         },
       ];
     });
-    return { worktrees, isRepo: true };
+    const existing = yield* Effect.filter(
+      worktrees,
+      (worktree) =>
+        worktree.isPrimary
+          ? Effect.succeed(true)
+          : fileSystem.exists(worktree.path).pipe(Effect.orElseSucceed(() => false)),
+      { concurrency: "unbounded" },
+    );
+    return { worktrees: existing, isRepo: true };
   });
 
   // A checkout stamps most files in the second it writes the index, and Git re-reads every file

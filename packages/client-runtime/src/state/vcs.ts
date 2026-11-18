@@ -363,18 +363,21 @@ export function createVcsEnvironmentAtoms<R, E>(
       environmentId: target.environmentId,
       cwd: target.input.cwd,
     });
+  const refreshWorktrees = (environmentId: EnvironmentId, registry: AtomRegistry.AtomRegistry) =>
+    registry.update(vcsWorktreesRevisionAtom(environmentId), (revision) => revision + 1);
   const invalidateRefsAndWorktrees = (
     target: { readonly environmentId: EnvironmentId; readonly input: { readonly cwd: string } },
     registry: AtomRegistry.AtomRegistry,
   ) =>
-    Effect.sync(() =>
-      registry.update(vcsWorktreesRevisionAtom(target.environmentId), (revision) => revision + 1),
-    ).pipe(Effect.andThen(invalidateRefs(target, registry)));
+    Effect.sync(() => refreshWorktrees(target.environmentId, registry)).pipe(
+      Effect.andThen(invalidateRefs(target, registry)),
+    );
 
   return {
     listRefs,
     listWorktrees,
     listWorktreesOnce,
+    refreshWorktrees,
     // An uncached read for decisions that must match the repository now, not
     // the persisted list a picker renders from.
     readRefs: createEnvironmentRpcCommand(runtime, {

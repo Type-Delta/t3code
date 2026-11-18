@@ -9889,3 +9889,19 @@ it.layer(layerTest)("branch change totals after a failed untracked listing", (it
     }),
   );
 });
+
+it.effect("omits a locked worktree whose checkout has been deleted", () =>
+  Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const fs = yield* FileSystem.FileSystem;
+    const cwd = yield* makeTmpDir();
+    const checkout = yield* makeTmpDir();
+    yield* initRepoWithCommit(cwd);
+    yield* git(cwd, ["worktree", "add", "--detach", checkout]);
+    yield* git(cwd, ["worktree", "lock", checkout]);
+    yield* fs.remove(checkout, { recursive: true });
+    const result = yield* driver.listWorktrees({ cwd });
+    assert.equal(result.worktrees.length, 1);
+    assert.isTrue(result.worktrees[0]?.isPrimary);
+  }).pipe(Effect.provide(layerTest)),
+);

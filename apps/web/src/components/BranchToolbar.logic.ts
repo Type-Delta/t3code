@@ -248,12 +248,21 @@ export function resolvePreviousWorktreeSeed(input: {
     archivedAt?: string | null;
   }>;
   currentWorktreePath: string | null;
+  existingWorktrees: ReadonlyArray<{ readonly path: string }>;
 }): PreviousWorktreeSeed | null {
+  const existingPaths = new Set(
+    input.existingWorktrees.map((worktree) => normalizeWorktreePathForComparison(worktree.path)),
+  );
+  const currentPath =
+    input.currentWorktreePath === null
+      ? null
+      : normalizeWorktreePathForComparison(input.currentWorktreePath);
   let latest: { branch: string | null; worktreePath: string; updatedAt: number } | null = null;
   for (const thread of input.threads) {
     if (
       !thread.worktreePath ||
-      thread.worktreePath === input.currentWorktreePath ||
+      normalizeWorktreePathForComparison(thread.worktreePath) === currentPath ||
+      !existingPaths.has(normalizeWorktreePathForComparison(thread.worktreePath)) ||
       (thread.archivedAt ?? null) !== null
     ) {
       continue;

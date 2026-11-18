@@ -899,6 +899,33 @@ describe("VCS worktrees", () => {
           { cwd: "/repo", refresh: true },
         ]);
         yield* Fiber.interrupt(fiber);
+
+        const environmentRegistry = EnvironmentRegistry.EnvironmentRegistry.of({
+          followStream: (_environmentId, stream) =>
+            Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        } as EnvironmentRegistry.EnvironmentRegistry["Service"]);
+        const runtime = Atom.runtime(
+          Layer.merge(
+            Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, environmentRegistry),
+            Layer.succeed(Persistence.EnvironmentCacheStore, cacheWithRefs(Option.none())),
+          ),
+        );
+        const atoms = createVcsEnvironmentAtoms(runtime);
+        const registry = yield* Effect.acquireRelease(Effect.sync(AtomRegistry.make), (value) =>
+          Effect.sync(() => value.dispose()),
+        );
+        const atom = atoms.listWorktrees({
+          environmentId: TARGET.environmentId,
+          input: { cwd: "/repo" },
+        });
+        yield* Effect.acquireRelease(
+          Effect.sync(() => registry.mount(atom)),
+          (unmount) => Effect.sync(unmount),
+        );
+        yield* Queue.take(requested);
+        atoms.refreshWorktrees(TARGET.environmentId, registry);
+        expect(registry.get(vcsWorktreesRevisionAtom(TARGET.environmentId))).toBe(1);
+        expect(yield* Queue.take(requested)).toEqual({ cwd: "/repo" });
       }).pipe(Effect.provide(TestClock.layer())),
     ),
   );

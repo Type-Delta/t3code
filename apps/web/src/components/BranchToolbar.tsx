@@ -1,3 +1,5 @@
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { vcsEnvironment } from "../state/vcs";
 import { useWorktrees, useWorktreesOnce } from "../state/queries";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
@@ -161,6 +163,7 @@ interface RunContextSelectorProps {
   previousWorktreeLabel: string | null;
   previousWorktreeBranch: string | null;
   onUsePreviousWorktree: () => void;
+  onOpenWorkspace: () => void;
   addTargets: readonly AddProjectTarget[];
   onAddToMachine: (environmentId: EnvironmentId) => void;
 }
@@ -184,6 +187,7 @@ const RunContextSelector = memo(function RunContextSelector({
   previousWorktreeLabel,
   previousWorktreeBranch,
   onUsePreviousWorktree,
+  onOpenWorkspace,
   addTargets,
   onAddToMachine,
 }: RunContextSelectorProps) {
@@ -284,7 +288,11 @@ const RunContextSelector = memo(function RunContextSelector({
   }
 
   return (
-    <Menu>
+    <Menu
+      onOpenChange={(open) => {
+        if (open) onOpenWorkspace();
+      }}
+    >
       <MenuTrigger
         render={isPanel ? <ThreadDetailsControl part="select" /> : <ComposerControl size="xs" />}
         className={isPanel ? undefined : "min-w-0 max-w-[48%] flex-initial justify-start"}
@@ -637,13 +645,16 @@ export const BranchToolbar = memo(function BranchToolbar({
   const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
   const envModeLocked = envLocked || (isServerThread && activeWorktreePath !== null);
 
-  // Current checkout drafts can pin an existing Git worktree. Drafts poll the
-  // worktree list; a materialized thread only needs one lookup for its label.
+  // A materialized thread only needs one lookup for its worktree label.
   const projectWorkspaceRoot = activeProject?.workspaceRoot ?? null;
   const canSelectExistingWorktree = showGitControls && !isServerThread && !envLocked;
+  const canUsePreviousWorktree = !isServerThread && !envModeLocked && !forceNewWorktree;
   const worktreeQuery = useWorktrees({
     environmentId,
-    cwd: canSelectExistingWorktree && !forceNewWorktree ? projectWorkspaceRoot : null,
+    cwd:
+      (canSelectExistingWorktree && !forceNewWorktree) || canUsePreviousWorktree
+        ? projectWorkspaceRoot
+        : null,
   });
   const lockedWorktreeQuery = useWorktreesOnce({
     environmentId,
@@ -666,6 +677,14 @@ export const BranchToolbar = memo(function BranchToolbar({
           branch,
           worktrees: lockedWorktreeQuery.data?.worktrees ?? [],
         });
+  const refreshWorktrees = () => {
+    if (
+      ((canSelectExistingWorktree && !forceNewWorktree) || canUsePreviousWorktree) &&
+      projectWorkspaceRoot
+    ) {
+      vcsEnvironment.refreshWorktrees(environmentId, appAtomRegistry);
+    }
+  };
   const onWorktreeChange = (worktree: WorktreePickerOption) => {
     if (!activeProjectRef || !canSelectExistingWorktree || !projectWorkspaceRoot) return;
     setDraftThreadContext(draftId ?? threadRef, {
@@ -681,18 +700,20 @@ export const BranchToolbar = memo(function BranchToolbar({
         locked={isServerThread}
         lockedDisplay={lockedWorktreeDisplay}
         onWorktreeChange={onWorktreeChange}
+        onOpen={refreshWorktrees}
       />
     ) : null;
 
-  const canUsePreviousWorktree = !isServerThread && !envModeLocked && !forceNewWorktree;
   const projectRefsForWorktreeLookup = canUsePreviousWorktree ? [activeProjectRef] : [];
   const projectThreads = useThreadShellsForProjectRefs(projectRefsForWorktreeLookup);
-  const previousWorktreeSeed = canUsePreviousWorktree
-    ? resolvePreviousWorktreeSeed({
-        threads: projectThreads,
-        currentWorktreePath: activeWorktreePath,
-      })
-    : null;
+  const previousWorktreeSeed =
+    canUsePreviousWorktree && worktreeQuery.data !== null
+      ? resolvePreviousWorktreeSeed({
+          threads: projectThreads,
+          currentWorktreePath: activeWorktreePath,
+          existingWorktrees: worktreeQuery.data.worktrees,
+        })
+      : null;
   const previousWorktreeLabel = previousWorktreeSeed
     ? resolvePreviousWorktreeLabel(previousWorktreeSeed)
     : null;
@@ -766,6 +787,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
+            onOpenWorkspace={refreshWorktrees}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
@@ -816,6 +838,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             previousWorktreeLabel={previousWorktreeLabel}
             previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
             onUsePreviousWorktree={onUsePreviousWorktree}
+            onOpenWorkspace={refreshWorktrees}
             addTargets={addTargets}
             onAddToMachine={onAddToMachine}
           />
@@ -860,6 +883,7 @@ export const BranchToolbar = memo(function BranchToolbar({
               previousWorktreeLabel={previousWorktreeLabel}
               previousWorktreeBranch={previousWorktreeSeed?.branch ?? null}
               onUsePreviousWorktree={onUsePreviousWorktree}
+              onOpen={refreshWorktrees}
             />
           ) : null}
           {showGitControls ? worktreeSelector : null}
