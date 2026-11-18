@@ -1010,6 +1010,18 @@ Web and desktop retain the original composer context window ring removed by the 
 
 **Last updated:** 2026-11-18
 
+### DL064 — Storage usage breakdown
+
+**Settings → Maintenance → Storage usage** shows how much disk T3 Code uses on each connected environment as an iOS-style bar of the whole volume with an inline legend whose entries show their size and description on hover or tap: database (all SQLite files and sidecars), worktrees, Git snapshots (the sidecar checkpoint repositories), logs, attachments, and other (the rest of the state folder, caches, and scratch projects), then everything else on the volume, with free space as the empty track. Tiny parts keep a minimum width so they stay visible. When the volume size is unknown, the bar falls back to T3 Code's own total. Worktrees cover the configured folder and the default one, so checkouts left behind after a location change still count. Reserved T3 folders are never counted twice. Snapshot refs inside project repositories are not counted because their objects are shared with project history.
+
+`server.getStorageUsage` measures on demand, when the section mounts or on Refresh, because a large worktrees folder takes seconds to scan. POSIX hosts use `du`, which counts hard links once (pnpm installs hard-link most files) and reports allocated size. Windows walks the tree with bounded concurrency. Concurrent requests share one in-flight measurement. A failed scan is an error, not a low total. Servers advertise `storageUsage`; clients hide the section on servers without it.
+
+**Implementation evidence:** `apps/server/src/persistence/StorageUsage.ts` and its test, `packages/contracts/src/{settings,rpc,environment}.ts`, `apps/server/src/{ws.ts,auth/RpcAuthorization.ts,environment/ServerEnvironment.ts}`, `packages/client-runtime/src/state/server.ts`, and `apps/web/src/components/settings/{StorageUsageSection.tsx,StorageUsageSection.logic.ts,StorageSettings.tsx}` with `StorageUsageSection.logic.test.ts`.
+
+**Recorded validation:** focused StorageUsage, GitVcsDriverCore, client-runtime vcs, BranchToolbar logic, and StorageUsageSection logic tests (423 passing); `vp check`; `vp run typecheck`. On 2026-11-18 a seeded dev app whose worktrees setting pointed at a real ~18 GB, 1.7M-file worktrees folder measured 19.8 GB in about 23 seconds, kept the previous result while refreshing, and rendered in light and dark themes and at 375 px with tap-opened legend details. The disk bar then showed 19.1 GB of T3 Code data and 181 GB of everything else on a 477 GB volume with 277 GB free.
+
+**Last updated:** 2026-11-18
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.

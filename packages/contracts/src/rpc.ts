@@ -362,7 +362,9 @@ import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from ".
 import {
   StorageCleanupReport,
   DatabaseReclaimError,
+  StorageUsageError,
   DatabaseStorageStatus,
+  StorageUsage,
   ServerSettings,
   ServerSettingsError,
   ClientServerSettingsPatch,
@@ -521,6 +523,7 @@ export const WS_METHODS = {
   serverRunStorageCleanup: "server.runStorageCleanup",
   serverGetStorageCleanupReport: "server.getStorageCleanupReport",
   serverGetDatabaseStorage: "server.getDatabaseStorage",
+  serverGetStorageUsage: "server.getStorageUsage",
   serverReclaimDatabaseSpace: "server.reclaimDatabaseSpace",
   peerLinksList: "peerLinks.list",
   peerLinksLink: "peerLinks.link",
@@ -831,6 +834,12 @@ const WsServerGetStorageCleanupReportRpc = Rpc.make(WS_METHODS.serverGetStorageC
   success: Schema.NullOr(StorageCleanupReport),
   stream: true,
   error: EnvironmentAuthorizationError,
+});
+
+const WsServerGetStorageUsageRpc = Rpc.make(WS_METHODS.serverGetStorageUsage, {
+  payload: Schema.Struct({}),
+  success: StorageUsage,
+  error: Schema.Union([StorageUsageError, EnvironmentAuthorizationError]),
 });
 
 const WsServerGetDatabaseStorageRpc = Rpc.make(WS_METHODS.serverGetDatabaseStorage, {
@@ -2151,6 +2160,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRunStorageCleanupRpc,
   WsServerGetStorageCleanupReportRpc,
   WsServerGetDatabaseStorageRpc,
+  WsServerGetStorageUsageRpc,
   WsServerGetSettingsRpc,
   WsServerReclaimDatabaseSpaceRpc,
   WsServerUpdateSettingsRpc,

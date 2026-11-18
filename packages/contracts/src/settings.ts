@@ -1337,6 +1337,27 @@ const NULLABLE_PROJECT_SETTINGS_OVERRIDES: ReadonlySet<ProjectScopedServerSettin
 /** Reclaimable bytes from which the offline `t3 doctor` repair is worth suggesting. */
 export const DATABASE_COMPACTION_RECOMMENDED_BYTES = 1024 ** 3;
 
+export const StorageUsageCategoryId = Schema.Literals([
+  "database",
+  "worktrees",
+  "checkpoints",
+  "logs",
+  "attachments",
+  "other",
+]);
+export type StorageUsageCategoryId = typeof StorageUsageCategoryId.Type;
+const StorageUsageCategory = Schema.Struct({
+  id: StorageUsageCategoryId,
+  bytes: Schema.Number,
+});
+export const StorageUsage = Schema.Struct({
+  totalBytes: Schema.Number,
+  categories: Schema.Array(StorageUsageCategory),
+  diskFreeBytes: Schema.NullOr(Schema.Number),
+  diskTotalBytes: Schema.NullOr(Schema.Number),
+});
+export type StorageUsage = typeof StorageUsage.Type;
+
 export const DatabaseStorageStatus = Schema.Struct({
   databaseBytes: Schema.Number,
   /** Free pages inside the file that an offline VACUUM (or incremental auto_vacuum) returns to disk. */
@@ -1351,6 +1372,15 @@ export const DatabaseStorageStatus = Schema.Struct({
   reclaimFailure: Schema.optionalKey(Schema.String),
 });
 export type DatabaseStorageStatus = typeof DatabaseStorageStatus.Type;
+
+export class StorageUsageError extends Schema.TaggedError<StorageUsageError>()(
+  "StorageUsageError",
+  { reason: Schema.String },
+) {
+  override get message() {
+    return `Couldn't measure storage: ${this.reason}`;
+  }
+}
 
 export class DatabaseReclaimError extends Schema.TaggedError<DatabaseReclaimError>()(
   "DatabaseReclaimError",

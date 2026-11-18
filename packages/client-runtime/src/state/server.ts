@@ -1377,6 +1377,10 @@ export function createServerEnvironmentAtoms<R, E>(
       concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
     }),
     databaseStorage,
+    storageUsage: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:storage-usage",
+      tag: WS_METHODS.serverGetStorageUsage,
+    }),
     databaseCompactionRecommendations,
     reclaimDatabaseSpace: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:reclaim-database-space",

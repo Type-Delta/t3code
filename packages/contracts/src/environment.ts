@@ -106,6 +106,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   storageCleanup: Schema.optionalKey(Schema.Boolean),
   storageCleanupRun: Schema.optionalKey(Schema.Boolean),
   databaseStorage: Schema.optionalKey(Schema.Boolean),
+  storageUsage: Schema.optionalKey(Schema.Boolean),
   otlpEndpointCheck: Schema.optionalKey(Schema.Boolean),
   /** Serves `server.checkSecretSource`; hide the secret check where it is absent. */
   secretSourceCheck: Schema.optionalKey(Schema.Boolean),

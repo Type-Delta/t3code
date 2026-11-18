@@ -191,6 +191,7 @@ import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretReso
 import * as ServerSettings from "./serverSettings.ts";
 import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
+import * as StorageUsage from "./persistence/StorageUsage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { makePrepareTerminalLaunch } from "./workspace/restoreMissingWorktree.ts";
@@ -1540,6 +1541,7 @@ export const layerWsRpc = (
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
+      const storageUsage = yield* StorageUsage.StorageUsage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
@@ -2669,6 +2671,7 @@ export const layerWsRpc = (
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
+        [WS_METHODS.serverGetStorageUsage]: () => storageUsage.measure(),
         [WS_METHODS.serverReclaimDatabaseSpace]: () => databaseStorage.requestReclaim,
         [WS_METHODS.peerLinksList]: (_input) =>
           peerLinks.list.pipe(Effect.map((links) => ({ links }))),

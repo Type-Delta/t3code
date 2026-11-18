@@ -35,6 +35,7 @@ import {
 } from "../ui/number-field";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 import { DatabaseStorageNotice } from "./DatabaseStorageNotice";
+import { StorageUsageSection } from "./StorageUsageSection";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
@@ -898,18 +899,25 @@ export function StorageCleanupSections() {
   if (scope.kind === "project" || scope.kind === "checkout") return null;
   const update = (patch: Partial<StorageCleanupSettings>, options: SaveOptions) =>
     updateSettings({ storageCleanup: patch }, options);
-  const databaseStorageNotice = (
-    <DatabaseStorageNotice
-      environments={connectedEnvironments.filter(
-        (environment) =>
-          environment.serverConfig?.environment.capabilities.databaseStorage === true,
-      )}
-    />
+  const storageOverview = (
+    <>
+      <StorageUsageSection
+        environments={connectedEnvironments.filter(
+          (environment) => environment.serverConfig?.environment.capabilities.storageUsage === true,
+        )}
+      />
+      <DatabaseStorageNotice
+        environments={connectedEnvironments.filter(
+          (environment) =>
+            environment.serverConfig?.environment.capabilities.databaseStorage === true,
+        )}
+      />
+    </>
   );
   if (!supportsStorageCleanup(connectedEnvironments)) {
     return (
       <>
-        {databaseStorageNotice}
+        {storageOverview}
         <SettingsSection id="storage-artifacts" title="Artifacts and logs" variant="plain">
           <StorageCleanupScopeNotice />
         </SettingsSection>
@@ -919,7 +927,7 @@ export function StorageCleanupSections() {
 
   return (
     <>
-      {databaseStorageNotice}
+      {storageOverview}
       <SettingsSection id="storage-artifacts" title="Artifacts and logs">
         <AnimatedHeight>
           <SettingsRow

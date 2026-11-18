@@ -76,6 +76,12 @@ describe("RPC authorization scopes", () => {
     }
   });
 
+  it("lets readers inspect storage usage", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverGetStorageUsage)).toBe(
+      AuthOrchestrationReadScope,
+    );
+  });
+
   it("still lets readers load settings the way installed Swift clients ask", () => {
     expect(requiredScopeForRpcMethod("server.getSettings")).toBe(AuthOrchestrationReadScope);
   });
