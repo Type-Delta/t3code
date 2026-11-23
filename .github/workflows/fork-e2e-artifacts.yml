@@ -1,6 +1,11 @@
 name: Fork E2E Artifacts
 
 on:
+  # GitHub dispatches only workflows that exist on the default branch, so a branch can also start
+  # this by pushing an `e2e-X.Y.Z-gwtest.N` tag. Tags create no release; no updater reads them.
+  push:
+    tags:
+      - "e2e-*"
   workflow_dispatch:
     inputs:
       version:
@@ -26,9 +31,10 @@ jobs:
         id: version
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           set -euo pipefail
+          VERSION="${VERSION#e2e-}"
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-gwtest\.[0-9]+$ ]]; then
             echo "::error::Invalid version '$VERSION'. Use X.Y.Z-gwtest.N."
             exit 1
