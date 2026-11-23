@@ -175,10 +175,7 @@ export const renderHelperDaemon = (executable: string, log: string) =>
     plistString("3774", "\t\t\t"),
     "\t\t</dict>",
     "\t</dict>",
-    plistKey("RunAtLoad"),
-    "\t<true/>",
-    plistKey("KeepAlive"),
-    "\t<false/>",
+    // No RunAtLoad: launchd would run it once without a connection on stdin.
     plistKey("StandardOutPath"),
     plistString(log),
     plistKey("StandardErrorPath"),
@@ -441,7 +438,8 @@ const accountName = Effect.fn("GatewayPlatform.darwin.accountName")(function* (
   if (result.code !== 0) {
     return yield* fail(`macOS account ${accountId} was not found.`);
   }
-  const match = result.stdout.match(/^(?:\/Users\/)?([^\s]+)\s+UniqueID\s*=\s*(-?\d+)\s*$/m);
+  // `name\t\tUniqueID = (\n    501\n)`: dscl prints the value as an array on its own lines.
+  const match = result.stdout.match(/^(\S+)\s+UniqueID\s*=\s*\(\s*(-?\d+)\s*\)/m);
   if (match?.[2] !== String(accountId)) {
     return yield* fail(`macOS account ${accountId} was not found.`);
   }
@@ -556,6 +554,8 @@ const replaceLink = Effect.fn("GatewayPlatform.darwin.replaceLink")(
     });
     const stagedLink = path.join(staging, "link");
     yield* fs.symlink(target, stagedLink);
+    // macOS checks a symlink's own mode on readlink, and symlink() applies the caller's umask.
+    yield* runTool("/bin/chmod", ["-h", "755", stagedLink]);
     yield* fs.rename(stagedLink, link);
   },
   Effect.scoped,

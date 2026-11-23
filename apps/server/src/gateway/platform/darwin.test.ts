@@ -1,3 +1,4 @@
+import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -17,6 +18,7 @@ import { currentGatewayPlatform, type GatewayActivation } from "./GatewayPlatfor
 import {
   backendLabel,
   darwinGatewayPaths,
+  darwinGatewayPlatform,
   GATEWAY_LABEL,
   makeDarwinGatewayPlatform,
   parseDsclList,
@@ -175,7 +177,10 @@ const fixture = Effect.fn("darwinGatewayTest.fixture")(function* () {
           }
           if (action === "-search") {
             const matches = [...table].flatMap(([entry, attrs]) =>
-              attrs.get(attribute!) === value ? [`/Users/${entry} ${attribute} = ${value}\n`] : [],
+              // Real `dscl . -search` output: the value is an array on its own lines.
+              attrs.get(attribute!) === value
+                ? [`${entry}\t\t${attribute} = (\n    ${value}\n)\n`]
+                : [],
             );
             return output(matches.join(""));
           }
@@ -1068,6 +1073,25 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
         const owner = yield* provide(platform.makeConnectionOwner);
         assert.isUndefined(yield* Effect.promise(() => owner(3801, 50000)));
         assert.deepEqual(calls, []);
+      }),
+    );
+  });
+});
+
+describe.skipIf(HostProcess.Platform.defaultValue() !== "darwin")("on macOS", () => {
+  it.layer(NodeServices.layer)("links", (it) => {
+    it.effect("leaves replaced links readable by everyone whatever the caller's umask", () =>
+      Effect.gen(function* () {
+        const root = yield* makeTestGatewayRoot("t3-darwin-link-");
+        const link = `${root}/current`;
+        const previous = process.umask(0o077);
+        yield* darwinGatewayPlatform
+          .replaceLink(`${root}/runtime`, link)
+          .pipe(
+            Effect.provide(ProcessRunner.layer),
+            Effect.ensuring(Effect.sync(() => process.umask(previous))),
+          );
+        assert.equal(NodeFS.lstatSync(link).mode & 0o777, 0o755);
       }),
     );
   });
