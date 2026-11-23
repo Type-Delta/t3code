@@ -233,7 +233,7 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
     runtimeVersion: status.runtimeVersion,
     backendPort: status.backendPort ?? null,
   });
-  yield* (yield* DesktopWindow.DesktopWindow).showConnectingSplash;
+  yield* (yield* DesktopWindow.DesktopWindow).showConnectingSplash("Connecting to shared T3 Code…");
 
   if (shouldUpdateSharedRuntime(status, environment.appVersion)) {
     status = yield* gateway.updateRuntime(environment.appVersion).pipe(

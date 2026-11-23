@@ -451,6 +451,9 @@ const makeHandler = Effect.fn("GatewayHelper.makeHandler")(function* (
             response.writeHead(status, {
               "content-type": "application/json",
               "content-length": Buffer.byteLength(text),
+              // One request per connection: a kept-alive connection would keep reaching the helper
+              // process that answered it, which still reports the runtime it ran before an update.
+              connection: "close",
             });
             response.end(text);
           }),

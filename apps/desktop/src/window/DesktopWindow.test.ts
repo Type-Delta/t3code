@@ -923,7 +923,7 @@ describe("DesktopWindow", () => {
         const state = yield* DesktopState.DesktopState;
         yield* Ref.set(state.quitting, true);
 
-        yield* windows.showConnectingSplash;
+        yield* windows.showConnectingSplash();
         yield* windows.handleBackendReady(new URL("http://127.0.0.1:3773"));
         yield* windows.activate;
         yield* windows.dispatchMenuAction("open-settings");
@@ -968,7 +968,7 @@ describe("DesktopWindow", () => {
           const state = yield* DesktopState.DesktopState;
           const fiber = yield* (
             kind === "splash"
-              ? windows.showConnectingSplash
+              ? windows.showConnectingSplash()
               : windows.handleBackendReady(new URL("http://127.0.0.1:3773"))
           ).pipe(Effect.forkChild({ startImmediately: true }));
           yield* Deferred.await(creationStarted);
@@ -1592,7 +1592,7 @@ describe("DesktopWindow", () => {
         yield* Effect.gen(function* () {
           const desktopWindow = yield* DesktopWindow.DesktopWindow;
 
-          yield* desktopWindow.showConnectingSplash;
+          yield* desktopWindow.showConnectingSplash();
           assert.equal(yield* Ref.get(scenario.createCalls), 1);
 
           const readyExit = yield* Effect.exit(

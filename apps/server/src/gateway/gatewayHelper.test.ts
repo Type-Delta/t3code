@@ -254,7 +254,13 @@ describe("gateway helper", () => {
           },
         }),
       });
-      const before = decodeStatus((yield* helper.send("GET", "/v1/status")).text);
+      const first = yield* helper.send("GET", "/v1/status", undefined, {
+        ...HELPER_HEADERS,
+        connection: "keep-alive",
+      });
+      // A kept-alive connection would keep reaching a helper that predates an update.
+      assert.equal(first.headers.connection, "close");
+      const before = decodeStatus(first.text);
       assert.deepInclude(before, { user: "alice", enrolled: false, selfService: true });
       assert.isUndefined(before.backendPort);
 
