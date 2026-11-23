@@ -317,6 +317,7 @@ jobs:
       - name: Build unsigned desktop artifact with updates disabled
         shell: bash
         env:
+          T3CODE_DESKTOP_KEEP_STAGE: "true"
           T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
           T3CODE_DISABLE_AUTO_UPDATE: "true"
         run: |
@@ -331,6 +332,15 @@ jobs:
             --build-version "${{ needs.preflight.outputs.version }}" \
             --wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz \
             --verbose
+
+      - name: List the packaged Windows payload
+        if: failure()
+        shell: bash
+        run: |
+          for dir in "$RUNNER_TEMP"/../../*/AppData/Local/Temp/t3code-desktop-win-stage-*/app/dist/win-unpacked "$TEMP"/t3code-desktop-win-stage-*/app/dist/win-unpacked; do
+            [ -d "$dir" ] || continue
+            echo "== $dir"; (cd "$dir" && find . -type f | sort)
+          done
 
       - name: Build Windows CLI single-executable
         shell: bash
