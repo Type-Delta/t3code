@@ -1,19 +1,19 @@
-// @effect-diagnostics nodeBuiltinImport:off globalErrorInEffectFailure:off -- Node HTTP and archive plumbing are isolated adapters.
+// @effect-diagnostics nodeBuiltinImport:off -- inetd-style sockets need node:http; Effect has no incremental digest.
 import * as NodeCrypto from "node:crypto";
-import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";
-import * as NodePath from "node:path";
 
 import {
   GATEWAY_HELPER_HEADER,
   GATEWAY_HELPER_PORT,
+  GatewayHelperError,
   GatewayHelperJoinRequest,
   GatewayHelperStatus,
   GatewayHelperUpdateRequest,
   GatewayHelperUpdateState,
 } from "@t3tools/contracts";
 import {
+  CLI_RELEASE_CHECKSUMS_FILE,
   cliArchiveFileName,
   cliArchivePlatformKey,
   cliArchiveTarCommand,
@@ -21,452 +21,485 @@ import {
   parseChecksums,
 } from "@t3tools/shared/cliRelease";
 import { T3CODE_REPOSITORY_URL } from "@t3tools/shared/forkRepository";
-import * as Effect from "effect/Effect";
-import * as Clock from "effect/Clock";
-import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import packageJson from "../../package.json" with { type: "json" };
-import { GatewayUserName, type GatewayConfig as GatewayConfigType } from "./GatewayConfig.ts";
-import { enrollGatewayUser, readGatewayConfig, unenrollGatewayUser } from "./gatewayCliAdmin.ts";
-import { lockGatewayPath } from "./gatewayCliAdmin.ts";
+import { GatewayUserName, type GatewayConfig } from "./GatewayConfig.ts";
+import {
+  enrollGatewayUser,
+  GatewayCliError,
+  lockGatewayPath,
+  readGatewayConfig,
+  unenrollGatewayUser,
+} from "./gatewayCliAdmin.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import type { GatewayPlatform, GatewayUserRecord } from "./platform/GatewayPlatform.ts";
+import {
+  type ConnectionOwner,
+  GatewayPlatformError,
+  type GatewayPlatform,
+  type GatewayPlatformServices,
+  type GatewayUserRecord,
+} from "./platform/GatewayPlatform.ts";
 
-const MAX_BODY = 16 * 1024;
-const decodeUser = Schema.decodeUnknownOption(GatewayUserName);
-const stateSchema = Schema.decodeUnknownOption(GatewayHelperUpdateState);
+/** A helper answer other than 2xx; `message` is safe to send to the caller. */
+class GatewayHelperRequestError extends Schema.TaggedError<
+  GatewayHelperRequestError,
+  { readonly brand: unique symbol }
+>()("GatewayHelperRequestError", { status: Schema.Int, message: Schema.String }) {}
 
-const errorMessage = (cause: unknown): string => {
-  if (typeof cause === "object" && cause !== null && "message" in cause) {
-    const message = (cause as { readonly message?: unknown }).message;
-    if (typeof message === "string" && message.length > 0) return message;
-  }
-  return "Gateway helper request failed.";
-};
-
-export interface GatewayHelperOptions {
+interface GatewayHelperOptions {
   readonly platform: GatewayPlatform;
   readonly configPath: string;
+  /** Defaults to this binary's version. */
   readonly runtimeVersion?: string;
-  readonly run?: <A, E, R>(effect: Effect.Effect<A, E, R>) => Promise<A>;
-  readonly context?: unknown;
-  readonly architecture?: NodeJS.Architecture;
-  readonly fetch?: typeof globalThis.fetch;
 }
 
-type HelperRun = <A, E, R>(effect: Effect.Effect<A, E, R>) => Promise<A>;
+type GatewayHelperServices = GatewayPlatformServices | HttpClient.HttpClient;
 
-const json = (response: NodeHttp.ServerResponse, status: number, body: unknown) => {
-  const text = JSON.stringify(body);
-  response.writeHead(status, {
-    "content-type": "application/json",
-    "content-length": String(Buffer.byteLength(text)),
-  });
-  response.end(text);
-};
+interface HelperRequest {
+  readonly method: string | undefined;
+  readonly url: string | undefined;
+  readonly headers: NodeHttp.IncomingHttpHeaders;
+  readonly clientPort: number | undefined;
+  readonly body: Effect.Effect<string, GatewayHelperRequestError>;
+}
 
-const error = (response: NodeHttp.ServerResponse, status: number, message: string) =>
-  json(response, status, { error: message });
+const MAX_BODY_BYTES = 16 * 1024;
+const DOWNLOAD_TIMEOUT = "15 minutes";
+const ROUTES = new Set(["GET /v1/status", "POST /v1/join", "POST /v1/leave", "POST /v1/update"]);
 
-const readRequestBody = (request: NodeHttp.IncomingMessage): Promise<Buffer | undefined> =>
-  new Promise((resolve) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const onData = (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > MAX_BODY) {
-        request.off("data", onData);
-        resolve(undefined);
-      } else chunks.push(chunk);
-    };
-    request.on("data", onData);
-    request.once("end", () => resolve(Buffer.concat(chunks)));
-    request.once("close", () => resolve(undefined));
-  });
+const fail = (status: number, message: string) =>
+  Effect.fail(new GatewayHelperRequestError({ status, message }));
+const decodeUserName = Schema.decodeUnknownOption(GatewayUserName);
+const decodeJoin = Schema.decodeUnknownEffect(Schema.fromJsonString(GatewayHelperJoinRequest));
+const decodeLeave = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Struct({})));
+const decodeUpdate = Schema.decodeUnknownEffect(Schema.fromJsonString(GatewayHelperUpdateRequest));
+const updateStateJson = Schema.fromJsonString(GatewayHelperUpdateState);
+const decodeUpdateState = Schema.decodeUnknownOption(updateStateJson);
+const encodeUpdateState = Schema.encodeSync(updateStateJson);
+const encodeStatus = Schema.encodeSync(Schema.fromJsonString(GatewayHelperStatus));
+const encodeError = Schema.encodeSync(Schema.fromJsonString(GatewayHelperError));
+const isRequestError = Schema.is(GatewayHelperRequestError);
+const isCliError = Schema.is(GatewayCliError);
+const isPlatformError = Schema.is(GatewayPlatformError);
 
-const parseJson = <A>(schema: Schema.Schema<A>, body: Buffer): A | undefined => {
-  try {
-    return Option.getOrUndefined(
-      Schema.decodeUnknownOption(schema as never)(JSON.parse(body.toString("utf8"))),
-    );
-  } catch {
-    return undefined;
-  }
-};
+const isNewer = (version: string, than: string) =>
+  parseSemver(version) !== null &&
+  parseSemver(than) !== null &&
+  compareSemverVersions(version, than) > 0;
 
-const updateStatePath = (configPath: string) =>
-  NodePath.join(NodePath.dirname(configPath), ".t3code-gateway-helper", "update.json");
+// `gateway install` deletes this file once the new runtime is active.
+const updateStatePath = (path: Path.Path, configPath: string) =>
+  path.join(path.dirname(configPath), ".t3code-gateway-helper", "update.json");
 
-const readState = async (configPath: string) => {
-  try {
-    return Option.getOrUndefined(
-      stateSchema(JSON.parse(await NodeFSP.readFile(updateStatePath(configPath), "utf8"))),
-    );
-  } catch {
-    return undefined;
-  }
-};
+const readUpdateState = Effect.fn("GatewayHelper.readUpdateState")(function* (configPath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const contents = yield* fs.readFileString(updateStatePath(path, configPath)).pipe(Effect.option);
+  return Option.getOrUndefined(Option.flatMap(contents, decodeUpdateState));
+});
 
-const writeState = async (configPath: string, state: GatewayHelperUpdateState) => {
-  const file = updateStatePath(configPath);
-  await NodeFSP.mkdir(NodePath.dirname(file), { recursive: true, mode: 0o755 });
-  await NodeFSP.writeFile(file, `${JSON.stringify(state)}\n`, { mode: 0o644 });
-};
-
-const identity = async (
-  request: NodeHttp.IncomingMessage,
-  options: GatewayHelperOptions,
-  run: HelperRun,
-) => {
-  const clientPort = request.socket.remotePort;
-  if (clientPort === undefined) return undefined;
-  const owner = await run(options.platform.makeConnectionOwner).then((make) =>
-    make(clientPort, GATEWAY_HELPER_PORT),
+const writeUpdateState = Effect.fn("GatewayHelper.writeUpdateState")(function* (
+  configPath: string,
+  state: GatewayHelperUpdateState["state"],
+  version: string,
+  message: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const updatedAt = yield* Clock.currentTimeMillis;
+  yield* fs.writeFileString(
+    updateStatePath(path, configPath),
+    `${encodeUpdateState({ state, version, message, updatedAt })}\n`,
+    { mode: 0o644 },
   );
-  if (owner === undefined) return undefined;
-  const name = await run(options.platform.accountName(owner));
-  const user = Option.getOrUndefined(decodeUser(name.toLowerCase()));
-  if (user === undefined) return undefined;
-  const record = await run(options.platform.lookupUser(user));
-  return record.accountId === owner ? record : undefined;
-};
+});
 
-const currentStatus = async (
-  record: GatewayUserRecord,
-  config: GatewayConfigType,
+const callerUnknown = new GatewayHelperRequestError({
+  status: 403,
+  message: "Could not identify the connecting account.",
+});
+
+/** The account behind the connecting socket, as a gateway user whose OS record names the same account. */
+const identifyCaller = Effect.fn("GatewayHelper.identifyCaller")(
+  function* (
+    platform: GatewayPlatform,
+    connectionOwner: ConnectionOwner,
+    clientPort: number | undefined,
+  ) {
+    if (clientPort === undefined) return yield* callerUnknown;
+    const accountId = yield* Effect.promise(() => connectionOwner(clientPort, GATEWAY_HELPER_PORT));
+    if (accountId === undefined) return yield* callerUnknown;
+    const name = decodeUserName((yield* platform.accountName(accountId)).toLowerCase());
+    if (Option.isNone(name)) return yield* callerUnknown;
+    const record = yield* platform.lookupUser(name.value);
+    if (record.accountId !== accountId) return yield* callerUnknown;
+    return record;
+  },
+  Effect.mapError(() => callerUnknown),
+);
+
+const helperStatus = Effect.fn("GatewayHelper.status")(function* (
   options: GatewayHelperOptions,
-) => {
-  const update = await readState(options.configPath);
+  caller: GatewayUserRecord,
+) {
+  const config = yield* readGatewayConfig(options.configPath);
+  const update = yield* readUpdateState(options.configPath);
   const runtimeVersion = options.runtimeVersion ?? packageJson.version;
-  const visibleUpdate =
-    update !== undefined &&
-    parseSemver(runtimeVersion) !== null &&
-    parseSemver(update.version) !== null &&
-    compareVersion(runtimeVersion, update.version) < 0
-      ? update
-      : undefined;
+  const entry = Object.hasOwn(config.users, caller.name) ? config.users[caller.name] : undefined;
+  const backendPort = entry?.uid === caller.accountId ? entry.port : undefined;
   return {
-    version: 1 as const,
+    version: 1,
     runtimeVersion,
     selfService: config.selfService === true,
     joinNeedsPassword: options.platform.joinNeedsPassword,
-    user: record.name,
-    enrolled:
-      Object.hasOwn(config.users, record.name) &&
-      config.users[record.name]!.uid === record.accountId,
-    ...(Object.hasOwn(config.users, record.name)
-      ? { backendPort: config.users[record.name]!.port }
-      : {}),
-    ...(visibleUpdate === undefined ? {} : { update: visibleUpdate }),
+    user: caller.name,
+    enrolled: backendPort !== undefined,
+    ...(backendPort === undefined ? {} : { backendPort }),
+    ...(update !== undefined && isNewer(update.version, runtimeVersion) ? { update } : {}),
   } satisfies GatewayHelperStatus;
-};
+});
 
-const compareVersion = (left: string, right: string) => compareSemverVersions(left, right);
+const downloadFailed = () =>
+  new GatewayHelperRequestError({ status: 502, message: "Could not download the update." });
 
-const extract = Effect.fn("GatewayHelper.extract")(function* (
-  archive: string,
-  destination: string,
+const download = Effect.fn("GatewayHelper.download")(function* (url: string) {
+  const http = yield* HttpClient.HttpClient;
+  return yield* http
+    .execute(HttpClientRequest.get(url))
+    .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk));
+});
+
+/** Downloads, verifies and extracts release `version` into `staging`; returns its executable. */
+const stageRelease = Effect.fn("GatewayHelper.stageRelease")(function* (
   platform: GatewayPlatform,
+  config: GatewayConfig,
+  version: string,
+  staging: string,
 ) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const runner = yield* ProcessRunner.ProcessRunner;
-  const result = yield* runner.run({
-    command: cliArchiveTarCommand(platform.name, process.env),
-    args:
-      platform.name === "win32"
-        ? ["-xf", archive, "-C", destination, "--strip-components=1"]
-        : [
-            "-xzf",
-            archive,
-            "-C",
-            destination,
-            "--strip-components=1",
-            "--no-same-owner",
-            "--no-same-permissions",
-          ],
-    maxOutputBytes: 64 * 1024,
-  });
-  if (result.code !== 0) {
-    return yield* Effect.die(new Error("archive extraction failed"));
+  const platformKey = cliArchivePlatformKey(platform.name, yield* HostProcess.Architecture);
+  if (platformKey === undefined) {
+    return yield* fail(400, "No release archive exists for this platform.");
+  }
+  const baseUrl = config.updates?.baseUrl ?? `${T3CODE_REPOSITORY_URL}/releases/download`;
+  const archiveName = cliArchiveFileName(version, platformKey);
+  const archive = path.join(staging, archiveName);
+
+  const checksums = yield* download(
+    cliReleaseAssetUrl(version, CLI_RELEASE_CHECKSUMS_FILE, baseUrl),
+  ).pipe(
+    Effect.flatMap((response) => response.text),
+    Effect.mapError(downloadFailed),
+  );
+  const hash = NodeCrypto.createHash("sha256");
+  yield* download(cliReleaseAssetUrl(version, archiveName, baseUrl)).pipe(
+    Effect.flatMap((response) =>
+      response.stream.pipe(
+        Stream.tap((chunk) => Effect.sync(() => hash.update(chunk))),
+        Stream.run(fs.sink(archive, { flag: "wx" })),
+      ),
+    ),
+    Effect.timeout(DOWNLOAD_TIMEOUT),
+    Effect.mapError(downloadFailed),
+  );
+  if (parseChecksums(checksums).get(archiveName) !== hash.digest("hex")) {
+    return yield* fail(502, "The update checksum did not match.");
+  }
+
+  const result = yield* runner
+    .run({
+      command: cliArchiveTarCommand(platform.name, yield* HostProcess.Environment),
+      args:
+        platform.name === "win32"
+          ? ["-xf", archive, "-C", staging, "--strip-components=1"]
+          : [
+              "-xzf",
+              archive,
+              "-C",
+              staging,
+              "--strip-components=1",
+              "--no-same-owner",
+              "--no-same-permissions",
+            ],
+      timeout: "5 minutes",
+      maxOutputBytes: 64 * 1024,
+      outputMode: "truncate",
+    })
+    .pipe(Effect.option);
+  if (Option.isNone(result) || result.value.code !== 0) {
+    return yield* fail(502, "Could not extract the update.");
+  }
+  yield* fs.remove(archive);
+  const executable = path.join(staging, platform.layout.executableName);
+  if (!(yield* fs.exists(executable))) {
+    return yield* fail(502, "The update archive did not contain the gateway executable.");
+  }
+  return executable;
+});
+
+const STALE_UPDATE_MS = 30 * 60 * 1000;
+
+/** Claims the single update slot, or fails while another update to a newer runtime is running. */
+const claimUpdate = Effect.fn("GatewayHelper.claimUpdate")(function* (
+  options: GatewayHelperOptions,
+  version: string,
+  runtimeVersion: string,
+) {
+  const path = yield* Path.Path;
+  const statePath = updateStatePath(path, options.configPath);
+  yield* options.platform.secureDirectory(path.dirname(statePath), "admin");
+  yield* lockGatewayPath(statePath);
+  const previous = yield* readUpdateState(options.configPath);
+  const now = yield* Clock.currentTimeMillis;
+  // A detached install that died never clears its state; stop it blocking updates forever.
+  if (
+    previous?.state === "running" &&
+    isNewer(previous.version, runtimeVersion) &&
+    now - previous.updatedAt < STALE_UPDATE_MS
+  ) {
+    return yield* fail(409, `An update to ${previous.version} is already in progress.`);
+  }
+  yield* writeUpdateState(options.configPath, "running", version, "Downloading update");
+}, Effect.scoped);
+
+const updateRuntime = Effect.fn("GatewayHelper.update")(function* (
+  options: GatewayHelperOptions,
+  config: GatewayConfig,
+  version: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const { platform } = options;
+  const runtimeVersion = options.runtimeVersion ?? packageJson.version;
+  if (parseSemver(version) === null) {
+    return yield* fail(400, "Update version must be a semantic version.");
+  }
+  const order = compareSemverVersions(version, runtimeVersion);
+  if (order === 0) return 200;
+  if (order < 0) {
+    return yield* fail(400, `The shared runtime ${runtimeVersion} is newer than ${version}.`);
+  }
+  yield* claimUpdate(options, version, runtimeVersion);
+  yield* Effect.gen(function* () {
+    const staging = yield* fs.makeTempDirectory({
+      directory: platform.layout.installRoot,
+      prefix: ".helper-staging-",
+    });
+    // A started installer owns the staging directory; `gateway install` prunes it.
+    yield* Effect.gen(function* () {
+      yield* platform.secureDirectory(staging, "admin");
+      const executable = yield* stageRelease(platform, config, version, staging);
+      yield* writeUpdateState(options.configPath, "running", version, "Installing update");
+      yield* platform.services.runDetached("update", [executable, "gateway", "install"]).pipe(
+        Effect.mapError(
+          (error) =>
+            new GatewayHelperRequestError({
+              status: 500,
+              message: `Could not start the update: ${error.message}`,
+            }),
+        ),
+      );
+    }).pipe(
+      Effect.onError(() =>
+        fs.remove(staging, { recursive: true, force: true }).pipe(Effect.ignore),
+      ),
+    );
+  }).pipe(
+    Effect.onError((cause) => {
+      const error = Cause.squash(cause);
+      const message = isRequestError(error) ? error.message : "The update failed.";
+      return writeUpdateState(options.configPath, "failed", version, message).pipe(Effect.ignore);
+    }),
+  );
+  return 202;
+});
+
+/** The answer for any failure. Known gateway errors keep their message; others are logged. */
+const failureResponse = Effect.fn("GatewayHelper.failureResponse")(function* (
+  cause: Cause.Cause<unknown>,
+  secret?: string,
+) {
+  const scrub = (text: string) =>
+    secret === undefined || secret === "" ? text : text.replaceAll(secret, "[redacted]");
+  const error = Cause.squash(cause);
+  if (isRequestError(error)) return error;
+  if (isCliError(error) || isPlatformError(error)) {
+    return new GatewayHelperRequestError({ status: 400, message: scrub(error.message) });
+  }
+  yield* Effect.logError(`Gateway helper request failed: ${scrub(Cause.pretty(cause))}`);
+  return new GatewayHelperRequestError({ status: 500, message: "Gateway helper request failed." });
+});
+
+const handleRequest = Effect.fn("GatewayHelper.handle")(function* (
+  options: GatewayHelperOptions,
+  connectionOwner: ConnectionOwner,
+  request: HelperRequest,
+) {
+  const { platform } = options;
+  if (request.method === "OPTIONS") return yield* fail(404, "Not found.");
+  if (
+    request.headers[GATEWAY_HELPER_HEADER] !== "1" ||
+    request.headers.host !== `127.0.0.1:${GATEWAY_HELPER_PORT}`
+  ) {
+    return yield* fail(403, "Gateway helper access denied.");
+  }
+  if (request.method !== "GET" && request.method !== "POST") {
+    return yield* fail(405, "Method not allowed.");
+  }
+  if (!ROUTES.has(`${request.method} ${request.url}`)) return yield* fail(404, "Not found.");
+  if (
+    request.method === "POST" &&
+    request.headers["content-type"]?.split(";", 1)[0]?.trim() !== "application/json"
+  ) {
+    return yield* fail(415, "Content-Type must be application/json.");
+  }
+  const caller = yield* identifyCaller(platform, connectionOwner, request.clientPort);
+  const answer = (status: number) =>
+    Effect.map(helperStatus(options, caller), (body) => ({ status, text: encodeStatus(body) }));
+  if (request.method === "GET") return yield* answer(200);
+
+  const config = yield* readGatewayConfig(options.configPath);
+  if (config.selfService !== true) {
+    return yield* fail(403, "Self-service is disabled for this gateway.");
+  }
+  const body = yield* request.body;
+  switch (request.url) {
+    case "/v1/join": {
+      const { password } = yield* decodeJoin(body).pipe(
+        Effect.mapError(
+          () => new GatewayHelperRequestError({ status: 400, message: "Invalid join request." }),
+        ),
+      );
+      yield* enrollGatewayUser(
+        platform,
+        caller.name,
+        undefined,
+        password === undefined ? undefined : { password },
+      ).pipe(Effect.catchCause((cause) => Effect.flip(failureResponse(cause, password))));
+      return yield* answer(200);
+    }
+    case "/v1/leave": {
+      yield* decodeLeave(body).pipe(
+        Effect.mapError(
+          () => new GatewayHelperRequestError({ status: 400, message: "Invalid leave request." }),
+        ),
+      );
+      yield* unenrollGatewayUser(platform, caller.name);
+      return yield* answer(200);
+    }
+    default: {
+      const { version } = yield* decodeUpdate(body).pipe(
+        Effect.mapError(
+          () => new GatewayHelperRequestError({ status: 400, message: "Invalid update request." }),
+        ),
+      );
+      return yield* answer(yield* updateRuntime(options, config, version));
+    }
   }
 });
 
-const update = async (
-  config: GatewayConfigType,
-  version: string,
-  options: GatewayHelperOptions,
-  run: HelperRun,
-) => {
-  const runtimeVersion = options.runtimeVersion ?? packageJson.version;
-  if (parseSemver(version) === null) {
-    return { status: 400 as const, message: "Update version must be a semantic version." };
-  }
-  if (parseSemver(runtimeVersion) === null) {
-    return { status: 500 as const, message: "The running runtime has an invalid version." };
-  }
-  if (compareVersion(version, runtimeVersion) <= 0) return { status: 200 as const, config };
-  const previous = await readState(options.configPath);
-  if (
-    previous?.state === "running" &&
-    parseSemver(previous.version) !== null &&
-    compareVersion(runtimeVersion, previous.version) < 0
-  ) {
-    return { status: 409 as const, message: "An update is already in progress." };
-  }
-  const platformKey = cliArchivePlatformKey(
-    platformNodeName(options.platform),
-    options.architecture ?? "x64",
-  );
-  if (platformKey === undefined)
-    return { status: 400 as const, message: "No release archive exists for this platform." };
-  const baseUrl = config.updates?.baseUrl ?? `${T3CODE_REPOSITORY_URL}/releases/download`;
-  const archiveName = cliArchiveFileName(version, platformKey);
-  const fetcher = options.fetch ?? globalThis.fetch;
-  const staging = await NodeFSP.mkdtemp(
-    NodePath.join(options.platform.layout.installRoot, ".helper-staging-"),
-  );
-  try {
-    await run(options.platform.secureDirectory(staging, "admin"));
-    let archiveResponse: Response;
-    let sumsResponse: Response;
-    try {
-      archiveResponse = await fetcher(cliReleaseAssetUrl(version, archiveName, baseUrl));
-      sumsResponse = await fetcher(cliReleaseAssetUrl(version, "SHA256SUMS", baseUrl));
-    } catch {
-      return { status: 502 as const, message: "Could not download the update." };
-    }
-    if (!archiveResponse.ok || !sumsResponse.ok) {
-      return { status: 502 as const, message: "Could not download the update." };
-    }
-    const archive = Buffer.from(await archiveResponse.arrayBuffer());
-    const expected = parseChecksums(await sumsResponse.text()).get(archiveName);
-    const actual = NodeCrypto.createHash("sha256").update(archive).digest("hex");
-    if (expected === undefined || expected !== actual) {
-      return { status: 502 as const, message: "The update checksum did not match." };
-    }
-    const archivePath = NodePath.join(staging, archiveName);
-    await NodeFSP.writeFile(archivePath, archive, { mode: 0o644 });
-    await run(extract(archivePath, staging, options.platform));
-    const executable = NodePath.join(staging, options.platform.layout.executableName);
-    if (
-      !(await NodeFSP.stat(executable).then(
-        () => true,
-        () => false,
-      ))
-    ) {
-      return {
-        status: 502 as const,
-        message: "The update archive did not contain the gateway executable.",
-      };
-    }
-    await writeState(options.configPath, {
-      state: "running",
-      version,
-      message: "Installing update",
-      updatedAt: await run(Clock.currentTimeMillis),
+// Node HTTP boundary: everything below only moves bytes between sockets and handleRequest.
+
+const readBody = (request: NodeHttp.IncomingMessage) =>
+  Effect.callback<string, GatewayHelperRequestError>((resume) => {
+    const chunks: Array<Buffer> = [];
+    let size = 0;
+    // Past the limit, keep draining so the connection can still carry the 413.
+    request.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) resume(fail(413, "Request body is too large."));
+      else chunks.push(chunk);
     });
-    try {
-      await run(
-        options.platform.services.runDetached("update", [executable, "gateway", "install"]),
-      );
-    } catch (cause) {
-      const message = errorMessage(cause);
-      await writeState(options.configPath, {
-        state: "failed",
-        version,
-        message,
-        updatedAt: await run(Clock.currentTimeMillis),
-      });
-      return { status: 500 as const, message };
-    }
-    return { status: 202 as const, config };
-  } finally {
-    // The detached installer owns a successful staging directory. Every failed path removes it.
-    // A running state is the only path where the installer may still need the files.
-    const state = await readState(options.configPath);
-    if (state?.state !== "running" || state.version !== version) {
-      await NodeFSP.rm(staging, { recursive: true, force: true }).catch(() => undefined);
-    }
-  }
-};
+    request.once("end", () => resume(Effect.succeed(Buffer.concat(chunks).toString("utf8"))));
+    request.once("close", () => resume(fail(400, "The request body was not completed.")));
+  });
 
-const platformNodeName = (platform: GatewayPlatform): NodeJS.Platform => platform.name;
-
-export const makeGatewayHelperHandler = (options: GatewayHelperOptions) => {
-  const run: HelperRun =
-    options.run ?? ((effect) => Effect.runPromiseWith(options.context as never)(effect));
-  return async (request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) => {
-    let requestPassword: string | undefined;
-    try {
-      if (
-        request.headers[GATEWAY_HELPER_HEADER] !== "1" ||
-        request.headers.host !== `127.0.0.1:${GATEWAY_HELPER_PORT}`
-      ) {
-        error(response, 403, "Gateway helper access denied.");
-        return;
-      }
-      if (request.method === "OPTIONS") {
-        error(response, 404, "Not found.");
-        return;
-      }
-      if (request.method !== "GET" && request.method !== "POST") {
-        error(response, 405, "Method not allowed.");
-        return;
-      }
-      if (
-        request.method === "POST" &&
-        request.headers["content-type"]?.split(";", 1)[0] !== "application/json"
-      ) {
-        error(response, 415, "Content-Type must be application/json.");
-        return;
-      }
-      const record = await identity(request, options, run).catch(() => undefined);
-      if (record === undefined) {
-        error(response, 403, "Could not identify the connecting account.");
-        return;
-      }
-      const config = await run(readGatewayConfig(options.configPath));
-      if (request.method === "GET" && request.url === "/v1/status") {
-        json(response, 200, await currentStatus(record, config, options));
-        return;
-      }
-      if (
-        config.selfService !== true &&
-        ["/v1/join", "/v1/leave", "/v1/update"].includes(request.url ?? "")
-      ) {
-        error(response, 403, "Self-service is disabled for this gateway.");
-        return;
-      }
-      if (request.method !== "POST") {
-        error(response, 404, "Not found.");
-        return;
-      }
-      const body = await readRequestBody(request);
-      if (body === undefined) {
-        error(response, 413, "Request body is too large.");
-        return;
-      }
-      if (request.url === "/v1/join") {
-        const input = parseJson(GatewayHelperJoinRequest, body);
-        if (input === undefined) return error(response, 400, "Invalid join request.");
-        const password = (input as typeof GatewayHelperJoinRequest.Type).password;
-        requestPassword = password;
-        await run(
-          enrollGatewayUser(
-            options.platform,
-            record.name,
-            undefined,
-            password === undefined ? undefined : { password },
-          ),
-        );
-        const updated = await run(readGatewayConfig(options.configPath));
-        json(response, 200, await currentStatus(record, updated, options));
-        return;
-      }
-      if (request.url === "/v1/leave") {
-        if (parseJson(Schema.Struct({}), body) === undefined)
-          return error(response, 400, "Invalid leave request.");
-        await run(unenrollGatewayUser(options.platform, record.name));
-        const updated = await run(readGatewayConfig(options.configPath));
-        json(response, 200, await currentStatus(record, updated, options));
-        return;
-      }
-      if (request.url === "/v1/update") {
-        const input = parseJson(GatewayHelperUpdateRequest, body);
-        if (input === undefined) return error(response, 400, "Invalid update request.");
-        const result = await run(
-          Effect.scoped(
-            lockGatewayPath(options.configPath).pipe(
-              Effect.flatMap(() =>
-                Effect.promise(() =>
-                  update(
-                    config,
-                    (input as typeof GatewayHelperUpdateRequest.Type).version,
-                    options,
-                    run,
-                  ),
-                ),
-              ),
-            ),
-          ),
-        );
-        if (result.message !== undefined) return error(response, result.status, result.message);
-        const updated = await run(readGatewayConfig(options.configPath));
-        json(response, result.status, await currentStatus(record, updated, options));
-        return;
-      }
-      error(response, 404, "Not found.");
-    } catch (cause) {
-      const status =
-        typeof cause === "object" &&
-        cause !== null &&
-        "_tag" in cause &&
-        (cause as { readonly _tag?: unknown })._tag === "GatewayCliError"
-          ? 400
-          : 500;
-      const message = errorMessage(cause);
-      error(
-        response,
-        status,
-        requestPassword === undefined ? message : message.replaceAll(requestPassword, "[redacted]"),
-      );
-    }
-  };
-};
-
-export const serveGatewayHelper = Effect.fn("GatewayHelper.serve")(function* (
+const makeHandler = Effect.fn("GatewayHelper.makeHandler")(function* (
   options: GatewayHelperOptions,
-  socket?: NodeNet.Socket,
 ) {
-  const handler = makeGatewayHelperHandler(options);
-  if (socket !== undefined) {
-    const server = NodeHttp.createServer(handler);
-    yield* Effect.acquireRelease(
-      Effect.promise(
-        () =>
-          new Promise<void>((resolve) => {
-            server.once("close", resolve);
-            server.emit("connection", socket);
+  const connectionOwner = yield* options.platform.makeConnectionOwner;
+  const runFork = Effect.runForkWith(yield* Effect.context<GatewayHelperServices>());
+  return (request: NodeHttp.IncomingMessage, response: NodeHttp.ServerResponse) => {
+    runFork(
+      handleRequest(options, connectionOwner, {
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
+        clientPort: request.socket.remotePort,
+        body: readBody(request),
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.map(failureResponse(cause), ({ status, message }) => ({
+            status,
+            text: encodeError({ error: message }),
+          })),
+        ),
+        Effect.flatMap(({ status, text }) =>
+          Effect.sync(() => {
+            response.writeHead(status, {
+              "content-type": "application/json",
+              "content-length": Buffer.byteLength(text),
+            });
+            response.end(text);
           }),
+        ),
       ),
-      () => Effect.sync(() => server.close()),
     );
-    return;
-  }
-  const server = NodeHttp.createServer(handler);
-  yield* Effect.acquireRelease(
-    Effect.promise(
-      () =>
-        new Promise<void>((resolve, reject) => {
-          server.once("error", reject);
-          server.listen(GATEWAY_HELPER_PORT, "127.0.0.1", () => resolve());
-        }),
-    ),
+  };
+});
+
+/** Serves helper requests on 127.0.0.1:`port` for the scope's lifetime; returns the bound port. */
+export const listenGatewayHelper = Effect.fn("GatewayHelper.listen")(function* (
+  options: GatewayHelperOptions,
+  port = GATEWAY_HELPER_PORT,
+) {
+  const server = NodeHttp.createServer(yield* makeHandler(options));
+  return yield* Effect.acquireRelease(
+    Effect.callback<number, GatewayPlatformError>((resume) => {
+      const listenFailed = (reason: string) =>
+        resume(
+          Effect.fail(
+            new GatewayPlatformError({
+              message: `Could not listen on 127.0.0.1:${port}: ${reason}`,
+            }),
+          ),
+        );
+      server.once("error", (error) => listenFailed(error.message));
+      server.listen(port, "127.0.0.1", () => {
+        const address = server.address();
+        if (typeof address === "object" && address !== null) resume(Effect.succeed(address.port));
+        else listenFailed("no address");
+      });
+    }),
     () =>
       Effect.callback<void>((resume) => {
         server.close(() => resume(Effect.void));
+        server.closeAllConnections();
       }),
   );
 });
 
+/** Serves the one connection an inetd-style service passed as fd 0, until it closes. */
 export const gatewayHelperFromStdin = Effect.fn("GatewayHelper.stdin")(function* (
   options: GatewayHelperOptions,
 ) {
+  const server = NodeHttp.createServer(yield* makeHandler(options));
   const socket = new NodeNet.Socket({ fd: 0 });
-  const server = NodeHttp.createServer(makeGatewayHelperHandler(options));
-  yield* Effect.acquireRelease(
-    Effect.promise(
-      () =>
-        new Promise<void>((resolve) => {
-          socket.once("close", resolve);
-          server.emit("connection", socket);
-        }),
-    ),
-    () =>
-      Effect.sync(() => {
-        server.close();
-        socket.destroy();
-      }),
-  );
+  yield* Effect.callback<void>((resume) => {
+    socket.once("close", () => resume(Effect.void));
+    server.emit("connection", socket);
+    return Effect.sync(() => socket.destroy());
+  });
 });

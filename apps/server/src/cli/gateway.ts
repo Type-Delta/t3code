@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as References from "effect/References";
 import { Argument, Command, Flag } from "effect/cli";
+import { FetchHttpClient } from "effect/http";
 
 import packageJson from "../../package.json" with { type: "json" };
 import { GatewayUserName } from "../gateway/GatewayConfig.ts";
@@ -78,12 +79,8 @@ const gatewayHelper = Command.make("helper").pipe(
           message: "The gateway helper is hosted by the gateway process on this platform.",
         });
       }
-      yield* gatewayHelperFromStdin({
-        platform,
-        configPath: paths.configPath,
-        context: yield* Effect.context<never>(),
-      });
-    }).pipe(Effect.provide(ProcessRunner.layer)),
+      yield* gatewayHelperFromStdin({ platform, configPath: paths.configPath });
+    }).pipe(Effect.provide([ProcessRunner.layer, FetchHttpClient.layer])),
   ),
 );
 
