@@ -1,4 +1,3 @@
-import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1091,7 +1090,8 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "darwin")("on macOS", ()
             Effect.provide(ProcessRunner.layer),
             Effect.ensuring(Effect.sync(() => process.umask(previous))),
           );
-        assert.equal(NodeFS.lstatSync(link).mode & 0o777, 0o755);
+        const fs = yield* FileSystem.FileSystem;
+        assert.equal((yield* fs.lstat(link)).mode & 0o777, 0o755);
       }),
     );
   });
