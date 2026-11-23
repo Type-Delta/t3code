@@ -312,8 +312,30 @@ jobs:
         shell: bash
         run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-pc-windows-msvc
 
-      # Build the desktop first: the CLI single-executable build leaves files the Windows
-      # payload validation would count.
+      - name: Build Windows CLI single-executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          node apps/server/scripts/cli.ts build
+          node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build and smoke-test Windows CLI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          resource_monitor_dir="$RUNNER_TEMP/cli-resource-monitor/win32-x64"
+          mkdir -p "$resource_monitor_dir"
+          cp native/resource-monitor/target/x86_64-pc-windows-msvc/release/t3-resource-monitor.exe "$resource_monitor_dir/"
+          node scripts/build-cli-archive.ts \
+            --platform win \
+            --arch x64 \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --resource-monitor-dir "$resource_monitor_dir" \
+            --output-dir release-cli
+          node scripts/smoke-cli-archive.ts \
+            --archive release-cli/* \
+            --expect-version "${{ needs.preflight.outputs.version }}"
+
       - name: Build unsigned desktop artifact with updates disabled
         shell: bash
         env:
@@ -342,41 +364,20 @@ jobs:
             echo "== $dir"; (cd "$dir" && find . -type f | sort)
           done
 
-      - name: Build Windows CLI single-executable
-        shell: bash
-        run: |
-          set -euo pipefail
-          node apps/server/scripts/cli.ts build
-          node apps/server/scripts/cli.ts build-exe --verbose
-
-      - name: Build and smoke-test Windows CLI archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          resource_monitor_dir="$RUNNER_TEMP/cli-resource-monitor/win32-x64"
-          mkdir -p "$resource_monitor_dir"
-          cp native/resource-monitor/target/x86_64-pc-windows-msvc/release/t3-resource-monitor.exe "$resource_monitor_dir/"
-          node scripts/build-cli-archive.ts \
-            --platform win \
-            --arch x64 \
-            --version "${{ needs.preflight.outputs.version }}" \
-            --resource-monitor-dir "$resource_monitor_dir" \
-            --output-dir release-cli
-          node scripts/smoke-cli-archive.ts \
-            --archive release-cli/* \
-            --expect-version "${{ needs.preflight.outputs.version }}"
-
+      # Keep the CLI archive even when the desktop build fails; the collect job still needs both.
       - name: Stage Windows transfer files
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p e2e-assets
-          cp "release/T3-Code-${VERSION}-x64.exe" e2e-assets/
           cp "release-cli/t3-${VERSION}-win32-x64.zip" e2e-assets/
+          if [ -f "release/T3-Code-${VERSION}-x64.exe" ]; then cp "release/T3-Code-${VERSION}-x64.exe" e2e-assets/; fi
 
       - name: Upload Windows transfer files
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: fork-e2e-transfer-windows-x64
@@ -429,14 +430,14 @@ jobs:
 
           mapfile -t feeds < <(find e2e-assets -type f -iname '*.yml' -print)
           if (( ${#feeds[@]} > 0 )); then
-            printf '%s\\n' "${feeds[@]}"
+            printf '%s\n' "${feeds[@]}"
             echo "::error::E2E artifacts contain an update feed."
             exit 1
           fi
 
-          mapfile -t files < <(find e2e-assets -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\\n' | sort)
+          mapfile -t files < <(find e2e-assets -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
           if (( ${#files[@]} != ${#expected[@]} )); then
-            printf 'Unexpected files:\\n%s\\n' "${files[*]}"
+            printf 'Unexpected files:\n%s\n' "${files[*]}"
             echo "::error::The E2E artifact set contains unexpected files."
             exit 1
           fi

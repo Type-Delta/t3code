@@ -1086,8 +1086,9 @@ export function resolveWindowsServerAsarIgnoreGlobs(arch: typeof BuildArch.Type)
   ];
 }
 
-// Fork: native Windows builds add the prepared server compile cache that Linux cross-builds skip.
-export const WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT = 96;
+// Fork: native Windows builds add the prepared server compile cache that Linux cross-builds skip,
+// one file per server chunk loaded at startup (31 on dev, 36 with the gateway helper).
+export const WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT = 112;
 export const WINDOWS_SERVER_RESOURCE_SOURCE_DIR = "apps/desktop/prod-resources/windows-server";
 export const WINDOWS_SERVER_EXTRA_RESOURCES = [
   {
