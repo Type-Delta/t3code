@@ -38,12 +38,14 @@ function SharedRuntimeDialog({
   needsPassword,
   cancelLabel,
   onCancel,
+  onConfirm,
 }: {
   readonly mode: "join" | "leave";
   readonly open: boolean;
   readonly needsPassword: boolean;
   readonly cancelLabel: string;
   readonly onCancel: () => void;
+  readonly onConfirm?: () => void;
 }) {
   const passwordId = useId();
   const [password, setPassword] = useState("");
@@ -55,6 +57,7 @@ function SharedRuntimeDialog({
   const confirm = async () => {
     const bridge = window.desktopBridge;
     if (!bridge) return;
+    onConfirm?.();
     setPending(true);
     setError(null);
     // Success relaunches the app, so only a failure comes back here.
@@ -136,6 +139,7 @@ function SharedRuntimeDialog({
 export function SharedRuntimeSetting() {
   const state = useSharedRuntimeState();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [, setPromptDismissed] = useLocalStorage(PROMPT_DISMISSED_KEY, false, Schema.Boolean);
   if (!state) return null;
   const mode = state.enrolled ? "leave" : "join";
   const status = state.attached ? "In use" : state.enrolled ? "Joined" : "Not joined";
@@ -163,6 +167,8 @@ export function SharedRuntimeSetting() {
         needsPassword={state.joinNeedsPassword}
         cancelLabel="Cancel"
         onCancel={() => setDialogOpen(false)}
+        // Leaving is an answer: the relaunched app should not offer joining again.
+        {...(mode === "leave" ? { onConfirm: () => setPromptDismissed(true) } : {})}
       />
     </>
   );

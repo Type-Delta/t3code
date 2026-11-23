@@ -203,8 +203,8 @@ if ($gatewayInstall) {
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $rules = @(
       (New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($identity.User, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
-      (New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @("S-1-5-32-544", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
-      (New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @("S-1-5-18", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"))
+      (New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @((New-Object System.Security.Principal.SecurityIdentifier "S-1-5-32-544"), "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+      (New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @((New-Object System.Security.Principal.SecurityIdentifier "S-1-5-18"), "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"))
     )
     foreach ($rule in $rules) { $acl.AddAccessRule($rule) }
     $acl.SetOwner($identity.User)

@@ -29,7 +29,9 @@ import * as DesktopHomeOwner from "./DesktopHomeOwner.ts";
 // gateway-managed backend instead of starting its own.
 
 const HELPER_URL = `http://127.0.0.1:${GATEWAY_HELPER_PORT}`;
-const STATUS_TIMEOUT = Duration.millis(1_500);
+// Without a gateway the connection is refused at once; on Windows the helper names the caller with
+// netstat and tasklist, which took over 1.5 s while the app was starting.
+const STATUS_TIMEOUT = Duration.seconds(10);
 // Joining registers OS services (on Windows a scheduled task), which can take a while.
 const CHANGE_TIMEOUT = Duration.seconds(60);
 const UPDATE_TIMEOUT = Duration.minutes(5);

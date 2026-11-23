@@ -117,7 +117,7 @@ describe("DesktopGateway", () => {
         Effect.provide(layerGateway({ respond: () => Effect.never })),
         Effect.forkChild,
       );
-      yield* TestClock.adjust(Duration.millis(1_500));
+      yield* TestClock.adjust(Duration.seconds(10));
       assert.isTrue(Option.isNone(yield* Fiber.join(fiber)));
     }).pipe(Effect.provide(TestClock.layer())),
   );
