@@ -253,6 +253,11 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
       );
     }
     if (script.includes("NTAccount")) {
+      if (script.includes("$s.Translate")) {
+        const sid = unquote(new RegExp(`SecurityIdentifier\\(${literal}`).exec(script)?.[1] ?? "");
+        const name = state.accountNames.get(sid)?.split("\\").at(-1) ?? "";
+        return output(JSON.stringify(name));
+      }
       const name = unquote(new RegExp(`\\$n=${literal}`).exec(script)![1]!);
       return output(JSON.stringify(state.accounts.get(name) ?? { sid: null, profile: null }));
     }
@@ -594,6 +599,19 @@ describe("win32 parsers", () => {
     ]) {
       assert.include(xml, fragment);
     }
+    const detached = renderTaskXml({
+      userId: "S-1-5-18",
+      logonType: "ServiceAccount",
+      runLevel: "HighestAvailable",
+      command: "C:\\T3\\t3.exe",
+      arguments: "gateway install",
+      workingDirectory: "C:\\T3",
+      oneShot: true,
+      executionTimeLimit: "PT30M",
+    });
+    assert.include(detached, "<Triggers />");
+    assert.include(detached, "<ExecutionTimeLimit>PT30M</ExecutionTimeLimit>");
+    assert.notInclude(detached, "<BootTrigger>");
   });
 });
 
@@ -650,6 +668,14 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
         assert.isTrue(Result.isFailure(result) && result.failure.message.includes(message), name);
       }
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("resolves a SID to its local account name", () =>
+    Effect.gen(function* () {
+      const { platform, provide } = yield* fixture();
+      assert.equal(yield* provide(platform.accountName(alice)), "alice");
+      assert.equal(yield* provide(platform.accountName(alice)), "alice");
+    }),
   );
 
   it.effect("checks admin ownership through SIDs, letting users only add to ancestors", () =>
@@ -1099,6 +1125,13 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       assert.isFalse(state.tasks.has("Backend-alice"));
       yield* provide(platform.services.disableUser("alice"));
 
+      const bobUser = { name: "bob", accountId: bob, home: at("Users", "bob") };
+      yield* provide(
+        platform.services.enableUser(bobUser, executable, { password: "passed-directly" }),
+      );
+      assert.equal(state.prompts.length, 2);
+      assert.equal(state.stdins.at(-1), "passed-directly\n");
+
       state.tasks.set("Backend-bob", { description: null, xml: "<Task/>", running: true });
       const warnings: Array<string> = [];
       yield* provide(platform.services.disableUser("bob")).pipe(capture("warn", warnings));
@@ -1110,6 +1143,21 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       state.failScripts = ["Schedule.Service"];
       assert.equal(yield* provide(platform.services.userState("alice")), "unavailable");
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("registers and starts a one-shot detached SYSTEM task", () =>
+    Effect.gen(function* () {
+      const { platform, provide, state } = yield* fixture();
+      yield* provide(
+        platform.services.runDetached("update", ["C:\\T3 Code\\t3.exe", "gateway", "install"]),
+      );
+      const task = state.tasks.get("Update");
+      assert.isDefined(task);
+      assert.include(task!.xml, "<Triggers />");
+      assert.include(task!.xml, "<ExecutionTimeLimit>PT30M</ExecutionTimeLimit>");
+      assert.isTrue(task!.running);
+      assert.isFalse(state.prompts.length > 0);
+    }),
   );
 
   it.effect("uninstalls managed tasks, the firewall rule, the PATH entry and its own exe", () =>

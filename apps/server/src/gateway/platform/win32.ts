@@ -114,6 +114,8 @@ export interface TaskDefinition {
   readonly command: string;
   readonly arguments: string;
   readonly workingDirectory: string;
+  readonly oneShot?: boolean;
+  readonly executionTimeLimit?: string;
 }
 
 /**
@@ -135,19 +137,23 @@ const taskXmlLines = (task: TaskDefinition, version: string) => [
   `    <Version>${version}</Version>`,
   `    <Description>${MANAGED_MARKER}</Description>`,
   `  </RegistrationInfo>`,
-  `  <Triggers>`,
-  `    <BootTrigger>`,
-  `      <Enabled>true</Enabled>`,
-  `    </BootTrigger>`,
-  // Task Scheduler restarts nothing whose action exits, even with an error. With IgnoreNew,
-  // this relaunches a stopped task within a minute and does nothing while it runs.
-  `    <TimeTrigger>`,
-  `      <StartBoundary>2000-01-01T00:00:00</StartBoundary>`,
-  `      <Repetition>`,
-  `        <Interval>PT1M</Interval>`,
-  `      </Repetition>`,
-  `    </TimeTrigger>`,
-  `  </Triggers>`,
+  ...(task.oneShot
+    ? [`  <Triggers />`]
+    : [
+        `  <Triggers>`,
+        `    <BootTrigger>`,
+        `      <Enabled>true</Enabled>`,
+        `    </BootTrigger>`,
+        // Task Scheduler restarts nothing whose action exits, even with an error. With IgnoreNew,
+        // this relaunches a stopped task within a minute and does nothing while it runs.
+        `    <TimeTrigger>`,
+        `      <StartBoundary>2000-01-01T00:00:00</StartBoundary>`,
+        `      <Repetition>`,
+        `        <Interval>PT1M</Interval>`,
+        `      </Repetition>`,
+        `    </TimeTrigger>`,
+        `  </Triggers>`,
+      ]),
   `  <Principals>`,
   `    <Principal id="Author">`,
   `      <UserId>${xmlText(task.userId)}</UserId>`,
@@ -160,7 +166,7 @@ const taskXmlLines = (task: TaskDefinition, version: string) => [
   `    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`,
   `    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`,
   `    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`,
-  `    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`,
+  `    <ExecutionTimeLimit>${task.executionTimeLimit ?? "PT0S"}</ExecutionTimeLimit>`,
   `    <Priority>5</Priority>`,
   `  </Settings>`,
   `  <Actions Context="Author">`,
@@ -347,6 +353,7 @@ const TaskInfo = Schema.Struct({
 });
 const decodeTasks = Schema.decodeEffect(Schema.fromJsonString(Schema.Array(TaskInfo)));
 const decodeNames = Schema.decodeEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
+const decodeAccountName = Schema.decodeEffect(Schema.fromJsonString(Schema.String));
 
 // Task Scheduler's COM API: no module import, and IRunningTask names the action's process.
 // S kills the action's process tree: ending a task stops cmd.exe but not the t3.exe it started.
@@ -542,6 +549,26 @@ export const makeWin32GatewayPlatform = (
     if (sid === undefined) return yield* fail("Could not determine the current Windows account.");
     return sid;
   });
+  const accountNames = new Map<string, string>();
+  const accountName = Effect.fn("GatewayPlatform.win32.accountName")(function* (
+    accountId: GatewayAccountId,
+  ) {
+    if (typeof accountId !== "string" || !sidPattern.test(accountId)) {
+      return yield* fail(`Windows account id ${String(accountId)} is not a SID.`);
+    }
+    const cached = accountNames.get(accountId);
+    if (cached !== undefined) return cached;
+    const output = yield* powershell(
+      [
+        `$s=New-Object System.Security.Principal.SecurityIdentifier(${psLiteral(accountId)})`,
+        `$n=$s.Translate([System.Security.Principal.NTAccount]).Value`,
+        "$n=$n -replace '^[^\\\\]+\\\\',''",
+        "J $n",
+      ].join(";"),
+    ).pipe(Effect.flatMap(decodeAccountName));
+    accountNames.set(accountId, output);
+    return output;
+  }, Effect.mapError(asPlatformError));
   // checkRuntimeSource runs once per archive file; the invoking account does not change.
   let invokingAccount: string | undefined;
 
@@ -888,6 +915,29 @@ export const makeWin32GatewayPlatform = (
     };
   });
 
+  const quoteCommandArgument = (value: string) => {
+    if (value !== "" && !/[\s"]/.test(value)) return value;
+    return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, "$1$1")}"`;
+  };
+
+  const detachedTaskXml = Effect.fn("GatewayPlatform.win32.detachedTaskXml")(function* (
+    argv: ReadonlyArray<string>,
+  ) {
+    const path = yield* Path.Path;
+    const command = argv[0];
+    if (command === undefined) return yield* fail("Detached jobs require a non-empty command.");
+    return renderTaskXml({
+      userId: systemSid,
+      logonType: "ServiceAccount",
+      runLevel: "HighestAvailable",
+      workingDirectory: path.dirname(paths.configPath),
+      command,
+      arguments: argv.slice(1).map(quoteCommandArgument).join(" "),
+      oneShot: true,
+      executionTimeLimit: "PT30M",
+    });
+  });
+
   const gatewayTaskXml = Effect.fn("GatewayPlatform.win32.gatewayTaskXml")(function* (
     executable: string,
   ) {
@@ -974,12 +1024,15 @@ export const makeWin32GatewayPlatform = (
   const enableUser = Effect.fn("GatewayPlatform.win32.enableUser")(function* (
     user: GatewayUserRecord,
     executable: string,
+    options?: { readonly password?: string },
   ) {
     const { name, xml, current } = yield* backendTask(user, executable);
     if (current) return yield* restartBackend(user, name);
-    const password = yield* readPassword(
-      `Windows password for ${user.name} (registers their backend task; it is not stored): `,
-    );
+    const password =
+      options?.password ??
+      (yield* readPassword(
+        `Windows password for ${user.name} (registers their backend task; it is not stored): `,
+      ));
     const sid = yield* accountSid(user);
     yield* secureLogs([user]);
     yield* powershell(grantBatchLogonScript(sid));
@@ -988,6 +1041,19 @@ export const makeWin32GatewayPlatform = (
       `T3Register ${psLiteral(name)} ${psLiteral(xml)} ${s4uLogon} ${psLiteral(sid)}`,
       { stdin: `${password}\n` },
     );
+    yield* startTask(name);
+  }, Effect.mapError(asPlatformError));
+
+  const runDetached = Effect.fn("GatewayPlatform.win32.runDetached")(function* (
+    label: string,
+    argv: ReadonlyArray<string>,
+  ) {
+    if (!/^[a-z]+$/.test(label) || argv.length === 0) {
+      return yield* fail("Detached jobs require a lowercase label and a non-empty command.");
+    }
+    const name = `${label[0]!.toUpperCase()}${label.slice(1)}`;
+    const xml = yield* detachedTaskXml(argv);
+    yield* registerTask(name, xml, serviceLogon);
     yield* startTask(name);
   }, Effect.mapError(asPlatformError));
 
@@ -1189,6 +1255,7 @@ export const makeWin32GatewayPlatform = (
     currentAccount: currentAccount.pipe(Effect.mapError(asPlatformError)),
     isAdmin: isAdmin.pipe(Effect.mapError(asPlatformError)),
     lookupUser,
+    accountName,
     checkAdminOwned,
     checkRuntimeSource,
     secureDirectory,
@@ -1200,6 +1267,8 @@ export const makeWin32GatewayPlatform = (
     listeners: listenersOn(undefined).pipe(Effect.mapError(asPlatformError)),
     makeConnectionOwner,
     markerAttribution: "folder",
+    helperHost: "gateway",
+    joinNeedsPassword: true,
     services: {
       ensureGatewayAccount: Effect.succeed(systemSid),
       preflight,
@@ -1207,6 +1276,7 @@ export const makeWin32GatewayPlatform = (
       enableUser,
       disableUser,
       userState: (user) => taskState(backendTaskName(user)),
+      runDetached,
       uninstall,
       logHint,
     },

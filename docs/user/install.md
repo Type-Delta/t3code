@@ -28,6 +28,10 @@ installer or the desktop app did not create is already there, it leaves that
 one alone and stops. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
 `T3CODE_VERSION` to pin an exact version.
 
+Running the installer as an administrator offers a machine-wide install for all
+local users. See [the multi-user gateway guide](./multi-user-gateway.md) for
+details.
+
 | Task                                  | Command                                                                 |
 | ------------------------------------- | ----------------------------------------------------------------------- |
 | Start the server and open the web app | `t3`                                                                    |

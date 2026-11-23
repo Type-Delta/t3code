@@ -119,6 +119,7 @@ describe("DesktopWslBackend", () => {
         Effect.sync(() => {
           registeredWsl = undefined;
         }),
+      attachPrimary: () => Effect.die("unused"),
     } satisfies DesktopBackendPool.DesktopBackendPool["Service"]);
 
     return Effect.gen(function* () {

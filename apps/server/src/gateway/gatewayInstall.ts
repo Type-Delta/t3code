@@ -332,6 +332,8 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
     yield* writeGatewayConfig(platform, layout.configPath, emptyGatewayConfig);
   }
   const config = yield* readGatewayConfig(layout.configPath);
+  const configured = config.selfService === undefined ? { ...config, selfService: true } : config;
+  if (configured !== config) yield* writeGatewayConfig(platform, layout.configPath, configured);
   const destination = yield* publishRuntime(platform, source, activeRuntime);
   const gatewayAccount = yield* platform.services.ensureGatewayAccount;
   if (activeRuntime !== destination) yield* platform.replaceLink(destination, current);
@@ -345,7 +347,7 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   const activation = yield* platform.services
     .activate({
       executable,
-      config,
+      config: configured,
       gatewayAccount,
       users: users.flat(),
       restorePreviousRuntime:
@@ -368,6 +370,16 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   }
   if (Result.isFailure(activation)) return yield* activation.failure;
   yield* pruneRuntimes(platform, destination, previousRuntime);
+  for (const name of yield* fs.readDirectory(layout.installRoot)) {
+    if (name.startsWith(".helper-staging-")) {
+      yield* fs
+        .remove(path.join(layout.installRoot, name), { recursive: true })
+        .pipe(Effect.ignore);
+    }
+  }
+  yield* fs
+    .remove(path.join(configDir, ".t3code-gateway-helper", "update.json"), { force: true })
+    .pipe(Effect.ignore);
   yield* Console.log(`Installed ${destination} and started the gateway. CLI: ${layout.launcher}.`);
 }, Effect.scoped);
 

@@ -28,6 +28,9 @@ import { serverEnvironment, updateOutdatedServer } from "~/state/server";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useServerConfigs } from "~/state/entities";
+import { desktopSharedRuntimeAtom } from "~/state/desktopSharedRuntime";
+import { usePrimaryEnvironmentId } from "~/state/environments";
+import { useEnvironmentQuery } from "~/state/query";
 import { useManagedPolicy } from "~/state/managedPolicy";
 import { environmentPresentations } from "~/state/presentation";
 import { ManagedControl } from "./ManagedPolicy";
@@ -276,6 +279,10 @@ export function ServerUpdateAction({
   const canUpdate = useAtomValue(sessionStateAtom, canUpdateServer);
   const updatesDenial = managedUpdatesDenial(useManagedPolicy(environmentId));
   const update = useServerUpdate();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const sharedRuntimeAttached =
+    useEnvironmentQuery(window.desktopBridge ? desktopSharedRuntimeAtom : null).data?.attached ===
+    true;
   const updatesInstall =
     installation?.kind === "npm-global" || installation?.kind === "t3-launcher";
   const { copyToClipboard } = useCopyToClipboard<{ command: string }>({
@@ -324,6 +331,13 @@ export function ServerUpdateAction({
       targetVersion,
     });
   };
+
+  // Fork-only: the shared runtime updates to this app's version when the app starts.
+  if (sharedRuntimeAttached && selfUpdate === null && environmentId === primaryEnvironmentId) {
+    return appearance === "icon" ? null : (
+      <span className="text-muted-foreground text-xs">Restart T3 Code to update this server.</span>
+    );
+  }
 
   if (updatesDenial !== undefined) {
     return appearance === "icon" ? (

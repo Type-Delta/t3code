@@ -249,6 +249,8 @@ export interface DesktopBackendInstance {
   readonly currentConfig: Effect.Effect<Option.Option<DesktopBackendStartConfig>>;
   readonly snapshot: Effect.Effect<DesktopBackendSnapshot>;
   readonly waitForReady: (timeout: Duration.Duration) => Effect.Effect<boolean>;
+  /** Fork-only: a one-time credential per session, for a backend with no launch credential. */
+  readonly mintCredential?: Effect.Effect<string, Error>;
 }
 
 export interface BackendInstanceSpec {
@@ -1250,3 +1252,76 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
     waitForReady,
   } satisfies DesktopBackendInstance;
 });
+
+/**
+ * Fork-only (gateway self-service): a backend another supervisor runs, such as the shared
+ * gateway's. The app starts no process and never restarts or stops it; start and stop only tell
+ * the window whether it is reachable.
+ */
+export const makeAttachedBackendInstance = Effect.fn("desktop.backendInstance.makeAttached")(
+  function* (spec: {
+    readonly id: BackendInstanceId;
+    readonly label: Effect.Effect<string>;
+    readonly httpBaseUrl: URL;
+    readonly mintCredential: Effect.Effect<string, Error>;
+    readonly onReady: (httpBaseUrl: URL) => Effect.Effect<void>;
+    readonly onShutdown: Effect.Effect<void>;
+  }) {
+    const state = yield* SubscriptionRef.make({ desiredRunning: false, ready: false });
+    const port = Number(spec.httpBaseUrl.port);
+    // Only the endpoint is real; consumers read httpBaseUrl, and the empty launch token tells
+    // DesktopLocalEnvironmentAuth to use mintCredential instead.
+    const config: DesktopBackendStartConfig = {
+      executablePath: "",
+      entryPath: "",
+      cwd: "",
+      args: [],
+      env: {},
+      extendEnv: false,
+      bootstrap: {
+        mode: "desktop",
+        noBrowser: true,
+        port,
+        host: spec.httpBaseUrl.hostname,
+        desktopBootstrapToken: "",
+        tailscaleServeEnabled: false,
+        tailscaleServePort: port,
+      },
+      bootstrapDelivery: "fd3",
+      httpBaseUrl: spec.httpBaseUrl,
+      captureOutput: false,
+      preflightFailure: Option.none(),
+    };
+    const start = SubscriptionRef.getAndSet(state, { desiredRunning: true, ready: true }).pipe(
+      Effect.flatMap((previous) => (previous.ready ? Effect.void : spec.onReady(spec.httpBaseUrl))),
+    );
+    const stop = () =>
+      SubscriptionRef.getAndSet(state, { desiredRunning: false, ready: false }).pipe(
+        Effect.flatMap((previous) => (previous.ready ? spec.onShutdown : Effect.void)),
+      );
+    return {
+      id: spec.id,
+      label: spec.label,
+      start,
+      stop,
+      currentConfig: Effect.succeedSome(config),
+      snapshot: SubscriptionRef.get(state).pipe(
+        Effect.map((current) => ({
+          ...current,
+          activePid: Option.none<number>(),
+          restartAttempt: 0,
+          restartScheduled: false,
+        })),
+      ),
+      waitForReady: (timeout: Duration.Duration) =>
+        SubscriptionRef.changes(state).pipe(
+          Stream.filter((current) => current.ready || !current.desiredRunning),
+          Stream.map((current) => current.ready),
+          Stream.runHead,
+          Effect.timeoutOption(timeout),
+          Effect.map((result) => Option.getOrElse(Option.flatten(result), () => false)),
+        ),
+      mintCredential: spec.mintCredential,
+    } satisfies DesktopBackendInstance;
+  },
+);

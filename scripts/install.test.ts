@@ -189,6 +189,61 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
   },
 );
 
+describe.skipIf(HostProcess.Platform.defaultValue() !== "linux" || process.getuid?.() !== 0)(
+  "installer gateway mode",
+  () => {
+    it("installs the downloaded archive with gateway install and removes its staging directory", async () => {
+      const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-install-gateway-"));
+      const version = "1.2.3";
+      const stem = `t3-${version}-linux-${HostProcess.Architecture.defaultValue()}`;
+      const archiveName = `${stem}.tar.gz`;
+      const log = NodePath.join(root, "gateway.log");
+      const server = NodeHttp.createServer();
+      try {
+        await NodeFSP.mkdir(NodePath.join(root, stem));
+        await NodeFSP.writeFile(
+          NodePath.join(root, stem, "t3"),
+          '#!/bin/sh\nprintf \'%s %s\\n\' "$1" "$2" > "$GATEWAY_LOG"\n',
+          { mode: 0o755 },
+        );
+        const archivePath = NodePath.join(root, archiveName);
+        NodeChildProcess.execFileSync("tar", ["-czf", archivePath, "-C", root, stem]);
+        const archive = await NodeFSP.readFile(archivePath);
+        const digest = NodeCrypto.createHash("sha256").update(archive).digest("hex");
+        server.on("request", (request, response) => {
+          response.end(
+            request.url?.endsWith("/SHA256SUMS") ? `${digest}  ${archiveName}\n` : archive,
+          );
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Expected a TCP listener");
+        const result = NodeChildProcess.spawnSync(
+          "sh",
+          [NodePath.resolve(import.meta.dirname, "install.sh")],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              T3CODE_VERSION: version,
+              T3CODE_INSTALL_MODE: "gateway",
+              T3CODE_RELEASE_BASE_URL: `http://127.0.0.1:${address.port}`,
+              GATEWAY_LOG: log,
+            },
+          },
+        );
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(await NodeFSP.readFile(log, "utf8")).toBe("gateway install\n");
+        expect(result.stderr).toContain("Users can now join from the T3 Code desktop app");
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        await NodeFSP.rm(root, { recursive: true, force: true });
+      }
+    });
+  },
+);
+
 /** Runs an installer for a version that is already unpacked, so only the t3 command step runs. */
 async function installOver(input: {
   readonly script: "install.sh" | "install.ps1";

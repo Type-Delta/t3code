@@ -25,6 +25,8 @@ import {
   parseNetstat,
   parseOwnerSnapshot,
   renderLaunchDaemon,
+  renderHelperDaemon,
+  HELPER_LABEL,
   renderSocketsDaemon,
   SOCKETS_LABEL,
 } from "./darwin.ts";
@@ -121,6 +123,7 @@ const fixture = Effect.fn("darwinGatewayTest.fixture")(function* () {
     pairingDir: at("Library/Application Support/T3Code/pairing"),
     launchDaemonsDir: at("Library/LaunchDaemons"),
     logDir: at("Library/Logs/T3Code"),
+    jobsDir: at("Library/Application Support/T3Code/jobs"),
     ownerSocket: at("o.sock"),
   };
   yield* fs.makeDirectory(paths.launchDaemonsDir, { recursive: true, mode: 0o755 });
@@ -169,6 +172,12 @@ const fixture = Effect.fn("darwinGatewayTest.fixture")(function* () {
             return output(
               [...table].map(([entry, attrs]) => `${entry} ${attrs.get(attribute!)}\n`).join(""),
             );
+          }
+          if (action === "-search") {
+            const matches = [...table].flatMap(([entry, attrs]) =>
+              attrs.get(attribute!) === value ? [`/Users/${entry} ${attribute} = ${value}\n`] : [],
+            );
+            return output(matches.join(""));
           }
           const entry = table.get(name!) ?? new Map<string, string>();
           table.set(name!, entry);
@@ -468,9 +477,14 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
         const gatewayFile = plist(GATEWAY_LABEL);
         const backendFile = plist(backendLabel("alice"));
         const socketsFile = plist(SOCKETS_LABEL);
+        const helperFile = plist(HELPER_LABEL);
         assert.equal(
           yield* fs.readFileString(socketsFile),
           renderSocketsDaemon(paths.ownerSocket, gatewayUid),
+        );
+        assert.equal(
+          yield* fs.readFileString(helperFile),
+          renderHelperDaemon("/usr/local/t3code/current/t3", `${paths.logDir}/helper.log`),
         );
         assert.equal(
           yield* fs.readFileString(gatewayFile),
@@ -483,7 +497,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
           }),
         );
         assert.include(yield* fs.readFileString(backendFile), `<string>${alice.home}</string>`);
-        for (const file of [socketsFile, gatewayFile, backendFile]) {
+        for (const file of [socketsFile, helperFile, gatewayFile, backendFile]) {
           assert.equal((yield* fs.stat(file)).mode & 0o777, 0o644);
         }
         assert.deepEqual(ownership.get(`${paths.logDir}/gateway.log`), [gatewayUid, 0]);
@@ -495,6 +509,8 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
           [
             `/bin/launchctl enable system/${SOCKETS_LABEL}`,
             `/bin/launchctl bootstrap system ${socketsFile}`,
+            `/bin/launchctl enable system/${HELPER_LABEL}`,
+            `/bin/launchctl bootstrap system ${helperFile}`,
             `/bin/launchctl enable system/${GATEWAY_LABEL}`,
             `/bin/launchctl bootstrap system ${gatewayFile}`,
             "/usr/sbin/netstat -anv -p tcp",
@@ -506,12 +522,13 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
         assert.deepEqual(reports, [`${backendLabel("alice")}: running`]);
         assert.deepEqual(
           [...launchd.loaded.keys()],
-          [SOCKETS_LABEL, GATEWAY_LABEL, backendLabel("alice")],
+          [SOCKETS_LABEL, HELPER_LABEL, GATEWAY_LABEL, backendLabel("alice")],
         );
         assert.sameMembers(yield* fs.readDirectory(paths.launchDaemonsDir), [
           `${backendLabel("alice")}.plist`,
           `${GATEWAY_LABEL}.plist`,
           `${SOCKETS_LABEL}.plist`,
+          `${HELPER_LABEL}.plist`,
         ]);
         assert.isTrue(yield* fs.exists(at("Library/Logs/T3Code")));
       }),
@@ -579,6 +596,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
           const previous = yield* fs.readFileString(plist(GATEWAY_LABEL));
           const previousBackend = yield* fs.readFileString(plist(backendLabel("alice")));
           launchd.failBootstrap = rollbackWorks ? 1 : 2;
+          launchd.failBootstrapOf = GATEWAY_LABEL;
           calls.length = 0;
           const error = yield* Effect.flip(
             activate(
@@ -718,6 +736,24 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
       }),
     );
 
+    it.effect("writes and bootstraps a detached launchd job", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const { calls, paths, platform, provide } = yield* fixture();
+        yield* provide(
+          platform.services.runDetached("update", [
+            "/usr/local/t3code/staged/t3",
+            "gateway",
+            "install",
+          ]),
+        );
+        const file = `${paths.jobsDir}/com.t3tools.t3code.update.plist`;
+        assert.include(yield* fs.readFileString(file), "<key>KeepAlive</key>");
+        assert.include(yield* fs.readFileString(file), "<false/>");
+        assert.include(calls, `/bin/launchctl bootstrap system ${file}`);
+      }),
+    );
+
     it.effect("refuses a linked log file or a log folder others own", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -760,6 +796,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
           [
             `/bin/launchctl bootout system/${GATEWAY_LABEL}`,
             `/bin/launchctl bootout system/${backendLabel("alice")}`,
+            `/bin/launchctl bootout system/${HELPER_LABEL}`,
             `/bin/launchctl bootout system/${SOCKETS_LABEL}`,
           ],
         );
@@ -852,6 +889,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
             accountId: 501,
             home: at("Users/alice"),
           });
+          assert.equal(yield* provide(platform.accountName(501)), "alice");
           for (const [user, expected] of [
             ["_t3code", /reserved for the gateway/],
             ["../Groups/admin", /not a macOS user that can be enrolled/],

@@ -107,7 +107,10 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       if (posixOwnership) assert.equal((yield* fs.stat(layout.launcher)).mode & 0o777, 0o755);
       assert.equal(yield* fs.readFileString(at("install/current/lib/native.node")), "native addon");
       assert.isFalse(yield* fs.exists(at("install/current/notes.txt")));
-      assert.deepEqual(JSON.parse(yield* fs.readFileString(layout.configPath)), emptyGatewayConfig);
+      assert.deepEqual(JSON.parse(yield* fs.readFileString(layout.configPath)), {
+        ...emptyGatewayConfig,
+        selfService: true,
+      });
       if (posixOwnership) assert.equal((yield* fs.stat(layout.configPath)).mode & 0o777, 0o644);
       assert.isTrue(yield* fs.exists(layout.pairingDir));
       assert.deepEqual(serviceCalls(calls), ["preflight", "ensureGatewayAccount", "activate "]);
@@ -120,6 +123,7 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       const config = JSON.stringify({
         ...emptyGatewayConfig,
         users: { alice: { uid: 1001, port: 3801 }, bob: { uid: 1002, port: 3802 } },
+        selfService: true,
       });
       yield* fs.writeFileString(layout.configPath, config);
       yield* fs.chmod(layout.configPath, 0o600);
@@ -407,7 +411,10 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       assert.deepEqual(calls, ["uninstall"]);
       assert.isFalse(yield* fs.exists(layout.installRoot));
       assert.isFalse(yield* fs.exists(layout.launcher));
-      assert.deepEqual(JSON.parse(yield* fs.readFileString(layout.configPath)), emptyGatewayConfig);
+      assert.deepEqual(JSON.parse(yield* fs.readFileString(layout.configPath)), {
+        ...emptyGatewayConfig,
+        selfService: true,
+      });
       assert.equal(yield* fs.readFileString(marker), "pairing");
       yield* uninstall;
       assert.deepEqual(calls, ["uninstall", "uninstall"]);

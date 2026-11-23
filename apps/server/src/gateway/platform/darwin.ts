@@ -22,6 +22,7 @@ export const GATEWAY_LABEL = "com.t3tools.t3code.gateway";
 const backendLabelPrefix = "com.t3tools.t3code.backend.";
 export const backendLabel = (user: string) => `${backendLabelPrefix}${user}`;
 export const SOCKETS_LABEL = "com.t3tools.t3code.sockets";
+export const HELPER_LABEL = "com.t3tools.t3code.helper";
 const gatewayAccount = "_t3code";
 const plistMarker = "<!-- Managed by t3 gateway install -->";
 const servicePath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
@@ -40,9 +41,12 @@ export const darwinGatewayPaths = {
   pairingDir: "/Library/Application Support/T3Code/pairing",
   launchDaemonsDir: "/Library/LaunchDaemons",
   logDir: "/Library/Logs/T3Code",
+  jobsDir: "/Library/Application Support/T3Code/jobs",
   ownerSocket: "/var/run/com.t3tools.t3code.sockets.sock",
 };
-type DarwinGatewayPaths = typeof darwinGatewayPaths;
+type DarwinGatewayPaths = Omit<typeof darwinGatewayPaths, "jobsDir"> & {
+  readonly jobsDir?: string;
+};
 
 const fail = (message: string) => new GatewayPlatformError({ message });
 const asPlatformError = (error: { readonly message: string }) => fail(error.message);
@@ -147,6 +151,55 @@ export const renderSocketsDaemon = (socket: string, uid: number) =>
     `\t\t\t<integer>${0o600}</integer>`,
     "\t\t</dict>",
     "\t</dict>",
+  ]);
+
+export const renderHelperDaemon = (executable: string, log: string) =>
+  renderPlist([
+    plistKey("Label"),
+    plistString(HELPER_LABEL),
+    plistKey("UserName"),
+    plistString("root"),
+    ...plistArguments([executable, "gateway", "helper"]),
+    plistKey("inetdCompatibility"),
+    "\t<dict>",
+    plistKey("Wait", "\t\t"),
+    "\t\t<false/>",
+    "\t</dict>",
+    plistKey("Sockets"),
+    "\t<dict>",
+    plistKey("Listeners", "\t\t"),
+    "\t\t<dict>",
+    plistKey("SockNodeName", "\t\t\t"),
+    plistString("127.0.0.1", "\t\t\t"),
+    plistKey("SockServiceName", "\t\t\t"),
+    plistString("3774", "\t\t\t"),
+    "\t\t</dict>",
+    "\t</dict>",
+    plistKey("RunAtLoad"),
+    "\t<true/>",
+    plistKey("KeepAlive"),
+    "\t<false/>",
+    plistKey("StandardOutPath"),
+    plistString(log),
+    plistKey("StandardErrorPath"),
+    plistString(log),
+  ]);
+
+export const renderDetachedDaemon = (label: string, argv: ReadonlyArray<string>, log: string) =>
+  renderPlist([
+    plistKey("Label"),
+    plistString(label),
+    plistKey("UserName"),
+    plistString("root"),
+    ...plistArguments(argv),
+    plistKey("RunAtLoad"),
+    "\t<true/>",
+    plistKey("KeepAlive"),
+    "\t<false/>",
+    plistKey("StandardOutPath"),
+    plistString(log),
+    plistKey("StandardErrorPath"),
+    plistString(log),
   ]);
 
 const isManagedPlist = (contents: string) => contents.split("\n", 2)[1] === plistMarker;
@@ -376,6 +429,23 @@ const lookupUser = Effect.fn("GatewayPlatform.darwin.lookupUser")(function* (nam
     return yield* fail(`The home directory for ${name} does not exist or is not a directory.`);
   }
   return { name, accountId: account.uid, home } satisfies GatewayUserRecord;
+}, Effect.mapError(asPlatformError));
+
+const accountName = Effect.fn("GatewayPlatform.darwin.accountName")(function* (
+  accountId: GatewayAccountId,
+) {
+  if (typeof accountId !== "number" || !Number.isSafeInteger(accountId) || accountId < 0) {
+    return yield* fail(`macOS account id ${String(accountId)} is invalid.`);
+  }
+  const result = yield* exec(dscl, [".", "-search", "/Users", "UniqueID", String(accountId)]);
+  if (result.code !== 0) {
+    return yield* fail(`macOS account ${accountId} was not found.`);
+  }
+  const match = result.stdout.match(/^(?:\/Users\/)?([^\s]+)\s+UniqueID\s*=\s*(-?\d+)\s*$/m);
+  if (match?.[2] !== String(accountId)) {
+    return yield* fail(`macOS account ${accountId} was not found.`);
+  }
+  return match[1]!;
 }, Effect.mapError(asPlatformError));
 
 // SIP keeps these root-owned links to /private immutable, so they resolve like directories.
@@ -690,6 +760,9 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
   const logHint = `${paths.logDir}/gateway.log`;
   const plistPath = (label: string) => `${paths.launchDaemonsDir}/${label}.plist`;
   const gatewayPlist = plistPath(GATEWAY_LABEL);
+  const helperPlist = plistPath(HELPER_LABEL);
+  const jobsDir =
+    paths.jobsDir ?? `${paths.configPath.slice(0, paths.configPath.lastIndexOf("/"))}/jobs`;
 
   const gatewaySpec = (executable: string): LaunchDaemonSpec => ({
     label: GATEWAY_LABEL,
@@ -739,6 +812,7 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
       .filter(
         (name) =>
           name === `${GATEWAY_LABEL}.plist` ||
+          name === `${HELPER_LABEL}.plist` ||
           name === `${SOCKETS_LABEL}.plist` ||
           (name.startsWith(backendLabelPrefix) && name.endsWith(".plist")),
       )
@@ -813,11 +887,19 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
         `Refusing to install: launchd runs ${GATEWAY_LABEL} from ${loadedFrom ?? "an unknown definition"}, not ${gatewayPlist}.`,
       );
     }
+    const helperLoaded = yield* printService(HELPER_LABEL);
+    const helperFrom = helperLoaded === undefined ? undefined : parseLaunchctlPath(helperLoaded);
+    if (helperLoaded !== undefined && helperFrom !== helperPlist) {
+      return yield* fail(
+        `Refusing to install: launchd runs ${HELPER_LABEL} from ${helperFrom ?? "an unknown definition"}, not ${helperPlist}.`,
+      );
+    }
   });
 
   const activate = Effect.fn("GatewayPlatform.darwin.activate")(function* (
     activation: GatewayActivation,
   ) {
+    const fs = yield* FileSystem.FileSystem;
     const { port } = activation.config.listen;
     const gatewayUid = activation.gatewayAccount;
     if (typeof gatewayUid !== "number") {
@@ -837,6 +919,16 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
         renderSocketsDaemon(paths.ownerSocket, gatewayUid),
       );
       yield* loadService(SOCKETS_LABEL, sockets.file, sockets.changed);
+      const helper = yield* definePlist(
+        HELPER_LABEL,
+        renderHelperDaemon(activation.executable, `${paths.logDir}/helper.log`),
+      );
+      yield* secureDirectory(paths.logDir, "admin");
+      yield* fs.writeFileString(`${paths.logDir}/helper.log`, "", { flag: "a" });
+      yield* fs.chown(`${paths.logDir}/helper.log`, 0, 0);
+      yield* fs.chmod(`${paths.logDir}/helper.log`, 0o600);
+      yield* loadService(HELPER_LABEL, helper.file, helper.changed);
+      if (helper.changed) changed.push({ file: helperPlist, previous: helper.previous });
       gateway = yield* defineJob(gatewaySpec(activation.executable), gatewayUid);
       if (gateway.changed) changed.push({ file: gatewayPlist, previous: gateway.previous });
       for (const user of activation.users) {
@@ -936,7 +1028,62 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
       yield* fs.remove(file, { force: true });
       if (name === `${SOCKETS_LABEL}.plist`) yield* fs.remove(paths.ownerSocket, { force: true });
     }
+    const jobs = yield* fs.readDirectory(jobsDir).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () => Effect.succeed([]),
+      ),
+    );
+    for (const name of jobs.filter((file) => /^com\.t3tools\.t3code\.[a-z]+\.plist$/.test(file))) {
+      const file = `${jobsDir}/${name}`;
+      const contents = yield* fs.readFileString(file).pipe(Effect.result);
+      if (Result.isFailure(contents) || !isManagedPlist(contents.success)) {
+        yield* Console.warn(`Skipping ${file}: it has no installer marker.`);
+        continue;
+      }
+      yield* stopService(name.slice(0, -".plist".length));
+      yield* fs.remove(file, { force: true });
+    }
   }).pipe(Effect.mapError(asPlatformError));
+
+  const runDetached = Effect.fn("GatewayPlatform.darwin.runDetached")(
+    function* (label: string, argv: ReadonlyArray<string>) {
+      if (!/^[a-z]+$/.test(label) || argv.length === 0) {
+        return yield* fail("Detached jobs require a lowercase label and a non-empty command.");
+      }
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const labelName = `com.t3tools.t3code.${label}`;
+      const file = path.join(jobsDir, `${labelName}.plist`);
+      const previous = yield* entry(file);
+      if (previous !== undefined) {
+        if (previous.type !== "File") return yield* fail(`Expected a regular file at ${file}.`);
+        const contents = yield* fs.readFileString(file);
+        if (!isManagedPlist(contents)) return yield* fail(`Refusing to modify unmanaged ${file}.`);
+      }
+      const loaded = yield* printService(labelName);
+      if (loaded !== undefined && parseLaunchctlState(loaded) === "running") {
+        return yield* fail(`Detached job ${labelName} is already running.`);
+      }
+      if (loaded !== undefined) yield* runTool(launchctl, ["bootout", `system/${labelName}`]);
+      yield* secureDirectory(jobsDir, "admin");
+      yield* checkAdminOwned(jobsDir, "Directory");
+      yield* secureDirectory(paths.logDir, "admin");
+      const log = path.join(paths.logDir, `${label}.log`);
+      yield* fs.writeFileString(log, "", { flag: "a" });
+      yield* fs.chown(log, 0, 0);
+      yield* fs.chmod(log, 0o600);
+      const staging = yield* fs.makeTempDirectoryScoped({ directory: jobsDir, prefix: ".t3code-" });
+      const staged = path.join(staging, path.basename(file));
+      yield* fs.writeFileString(staged, renderDetachedDaemon(labelName, argv, log));
+      yield* fs.chown(staged, 0, 0);
+      yield* fs.chmod(staged, 0o644);
+      yield* fs.rename(staged, file);
+      yield* runTool(launchctl, ["bootstrap", "system", file]);
+    },
+    Effect.scoped,
+    Effect.mapError(asPlatformError),
+  );
 
   return {
     name: "darwin",
@@ -960,6 +1107,7 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
     }),
     isAdmin: Effect.map(HostProcess.UserId, (uid) => uid === 0),
     lookupUser,
+    accountName,
     checkAdminOwned,
     checkRuntimeSource,
     secureDirectory,
@@ -978,6 +1126,8 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
         .catch(() => undefined),
     ),
     markerAttribution: "file-owner",
+    helperHost: "service",
+    joinNeedsPassword: false,
     services: {
       ensureGatewayAccount,
       preflight: preflight.pipe(Effect.mapError(asPlatformError)),
@@ -988,6 +1138,7 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
         userNamePattern.test(user)
           ? serviceState(backendLabel(user))
           : Effect.succeed("unavailable"),
+      runDetached,
       uninstall,
       logHint,
     },

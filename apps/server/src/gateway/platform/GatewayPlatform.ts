@@ -76,6 +76,8 @@ export interface GatewayPlatform {
   readonly isAdmin: Op<boolean>;
   /** An existing, non-system OS user with a home directory; fails with a message otherwise. */
   readonly lookupUser: (name: string) => Op<GatewayUserRecord>;
+  /** The OS login name of an account id (for the helper's caller); fails when there is none. */
+  readonly accountName: (accountId: GatewayAccountId) => Op<string>;
 
   /**
    * False when nothing exists at `path`. True when it is a `kind` entry that only admins can
@@ -127,6 +129,14 @@ export interface GatewayPlatform {
    * user and admins can write (Windows, where owner lookup is expensive).
    */
   readonly markerAttribution: "file-owner" | "folder";
+  /**
+   * Where the privileged helper (127.0.0.1:GATEWAY_HELPER_PORT) runs: "service" is an
+   * inetd-style admin service running `t3 gateway helper` once per connection, with the accepted
+   * socket as stdin; "gateway" is the gateway process itself, which already runs as an admin.
+   */
+  readonly helperHost: "service" | "gateway";
+  /** Windows: registering a user's backend needs their password, so self-service join asks for it. */
+  readonly joinNeedsPassword: boolean;
 
   readonly services: {
     /** The unprivileged account the gateway runs as (created when missing). */
@@ -134,18 +144,32 @@ export interface GatewayPlatform {
     /** Refuses before any change when unmanaged service definitions would be overwritten. */
     readonly preflight: Op<void>;
     /**
-     * Writes the gateway's and users' definitions for `executable`, (re)starts the gateway, waits
-     * for it to listen, then restarts running backends. On failure it restores the previous
-     * runtime and definitions and fails saying whether rollback worked.
+     * Writes the gateway's, the helper's (when `helperHost` is "service") and users' definitions
+     * for `executable`, (re)starts the gateway, waits for it to listen, then restarts running
+     * backends. On failure it restores the previous runtime and definitions and fails saying
+     * whether rollback worked.
      */
     readonly activate: (activation: GatewayActivation) => Op<void>;
-    /** Defines (if needed), enables and starts one user's backend. */
-    readonly enableUser: (user: GatewayUserRecord, executable: string) => Op<void>;
+    /**
+     * Defines (if needed), enables and starts one user's backend. `password` is the user's own
+     * account password where `joinNeedsPassword`; without it the adapter asks on the terminal.
+     */
+    readonly enableUser: (
+      user: GatewayUserRecord,
+      executable: string,
+      options?: { readonly password?: string },
+    ) => Op<void>;
     /** Stops, disables and removes one user's backend definition. Absent is fine. */
     readonly disableUser: (user: string) => Op<void>;
     /** A short state for `t3 gateway list`, such as `active`, `running`, `stopped`, `unavailable`. */
     readonly userState: (user: string) => Op<string>;
-    /** Stops and removes every managed definition; keeps config, pairing data and accounts. */
+    /**
+     * Starts `argv` as an admin outside every gateway service under the managed name `label`, so
+     * it survives the gateway and helper restarting; returns once it has started. Self-service
+     * updates run the staged runtime's `gateway install` this way.
+     */
+    readonly runDetached: (label: string, argv: ReadonlyArray<string>) => Op<void>;
+    /** Stops and removes every managed definition, the helper's included; keeps config, pairing data and accounts. */
     readonly uninstall: Op<void>;
     /** Where to look when the gateway fails, for error messages. */
     readonly logHint: string;

@@ -11,6 +11,7 @@
 #   T3CODE_HOME              T3 home directory (default: ~/.t3)
 #   T3CODE_INSTALL_BIN_DIR   where the `t3` command goes (default: ~/.local/bin)
 #   T3CODE_RELEASE_BASE_URL  mirror for releases/download (default: GitHub)
+#   T3CODE_INSTALL_MODE      user, or gateway when running as root (default: ask)
 #
 # The archive is unpacked into $T3CODE_HOME/runtime/versions/<version>, the
 # same layout `t3 service install` uses, so the service reuses this download
@@ -47,6 +48,19 @@ reset= bold= muted= accent= green=
 if "$interactive" && [ -z "${NO_COLOR:-}" ]; then
   reset="$(printf '\033[0m')"; bold="$(printf '\033[1m')"
   muted="$(printf '\033[2m')"; accent="$(printf '\033[94m')"; green="$(printf '\033[32m')"
+fi
+install_mode="${T3CODE_INSTALL_MODE:-}"
+gateway_install=false
+if [ "$(id -u)" -eq 0 ] && [ "$install_mode" != user ]; then
+  if [ "$install_mode" = gateway ]; then
+    gateway_install=true
+  elif [ -r /dev/tty ]; then
+    answer=
+    printf 'Install T3 Code for everyone on this computer? [y/N] ' >/dev/tty
+    if IFS= read -r answer < /dev/tty; then
+      case "$answer" in [yY] | [yY][eE][sS]) gateway_install=true ;; esac
+    fi
+  fi
 fi
 step() {
   if "$interactive"; then printf '\r\033[2K  %s%s%s' "$muted" "$1" "$reset" >&2
@@ -225,6 +239,47 @@ stem="t3-${version}-${platform}-${arch}"
 archive="${stem}.tar.gz"
 versions_dir="${t3_home}/runtime/versions"
 target_dir="${versions_dir}/${version}"
+
+if "$gateway_install"; then
+  if [ "$platform" = linux ] && ! command -v systemctl >/dev/null 2>&1; then
+    fail "machine-wide gateway installs on Linux require systemd"
+  fi
+  gateway_root=/root
+  [ "$platform" = darwin ] && gateway_root=/var/root
+  mkdir -p "$gateway_root"
+  gateway_dir="$(mktemp -d "${gateway_root}/t3-gateway-XXXXXX")"
+  chmod 700 "$gateway_dir"
+  gateway_archive="${gateway_dir}/${archive}"
+  gateway_checksums="${gateway_dir}/SHA256SUMS"
+  trap 'rm -rf "$gateway_dir"' EXIT
+  step "Downloading..."
+  fetch_status=0
+  fetch "${base_url}/v${version}/SHA256SUMS" "$gateway_checksums" || fetch_status=$?
+  if [ "$fetch_status" -eq 44 ]; then
+    fail "t3 ${version} has no release archive for ${platform}-${arch}"
+  elif [ "$fetch_status" -ne 0 ]; then
+    fail "could not download the release checksums"
+  fi
+  expected="$(grep " \*\{0,1\}${archive}\$" "$gateway_checksums" | cut -d' ' -f1)"
+  [ -n "$expected" ] || fail "t3 ${version} has no release archive for ${platform}-${arch}"
+  download "${base_url}/v${version}/${archive}" "$gateway_archive" || fail "could not download ${archive}"
+  step "Verifying the download..."
+  actual="$(checksum "$gateway_archive")"
+  [ "$actual" = "$expected" ] || fail "checksum mismatch for ${archive}"
+  step "Extracting T3 Code..."
+  if tar --help 2>&1 | grep -q -- '--no-same-owner'; then
+    tar -xzf "$gateway_archive" -C "$gateway_dir" --strip-components=1 --no-same-owner --no-same-permissions
+  else
+    tar -xzf "$gateway_archive" -C "$gateway_dir" --strip-components=1
+  fi
+  chown -R root "$gateway_dir"
+  chmod -R go-w "$gateway_dir"
+  "$gateway_dir/t3" gateway install || fail "gateway install failed"
+  rm -rf "$gateway_dir"
+  trap - EXIT
+  printf '\nUsers can now join from the T3 Code desktop app, or an admin can run: sudo t3 gateway add <user>\n' >&2
+  exit 0
+fi
 
 if [ -f "${target_dir}/.install-complete" ] && [ "$(cat "${target_dir}/.install-complete")" = "$version" ]; then
   step "Version ${version} is already downloaded."

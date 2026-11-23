@@ -81,6 +81,11 @@ import {
 } from "./methods/legacyLocalStorage.ts";
 import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
 import {
+  getSharedRuntimeState,
+  joinSharedRuntime,
+  leaveSharedRuntime,
+} from "./methods/sharedRuntime.ts";
+import {
   getCliCommandState,
   installCliCommand,
   uninstallCliCommand,
@@ -146,6 +151,9 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setWslBackendEnabled);
   yield* ipc.handle(setWslDistro);
   yield* ipc.handle(setWslOnly);
+  yield* ipc.handle(getSharedRuntimeState);
+  yield* ipc.handle(joinSharedRuntime);
+  yield* ipc.handle(leaveSharedRuntime);
 
   yield* ipc.handle(pickFolder);
   yield* ipc.handle(toLocalBackendPath);

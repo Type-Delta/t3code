@@ -26,6 +26,7 @@ import {
   type ConnectionOwner,
 } from "./platform/GatewayPlatform.ts";
 import { readPendingUsers } from "./GatewayPending.ts";
+import { makeGatewayHelperHandler } from "./gatewayHelper.ts";
 import {
   backendCookieHeader,
   backendRequestHeaders,
@@ -848,6 +849,31 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
   );
 
   const { host, port } = configSource.initial.listen;
+  const helperServer =
+    platform.helperHost === "gateway"
+      ? NodeHttp.createServer(
+          makeGatewayHelperHandler({
+            platform,
+            configPath: options.configPath,
+            context: yield* Effect.context<never>(),
+          }),
+        )
+      : undefined;
+  if (helperServer !== undefined) {
+    yield* Effect.acquireRelease(
+      Effect.promise(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            helperServer.once("error", reject);
+            helperServer.listen(3774, "127.0.0.1", () => resolve());
+          }),
+      ),
+      () =>
+        Effect.callback<void>((resume) => {
+          helperServer.close(() => resume(Effect.void));
+        }),
+    );
+  }
   yield* Effect.acquireRelease(
     Effect.callback<void, GatewayError>((resume) => {
       const onError = (error: Error) =>

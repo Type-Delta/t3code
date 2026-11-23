@@ -21,6 +21,7 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as PreviewPasskeys from "../preview/Passkeys.ts";
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
+import * as DesktopGateway from "../backend/DesktopGateway.ts";
 import * as DesktopHomeOwner from "../backend/DesktopHomeOwner.ts";
 import * as DesktopLocalEnvironmentAuth from "../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -197,6 +198,16 @@ const startLocalBackend = Effect.gen(function* () {
   if (!settings.localEnvironmentEnabled) {
     yield* logBootstrapInfo("bootstrap skipping local environment (disabled in settings)");
     return false;
+  }
+
+  // Fork-only (gateway self-service): an enrolled account uses its shared gateway backend.
+  if (!environment.isDevelopment && !(settings.wslOnly && settings.wslBackendEnabled)) {
+    const shared = yield* DesktopGateway.attachAtStartup();
+    if (shared === "attached") return true;
+    if (shared === "quit") {
+      yield* (yield* ElectronApp.ElectronApp).quit;
+      return false;
+    }
   }
 
   const primaryBackend = yield* (yield* DesktopBackendPool.DesktopBackendPool).primary;

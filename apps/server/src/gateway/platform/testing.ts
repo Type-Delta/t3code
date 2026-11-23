@@ -68,6 +68,11 @@ export const makeTestGatewayPlatform = (root: string) => {
       ],
     },
     currentAccount: Effect.succeed(1001),
+    accountName: Effect.fn("TestGatewayPlatform.accountName")(function* (account) {
+      return account === 1001
+        ? "alice"
+        : yield* new GatewayPlatformError({ message: "unknown account" });
+    }),
     isAdmin: Effect.succeed(true),
     lookupUser: (name) => Effect.succeed({ name, accountId: 1001, home: root }),
     checkAdminOwned: checkKind,
@@ -100,14 +105,18 @@ export const makeTestGatewayPlatform = (root: string) => {
     listeners: Effect.succeed([]),
     makeConnectionOwner: Effect.succeed(async () => undefined),
     markerAttribution: "file-owner",
+    helperHost: "service",
+    joinNeedsPassword: false,
     services: {
       ensureGatewayAccount: Effect.as(record("ensureGatewayAccount"), 999),
       preflight: record("preflight"),
       activate: ({ users }) => record(`activate ${users.map((user) => user.name).join(",")}`),
-      enableUser: (user) => record(`enableUser ${user.name}`),
+      enableUser: (user, _executable, options) =>
+        record(`enableUser ${user.name}${options?.password === undefined ? "" : " password"}`),
       disableUser: (user) => record(`disableUser ${user}`),
       userState: () => Effect.succeed("active"),
       uninstall: record("uninstall"),
+      runDetached: (label, argv) => record(`runDetached ${label} ${argv.join(" ")}`),
       logHint: "the test log",
     },
   };

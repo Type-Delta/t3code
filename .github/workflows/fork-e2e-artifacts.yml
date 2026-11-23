@@ -1,0 +1,436 @@
+name: Fork E2E Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Test artifact version (X.Y.Z-gwtest.N)"
+        required: true
+        default: "0.1.9-gwtest.1"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  preflight:
+    name: Validate test artifact version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      ref: ${{ steps.version.outputs.ref }}
+    steps:
+      - name: Validate version
+        id: version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-gwtest\.[0-9]+$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Use X.Y.Z-gwtest.N."
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "ref=$GITHUB_REF"
+          } >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux x64 CLI archive
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout dispatched ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+              - --filter=@t3tools/web...
+              - --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install patchelf
+        shell: bash
+        run: command -v patchelf || { sudo apt-get update && sudo apt-get install -y patchelf; }
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+
+      - name: Configure public T3 Connect identifiers
+        run: cp .env.example .env
+
+      - name: Build web client
+        run: vp run --filter=@t3tools/web build
+
+      - name: Build Linux resource monitor
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+
+      - name: Build Linux CLI single-executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          node apps/server/scripts/cli.ts build
+          node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build and smoke-test Linux CLI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          resource_monitor_dir="$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          mkdir -p "$resource_monitor_dir"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$resource_monitor_dir/"
+          node scripts/build-cli-archive.ts \
+            --platform linux \
+            --arch x64 \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --resource-monitor-dir "$resource_monitor_dir" \
+            --output-dir release-cli
+          node scripts/smoke-cli-archive.ts \
+            --archive release-cli/* \
+            --expect-version "${{ needs.preflight.outputs.version }}"
+
+      - name: Stage Linux transfer files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p e2e-assets
+          cp release-cli/t3-${{ needs.preflight.outputs.version }}-linux-x64.tar.gz e2e-assets/
+
+      - name: Upload Linux transfer files
+        uses: actions/upload-artifact@v7
+        with:
+          name: fork-e2e-transfer-linux-x64
+          path: e2e-assets/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  macos:
+    name: macOS arm64 desktop and CLI
+    needs: preflight
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout dispatched ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install desktop dependencies
+        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+
+      - name: Configure public T3 Connect identifiers
+        run: cp .env.example .env
+
+      - name: Build web client
+        run: vp run --filter=@t3tools/web build
+
+      - name: Build macOS resource monitor
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target aarch64-apple-darwin
+
+      - name: Build macOS CLI single-executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          node apps/server/scripts/cli.ts build
+          node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build and smoke-test macOS CLI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          resource_monitor_dir="$RUNNER_TEMP/cli-resource-monitor/darwin-arm64"
+          mkdir -p "$resource_monitor_dir"
+          cp native/resource-monitor/target/aarch64-apple-darwin/release/t3-resource-monitor "$resource_monitor_dir/"
+          node scripts/build-cli-archive.ts \
+            --platform mac \
+            --arch arm64 \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --resource-monitor-dir "$resource_monitor_dir" \
+            --output-dir release-cli
+          node scripts/smoke-cli-archive.ts \
+            --archive release-cli/* \
+            --expect-version "${{ needs.preflight.outputs.version }}"
+
+      - name: Build unsigned desktop artifacts with updates disabled
+        shell: bash
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
+          T3CODE_DISABLE_AUTO_UPDATE: "true"
+        run: |
+          set -euo pipefail
+          # build-desktop-artifact falls back to GITHUB_REPOSITORY when no
+          # explicit updater repository is set. Remove that fallback entirely.
+          unset GITHUB_REPOSITORY
+          unset T3CODE_DESKTOP_UPDATE_REPOSITORY
+          vp run dist:desktop:artifact \
+            --platform mac \
+            --target dmg \
+            --arch arm64 \
+            --build-version "${{ needs.preflight.outputs.version }}" \
+            --verbose
+
+      - name: Stage macOS transfer files
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p e2e-assets
+          cp "release/T3-Code-${VERSION}-arm64.dmg" e2e-assets/
+          cp "release/T3-Code-${VERSION}-arm64.zip" e2e-assets/
+          cp "release-cli/t3-${VERSION}-darwin-arm64.tar.gz" e2e-assets/
+
+      - name: Upload macOS transfer files
+        uses: actions/upload-artifact@v7
+        with:
+          name: fork-e2e-transfer-macos-arm64
+          path: e2e-assets/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  windows:
+    name: Windows x64 desktop and CLI
+    needs: [preflight, linux]
+    runs-on: windows-2025
+    timeout-minutes: 75
+    steps:
+      - name: Checkout dispatched ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+
+      - name: Resolve package cache path
+        id: package_cache_path
+        shell: pwsh
+        run: '"path=$(vp pm cache dir)" >> $env:GITHUB_OUTPUT'
+
+      - name: Cache packages
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.package_cache_path.outputs.path }}
+          key: fork-e2e-windows-packages-x64-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install desktop dependencies
+        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Align package versions
+        run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+
+      - name: Configure public T3 Connect identifiers
+        shell: bash
+        run: cp .env.example .env
+
+      - name: Download Linux CLI archive for WSL
+        uses: actions/download-artifact@v8
+        with:
+          name: fork-e2e-transfer-linux-x64
+          path: wsl-runtime
+
+      - name: Install Spectre-mitigated MSVC libs
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\\Microsoft Visual Studio\\Installer\\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - name: Build web client
+        run: vp run --filter=@t3tools/web build
+
+      - name: Build Windows resource monitor
+        shell: bash
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Build Windows CLI single-executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          node apps/server/scripts/cli.ts build
+          node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build and smoke-test Windows CLI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          resource_monitor_dir="$RUNNER_TEMP/cli-resource-monitor/win32-x64"
+          mkdir -p "$resource_monitor_dir"
+          cp native/resource-monitor/target/x86_64-pc-windows-msvc/release/t3-resource-monitor.exe "$resource_monitor_dir/"
+          node scripts/build-cli-archive.ts \
+            --platform win \
+            --arch x64 \
+            --version "${{ needs.preflight.outputs.version }}" \
+            --resource-monitor-dir "$resource_monitor_dir" \
+            --output-dir release-cli
+          node scripts/smoke-cli-archive.ts \
+            --archive release-cli/* \
+            --expect-version "${{ needs.preflight.outputs.version }}"
+
+      - name: Build unsigned desktop artifact with updates disabled
+        shell: bash
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
+          T3CODE_DISABLE_AUTO_UPDATE: "true"
+        run: |
+          set -euo pipefail
+          # See the macOS build for why the GitHub repository fallback is removed.
+          unset GITHUB_REPOSITORY
+          unset T3CODE_DESKTOP_UPDATE_REPOSITORY
+          vp run dist:desktop:artifact \
+            --platform win \
+            --target nsis \
+            --arch x64 \
+            --build-version "${{ needs.preflight.outputs.version }}" \
+            --wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz \
+            --verbose
+
+      - name: Stage Windows transfer files
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p e2e-assets
+          cp "release/T3-Code-${VERSION}-x64.exe" e2e-assets/
+          cp "release-cli/t3-${VERSION}-win32-x64.zip" e2e-assets/
+
+      - name: Upload Windows transfer files
+        uses: actions/upload-artifact@v7
+        with:
+          name: fork-e2e-transfer-windows-x64
+          path: e2e-assets/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  collect:
+    name: Collect E2E artifacts
+    needs: [preflight, macos, windows, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download platform transfer files
+        uses: actions/download-artifact@v8
+        with:
+          pattern: fork-e2e-transfer-*
+          merge-multiple: true
+          path: e2e-assets
+
+      - name: Validate files and write checksums
+        shell: bash
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected=(
+            "T3-Code-${VERSION}-arm64.dmg"
+            "T3-Code-${VERSION}-arm64.zip"
+            "T3-Code-${VERSION}-x64.exe"
+            "t3-${VERSION}-darwin-arm64.tar.gz"
+            "t3-${VERSION}-linux-x64.tar.gz"
+            "t3-${VERSION}-win32-x64.zip"
+          )
+
+          for file in "${expected[@]}"; do
+            [[ -s "e2e-assets/$file" ]] || { echo "::error::Missing E2E artifact: $file"; exit 1; }
+          done
+
+          feed_pattern='(app-update|dev-app-update|latest[^[:space:]/\\]*|nightly[^[:space:]/\\]*)\.yml'
+          if unzip -Z1 "e2e-assets/T3-Code-${VERSION}-arm64.zip" | grep -Eiq "$feed_pattern"; then
+            echo "::error::The macOS desktop archive contains an update feed."
+            exit 1
+          fi
+          if 7z l -ba "e2e-assets/T3-Code-${VERSION}-x64.exe" | grep -Eiq "$feed_pattern"; then
+            echo "::error::The Windows desktop installer contains an update feed."
+            exit 1
+          fi
+
+          mapfile -t feeds < <(find e2e-assets -type f -iname '*.yml' -print)
+          if (( ${#feeds[@]} > 0 )); then
+            printf '%s\\n' "${feeds[@]}"
+            echo "::error::E2E artifacts contain an update feed."
+            exit 1
+          fi
+
+          mapfile -t files < <(find e2e-assets -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\\n' | sort)
+          if (( ${#files[@]} != ${#expected[@]} )); then
+            printf 'Unexpected files:\\n%s\\n' "${files[*]}"
+            echo "::error::The E2E artifact set contains unexpected files."
+            exit 1
+          fi
+
+          (cd e2e-assets && sha256sum -- "${files[@]}") > e2e-assets/SHA256SUMS
+          (cd e2e-assets && sha256sum -c SHA256SUMS)
+
+      - name: Upload combined E2E artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: fork-e2e-${{ needs.preflight.outputs.version }}
+          path: e2e-assets/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

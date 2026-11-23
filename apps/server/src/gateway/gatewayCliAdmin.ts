@@ -207,6 +207,7 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
   platform: GatewayPlatform,
   user: string,
   requestedPort?: number,
+  options?: { readonly password?: string },
 ) {
   yield* requireAdmin(platform);
   const path = yield* Path.Path;
@@ -244,6 +245,7 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
   yield* platform.services.enableUser(
     record,
     path.join(platform.layout.installRoot, "current", platform.layout.executableName),
+    options,
   );
   return port;
 }, Effect.scoped);

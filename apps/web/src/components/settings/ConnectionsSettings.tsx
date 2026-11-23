@@ -40,6 +40,7 @@ import { useAccessEnvironment } from "./useAccessEnvironment";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { ManagedByOrganization } from "../ManagedPolicy";
 import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
+import { SharedRuntimeSetting } from "./SharedRuntimeSetting";
 import { searchableSetting } from "./settingsSearch";
 import { ConnectDeviceApprovalSettings } from "./ConnectDeviceApprovalSettings";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
@@ -99,6 +100,7 @@ import {
   desktopNetworkAccessStateAtom,
   refreshDesktopNetworkAccessState,
 } from "~/state/desktopNetworkAccess";
+import { desktopSharedRuntimeAtom } from "~/state/desktopSharedRuntime";
 import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
 import { useDesktopUpdateState } from "~/state/desktopUpdate";
 import {
@@ -417,6 +419,10 @@ function ConnectionsSettingsContent({
   const desktopWsl = useEnvironmentQuery(
     showsAccess && canManageLocalBackend && desktopBridge ? desktopWslStateAtom : null,
   );
+  // The shared gateway, not this app, launches that server, so its exposure is not ours to change.
+  const sharedRuntimeAttached =
+    useEnvironmentQuery(showsAccess && desktopBridge ? desktopSharedRuntimeAtom : null).data
+      ?.attached === true;
   const desktopWslState = desktopWsl.data;
   const desktopWslError = desktopWslMutationError ?? desktopWsl.error;
   const isLoadingWslState = desktopWsl.isPending && desktopWsl.data === null;
@@ -1286,7 +1292,7 @@ function ConnectionsSettingsContent({
                 }
               />
             ) : null}
-            {canManageLocalBackend && desktopBridge ? (
+            {sharedRuntimeAttached ? null : canManageLocalBackend && desktopBridge ? (
               <>
                 {renderNetworkAccessRow()}
                 {renderEndpointRows()}
@@ -1677,6 +1683,7 @@ function ConnectionsSettingsContent({
       {desktopBridge ? (
         <SettingsSection id="this-app" title="This app">
           <LocalEnvironmentSetting />
+          <SharedRuntimeSetting />
         </SettingsSection>
       ) : null}
       <SettingsSection

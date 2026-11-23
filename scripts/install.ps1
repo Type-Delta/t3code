@@ -10,6 +10,7 @@
 #   T3CODE_HOME              T3 home directory (default: ~\.t3)
 #   T3CODE_INSTALL_BIN_DIR   where t3.exe is linked (default: ~\.local\bin)
 #   T3CODE_RELEASE_BASE_URL  mirror for releases/download (default: GitHub)
+#   T3CODE_INSTALL_MODE      user, or gateway when running elevated (default: ask)
 #
 # The archive is unpacked into $T3CODE_HOME\runtime\versions\<version>, the
 # same layout `t3 service install` uses, so the service reuses this download.
@@ -117,6 +118,17 @@ function Fetch([string] $uri, [string] $destination, [switch] $progress) {
     $client.Dispose()
   }
 }
+$isAdministrator = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+  [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+$gatewayInstall = $false
+if ($isAdministrator -and $env:T3CODE_INSTALL_MODE -ne "user") {
+  if ($env:T3CODE_INSTALL_MODE -eq "gateway") {
+    $gatewayInstall = $true
+  } elseif (-not [Console]::IsInputRedirected -and $Host.UI.SupportsUserInteraction) {
+    $gatewayInstall = (Read-Host "Install T3 Code for everyone on this computer? [y/N]") -match '^(?i:y|yes)$'
+  }
+}
 if ($interactive) {
   # Block characters are constructed so this file also loads correctly in PowerShell 5.1.
   $mark = @(
@@ -181,6 +193,48 @@ $archive = "$stem.zip"
 $versionsDir = Join-Path $t3Home "runtime\versions"
 $targetDir = Join-Path $versionsDir $version
 $marker = Join-Path $targetDir ".install-complete"
+
+if ($gatewayInstall) {
+  $gatewayDir = Join-Path $HOME ("t3-gateway-" + [System.IO.Path]::GetRandomFileName())
+  New-Item -ItemType Directory -Path $gatewayDir | Out-Null
+  try {
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $rules = @(
+      (New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($identity.User, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+      (New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @("S-1-5-32-544", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")),
+      (New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @("S-1-5-18", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"))
+    )
+    foreach ($rule in $rules) { $acl.AddAccessRule($rule) }
+    $acl.SetOwner($identity.User)
+    Set-Acl -LiteralPath $gatewayDir -AclObject $acl
+
+    Step "Downloading..."
+    $checksums = Join-Path $gatewayDir "SHA256SUMS"
+    $gatewayArchive = Join-Path $gatewayDir $archive
+    Fetch "$baseUrl/v$version/SHA256SUMS" $checksums
+    Fetch "$baseUrl/v$version/$archive" $gatewayArchive -progress
+    $expected = (Get-Content $checksums | Where-Object { $_ -match "\s\*?$([regex]::Escape($archive))$" } | Select-Object -First 1)
+    if (-not $expected) { Fail "$archive is not listed in SHA256SUMS" }
+    $expected = ($expected -split "\s+")[0].ToLowerInvariant()
+    $actual = (Get-FileHash -Algorithm SHA256 $gatewayArchive).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) { Fail "checksum mismatch for $archive" }
+
+    Step "Extracting T3 Code..."
+    $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+    if (-not (Test-Path -LiteralPath $tar)) { Fail "System32\tar.exe is required for a gateway install" }
+    & $tar -xf $gatewayArchive -C $gatewayDir
+    if ($LASTEXITCODE -ne 0) { Fail "could not extract $archive" }
+    $gatewayExecutable = Join-Path $gatewayDir "$stem\t3.exe"
+    & $gatewayExecutable gateway install
+    if ($LASTEXITCODE -ne 0) { Fail "gateway install failed" }
+  } finally {
+    if (Test-Path -LiteralPath $gatewayDir) { Remove-Item -LiteralPath $gatewayDir -Recurse -Force }
+  }
+  Write-Host "`nUsers can now join from the T3 Code desktop app, or an admin can run: t3 gateway add <user>"
+  exit 0
+}
 
 if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $version)) {
   Step "Version $version is already downloaded."

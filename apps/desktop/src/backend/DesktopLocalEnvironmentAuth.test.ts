@@ -125,6 +125,53 @@ describe("DesktopLocalEnvironmentAuth", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("mints a fresh credential per session for a shared gateway backend", () =>
+    Effect.gen(function* () {
+      const mints = yield* Ref.make(0);
+      const exchanged = yield* Ref.make<ReadonlyArray<string>>([]);
+      const configRef = yield* Ref.make(Option.some(makeConfig(41001, "")));
+      const httpClientLayer = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Ref.update(exchanged, (all) => [
+            ...all,
+            request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "",
+          ]).pipe(Effect.as(makeSessionResponse(request, "shared-bearer-token"))),
+        ),
+      );
+      const poolLayer = DesktopBackendPool.layerTest([
+        {
+          ...makeInstance(
+            DesktopBackendPool.BackendInstanceId(PRIMARY_LOCAL_ENVIRONMENT_ID),
+            configRef,
+          ),
+          mintCredential: Ref.updateAndGet(mints, (count) => count + 1).pipe(
+            Effect.map((count) => `one-time-${count}`),
+          ),
+        },
+      ]);
+      const testLayer = DesktopLocalEnvironmentAuth.layer.pipe(
+        Layer.provide(Layer.mergeAll(poolLayer, httpClientLayer, NodeCrypto.layerMac)),
+      );
+
+      yield* Effect.gen(function* () {
+        const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+        assert.strictEqual(yield* auth.getBearerToken(), "shared-bearer-token");
+        assert.strictEqual(yield* auth.getBearerToken(), "shared-bearer-token");
+        assert.strictEqual(yield* Ref.get(mints), 1);
+        // The session expires after an hour; the next request needs a new one-time token.
+        yield* TestClock.adjust(Duration.hours(1));
+        yield* auth.getBearerToken();
+      }).pipe(Effect.provide(testLayer));
+
+      assert.strictEqual(yield* Ref.get(mints), 2);
+      const bodies = yield* Ref.get(exchanged);
+      assert.strictEqual(bodies.length, 2);
+      assert.include(bodies[0], "one-time-1");
+      assert.include(bodies[1], "one-time-2");
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("shares one exchange between concurrent window and tray consumers", () =>
     Effect.gen(function* () {
       const requestCount = yield* Ref.make(0);

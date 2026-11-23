@@ -11,6 +11,7 @@ import * as FiberHandle from "effect/FiberHandle";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -80,6 +81,11 @@ export class DesktopBackendPool extends Context.Service<
     readonly unregister: (
       id: BackendInstanceId,
     ) => Effect.Effect<void, DesktopBackendPoolCannotUnregisterPrimaryError>;
+    /** Fork-only: before the primary starts, make it the shared gateway's backend instead. */
+    readonly attachPrimary: (input: {
+      readonly httpBaseUrl: URL;
+      readonly mintCredential: Effect.Effect<string, Error>;
+    }) => Effect.Effect<void>;
   }
 >()("@t3tools/desktop/backend/DesktopBackendPool") {}
 
@@ -372,6 +378,36 @@ export const layer = Layer.effect(
       }).pipe(Effect.ensuring(finish));
     });
 
+    const primaryRef = yield* Ref.make(primary);
+    const attachPrimary: DesktopBackendPool["Service"]["attachPrimary"] = Effect.fn(
+      "DesktopBackendPool.attachPrimary",
+    )(function* (input) {
+      const attached = yield* DesktopBackendManager.makeAttachedBackendInstance({
+        id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
+        label: configuration.resolvePrimaryLabel,
+        httpBaseUrl: input.httpBaseUrl,
+        mintCredential: input.mintCredential,
+        onReady: (httpBaseUrl) =>
+          desktopWindow.handleBackendReady(httpBaseUrl).pipe(
+            Effect.andThen(SubscriptionRef.set(primaryBackendStartup, { _tag: "Ready" })),
+            Effect.catch((error) =>
+              logBackendPoolWarning("failed to open main window for the shared backend", {
+                error: error.message,
+              }),
+            ),
+          ),
+        onShutdown: desktopWindow.handleBackendNotReady,
+      });
+      yield* Ref.set(primaryRef, attached);
+      yield* SynchronizedRef.update(instancesRef, (current) =>
+        new Map(current).set(DesktopBackendManager.PRIMARY_INSTANCE_ID, {
+          _tag: "Active",
+          instance: attached,
+          scope: Option.none(),
+        }),
+      );
+    });
+
     return DesktopBackendPool.of({
       get: Effect.fn("DesktopBackendPool.get")(function (id) {
         return SynchronizedRef.get(instancesRef).pipe(
@@ -388,9 +424,10 @@ export const layer = Layer.effect(
           ),
         ),
       ),
-      primary: Effect.succeed(primary),
+      primary: Ref.get(primaryRef),
       register,
       unregister,
+      attachPrimary,
     });
   }),
 );
@@ -419,6 +456,9 @@ export const layerTest = (
         }),
         unregister: Effect.fn("DesktopBackendPool.unregister")(function () {
           return Effect.die("DesktopBackendPool.layerTest does not support unregister");
+        }),
+        attachPrimary: Effect.fn("DesktopBackendPool.attachPrimary")(function () {
+          return Effect.die("DesktopBackendPool.layerTest does not support attachPrimary");
         }),
       });
     }),

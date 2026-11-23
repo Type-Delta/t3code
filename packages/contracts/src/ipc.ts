@@ -587,6 +587,17 @@ export const DesktopWslStateSchema = Schema.Struct({
   preflightError: Schema.NullOr(Schema.String),
 });
 
+// Fork-only (FORK.md): the machine's shared T3 Code (multi-user gateway) as this app sees it.
+export const DesktopSharedRuntimeStateSchema = Schema.Struct({
+  /** This app uses the account's shared server instead of starting its own. */
+  attached: Schema.Boolean,
+  enrolled: Schema.Boolean,
+  selfService: Schema.Boolean,
+  joinNeedsPassword: Schema.Boolean,
+  runtimeVersion: Schema.String,
+});
+export type DesktopSharedRuntimeState = typeof DesktopSharedRuntimeStateSchema.Type;
+
 export type DesktopPreviewNavStatus =
   | { kind: "Idle" }
   | { kind: "Loading"; url: string; title: string }
@@ -1219,6 +1230,11 @@ export interface DesktopBridge {
   setWslBackendEnabled: (enabled: boolean) => Promise<DesktopWslState>;
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
+  /** Null when this computer has no shared T3 Code. */
+  getSharedRuntimeState: () => Promise<DesktopSharedRuntimeState | null>;
+  /** Both relaunch the app on success so startup picks the shared or the app's own server. */
+  joinSharedRuntime: (password?: string) => Promise<void>;
+  leaveSharedRuntime: () => Promise<void>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   /** Maps a Windows path to the one a local backend (`primary` or `wsl:…`) sees; null when it cannot. */
   toLocalBackendPath: (backendId: string, windowsPath: string) => Promise<string | null>;

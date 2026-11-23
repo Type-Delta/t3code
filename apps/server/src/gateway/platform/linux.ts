@@ -19,6 +19,8 @@ import { loopbackPeerUid, parseProcNetTcp, readTcpSockets } from "./linuxProc.ts
 
 export const GATEWAY_UNIT = "t3code-gateway.service";
 export const GATEWAY_USER_UNIT_TEMPLATE = "t3code@.service";
+export const HELPER_SOCKET_UNIT = "t3code-gateway-helper.socket";
+export const HELPER_SERVICE_UNIT_TEMPLATE = "t3code-gateway-helper@.service";
 const gatewayAccount = "t3code";
 const unitMarker = "# Managed by t3 gateway install";
 const startLimit = ["StartLimitIntervalSec=60", "StartLimitBurst=5"];
@@ -90,6 +92,38 @@ export function renderGatewayUnits(executable: string) {
       "WantedBy=multi-user.target",
       "",
     ].join("\n"),
+    [HELPER_SOCKET_UNIT]: [
+      unitMarker,
+      "[Unit]",
+      "Description=T3 Code gateway self-service helper socket",
+      "",
+      "[Socket]",
+      "ListenStream=127.0.0.1:3774",
+      "Accept=yes",
+      `Service=${HELPER_SERVICE_UNIT_TEMPLATE}`,
+      "",
+      "[Install]",
+      "WantedBy=sockets.target",
+      "",
+    ].join("\n"),
+    [HELPER_SERVICE_UNIT_TEMPLATE]: [
+      unitMarker,
+      "[Unit]",
+      "Description=T3 Code gateway self-service helper",
+      "",
+      "[Service]",
+      "Type=exec",
+      "User=root",
+      "StandardInput=socket",
+      "StandardOutput=socket",
+      `Environment=PATH=${systemPath}`,
+      `ExecStart=${executable} gateway helper`,
+      "NoNewPrivileges=no",
+      "ProtectSystem=false",
+      "ProtectHome=false",
+      "PrivateTmp=yes",
+      "",
+    ].join("\n"),
   };
 }
 
@@ -145,7 +179,7 @@ const readPasswd = Effect.fn("GatewayPlatform.linux.readPasswd")(function* (user
   ) {
     return undefined;
   }
-  return { uid, gid, home, shell };
+  return { name, uid, gid, home, shell };
 });
 
 const lookupUser = Effect.fn("GatewayPlatform.linux.lookupUser")(function* (name: string) {
@@ -171,6 +205,20 @@ const lookupUser = Effect.fn("GatewayPlatform.linux.lookupUser")(function* (name
     return yield* fail(`The home directory for ${name} does not exist or is not a directory.`);
   }
   return { name, accountId: passwd.uid, home } satisfies GatewayUserRecord;
+}, Effect.mapError(asPlatformError));
+
+const accountName = Effect.fn("GatewayPlatform.linux.accountName")(function* (
+  accountId: GatewayAccountId,
+) {
+  if (typeof accountId !== "number" || !Number.isSafeInteger(accountId) || accountId < 0) {
+    return yield* fail(`Linux account id ${String(accountId)} is invalid.`);
+  }
+  const result = yield* exec("getent", ["passwd", String(accountId)]);
+  const [name, , uidText] = result.stdout.trim().split(":");
+  if (result.code !== 0 || name === undefined || Number(uidText) !== accountId) {
+    return yield* fail(`Linux account ${accountId} was not found.`);
+  }
+  return name;
 }, Effect.mapError(asPlatformError));
 
 // A sticky shared ancestor cannot let another user replace the trusted entry below it.
@@ -319,9 +367,16 @@ const ensureGatewayAccount = Effect.gen(function* () {
 });
 
 const instancePattern = GATEWAY_USER_UNIT_TEMPLATE.replace("@.", "@*.");
+const helperInstancePattern = HELPER_SERVICE_UNIT_TEMPLATE.replace("@.", "@*.");
 const isGatewayUnit = (name: string) =>
   name === GATEWAY_UNIT ||
-  (name.startsWith("t3code@") && name.endsWith(".service") && name !== GATEWAY_USER_UNIT_TEMPLATE);
+  name === HELPER_SOCKET_UNIT ||
+  (name.startsWith("t3code@") &&
+    name.endsWith(".service") &&
+    name !== GATEWAY_USER_UNIT_TEMPLATE) ||
+  (name.startsWith("t3code-gateway-helper@") &&
+    name.endsWith(".service") &&
+    name !== HELPER_SERVICE_UNIT_TEMPLATE);
 const userUnit = (user: string) => `t3code@${user}.service`;
 
 const listUnits = Effect.fn("GatewayPlatform.linux.listUnits")(function* (
@@ -335,6 +390,8 @@ const listUnits = Effect.fn("GatewayPlatform.linux.listUnits")(function* (
     "--no-pager",
     GATEWAY_UNIT,
     instancePattern,
+    HELPER_SOCKET_UNIT,
+    helperInstancePattern,
   ]);
   return stdout
     .split("\n")
@@ -355,10 +412,10 @@ const readFragmentPath = Effect.fn("GatewayPlatform.linux.readFragmentPath")(fun
 });
 
 const checkTemplateFragment = Effect.fn("GatewayPlatform.linux.checkTemplateFragment")(function* (
+  unit: string,
   expected: string | undefined,
 ) {
   // Systemd cannot load a template by name. Its cat command resolves the exact template on disk.
-  const unit = GATEWAY_USER_UNIT_TEMPLATE;
   const result = yield* runTool("systemctl", ["cat", "--no-pager", unit], [0, 1]);
   if (
     result.code === 1 &&
@@ -436,7 +493,12 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
     const path = yield* Path.Path;
     const units = new Map<string, string>();
     let unmanagedGateway = false;
-    for (const unit of [GATEWAY_UNIT, GATEWAY_USER_UNIT_TEMPLATE]) {
+    for (const unit of [
+      GATEWAY_UNIT,
+      GATEWAY_USER_UNIT_TEMPLATE,
+      HELPER_SOCKET_UNIT,
+      HELPER_SERVICE_UNIT_TEMPLATE,
+    ]) {
       const file = path.join(paths.unitDir, unit);
       const info = yield* entry(file);
       if (info === undefined) continue;
@@ -512,8 +574,24 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
       );
     }
     yield* checkTemplateFragment(
+      GATEWAY_USER_UNIT_TEMPLATE,
       previousUnits.has(GATEWAY_USER_UNIT_TEMPLATE) ? templatePath : undefined,
     );
+    yield* checkTemplateFragment(
+      HELPER_SERVICE_UNIT_TEMPLATE,
+      previousUnits.has(HELPER_SERVICE_UNIT_TEMPLATE)
+        ? `${paths.unitDir}/${HELPER_SERVICE_UNIT_TEMPLATE}`
+        : undefined,
+    );
+    const helperSocketFragment = yield* readFragmentPath(HELPER_SOCKET_UNIT);
+    const previousHelperSocket = previousUnits.has(HELPER_SOCKET_UNIT)
+      ? `${paths.unitDir}/${HELPER_SOCKET_UNIT}`
+      : undefined;
+    if (helperSocketFragment && helperSocketFragment !== previousHelperSocket) {
+      return yield* fail(
+        `Refusing to install: systemd loaded unmanaged unit ${HELPER_SOCKET_UNIT} from ${helperSocketFragment}.`,
+      );
+    }
   });
 
   const activate = Effect.fn("GatewayPlatform.linux.activate")(function* (
@@ -533,8 +611,15 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
       if (!(yield* hasManagedFragment(GATEWAY_UNIT, gatewayUnitPath))) {
         return yield* fail(`systemd did not load the installed unit at ${gatewayUnitPath}.`);
       }
+      if (
+        !(yield* hasManagedFragment(HELPER_SOCKET_UNIT, `${paths.unitDir}/${HELPER_SOCKET_UNIT}`))
+      ) {
+        return yield* fail(`systemd did not load the installed helper socket unit.`);
+      }
       yield* resetFailedUnits(GATEWAY_UNIT);
       yield* runTool("systemctl", ["enable", "--now", GATEWAY_UNIT]);
+      yield* resetFailedUnits(HELPER_SOCKET_UNIT);
+      yield* runTool("systemctl", ["enable", "--now", HELPER_SOCKET_UNIT]);
       if (active.includes(GATEWAY_UNIT)) yield* runTool("systemctl", ["restart", GATEWAY_UNIT]);
       yield* waitForGateway(activation.gatewayAccount, port);
       return active;
@@ -574,7 +659,9 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
     );
 
     const backends = yield* Effect.filter(
-      active.filter((unit) => unit !== GATEWAY_UNIT),
+      active.filter(
+        (unit) => unit.startsWith("t3code@") && unit.endsWith(".service") && unit !== GATEWAY_UNIT,
+      ),
       (unit) => hasManagedFragment(unit, templatePath),
     );
     if (backends.length === 0) return;
@@ -602,7 +689,16 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
     const gatewayFragment = managedFiles.has(GATEWAY_UNIT) ? gatewayUnitPath : undefined;
     const managed = new Set(
       yield* Effect.filter(candidates, (unit) =>
-        hasManagedFragment(unit, unit === GATEWAY_UNIT ? gatewayFragment : templatePath),
+        hasManagedFragment(
+          unit,
+          unit === GATEWAY_UNIT
+            ? gatewayFragment
+            : unit === HELPER_SOCKET_UNIT
+              ? `${paths.unitDir}/${HELPER_SOCKET_UNIT}`
+              : unit.startsWith("t3code-gateway-helper@")
+                ? `${paths.unitDir}/${HELPER_SERVICE_UNIT_TEMPLATE}`
+                : templatePath,
+        ),
       ),
     );
     const loaded = loadedUnits.filter((unit) => managed.has(unit));
@@ -628,6 +724,27 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
     }
   });
 
+  const runDetached = Effect.fn("GatewayPlatform.linux.runDetached")(function* (
+    label: string,
+    argv: ReadonlyArray<string>,
+  ) {
+    if (!/^[a-z]+$/.test(label) || argv.length === 0) {
+      return yield* fail("Detached jobs require a lowercase label and a non-empty command.");
+    }
+    const unit = `t3code-gateway-${label}`;
+    const state = yield* exec("systemctl", ["show", "--property=ActiveState", "--value", unit]);
+    if (state.code === 0) {
+      const activeState = state.stdout.trim();
+      if (["active", "activating", "deactivating", "reloading"].includes(activeState)) {
+        return yield* fail(`Detached job ${unit} is already active.`);
+      }
+      yield* runTool("systemctl", ["reset-failed", unit]).pipe(Effect.ignore);
+    } else if (state.code !== 1) {
+      return yield* fail(`Could not inspect detached job ${unit}.`);
+    }
+    yield* runTool("systemd-run", [`--unit=${unit}`, "--collect", "--quiet", "--", ...argv]);
+  }, Effect.mapError(asPlatformError));
+
   return {
     name: "linux",
     layout: {
@@ -652,6 +769,7 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
     }),
     isAdmin: Effect.map(HostProcess.UserId, (uid) => uid === 0),
     lookupUser,
+    accountName,
     checkAdminOwned,
     checkRuntimeSource,
     secureDirectory,
@@ -663,6 +781,8 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
       loopbackPeerUid(await readTcpSockets(), backendPort, clientPort),
     ),
     markerAttribution: "file-owner",
+    helperHost: "service",
+    joinNeedsPassword: false,
     services: {
       ensureGatewayAccount,
       preflight: preflight.pipe(Effect.mapError(asPlatformError)),
@@ -673,6 +793,7 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
         exec("systemctl", ["is-active", userUnit(user)]).pipe(
           Effect.map((result) => result.stdout.trim() || "unavailable"),
         ),
+      runDetached,
       uninstall,
       logHint,
     },

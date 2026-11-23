@@ -39,6 +39,12 @@ export const GatewayConfig = Schema.Struct({
   // Origin printed in pairing links, e.g. http://192.168.1.20:3773. Derived from listen when absent.
   publicUrl: Schema.optional(Schema.String),
   users: Schema.Record(GatewayUserName, GatewayUser),
+  // Lets any local user join, leave and update through the helper. `gateway install` sets it to
+  // true when absent; an explicit false is kept.
+  selfService: Schema.optional(Schema.Boolean),
+  // Where self-service updates download CLI archives and SHA256SUMS, laid out as GitHub release
+  // downloads (`<baseUrl>/v<version>/<file>`). Defaults to this fork's GitHub releases.
+  updates: Schema.optional(Schema.Struct({ baseUrl: Schema.String })),
 });
 export type GatewayConfig = typeof GatewayConfig.Type;
 

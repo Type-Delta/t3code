@@ -58,6 +58,7 @@ import * as DesktopCliCommand from "./DesktopCliCommand.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as DesktopConnectionCatalogStore from "./DesktopConnectionCatalogStore.ts";
 import * as DesktopIpc from "../ipc/DesktopIpc.ts";
+import * as DesktopGateway from "../backend/DesktopGateway.ts";
 import * as DesktopLocalEnvironmentAuth from "../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopManagedPolicy from "./DesktopManagedPolicy.ts";
 import * as DesktopPrimaryPaste from "./DesktopPrimaryPaste.ts";
@@ -107,6 +108,9 @@ it.effect.each([false, true])(
           Effect.provideService(ElectronDialog.ElectronDialog, {
             showErrorBox: () => Effect.die("unexpected fatal startup error"),
           } as unknown as ElectronDialog.ElectronDialog["Service"]),
+          Effect.provideService(DesktopGateway.DesktopGateway, {
+            status: Effect.succeedNone,
+          } as unknown as DesktopGateway.DesktopGateway["Service"]),
           Effect.provideService(DesktopEnvironment.DesktopEnvironment, {
             platform: "linux",
             isDevelopment: false,

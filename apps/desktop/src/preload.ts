@@ -238,6 +238,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(IpcChannels.SET_WSL_BACKEND_ENABLED_CHANNEL, enabled),
   setWslDistro: (distro) => ipcRenderer.invoke(IpcChannels.SET_WSL_DISTRO_CHANNEL, distro),
   setWslOnly: (enabled) => ipcRenderer.invoke(IpcChannels.SET_WSL_ONLY_CHANNEL, enabled),
+  getSharedRuntimeState: () => ipcRenderer.invoke(IpcChannels.GET_SHARED_RUNTIME_STATE_CHANNEL),
+  joinSharedRuntime: (password) =>
+    ipcRenderer.invoke(IpcChannels.JOIN_SHARED_RUNTIME_CHANNEL, password),
+  leaveSharedRuntime: () => ipcRenderer.invoke(IpcChannels.LEAVE_SHARED_RUNTIME_CHANNEL),
   pickFolder: (options) => ipcRenderer.invoke(IpcChannels.PICK_FOLDER_CHANNEL, options),
   toLocalBackendPath: (backendId, path) =>
     ipcRenderer.invoke(IpcChannels.TO_LOCAL_BACKEND_PATH_CHANNEL, { backendId, path }),
