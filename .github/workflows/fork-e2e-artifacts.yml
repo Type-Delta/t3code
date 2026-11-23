@@ -312,6 +312,26 @@ jobs:
         shell: bash
         run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-pc-windows-msvc
 
+      # Build the desktop first: the CLI single-executable build leaves files the Windows
+      # payload validation would count.
+      - name: Build unsigned desktop artifact with updates disabled
+        shell: bash
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
+          T3CODE_DISABLE_AUTO_UPDATE: "true"
+        run: |
+          set -euo pipefail
+          # See the macOS build for why the GitHub repository fallback is removed.
+          unset GITHUB_REPOSITORY
+          unset T3CODE_DESKTOP_UPDATE_REPOSITORY
+          vp run dist:desktop:artifact \
+            --platform win \
+            --target nsis \
+            --arch x64 \
+            --build-version "${{ needs.preflight.outputs.version }}" \
+            --wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz \
+            --verbose
+
       - name: Build Windows CLI single-executable
         shell: bash
         run: |
@@ -335,24 +355,6 @@ jobs:
           node scripts/smoke-cli-archive.ts \
             --archive release-cli/* \
             --expect-version "${{ needs.preflight.outputs.version }}"
-
-      - name: Build unsigned desktop artifact with updates disabled
-        shell: bash
-        env:
-          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
-          T3CODE_DISABLE_AUTO_UPDATE: "true"
-        run: |
-          set -euo pipefail
-          # See the macOS build for why the GitHub repository fallback is removed.
-          unset GITHUB_REPOSITORY
-          unset T3CODE_DESKTOP_UPDATE_REPOSITORY
-          vp run dist:desktop:artifact \
-            --platform win \
-            --target nsis \
-            --arch x64 \
-            --build-version "${{ needs.preflight.outputs.version }}" \
-            --wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz \
-            --verbose
 
       - name: Stage Windows transfer files
         shell: bash
