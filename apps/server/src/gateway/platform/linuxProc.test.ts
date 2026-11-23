@@ -5,7 +5,7 @@ import {
   loopbackPeerUid,
   parseProcNetTcp,
   parseProcNetTcpSockets,
-} from "./GatewayListeners.ts";
+} from "./linuxProc.ts";
 
 const HEADER =
   "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";

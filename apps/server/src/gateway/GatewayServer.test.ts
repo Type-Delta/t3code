@@ -7,7 +7,6 @@ import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -16,8 +15,23 @@ import { vi } from "vite-plus/test";
 
 import type { GatewayConfig } from "./GatewayConfig.ts";
 import { connectVerified, serveGateway } from "./GatewayServer.ts";
+import { testGatewayServices } from "./platform/testing.ts";
 
 const uid = NodeOS.userInfo().uid;
+
+// Every fake backend runs as this process's account. macOS netstat lists no TCP sockets under the
+// Vite+ CLI, so the adapters' own tests cover real attribution.
+vi.mock("./platform/GatewayPlatform.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./platform/GatewayPlatform.ts")>();
+  return {
+    ...actual,
+    currentGatewayPlatform: () =>
+      Effect.map(actual.currentGatewayPlatform(), (platform) => ({
+        ...platform,
+        makeConnectionOwner: Effect.succeed(async () => uid),
+      })),
+  };
+});
 
 // Echoes what it received; answers upgrades with raw bytes, since the gateway only splices sockets.
 // Upgrades to /ws-hang are never answered; their sockets go to `hung`.
@@ -636,7 +650,7 @@ describe("serveGateway", () => {
       const removed = yield* get("/api/whoami", { cookie: "t3gw_user=bob" });
       expect(removed.response.status).toBe(421);
       yield* Effect.promise(() => bobClosed);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(testGatewayServices)),
   );
 
   // Android's React Native networking drops cookies from requests sent with `credentials: "omit"`,
@@ -712,7 +726,7 @@ describe("serveGateway", () => {
       expect(JSON.parse(noCookie.body)).toMatchObject({ name: "alice" });
       const unenrolled = yield* session("Bearer t3gw~mallory~alice-token.sig");
       expect(unenrolled.response.status).toBe(421);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(testGatewayServices)),
   );
 
   it.live("fails a verifying connection that is closed before it connects", () =>
@@ -724,9 +738,11 @@ describe("serveGateway", () => {
         socket.once("close", () => sockets.delete(socket));
       };
       const result = yield* Effect.callback<Error | null>((resume) => {
-        connectVerified({ user: "alice", uid, port }, track)({}, (error) =>
-          resume(Effect.succeed(error)),
-        );
+        connectVerified(
+          { user: "alice", uid, port },
+          track,
+          async () => uid,
+        )({}, (error) => resume(Effect.succeed(error)));
         // What a config reload does to a removed user's sockets.
         for (const socket of sockets) socket.destroy();
       });

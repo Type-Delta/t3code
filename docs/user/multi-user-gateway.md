@@ -1,20 +1,35 @@
-# Share T3 Code on a Linux host
+# Share T3 Code with several users on one computer
 
-The multi-user gateway is available in this fork on Linux with systemd. Each enrolled Linux
-account gets its own T3 Code server, projects, settings, and provider credentials. Browsers
-and phones connect to a single gateway address.
+The multi-user gateway is available in this fork on Linux with systemd, macOS, and Windows.
+Each enrolled account gets its own T3 Code server, projects, settings, and provider
+credentials. Browsers and phones connect to a single gateway address.
 
-Use it on a trusted host with trusted Linux users and an IPv4 LAN or tailnet. The gateway
+Use it on a trusted computer with trusted users and an IPv4 LAN or tailnet. The gateway
 uses HTTP on port 3773 by default. Use one browser profile per person on each gateway,
 since everyone on it shares one browser origin. Other services on the same hostname can
 receive gateway cookies. Guest links, webhooks, and outside agents connecting over MCP use
 each user's T3 Connect address.
 
+Each enrolled user's backend uses their existing T3 Code data. If someone used the T3 Code
+desktop app on this computer, have them quit it before you enroll them, and don't run it
+alongside the gateway. Their projects and threads carry over.
+
 ## Install and enroll a user
 
-Use a Linux CLI archive you trust, built from this fork. Set `archive` to its path.
-Extract it into a private, root-owned directory because the executable loads its bundled
-libraries before the installer can check them.
+Use a CLI archive you trust, built from this fork for your operating system. Extract it
+into a private, administrator-owned folder, because the executable loads its bundled
+libraries before the installer can check them. Then install the gateway and enroll each
+person with their existing account name in place of `alice`.
+
+Enrolling a user starts their backend under their account. Their provider CLIs and
+credentials must be set up under that account. For a CLI installed in the user's home
+directory, add it to their PATH or configure its full executable path in T3 Code.
+
+If the printed pairing links use the wrong network address, set `publicUrl` in the
+gateway config to the HTTP origin your devices can reach, including the port if needed.
+The install and uninstall commands refuse config or pairing folder path overrides.
+
+### Linux
 
 ```sh
 archive=/path/to/t3-linux-archive.tar.gz
@@ -24,22 +39,47 @@ sudo "$release_dir/t3" gateway install
 sudo t3 gateway add alice
 ```
 
-Use the person's existing Linux username in place of `alice`. The gateway install puts
-`t3` on the system PATH and starts the shared service. Enrolling a user starts their
-backend under their account. Their provider CLIs and credentials must be set up under
-that account. For a CLI installed in the user's home directory, add it to their login
-shell's PATH or configure its full executable path in T3 Code.
+The config is `/etc/t3code/gateway.json`. Check service logs with
+`journalctl -u t3code-gateway.service` and `journalctl -u t3code@alice.service`.
 
-The systemd service uses `/etc/t3code/gateway.json` and `/var/lib/t3code/pairing`.
-`t3 gateway install` and `t3 gateway uninstall` refuse config or pairing directory path overrides.
+### macOS
 
-If the printed pairing links use the wrong network address, set `publicUrl` in
-`/etc/t3code/gateway.json` to the HTTP origin your devices can reach, including the port
-if needed.
+```sh
+archive=/path/to/t3-darwin-archive.tar.gz
+release_dir="$(sudo mktemp -d /var/root/t3code-release.XXXXXX)"
+sudo tar -xf "$archive" -C "$release_dir" --strip-components=1
+sudo chown -R root:wheel "$release_dir"
+sudo chmod -R go-w "$release_dir"
+sudo "$release_dir/t3" gateway install
+sudo t3 gateway add alice
+```
+
+The install needs `/usr/local/bin` to be writable only by administrators. On Macs where
+Homebrew owns `/usr/local`, it refuses to install. The config is
+`/Library/Application Support/T3Code/gateway.json`, and logs are in `/Library/Logs/T3Code`.
+
+### Windows
+
+In an elevated PowerShell, extract the zip into a folder only administrators can change,
+then run:
+
+```powershell
+.\t3.exe gateway install
+t3 gateway add alice
+```
+
+The user must have signed in to Windows at least once. `t3 gateway add` asks once for
+that user's Windows password so their backend can start at boot without them signed in.
+The password isn't stored, and later password changes don't affect it. Enrolling also
+grants the user "Log on as a batch job". The gateway itself runs as the system account.
+
+The install allows port 3773 through Windows Firewall on private and domain networks. If
+the computer's network is set to Public, the install warns you and shows how to change it.
+The config is `%ProgramData%\T3Code\gateway.json`, and logs are in `%ProgramData%\T3Code\logs`.
 
 ## Pair a browser or phone
 
-As the enrolled Linux user, run:
+As the enrolled user, run:
 
 ```sh
 t3 gateway pair
@@ -54,17 +94,19 @@ After scanning another account's code on your phone, pair your own account again
 
 ## Update or remove the gateway
 
-To update the server, extract a newer archive in a private, root-owned directory and run
-the extracted executable with `sudo` as above. The gateway and running backends restart,
-stopping any running agent turns. The installer reports the restarted backends' states.
-To check them later, run `t3 gateway list`.
+To update, extract a newer archive the same way and run its `gateway install` as an
+administrator. The gateway and running backends restart, stopping any running agent
+turns. The installer reports the restarted backends' states. To check them later, run
+`t3 gateway list`. On Windows, if the installer names a user, run `t3 gateway add` for them
+again.
 
 Skip the in-app server update and `t3 service install`, which can start a separate server.
 
-To unenroll an account, run `sudo t3 gateway remove alice`. This stops its backend and
-leaves the account's T3 Code data in place.
+To unenroll an account, run `t3 gateway remove alice` as an administrator. This stops its
+backend and leaves the account's T3 Code data in place.
 
-To remove the shared service, run `sudo t3 gateway uninstall`. It removes the system
-services and installed runtime and keeps `/etc/t3code`, `/var/lib/t3code`, the `t3code`
-service account, and everyone's `~/.t3`. To start the backends again after reinstalling,
-run `sudo t3 gateway add` for each account you want to bring back.
+To remove the shared service, run `t3 gateway uninstall` as an administrator. It removes
+the services and installed runtime and keeps the gateway config, pairing folders, the
+gateway's service account, and everyone's T3 Code data. On Windows, the running `t3.exe`
+is deleted at the next restart. To start the backends again after reinstalling, run
+`t3 gateway add` for each account you want to bring back.

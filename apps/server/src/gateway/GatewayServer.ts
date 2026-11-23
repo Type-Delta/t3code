@@ -20,7 +20,11 @@ import { guardHttpResponseWriteErrors, keepIdleConnections } from "../httpRespon
 import { acceptsPrivateNetworkConnection } from "../startupAccess.ts";
 import type { GatewayConfig } from "./GatewayConfig.ts";
 import { makeGatewayConfigSource } from "./GatewayConfigLoader.ts";
-import { loopbackPeerUid, readTcpSockets } from "./GatewayListeners.ts";
+import {
+  currentGatewayPlatform,
+  type GatewayAccountId,
+  type ConnectionOwner,
+} from "./platform/GatewayPlatform.ts";
 import { readPendingUsers } from "./GatewayPending.ts";
 import {
   backendCookieHeader,
@@ -95,7 +99,7 @@ const CONFIG_POLL_INTERVAL = "2 seconds";
 const BACKEND_UNAVAILABLE = "T3GW_BACKEND_UNAVAILABLE";
 const BACKEND_TIMEOUT = "T3GW_BACKEND_TIMEOUT";
 
-type Backend = { readonly user: string; readonly uid: number; readonly port: number };
+type Backend = { readonly user: string; readonly uid: GatewayAccountId; readonly port: number };
 const backendKey = (backend: Backend) => `${backend.user}:${backend.uid}:${backend.port}`;
 const isValidStatus = (status: number | undefined): status is number =>
   status !== undefined && status >= 100 && status <= 599;
@@ -104,12 +108,12 @@ const isBackendUnavailable = (error: Error & { code?: unknown }) =>
   error.code === BACKEND_UNAVAILABLE || error.code === "ECONNREFUSED";
 
 /**
- * A `createConnection` for 127.0.0.1:<port> that hands the socket over only once /proc shows the
- * accepting end belongs to `uid`, so no request byte reaches a squatter on a restarting backend's port.
- * `track` sees every socket as it is created.
+ * A `createConnection` for 127.0.0.1:<port> that hands the socket over only once `connectionOwner`
+ * shows the accepting end belongs to the backend's account, so no request byte reaches a squatter on
+ * a restarting backend's port. `track` sees every socket as it is created.
  */
 export const connectVerified =
-  (backend: Backend, track: (socket: NodeNet.Socket) => void) =>
+  (backend: Backend, track: (socket: NodeNet.Socket) => void, connectionOwner: ConnectionOwner) =>
   (_options: unknown, callback: (error: Error | null, socket: NodeStream.Duplex) => void) => {
     const socket = NodeNet.connect({ host: "127.0.0.1", port: backend.port });
     track(socket);
@@ -126,16 +130,16 @@ export const connectVerified =
       fail(new Error(`The connection to ${backend.user}'s backend closed before it was verified.`));
     });
     socket.once("connect", () => {
-      const peerUid = async () => {
+      const peerOwner = async () => {
         for (let attempt = 0; attempt < 2; attempt++) {
-          const uid = loopbackPeerUid(await readTcpSockets(), backend.port, socket.localPort ?? 0);
-          if (uid !== undefined) return uid;
+          const owner = await connectionOwner(backend.port, socket.localPort ?? 0);
+          if (owner !== undefined) return owner;
         }
         return undefined;
       };
-      void peerUid().then(
-        (uid) => {
-          if (uid === backend.uid && !socket.destroyed) {
+      void peerOwner().then(
+        (owner) => {
+          if (owner === backend.uid && !socket.destroyed) {
             if (settled) return;
             settled = true;
             socket.off("error", fail);
@@ -145,7 +149,7 @@ export const connectVerified =
           fail(
             Object.assign(
               new Error(
-                `Port ${backend.port} is held by uid ${uid ?? "unknown"}, not ${backend.user} (${backend.uid}).`,
+                `Port ${backend.port} is held by account ${owner ?? "unknown"}, not ${backend.user} (${backend.uid}).`,
               ),
               { code: BACKEND_UNAVAILABLE },
             ),
@@ -273,7 +277,10 @@ const serveStatic = async (
   const mimeType = Option.getOrElse(Mime.getType(filePath), () => "application/octet-stream");
   const isHtml = mimeType === "text/html";
   const isImmutable =
-    !isHtml && /^assets\/.+-[\w-]{8}\.[^/]+$/.test(NodePath.relative(staticRoot, filePath));
+    !isHtml &&
+    /^assets\/.+-[\w-]{8}\.[^/]+$/.test(
+      NodePath.relative(staticRoot, filePath).split(NodePath.sep).join("/"),
+    );
   const etag = `W/"${info.size.toString(16)}-${Math.trunc(info.mtimeMs).toString(16)}"`;
   const baseHeaders: Headers = {
     "content-type": isHtml ? "text/html; charset=utf-8" : mimeType,
@@ -330,6 +337,8 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
     catch: (cause) =>
       new GatewayError({ detail: `Could not load ${options.configPath}: ${String(cause)}` }),
   });
+  const platform = yield* currentGatewayPlatform();
+  const connectionOwner = yield* platform.makeConnectionOwner;
 
   // One keep-alive pool per registration: a verified socket never serves another user, uid or port.
   const agents = new Map<string, NodeHttp.Agent>();
@@ -354,7 +363,7 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
     let agent = agents.get(key);
     if (agent === undefined) {
       agent = new NodeHttp.Agent({ keepAlive: true });
-      agent.createConnection = connectVerified(backend, trackFor(backend));
+      agent.createConnection = connectVerified(backend, trackFor(backend), connectionOwner);
       agents.set(key, agent);
     }
     return agent;
@@ -417,7 +426,12 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
     if (firstPass._tag === "Routed" || carriesCredentials || !pendingAllowed) return firstPass;
     return routeRequest({
       ...input,
-      pendingUsers: await readPendingUsers(options.pairingDir, users, now()),
+      pendingUsers: await readPendingUsers(
+        options.pairingDir,
+        users,
+        now(),
+        platform.markerAttribution,
+      ),
     });
   };
 
@@ -454,7 +468,12 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
       ? compactToken.toUpperCase()
       : token;
     const tokenSha256 = NodeCrypto.createHash("sha256").update(pairingToken).digest("hex");
-    const pending = await readPendingUsers(options.pairingDir, users, now());
+    const pending = await readPendingUsers(
+      options.pairingDir,
+      users,
+      now(),
+      platform.markerAttribution,
+    );
     if (pending === "unknown") return { route, code: "ambiguous" };
     // Markers are world-readable, so a co-user can copy another's hash into their own folder.
     const owners = [...pending].filter(([, { tokens }]) => tokens.has(tokenSha256));
@@ -712,7 +731,7 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
       port: backend.port,
       method: request.method,
       path: request.url,
-      createConnection: connectVerified(backend, trackFor(backend)),
+      createConnection: connectVerified(backend, trackFor(backend), connectionOwner),
       headers: backendRequestHeaders({
         headers: request.headers,
         user: backend.user,

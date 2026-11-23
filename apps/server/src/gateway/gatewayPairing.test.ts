@@ -1,5 +1,4 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -31,6 +30,19 @@ import {
   pairThroughGateway,
   registerPendingPairing,
 } from "./gatewayPairing.ts";
+import {
+  makeTestGatewayPlatform,
+  posixOwnership,
+  testGatewayServices,
+} from "./platform/testing.ts";
+
+const userPlatform = (account: number) => ({
+  ...makeTestGatewayPlatform("/nonexistent").platform,
+  isAdmin: Effect.succeed(false),
+  currentAccount: Effect.succeed(account),
+  // Windows attributes markers by folder; file owners are a POSIX check.
+  markerAttribution: posixOwnership ? ("file-owner" as const) : ("folder" as const),
+});
 
 it.effect(
   "builds tagged web and app links and uses only a private address for a wildcard listener",
@@ -78,10 +90,8 @@ it.effect.each([
       users: { alice: { uid: 1001, port: 3801 } },
     };
     const error = yield* Effect.flip(
-      pairThroughGateway(input.ttl).pipe(
+      pairThroughGateway(userPlatform(1001), input.ttl).pipe(
         Effect.provideService(HostProcess.Platform, "linux"),
-        Effect.provideService(HostProcess.UserId, 1001),
-        Effect.provideService(HostProcess.Username, "alice"),
         Effect.provideService(
           FileSystem.FileSystem,
           FileSystem.makeNoop({
@@ -89,14 +99,14 @@ it.effect.each([
             access: () => Effect.die("Pairing reached filesystem access before validation"),
           }),
         ),
-        Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer)),
+        Effect.provide(Layer.mergeAll(testGatewayServices, NodeCrypto.layer, NetService.layer)),
       ),
     );
     assert.include(error.message, input.message);
   }),
 );
 
-it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, Digest.layerWebCrypto))(
+it.layer(Layer.mergeAll(testGatewayServices, NodeCrypto.layer, Digest.layerWebCrypto))(
   "pending pairing",
   (it) => {
     it.effect("asks an admin to repair a missing user folder before minting a token", () =>
@@ -113,20 +123,22 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, Digest.layerWebCry
             users: { alice: { uid: 1001, port: 3801 } },
           }),
         );
-        const error = yield* Effect.flip(
-          pairThroughGateway().pipe(
-            Effect.provideService(HostProcess.Platform, "linux"),
-            Effect.provideService(HostProcess.UserId, 1001),
-            Effect.provideService(HostProcess.Username, "alice"),
-            Effect.provideService(HostProcess.HomeDirectory, pairingDir),
-            Effect.provideService(HostProcess.Environment, {
-              [GATEWAY_CONFIG_PATH_ENV]: configPath,
-              [GATEWAY_PAIRING_DIR_ENV]: pairingDir,
-            }),
-            Effect.provide(NetService.layer),
-          ),
-        );
-        assert.include(error.message, "ask an admin to run t3 gateway add alice");
+        const pair = (account: number) =>
+          Effect.flip(
+            pairThroughGateway(userPlatform(account)).pipe(
+              Effect.provideService(HostProcess.Platform, "linux"),
+              // Windows reports the login name as typed at enrollment time, often capitalized.
+              Effect.provideService(HostProcess.Username, "Alice"),
+              Effect.provideService(HostProcess.HomeDirectory, pairingDir),
+              Effect.provideService(HostProcess.Environment, {
+                [GATEWAY_CONFIG_PATH_ENV]: configPath,
+                [GATEWAY_PAIRING_DIR_ENV]: pairingDir,
+              }),
+              Effect.provide(NetService.layer),
+            ),
+          );
+        assert.include((yield* pair(1001)).message, "ask an admin to run t3 gateway add alice");
+        assert.equal((yield* pair(1002)).message, "Your account is not enrolled in this gateway.");
         assert.isFalse(yield* fs.exists(path.join(pairingDir, "alice")));
       }),
     );
@@ -162,10 +174,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, Digest.layerWebCry
             }),
           });
           const now = DateTime.toEpochMillis(yield* DateTime.now);
-          const pairing = yield* pairThroughGateway("1s").pipe(
+          const platform = userPlatform(pairingUid);
+          const pairing = yield* pairThroughGateway(platform, "1s").pipe(
             Effect.provideService(HostProcess.Platform, "linux"),
-            Effect.provideService(HostProcess.UserId, pairingUid),
-            Effect.provideService(HostProcess.Username, "alice"),
             Effect.provideService(HostProcess.HomeDirectory, root),
             Effect.provideService(HostProcess.Environment, {
               [GATEWAY_CONFIG_PATH_ENV]: configPath,
@@ -194,8 +205,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, Digest.layerWebCry
           assert.match(firstName, /^[\da-f-]{36}\.json$/);
           const first = path.join(pairingDir, firstName);
           const info = yield* fs.lstat(first);
-          assert.equal(info.mode & 0o777, 0o644);
-          assert.equal(Option.getOrUndefined(info.uid), uid);
+          if (posixOwnership) {
+            assert.equal(info.mode & 0o777, 0o644);
+            assert.equal(Option.getOrUndefined(info.uid), uid);
+          }
           const token = new URLSearchParams(new URL(pairing.pairingUrl).hash.slice(1)).get(
             "token",
           )!;
@@ -207,9 +220,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, Digest.layerWebCry
           });
 
           const secondExpiry = now + 5_000;
-          yield* registerPendingPairing({
+          yield* registerPendingPairing(platform, {
             directory: pairingDir,
-            uid,
+            account: uid,
             expiresAt: secondExpiry,
             token: "other",
           });
@@ -221,9 +234,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, Digest.layerWebCry
             otherExpired,
             JSON.stringify({ version: 1, expiresAt: DateTime.toEpochMillis(pairing.expiresAt) }),
           );
-          yield* registerPendingPairing({
+          yield* registerPendingPairing(platform, {
             directory: pairingDir,
-            uid,
+            account: uid,
             expiresAt: secondExpiry,
             token: "other",
           });
@@ -240,9 +253,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, Digest.layerWebCry
             yield* fs.writeFileString(path.join(pairingDir, name), liveMarker);
           }
           const overflow = yield* Effect.flip(
-            registerPendingPairing({
+            registerPendingPairing(platform, {
               directory: pairingDir,
-              uid,
+              account: uid,
               expiresAt: secondExpiry,
               token: "overflow",
             }),

@@ -28,16 +28,15 @@ import {
   gatewayPaths,
   lockGatewayPath,
   readGatewayConfig,
-  requireLinux,
 } from "./gatewayCliAdmin.ts";
 import {
   type GatewayConfig,
   GATEWAY_PENDING_MAX_MS,
   GatewayPendingPairing,
-  GatewayUserName,
   GATEWAY_USER_QUERY_PARAM,
 } from "./GatewayConfig.ts";
 import { MAX_PENDING_FILES_PER_USER, PENDING_FILE_NAME } from "./GatewayPending.ts";
+import type { GatewayAccountId, GatewayPlatform } from "./platform/GatewayPlatform.ts";
 
 const pendingJson = Schema.fromJsonString(GatewayPendingPairing);
 const decodePending = Schema.decodeOption(
@@ -49,7 +48,6 @@ const decodePending = Schema.decodeOption(
   ),
 );
 const encodePending = Schema.encodeEffect(pendingJson);
-const isUserName = Schema.is(GatewayUserName);
 const decodeTtl = Schema.decodeEffect(DurationFromString);
 const maxPairingTtl = Duration.millis(GATEWAY_PENDING_MAX_MS);
 
@@ -57,11 +55,12 @@ export const gatewayPairingOrigin = Effect.fn("gatewayPairing.origin")(function*
   config: GatewayConfig,
   interfaces?: Parameters<typeof resolveHeadlessConnectionString>[2]["interfaces"],
 ) {
+  const platform = yield* HostProcess.Platform;
   const baseUrl =
     config.publicUrl ??
     resolveHeadlessConnectionString(config.listen.host, config.listen.port, {
       privateNetworkOnly: true,
-      platform: "linux",
+      platform,
       ...(interfaces === undefined ? {} : { interfaces }),
     });
   const url = URL.parse(baseUrl);
@@ -95,8 +94,9 @@ export const buildGatewayPairingLinks = (origin: URL, user: string, token: strin
 };
 
 const cleanExpiredPending = Effect.fn("gatewayPairing.cleanExpired")(function* (
+  platform: GatewayPlatform,
   directory: string,
-  uid: number,
+  account: GatewayAccountId,
   now: number,
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -112,7 +112,10 @@ const cleanExpiredPending = Effect.fn("gatewayPairing.cleanExpired")(function* (
       ),
     );
     if (info?.type !== "File") continue;
-    if (Option.getOrUndefined(info.uid) !== uid) {
+    if (
+      platform.markerAttribution === "file-owner" &&
+      Option.getOrUndefined(info.uid) !== account
+    ) {
       remaining++;
       continue;
     }
@@ -133,12 +136,15 @@ const cleanExpiredPending = Effect.fn("gatewayPairing.cleanExpired")(function* (
 });
 
 export const registerPendingPairing = Effect.fn("gatewayPairing.registerPending")(
-  function* (input: {
-    readonly directory: string;
-    readonly uid: number;
-    readonly expiresAt: number;
-    readonly token: string;
-  }) {
+  function* (
+    platform: GatewayPlatform,
+    input: {
+      readonly directory: string;
+      readonly account: GatewayAccountId;
+      readonly expiresAt: number;
+      readonly token: string;
+    },
+  ) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const random = yield* SecureRandom.SecureRandom;
@@ -149,7 +155,7 @@ export const registerPendingPairing = Effect.fn("gatewayPairing.registerPending"
         message: "The pairing token expired before registration.",
       });
     }
-    const remaining = yield* cleanExpiredPending(input.directory, input.uid, now);
+    const remaining = yield* cleanExpiredPending(platform, input.directory, input.account, now);
     if (remaining >= MAX_PENDING_FILES_PER_USER) {
       return yield* new GatewayCliError({
         message: `Your pairing folder already has ${MAX_PENDING_FILES_PER_USER} pending pairings. Wait for a pairing code to expire and retry.`,
@@ -172,7 +178,7 @@ export const registerPendingPairing = Effect.fn("gatewayPairing.registerPending"
       prefix: ".pending-",
     });
     yield* fs.writeFileString(staging, contents);
-    yield* fs.chmod(staging, 0o644);
+    yield* platform.secureRuntimeFile(staging, false);
     yield* fs.rename(staging, path.join(input.directory, name));
   },
   Effect.provide(Digest.layerWebCrypto),
@@ -224,24 +230,26 @@ const mintGatewayPairingToken = Effect.fn("gatewayPairing.mintToken")(function* 
   return { token, expiresAt: expiresAt.value };
 });
 
-export const pairThroughGateway = Effect.fn("gatewayPairing.pair")(function* (ttl?: string) {
-  yield* requireLinux;
-  const uid = yield* HostProcess.UserId;
-  if (uid === undefined || uid === 0) {
+export const pairThroughGateway = Effect.fn("gatewayPairing.pair")(function* (
+  platform: GatewayPlatform,
+  ttl?: string,
+) {
+  if (yield* platform.isAdmin) {
     return yield* new GatewayCliError({
-      message: "Run t3 gateway pair as the enrolled Linux user, without sudo.",
+      message: "Run t3 gateway pair as the enrolled user, not as an administrator.",
     });
   }
-  const user = yield* HostProcess.Username;
-  const { configPath, pairingDir } = yield* gatewayPaths;
+  const account = yield* platform.currentAccount;
+  const { configPath, pairingDir } = yield* gatewayPaths(platform);
   const config = yield* readGatewayConfig(configPath);
-  const entry =
-    isUserName(user) && Object.hasOwn(config.users, user) ? config.users[user] : undefined;
-  if (!user || entry?.uid !== uid) {
+  // Match by account id, not login name: Windows names are case-insensitive and keys are lowercase.
+  const enrolled = Object.entries(config.users).find(([, candidate]) => candidate.uid === account);
+  if (enrolled === undefined) {
     return yield* new GatewayCliError({
-      message: "Your Linux account is not enrolled in this gateway.",
+      message: "Your account is not enrolled in this gateway.",
     });
   }
+  const [user, entry] = enrolled;
   if (ttl !== undefined) {
     const duration = yield* decodeTtl(ttl);
     if (Duration.isGreaterThan(duration, maxPairingTtl)) {
@@ -264,9 +272,9 @@ export const pairThroughGateway = Effect.fn("gatewayPairing.pair")(function* (tt
     .pipe(Effect.catchIf((error) => error.reason._tag === "NotFound", missingDirectory));
   const baseDir = yield* resolveBaseDir(undefined);
   const { token, expiresAt } = yield* mintGatewayPairingToken(baseDir, entry.port, ttl);
-  yield* registerPendingPairing({
+  yield* registerPendingPairing(platform, {
     directory,
-    uid,
+    account,
     token,
     expiresAt: DateTime.toEpochMillis(expiresAt),
   }).pipe(

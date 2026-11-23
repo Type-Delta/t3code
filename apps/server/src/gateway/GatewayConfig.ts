@@ -1,17 +1,9 @@
 import * as Schema from "effect/Schema";
 
-// Fork-only multi-user gateway (FORK.md). One root-owned install serves every enrolled Linux user
-// on one port; each user keeps a stock `t3 serve` backend on a loopback port, run as that user.
+// Fork-only multi-user gateway (FORK.md). One admin-owned install serves every enrolled user on one
+// port; each user keeps a stock `t3 serve` backend on a loopback port, run as that user. OS-specific
+// paths and services live in `platform/`.
 
-export const GATEWAY_INSTALL_ROOT = "/opt/t3code";
-export const GATEWAY_CONFIG_DIR = "/etc/t3code";
-export const GATEWAY_CONFIG_PATH = `${GATEWAY_CONFIG_DIR}/gateway.json`;
-export const GATEWAY_USER_ENV_DIR = `${GATEWAY_CONFIG_DIR}/users`;
-// `t3 gateway add` creates `<dir>/<user>` owned by that user, mode 0755: only they can write their
-// markers, and the gateway reads only enrolled users' folders.
-export const GATEWAY_PAIRING_DIR = "/var/lib/t3code/pairing";
-export const GATEWAY_USER_UNIT_TEMPLATE = "t3code@.service";
-export const GATEWAY_UNIT = "t3code-gateway.service";
 // A pending pairing claiming a longer life is ignored, so a forgotten marker cannot route for long.
 export const GATEWAY_PENDING_MAX_MS = 60 * 60 * 1000;
 export const GATEWAY_ROUTE_COOKIE = "t3gw_user";
@@ -24,11 +16,20 @@ export const GATEWAY_PAIRING_DIR_ENV = "T3CODE_GATEWAY_PAIRING_DIR";
 // Cookies are renamed `<name>__<user>`, so a name with "__" or a leading "_" could match another
 // user's suffix ("team__alice" or "_alice" against "alice").
 export const GatewayUserName = Schema.String.check(
-  Schema.isPattern(/^(?!.*__)[a-z][a-z0-9._-]{0,31}$/),
+  Schema.isPattern(/^(?!.*__)[a-z][a-z0-9._-]{0,31}$/, {
+    expected:
+      "a lowercase user name: a letter, then up to 31 letters, digits, '.', '_' or '-', without '__'",
+  }),
 );
 
+export const GatewayAccountId = Schema.Union([
+  Schema.Int,
+  Schema.String.check(Schema.isPattern(/^S-1-\d+(-\d+)+$/)),
+]);
+export type GatewayAccountId = typeof GatewayAccountId.Type;
+
 export const GatewayUser = Schema.Struct({
-  uid: Schema.Int,
+  uid: GatewayAccountId,
   port: Schema.Int,
 });
 
@@ -41,8 +42,8 @@ export const GatewayConfig = Schema.Struct({
 });
 export type GatewayConfig = typeof GatewayConfig.Type;
 
-// `<GATEWAY_PAIRING_DIR>/<user>/<uuid>.json`, written by `t3 gateway pair`. The folder names the user
-// (the file owner must match); content bounds its lifetime and names its token.
+// `<pairingDir>/<user>/<uuid>.json`, written by `t3 gateway pair`. The folder names the user
+// (where the platform attributes markers by file owner, it must match); content bounds its lifetime and names its token.
 // `tokenSha256` (hex SHA-256 of the pairing token) lets the gateway send `POST /oauth/token` to the user
 // who minted the code even when a stale route cookie names someone else.
 export const GatewayPendingPairing = Schema.Struct({

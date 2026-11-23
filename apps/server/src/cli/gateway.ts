@@ -9,11 +9,13 @@ import packageJson from "../../package.json" with { type: "json" };
 import { GatewayUserName } from "../gateway/GatewayConfig.ts";
 import {
   enrollGatewayUser,
+  GatewayCliError,
   gatewayPaths,
   listGatewayUsers,
-  requireLinux,
+  readGatewayConfig,
   unenrollGatewayUser,
 } from "../gateway/gatewayCliAdmin.ts";
+import { currentGatewayPlatform } from "../gateway/platform/GatewayPlatform.ts";
 import { installGateway, uninstallGateway } from "../gateway/gatewayInstall.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { renderTerminalQrCode } from "../startupAccess.ts";
@@ -23,16 +25,26 @@ const userArgument = Argument.String("user").pipe(Argument.withSchema(GatewayUse
 
 const gatewayInstall = Command.make("install").pipe(
   Command.withDescription(
-    "Install or update the system-wide gateway from this Linux CLI archive. Requires root.",
+    "Install or update the system-wide gateway from this CLI archive. Requires an administrator.",
   ),
-  Command.withHandler(() => installGateway().pipe(Effect.provide(ProcessRunner.layer))),
+  Command.withHandler(() =>
+    currentGatewayPlatform().pipe(
+      Effect.flatMap(installGateway),
+      Effect.provide(ProcessRunner.layer),
+    ),
+  ),
 );
 
 const gatewayUninstall = Command.make("uninstall").pipe(
   Command.withDescription(
-    "Remove the gateway services and runtime while keeping user data and config. Requires root.",
+    "Remove the gateway services and runtime while keeping user data and config. Requires an administrator.",
   ),
-  Command.withHandler(() => uninstallGateway().pipe(Effect.provide(ProcessRunner.layer))),
+  Command.withHandler(() =>
+    currentGatewayPlatform().pipe(
+      Effect.flatMap(uninstallGateway),
+      Effect.provide(ProcessRunner.layer),
+    ),
+  ),
 );
 
 const gatewayRun = Command.make("run", {
@@ -44,24 +56,44 @@ const gatewayRun = Command.make("run", {
   Command.withDescription("Run the multi-user gateway."),
   Command.withHandler(({ config }) =>
     Effect.gen(function* () {
-      yield* requireLinux;
-      const paths = yield* gatewayPaths;
+      const paths = yield* gatewayPaths(yield* currentGatewayPlatform());
       const { runGateway } = yield* Effect.promise(() => import("../gateway/GatewayServer.ts"));
       return yield* runGateway({
         configPath: Option.getOrElse(config, () => paths.configPath),
         pairingDir: paths.pairingDir,
       });
-    }),
+    }).pipe(Effect.provide(ProcessRunner.layer)),
   ),
 );
+
+const backendPort = Effect.gen(function* () {
+  const platform = yield* currentGatewayPlatform();
+  const paths = yield* gatewayPaths(platform);
+  const config = yield* readGatewayConfig(paths.configPath);
+  const account = yield* platform.currentAccount.pipe(Effect.provide(ProcessRunner.layer));
+  const entry = Object.values(config.users).find((candidate) => candidate.uid === account);
+  if (entry === undefined) {
+    return yield* new GatewayCliError({ message: "This account is not enrolled in the gateway." });
+  }
+  return entry.port;
+});
+
+// Flags, not environment: serve reads T3CODE_PORT through Config from the real process env.
+const backendServeArguments = (port: number) => ["--host", "127.0.0.1", "--port", String(port)];
 
 const gatewayRunBackend = Command.make("run-backend").pipe(
   Command.unlisted,
   Command.withHandler(() =>
-    Command.runWith(serveCommand, { version: packageJson.version, renderErrors: false })([]).pipe(
-      // Discard stock serve's stdout because it prints a one-time admin pairing link.
-      Effect.updateService(Console.Console, (console) => ({ ...console, log: () => {} })),
-      Effect.provideService(References.LogToStderr, true),
+    backendPort.pipe(
+      Effect.flatMap((port) =>
+        Command.runWith(serveCommand, { version: packageJson.version, renderErrors: false })(
+          backendServeArguments(port),
+        ).pipe(
+          // Discard stock serve's stdout because it prints a one-time admin pairing link.
+          Effect.updateService(Console.Console, (console) => ({ ...console, log: () => {} })),
+          Effect.provideService(References.LogToStderr, true),
+        ),
+      ),
     ),
   ),
 );
@@ -73,9 +105,10 @@ const gatewayAdd = Command.make("add", {
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Enroll a Linux user and start their backend. Requires root."),
+  Command.withDescription("Enroll a user and start their backend. Requires an administrator."),
   Command.withHandler(({ user, port }) =>
-    enrollGatewayUser(user, Option.getOrUndefined(port)).pipe(
+    currentGatewayPlatform().pipe(
+      Effect.flatMap((platform) => enrollGatewayUser(platform, user, Option.getOrUndefined(port))),
       Effect.provide(ProcessRunner.layer),
       Effect.flatMap((assignedPort) => Console.log(`${user} is enrolled on port ${assignedPort}.`)),
     ),
@@ -83,9 +116,10 @@ const gatewayAdd = Command.make("add", {
 );
 
 const gatewayRemove = Command.make("remove", { user: userArgument }).pipe(
-  Command.withDescription("Stop and unenroll a Linux user's backend. Requires root."),
+  Command.withDescription("Stop and unenroll a user's backend. Requires an administrator."),
   Command.withHandler(({ user }) =>
-    unenrollGatewayUser(user).pipe(
+    currentGatewayPlatform().pipe(
+      Effect.flatMap((platform) => unenrollGatewayUser(platform, user)),
       Effect.provide(ProcessRunner.layer),
       Effect.andThen(Console.log(`${user} is no longer enrolled.`)),
     ),
@@ -95,7 +129,8 @@ const gatewayRemove = Command.make("remove", { user: userArgument }).pipe(
 const gatewayList = Command.make("list").pipe(
   Command.withDescription("List enrolled users and backend service states."),
   Command.withHandler(() =>
-    listGatewayUsers().pipe(
+    currentGatewayPlatform().pipe(
+      Effect.flatMap(listGatewayUsers),
       Effect.provide(ProcessRunner.layer),
       Effect.flatMap((users) =>
         Console.log(
@@ -124,8 +159,9 @@ const gatewayPair = Command.make("pair", {
         () => import("../gateway/gatewayPairing.ts"),
       );
       const { pairingUrl, appLink, expiresAt } = yield* pairThroughGateway(
+        yield* currentGatewayPlatform(),
         Option.getOrUndefined(ttl),
-      );
+      ).pipe(Effect.provide(ProcessRunner.layer));
       yield* Console.log(
         [
           renderTerminalQrCode(appLink),
@@ -140,7 +176,7 @@ const gatewayPair = Command.make("pair", {
 );
 
 export const gatewayCommand = Command.make("gateway").pipe(
-  Command.withDescription("Run and manage a shared T3 Code gateway on Linux."),
+  Command.withDescription("Run and manage a shared T3 Code gateway."),
   Command.withSubcommands([
     gatewayInstall,
     gatewayUninstall,

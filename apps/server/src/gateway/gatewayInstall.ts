@@ -1,9 +1,7 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
@@ -11,113 +9,34 @@ import * as Result from "effect/Result";
 import packageJson from "../../package.json" with { type: "json" };
 import {
   emptyGatewayConfig,
-  GATEWAY_CONFIG_DIR,
-  GATEWAY_CONFIG_PATH,
   GATEWAY_CONFIG_PATH_ENV,
-  GATEWAY_INSTALL_ROOT,
-  GATEWAY_PAIRING_DIR,
   GATEWAY_PAIRING_DIR_ENV,
-  GATEWAY_UNIT,
-  GATEWAY_USER_ENV_DIR,
-  GATEWAY_USER_UNIT_TEMPLATE,
 } from "./GatewayConfig.ts";
 import {
-  checkRootDirectory,
-  ensureDirectory,
   ensureReadableGatewayConfig,
   gatewayEntry,
-  gatewayAccount,
   GatewayCliError,
   lockGatewayPath,
   readGatewayConfig,
-  readGatewayListeners,
-  requireRoot,
-  runGatewaySystemTool,
+  requireAdmin,
   writeGatewayConfig,
 } from "./gatewayCliAdmin.ts";
-
-const systemLayout = {
-  installRoot: GATEWAY_INSTALL_ROOT,
-  launcher: "/usr/local/bin/t3",
-  unitDir: "/etc/systemd/system",
-  runtimeUnitDir: "/run/systemd/system",
-  configDir: GATEWAY_CONFIG_DIR,
-  configPath: GATEWAY_CONFIG_PATH,
-  userEnvDir: GATEWAY_USER_ENV_DIR,
-  pairingDir: GATEWAY_PAIRING_DIR,
-};
-
-type InstallLayout = { readonly [K in keyof typeof systemLayout]: string };
+import type {
+  GatewayPlatform,
+  GatewayPlatformError,
+  GatewayPlatformServices,
+} from "./platform/GatewayPlatform.ts";
 
 const installMarker = ".t3code-gateway-install";
-const unitMarker = "# Managed by t3 gateway install";
-const startLimit = ["StartLimitIntervalSec=60", "StartLimitBurst=5"];
-const systemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-const runtimeDirectories = ["client", "node_modules", "resource-monitor", "lib"] as const;
-const packageHint = [
-  "Use an extracted Linux CLI archive from this fork.",
-  "Build the web client and server with `vp run --filter=@t3tools/web build` and `node apps/server/scripts/cli.ts build`.",
-  "Run `node apps/server/scripts/cli.ts build-exe` and `vp run build:resource-monitor`.",
-  "Then run `node scripts/build-cli-archive.ts --platform linux --arch <x64|arm64> --version <version> --resource-monitor-dir <staged-monitor-dir>`.",
-].join(" ");
+const archivePlatform = { linux: "linux", darwin: "mac", win32: "win" } as const;
 
-export function renderGatewayUnits(layout: InstallLayout = systemLayout) {
-  const executable = `${layout.installRoot}/current/t3`;
-  return {
-    [GATEWAY_UNIT]: [
-      unitMarker,
-      "[Unit]",
-      "Description=T3 Code multi-user gateway",
-      ...startLimit,
-      "",
-      "[Service]",
-      "Type=exec",
-      `User=${gatewayAccount}`,
-      `ExecStart=${executable} gateway run`,
-      "Restart=on-failure",
-      "RestartSec=5",
-      "NoNewPrivileges=yes",
-      "ProtectSystem=strict",
-      "ProtectHome=yes",
-      "PrivateTmp=yes",
-      "CapabilityBoundingSet=",
-      "PrivateDevices=yes",
-      "LockPersonality=yes",
-      "ProtectKernelTunables=yes",
-      "ProtectKernelModules=yes",
-      "ProtectKernelLogs=yes",
-      "ProtectControlGroups=yes",
-      "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
-      "RestrictNamespaces=yes",
-      "SystemCallFilter=@system-service",
-      "SystemCallErrorNumber=EPERM",
-      "",
-      "[Install]",
-      "WantedBy=multi-user.target",
-      "",
-    ].join("\n"),
-    [GATEWAY_USER_UNIT_TEMPLATE]: [
-      unitMarker,
-      "[Unit]",
-      "Description=T3 Code backend for %i",
-      ...startLimit,
-      "",
-      "[Service]",
-      "Type=exec",
-      "User=%i",
-      "WorkingDirectory=~",
-      `Environment=PATH=${systemPath}`,
-      `EnvironmentFile=${layout.userEnvDir}/%i.env`,
-      `ExecStart=${executable} gateway run-backend`,
-      "Restart=on-failure",
-      "RestartSec=5",
-      "",
-      "[Install]",
-      "WantedBy=multi-user.target",
-      "",
-    ].join("\n"),
-  };
-}
+const packageHint = (platform: GatewayPlatform) =>
+  [
+    "Use an extracted CLI archive from this fork.",
+    "Build the web client and server with `vp run --filter=@t3tools/web build` and `node apps/server/scripts/cli.ts build`.",
+    "Run `node apps/server/scripts/cli.ts build-exe` and `vp run build:resource-monitor`.",
+    `Then run \`node scripts/build-cli-archive.ts --platform ${archivePlatform[platform.name]} --arch <x64|arm64> --version <version> --resource-monitor-dir <staged-monitor-dir>\`.`,
+  ].join(" ");
 
 const fail = (message: string) => new GatewayCliError({ message });
 
@@ -126,83 +45,33 @@ const requireDefaultPaths = Effect.gen(function* () {
   for (const variable of [GATEWAY_CONFIG_PATH_ENV, GATEWAY_PAIRING_DIR_ENV]) {
     if (env[variable]) {
       return yield* fail(
-        `Unset ${variable} before installing or uninstalling the gateway. The systemd service uses the default paths.`,
+        `Unset ${variable} before installing or uninstalling the gateway. The gateway services use the default paths.`,
       );
     }
   }
 });
 
-const readManagedUnits = Effect.fn("gatewayInstall.readManagedUnits")(function* (
-  unitDir: string,
-  command: "install" | "uninstall",
+const hasInstallMarker = Effect.fn("gatewayInstall.hasInstallMarker")(function* (
+  platform: GatewayPlatform,
 ) {
-  const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const units = new Map<string, string>();
-  let unmanagedGateway = false;
-  for (const unit of [GATEWAY_UNIT, GATEWAY_USER_UNIT_TEMPLATE]) {
-    const file = path.join(unitDir, unit);
-    const info = yield* gatewayEntry(file);
-    if (info === undefined) continue;
-    const skipUnmanagedGateway = unit === GATEWAY_UNIT && command === "uninstall";
-    if (skipUnmanagedGateway && info.type === "SymbolicLink") {
-      yield* Console.warn(`Skipping ${unit}: ${file} is a symlink.`);
-      unmanagedGateway = true;
-      continue;
-    }
-    if (info.type !== "File") return yield* fail(`Expected a regular file at ${file}.`);
-    const contents = yield* fs.readFileString(file);
-    if (!contents.startsWith(unitMarker + "\n")) {
-      if (skipUnmanagedGateway) {
-        yield* Console.warn(`Skipping ${unit}: ${file} has no installer marker.`);
-        unmanagedGateway = true;
-        continue;
-      }
-      return yield* fail(
-        `Refusing to modify unmanaged unit ${file}. Move it out of the way first.`,
-      );
-    }
-    units.set(unit, contents);
-  }
-  return { units, unmanagedGateway };
+  return yield* platform
+    .checkAdminOwned(path.join(platform.layout.installRoot, installMarker), "File")
+    .pipe(Effect.orElseSucceed(() => false));
 });
 
-const writeUnit = Effect.fn("gatewayInstall.writeUnit")(function* (
-  unitDir: string,
-  unit: string,
-  contents: string,
+const checkInstallDirectories = Effect.fn("gatewayInstall.checkInstallDirectories")(function* (
+  platform: GatewayPlatform,
 ) {
-  const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const staging = yield* fs.makeTempDirectoryScoped({
-    directory: unitDir,
-    prefix: ".t3code-",
-  });
-  const file = path.join(staging, unit);
-  yield* fs.writeFileString(file, contents);
-  yield* fs.chmod(file, 0o644);
-  yield* fs.rename(file, path.join(unitDir, unit));
-}, Effect.scoped);
-
-const hasInstallMarker = Effect.fn("gatewayInstall.hasInstallMarker")(function* (root: string) {
-  const path = yield* Path.Path;
-  const info = yield* gatewayEntry(path.join(root, installMarker));
-  return (
-    info?.type === "File" && Option.getOrUndefined(info.uid) === 0 && (info.mode & 0o022) === 0
-  );
-});
-
-const preflight = Effect.fn("gatewayInstall.preflight")(function* (layout: InstallLayout) {
-  const path = yield* Path.Path;
+  const { installRoot, launcher } = platform.layout;
   for (const directory of new Set([
-    path.dirname(layout.installRoot),
-    path.dirname(path.dirname(layout.launcher)),
-    path.dirname(layout.launcher),
-    path.dirname(layout.unitDir),
-    layout.unitDir,
-    layout.installRoot,
+    path.dirname(installRoot),
+    path.dirname(path.dirname(launcher)),
+    path.dirname(launcher),
+    installRoot,
   ])) {
-    yield* checkRootDirectory(directory);
+    yield* platform.checkAdminOwned(directory, "Directory");
   }
 });
 
@@ -222,282 +91,130 @@ const managedLink = Effect.fn("gatewayInstall.managedLink")(function* (
     target:
       relative !== "" &&
       relative !== ".." &&
-      !relative.startsWith("../") &&
+      !relative.startsWith(`..${path.sep}`) &&
       !path.isAbsolute(relative)
         ? target
         : undefined,
   };
 });
 
-const runSystemTool = Effect.fn("gatewayInstall.runSystemTool")(function* (
-  command: string,
-  args: ReadonlyArray<string>,
-  acceptedCodes: ReadonlyArray<number> = [0],
-) {
-  const result = yield* runGatewaySystemTool({
-    command,
-    args,
-    timeout: "120 seconds",
-  });
-  if (result.code === null || !acceptedCodes.includes(result.code)) {
-    const detail = result.stderr.trim();
-    return yield* fail(
-      `${command} ${args.join(" ")} failed (exit ${result.code}). ${detail}`.trim(),
-    );
-  }
-  return result;
-});
-
-const ensureAccount = Effect.fn("gatewayInstall.ensureAccount")(function* () {
-  let result = yield* runSystemTool("getent", ["passwd", gatewayAccount], [0, 2]);
-  if (result.code === 2) {
-    yield* runSystemTool("useradd", [
-      "--system",
-      "--no-create-home",
-      "--shell",
-      "/usr/sbin/nologin",
-      gatewayAccount,
-    ]);
-    result = yield* runSystemTool("getent", ["passwd", gatewayAccount]);
-  }
-  const [name, , uid, , , , shell] = result.stdout.trim().split(":");
-  if (
-    name !== gatewayAccount ||
-    !uid ||
-    !/^[0-9]+$/.test(uid) ||
-    !Number.isSafeInteger(Number(uid)) ||
-    Number(uid) === 0 ||
-    !shell?.endsWith("/nologin")
-  ) {
-    return yield* fail(
-      `The Linux account ${gatewayAccount} must be a non-root account with a nologin shell.`,
-    );
-  }
-  return Number(uid);
-});
-
-const instancePattern = GATEWAY_USER_UNIT_TEMPLATE.replace("@.", "@*.");
-const isGatewayUnit = (name: string) =>
-  name === GATEWAY_UNIT ||
-  (name.startsWith("t3code@") && name.endsWith(".service") && name !== GATEWAY_USER_UNIT_TEMPLATE);
-
-const listUnits = Effect.fn("gatewayInstall.listUnits")(function* (listing: "active" | "loaded") {
-  const { stdout } = yield* runSystemTool("systemctl", [
-    "list-units",
-    "--plain",
-    listing === "active" ? "--state=active" : "--all",
-    "--no-legend",
-    "--no-pager",
-    GATEWAY_UNIT,
-    instancePattern,
-  ]);
-  return stdout
-    .split("\n")
-    .map((line) => line.trim().split(/\s+/, 1)[0]!)
-    .filter(isGatewayUnit);
-});
-
-const readFragmentPath = Effect.fn("gatewayInstall.readFragmentPath")(function* (unit: string) {
-  const { stdout } = yield* runSystemTool("systemctl", [
-    "show",
-    "--property=FragmentPath",
-    "--value",
-    unit,
-  ]);
-  return stdout.trim();
-});
-
-const checkTemplateFragment = Effect.fn("gatewayInstall.checkTemplateFragment")(function* (
-  expected: string | undefined,
-) {
-  // Systemd cannot load a template by name. Its cat command resolves the exact template on disk.
-  const unit = GATEWAY_USER_UNIT_TEMPLATE;
-  const result = yield* runSystemTool("systemctl", ["cat", "--no-pager", unit], [0, 1]);
-  if (
-    result.code === 1 &&
-    result.stdout === "" &&
-    result.stderr.trim() === `No files found for ${unit}.`
-  ) {
-    return;
-  }
-  const header = result.stdout.trimStart().split("\n", 1)[0];
-  if (result.code === 0 && expected !== undefined && header === `# ${expected}`) return;
-  const fragment = header?.startsWith("# /") ? header.slice(2) : undefined;
-  return yield* fail(
-    fragment === undefined
-      ? `Refusing to install: could not verify the effective unit for ${unit}.`
-      : `Refusing to install: systemd resolves unmanaged unit ${unit} to ${fragment}.`,
-  );
-});
-
-const hasManagedFragment = Effect.fn("gatewayInstall.hasManagedFragment")(function* (
-  unit: string,
-  expected: string | undefined,
-) {
-  if (expected === undefined) {
-    yield* Console.warn(`Skipping ${unit}: no installer-marked unit file.`);
-    return false;
-  }
-  const fragment = yield* readFragmentPath(unit).pipe(Effect.orElseSucceed(() => ""));
-  if (fragment === expected) return true;
-  yield* Console.warn(
-    `Skipping ${unit}: effective unit is ${fragment || "unknown"} (expected ${expected}).`,
-  );
-  return false;
-});
-
-const enabledUnits = Effect.fn("gatewayInstall.enabledUnits")(function* (unitDir: string) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  // list-unit-files can omit enabled template instances present only in the target's .wants.
-  const wants = path.join(unitDir, "multi-user.target.wants");
-  const names = yield* fs.readDirectory(wants).pipe(
-    Effect.catchIf(
-      (error) => error.reason._tag === "NotFound",
-      () => Effect.succeed([]),
-    ),
-  );
-  return yield* Effect.filter(names.filter(isGatewayUnit).sort(), (name) =>
-    gatewayEntry(path.join(wants, name)).pipe(Effect.map((info) => info?.type === "SymbolicLink")),
-  );
-});
-
-function checkSourceOwnership(
-  source: string,
-  info: FileSystem.File.Info,
-  adminUid: number | undefined,
-  ancestor = false,
-) {
-  const uid = Option.getOrUndefined(info.uid);
-  // A sticky shared ancestor cannot let another user replace the trusted entry below it.
-  if (
-    uid === undefined ||
-    (uid !== 0 && uid !== adminUid) ||
-    ((info.mode & 0o022) !== 0 && !(ancestor && (info.mode & 0o1000) !== 0))
-  ) {
-    return fail(
-      `Runtime source requires trusted ownership and no group or world write access: ${source}.`,
-    );
-  }
-}
-
 const copyRuntimeEntry = Effect.fn("gatewayInstall.copyRuntimeEntry")(function* (
+  platform: GatewayPlatform,
   source: string,
   destination: string,
-  adminUid: number | undefined,
 ): Effect.fn.Return<
   void,
-  GatewayCliError | PlatformError.PlatformError,
-  FileSystem.FileSystem | Path.Path
+  GatewayCliError | GatewayPlatformError | PlatformError.PlatformError,
+  GatewayPlatformServices
 > {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const info = yield* fs.lstat(source);
   if (info.type !== "File" && info.type !== "Directory") {
-    return yield* fail(`Unexpected runtime entry at ${source}. ${packageHint}`);
+    return yield* fail(`Unexpected runtime entry at ${source}. ${packageHint(platform)}`);
   }
-  const unsafe = checkSourceOwnership(source, info, adminUid);
-  if (unsafe) return yield* unsafe;
+  yield* platform.checkRuntimeSource(source, info.type);
   if (info.type === "File") {
     yield* fs.copyFile(source, destination);
-    yield* fs.chmod(destination, info.mode & 0o111 ? 0o755 : 0o644);
+    yield* platform.secureRuntimeFile(destination, (info.mode & 0o111) !== 0);
     return;
   }
+  // The staged root is secured once; folders below take its permissions (inherited on Windows).
   yield* fs.makeDirectory(destination);
-  yield* fs.chmod(destination, 0o755);
+  yield* platform.secureRuntimeFile(destination, true);
   for (const name of yield* fs.readDirectory(source)) {
-    yield* copyRuntimeEntry(path.join(source, name), path.join(destination, name), adminUid);
+    yield* copyRuntimeEntry(platform, path.join(source, name), path.join(destination, name));
   }
 });
 
-const runtimeSource = Effect.fn("gatewayInstall.runtimeSource")(function* () {
-  const fs = yield* FileSystem.FileSystem;
+const runtimeSource = Effect.fn("gatewayInstall.runtimeSource")(function* (
+  platform: GatewayPlatform,
+) {
   const path = yield* Path.Path;
   if (!(yield* HostProcess.IsExecutable)) {
-    return yield* fail(`Gateway install requires the standalone t3 executable. ${packageHint}`);
+    return yield* fail(
+      `Gateway install requires the standalone t3 executable. ${packageHint(platform)}`,
+    );
   }
   const executable = yield* HostProcess.ExecutablePath;
   const directory = path.dirname(executable);
-  const sudoUid = (yield* HostProcess.Environment).SUDO_UID;
-  const adminUid = sudoUid && /^\d+$/.test(sudoUid) ? Number(sudoUid) : undefined;
   for (let folder = directory; ; folder = path.dirname(folder)) {
-    const info = yield* fs.lstat(folder);
-    if (info.type !== "Directory") return yield* fail(`Expected a directory at ${folder}.`);
-    const unsafe = checkSourceOwnership(folder, info, adminUid, folder !== directory);
-    if (unsafe) return yield* unsafe;
+    yield* platform.checkRuntimeSource(folder, "Directory", { ancestor: folder !== directory });
     if (folder === path.dirname(folder)) break;
   }
-  for (const [name, type] of [
-    ...runtimeDirectories.map((name) => [name, "Directory"] as const),
-    ["client/index.html", "File"],
-    ["lib/libatomic.so.1", "File"],
-  ] as const) {
+  for (const [name, type] of platform.layout.runtimeEntries) {
     if ((yield* gatewayEntry(path.join(directory, name)))?.type !== type) {
       return yield* fail(
-        `The standalone runtime is missing ${name} beside ${executable}. ${packageHint}`,
+        `The standalone runtime is missing ${name} beside ${executable}. ${packageHint(platform)}`,
       );
     }
   }
-  return { executable, directory, adminUid };
+  return { executable, directory };
 });
 
-const matchingExecutableBits = Effect.fn("gatewayInstall.matchingExecutableBits")(function* (
+export const treesMatch = Effect.fn("gatewayInstall.treesMatch")(function* (
   left: string,
   right: string,
 ): Effect.fn.Return<boolean, PlatformError.PlatformError, FileSystem.FileSystem | Path.Path> {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const info = yield* fs.lstat(right);
-  if (info.type === "File") return ((yield* fs.lstat(left)).mode & 0o111) === (info.mode & 0o111);
-  for (const name of yield* fs.readDirectory(right)) {
-    if (!(yield* matchingExecutableBits(path.join(left, name), path.join(right, name)))) {
-      return false;
-    }
+  const leftInfo = yield* fs.lstat(left);
+  if (leftInfo.type !== info.type || (leftInfo.mode & 0o111) !== (info.mode & 0o111)) return false;
+  if (info.type === "File") {
+    const [leftBytes, rightBytes] = yield* Effect.all([fs.readFile(left), fs.readFile(right)]);
+    return (
+      leftBytes.length === rightBytes.length &&
+      leftBytes.every((byte, index) => byte === rightBytes[index])
+    );
   }
+  if (info.type !== "Directory") return false;
+  const [leftNames, rightNames] = yield* Effect.all([
+    fs.readDirectory(left),
+    fs.readDirectory(right),
+  ]);
+  if (
+    leftNames.length !== rightNames.length ||
+    leftNames.some((name) => !rightNames.includes(name))
+  )
+    return false;
+  for (const name of rightNames)
+    if (!(yield* treesMatch(path.join(left, name), path.join(right, name)))) return false;
   return true;
 });
 
 const publishRuntime = Effect.fn("gatewayInstall.publishRuntime")(function* (
+  platform: GatewayPlatform,
   source: Effect.Success<ReturnType<typeof runtimeSource>>,
-  installRoot: string,
   active: string | undefined,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const { installRoot, executableName, runtimeEntries } = platform.layout;
   const staging = yield* fs.makeTempDirectoryScoped({
     directory: installRoot,
     prefix: ".install-",
   });
   const runtime = path.join(staging, "runtime");
-  yield* fs.makeDirectory(runtime);
-  yield* fs.chmod(runtime, 0o755);
-  yield* copyRuntimeEntry(source.executable, path.join(runtime, "t3"), source.adminUid);
-  for (const name of runtimeDirectories) {
-    yield* copyRuntimeEntry(
-      path.join(source.directory, name),
-      path.join(runtime, name),
-      source.adminUid,
-    );
+  yield* platform.secureDirectory(runtime, "admin");
+  yield* copyRuntimeEntry(platform, source.executable, path.join(runtime, executableName));
+  // Nested entries are only checked; copying their top-level parent brings them along.
+  for (const [name] of runtimeEntries.filter(([name]) => !name.includes("/"))) {
+    yield* copyRuntimeEntry(platform, path.join(source.directory, name), path.join(runtime, name));
   }
 
   const version = packageJson.version;
   const versionDir = path.join(installRoot, version);
-  const exists = yield* checkRootDirectory(versionDir);
+  const exists = yield* platform.checkAdminOwned(versionDir, "Directory");
   for (const candidate of new Set([active, exists ? versionDir : undefined])) {
     if (
       candidate !== undefined &&
       path.dirname(candidate) === installRoot &&
       (candidate === versionDir || path.basename(candidate).startsWith(`${version}-`)) &&
-      (yield* checkRootDirectory(candidate))
+      (yield* platform.checkAdminOwned(candidate, "Directory")) &&
+      (yield* treesMatch(candidate, runtime))
     ) {
-      const compared = yield* runSystemTool(
-        "diff",
-        ["--recursive", "--brief", "--no-dereference", "--", candidate, runtime],
-        [0, 1],
-      );
-      if (compared.code === 0 && (yield* matchingExecutableBits(candidate, runtime))) {
-        return candidate;
-      }
+      return candidate;
     }
   }
   // Development builds can change without a package version bump.
@@ -508,86 +225,59 @@ const publishRuntime = Effect.fn("gatewayInstall.publishRuntime")(function* (
   return destination;
 }, Effect.scoped);
 
-const replaceLink = Effect.fn("gatewayInstall.replaceLink")(function* (
-  target: string,
-  link: string,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const staging = yield* fs.makeTempDirectoryScoped({
-    directory: path.dirname(link),
-    prefix: ".t3code-",
-  });
-  const stagedLink = path.join(staging, "link");
-  yield* fs.symlink(target, stagedLink);
-  yield* fs.rename(stagedLink, link);
-}, Effect.scoped);
-
-const waitForGateway = Effect.fn("gatewayInstall.waitForGateway")(
-  function* (uid: number, port: number) {
-    while (
-      !(yield* readGatewayListeners()).some(
-        (listener) => listener.uid === uid && listener.port === port,
-      )
-    ) {
-      yield* Effect.sleep("500 millis");
-    }
-  },
-  (effect, _uid, port) =>
-    effect.pipe(
-      Effect.timeoutOrElse({
-        duration: "20 seconds",
-        orElse: () => fail(`The gateway did not listen on port ${port} within 20 seconds.`),
-      }),
-    ),
-);
-
-const resetFailedUnits = Effect.fn("gatewayInstall.resetFailedUnits")(function* (
-  ...units: ReadonlyArray<string>
-) {
-  // A unit that systemd has not loaded has no counters to reset.
-  yield* runSystemTool("systemctl", ["reset-failed", ...units]).pipe(Effect.ignore);
-});
-
 const pruneRuntimes = Effect.fn("gatewayInstall.pruneRuntimes")(function* (
-  installRoot: string,
+  platform: GatewayPlatform,
   current: string,
   previous: string | undefined,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  if (!(yield* hasInstallMarker(installRoot))) return;
+  const { installRoot, launcher } = platform.layout;
+  if (!(yield* hasInstallMarker(platform))) return;
   for (const name of yield* fs.readDirectory(installRoot)) {
     if (name === installMarker || name === "current" || name === "previous") continue;
     const directory = path.join(installRoot, name);
-    if (directory === current || directory === previous) continue;
+    if (directory === current || directory === previous || directory === path.dirname(launcher)) {
+      continue;
+    }
     if (!/^\d+\.\d+\.\d+(?:[-+][a-z0-9.+-]+)?$/i.test(name)) {
       yield* Console.warn(`Skipping unexpected install entry ${directory}.`);
       continue;
     }
-    const removable = yield* checkRootDirectory(directory).pipe(
-      Effect.catchTags({
-        GatewayCliError: (error) =>
+    const removable = yield* platform
+      .checkAdminOwned(directory, "Directory")
+      .pipe(
+        Effect.catch((error) =>
           Console.warn(`Skipping ${directory}. ${error.message}`).pipe(Effect.as(false)),
-      }),
-    );
-    if (removable) yield* fs.remove(directory, { recursive: true });
+        ),
+      );
+    // The install already succeeded; a runtime still in use (locked on Windows) waits for the next one.
+    if (removable) {
+      yield* fs
+        .remove(directory, { recursive: true })
+        .pipe(
+          Effect.catch((error) => Console.warn(`Could not remove ${directory}. ${error.message}`)),
+        );
+    }
   }
 });
 
-const installAt = Effect.fn("gatewayInstall.install")(function* (layout: InstallLayout) {
-  yield* requireRoot;
+export const installGateway = Effect.fn("gatewayInstall.install")(function* (
+  platform: GatewayPlatform,
+) {
+  yield* requireAdmin(platform);
   yield* requireDefaultPaths;
-  const source = yield* runtimeSource();
+  const source = yield* runtimeSource(platform);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  yield* preflight(layout);
-  const gatewayUnitPath = path.join(layout.unitDir, GATEWAY_UNIT);
-  yield* lockGatewayPath(gatewayUnitPath);
-  const marked = yield* hasInstallMarker(layout.installRoot);
+  const { layout } = platform;
+  const configDir = path.dirname(layout.configPath);
+  yield* checkInstallDirectories(platform);
+  yield* lockGatewayPath(layout.installRoot);
+  const marked = yield* hasInstallMarker(platform);
   if (
     !marked &&
-    (yield* checkRootDirectory(layout.installRoot)) &&
+    (yield* platform.checkAdminOwned(layout.installRoot, "Directory")) &&
     (yield* fs.readDirectory(layout.installRoot)).length > 0
   ) {
     return yield* fail(
@@ -596,12 +286,11 @@ const installAt = Effect.fn("gatewayInstall.install")(function* (layout: Install
   }
   const current = path.join(layout.installRoot, "current");
   const previous = path.join(layout.installRoot, "previous");
-  const executable = path.join(current, "t3");
+  const executable = path.join(current, layout.executableName);
   const activeLink = yield* managedLink(current, layout.installRoot);
   const activeRuntime = activeLink.target;
   const previousLink = yield* managedLink(previous, layout.installRoot);
   const launcher = yield* managedLink(layout.launcher, layout.installRoot);
-  const units = renderGatewayUnits(layout);
   for (const [file, link] of [
     [current, activeLink],
     [previous, previousLink],
@@ -617,195 +306,102 @@ const installAt = Effect.fn("gatewayInstall.install")(function* (layout: Install
       );
     }
   }
-  const { units: previousUnits } = yield* readManagedUnits(layout.unitDir, "install");
-  const previousGatewayFragment = previousUnits.has(GATEWAY_UNIT) ? gatewayUnitPath : undefined;
-  const gatewayFragment = yield* readFragmentPath(GATEWAY_UNIT);
-  if (gatewayFragment && gatewayFragment !== previousGatewayFragment) {
-    return yield* fail(
-      `Refusing to install: systemd loaded unmanaged unit ${GATEWAY_UNIT} from ${gatewayFragment}.`,
-    );
-  }
-  if (!gatewayFragment && (activeRuntime !== undefined || previousGatewayFragment !== undefined)) {
-    return yield* fail(
-      `Refusing to install: systemd did not load the installer-marked unit at ${gatewayUnitPath}.`,
-    );
-  }
-  const template = path.join(layout.unitDir, GATEWAY_USER_UNIT_TEMPLATE);
-  yield* checkTemplateFragment(
-    previousUnits.has(GATEWAY_USER_UNIT_TEMPLATE) ? template : undefined,
-  );
-  yield* checkRootDirectory(path.dirname(layout.configDir));
-  yield* checkRootDirectory(path.dirname(path.dirname(layout.pairingDir)));
-  yield* ensureDirectory(layout.installRoot, 0, 0);
+  yield* platform.services.preflight;
+  yield* platform.checkAdminOwned(path.dirname(configDir), "Directory");
+  yield* platform.checkAdminOwned(path.dirname(path.dirname(layout.pairingDir)), "Directory");
+  yield* platform.secureDirectory(layout.installRoot, "admin");
   if (!marked) {
-    yield* fs.writeFileString(path.join(layout.installRoot, installMarker), "", { mode: 0o644 });
+    const marker = path.join(layout.installRoot, installMarker);
+    yield* fs.writeFileString(marker, "");
+    yield* platform.secureRuntimeFile(marker, false);
   }
-  for (const directory of [
-    layout.configDir,
-    layout.userEnvDir,
-    path.dirname(layout.pairingDir),
-    layout.pairingDir,
-  ]) {
-    yield* checkRootDirectory(directory);
-    yield* ensureDirectory(directory, 0, 0);
+  for (const directory of [configDir, path.dirname(layout.pairingDir), layout.pairingDir]) {
+    yield* platform.checkAdminOwned(directory, "Directory");
+    yield* platform.secureDirectory(directory, "admin");
   }
   for (const directory of [
     path.dirname(path.dirname(layout.launcher)),
     path.dirname(layout.launcher),
   ]) {
-    if (!(yield* checkRootDirectory(directory))) yield* ensureDirectory(directory, 0, 0);
+    if (!(yield* platform.checkAdminOwned(directory, "Directory"))) {
+      yield* platform.secureDirectory(directory, "admin");
+    }
   }
   yield* lockGatewayPath(layout.configPath);
-  if (!(yield* ensureReadableGatewayConfig(layout.configPath))) {
-    yield* writeGatewayConfig(layout.configPath, emptyGatewayConfig);
+  if (!(yield* ensureReadableGatewayConfig(platform, layout.configPath))) {
+    yield* writeGatewayConfig(platform, layout.configPath, emptyGatewayConfig);
   }
-  const gatewayConfig = yield* readGatewayConfig(layout.configPath);
-  const destination = yield* publishRuntime(source, layout.installRoot, activeRuntime);
-  const uid = yield* ensureAccount();
-  let rollbackStatus = "";
-  const active = yield* Effect.gen(function* () {
-    for (const [unit, contents] of Object.entries(units)) {
-      yield* writeUnit(layout.unitDir, unit, contents);
-    }
-    if (activeRuntime !== destination) yield* replaceLink(path.basename(destination), current);
-    if (!launcher.exists) {
-      yield* fs.symlink(executable, layout.launcher);
-    } else if (launcher.target !== executable) {
-      yield* replaceLink(executable, layout.launcher);
-    }
-
-    yield* runSystemTool("systemctl", ["daemon-reload"]);
-    const active = yield* listUnits("active");
-    if (!(yield* hasManagedFragment(GATEWAY_UNIT, gatewayUnitPath))) {
-      return yield* fail(`systemd did not load the installed unit at ${gatewayUnitPath}.`);
-    }
-    yield* resetFailedUnits(GATEWAY_UNIT);
-    yield* runSystemTool("systemctl", ["enable", "--now", GATEWAY_UNIT]);
-    if (active.includes(GATEWAY_UNIT)) {
-      yield* runSystemTool("systemctl", ["restart", GATEWAY_UNIT]);
-    }
-    yield* waitForGateway(uid, gatewayConfig.listen.port);
-    return active;
-  }).pipe(
-    Effect.onExit((exit) => {
-      if (Exit.isSuccess(exit) || activeRuntime === undefined) return Effect.void;
-      return Effect.gen(function* () {
-        const rollback = yield* Effect.gen(function* () {
-          if (activeRuntime !== destination) {
-            yield* replaceLink(path.basename(activeRuntime), current);
-          }
-          for (const unit of Object.keys(units)) {
-            const contents = previousUnits.get(unit);
-            if (contents === undefined) {
-              yield* fs.remove(path.join(layout.unitDir, unit), { force: true });
-            } else {
-              yield* writeUnit(layout.unitDir, unit, contents);
-            }
-          }
-          yield* runSystemTool("systemctl", ["daemon-reload"]);
-          if (!(yield* hasManagedFragment(GATEWAY_UNIT, previousGatewayFragment))) {
-            return yield* fail(`systemd did not load the previous unit at ${gatewayUnitPath}.`);
-          }
-          yield* resetFailedUnits(GATEWAY_UNIT);
-          yield* runSystemTool("systemctl", ["restart", GATEWAY_UNIT]);
-          yield* waitForGateway(uid, gatewayConfig.listen.port);
-        }).pipe(Effect.result);
-        rollbackStatus = Result.isSuccess(rollback)
-          ? "Restored the previous runtime and unit files. The gateway is listening."
-          : `Rollback failed: ${rollback.failure.message}`;
-        if (Exit.hasInterrupts(exit)) {
-          yield* Console.warn(`${rollbackStatus} See journalctl -u ${GATEWAY_UNIT}.`);
-        }
-      });
-    }),
-    Effect.mapError((error) =>
-      fail(
-        [error.message, rollbackStatus, `See journalctl -u ${GATEWAY_UNIT}.`]
-          .filter(Boolean)
-          .join(" "),
-      ),
+  const config = yield* readGatewayConfig(layout.configPath);
+  const destination = yield* publishRuntime(platform, source, activeRuntime);
+  const gatewayAccount = yield* platform.services.ensureGatewayAccount;
+  if (activeRuntime !== destination) yield* platform.replaceLink(destination, current);
+  if (launcher.target !== executable) yield* platform.replaceLink(executable, layout.launcher);
+  const users = yield* Effect.forEach(Object.entries(config.users), ([name, { uid }]) =>
+    platform.lookupUser(name).pipe(
+      Effect.map((user) => (user.accountId === uid ? [user] : [])),
+      Effect.orElseSucceed(() => []),
     ),
   );
+  const activation = yield* platform.services
+    .activate({
+      executable,
+      config,
+      gatewayAccount,
+      users: users.flat(),
+      restorePreviousRuntime:
+        activeRuntime === undefined
+          ? undefined
+          : activeRuntime === destination
+            ? Effect.void
+            : platform.replaceLink(activeRuntime, current),
+    })
+    .pipe(Effect.result);
 
+  // The gateway kept the new runtime unless activation rolled it back.
   const previousRuntime = activeRuntime === destination ? previousLink.target : activeRuntime;
-  if (previousRuntime !== undefined && previousRuntime !== previousLink.target) {
-    yield* replaceLink(path.basename(previousRuntime), previous);
+  if (
+    previousRuntime !== undefined &&
+    previousRuntime !== previousLink.target &&
+    (yield* managedLink(current, layout.installRoot)).target === destination
+  ) {
+    yield* platform.replaceLink(previousRuntime, previous);
   }
-  const backends = yield* Effect.filter(
-    active.filter((unit) => unit !== GATEWAY_UNIT),
-    (unit) => hasManagedFragment(unit, template),
-  );
-  if (backends.length > 0) {
-    yield* resetFailedUnits(...backends);
-    const restarted = yield* runSystemTool("systemctl", ["try-restart", ...backends]).pipe(
-      Effect.result,
-    );
-    for (const unit of backends) {
-      const state = yield* runSystemTool("systemctl", ["is-active", unit], [0, 3, 4]).pipe(
-        Effect.map(({ stdout }) => stdout.trim()),
-        Effect.orElseSucceed(() => "unavailable"),
-      );
-      yield* Console.log(`${unit}: ${state || "unavailable"}`);
-    }
-    if (Result.isFailure(restarted)) return yield* restarted.failure;
-  }
-  yield* pruneRuntimes(layout.installRoot, destination, previousRuntime);
-  yield* Console.log(
-    `Installed ${destination} and started ${GATEWAY_UNIT}. CLI: ${layout.launcher}.`,
-  );
+  if (Result.isFailure(activation)) return yield* activation.failure;
+  yield* pruneRuntimes(platform, destination, previousRuntime);
+  yield* Console.log(`Installed ${destination} and started the gateway. CLI: ${layout.launcher}.`);
 }, Effect.scoped);
 
-const uninstallAt = Effect.fn("gatewayInstall.uninstall")(function* (layout: InstallLayout) {
-  yield* requireRoot;
+export const uninstallGateway = Effect.fn("gatewayInstall.uninstall")(function* (
+  platform: GatewayPlatform,
+) {
+  yield* requireAdmin(platform);
   yield* requireDefaultPaths;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  yield* preflight(layout);
-  const gatewayUnitPath = path.join(layout.unitDir, GATEWAY_UNIT);
-  yield* lockGatewayPath(gatewayUnitPath);
-  const { units: managedFiles, unmanagedGateway } = yield* readManagedUnits(
-    layout.unitDir,
-    "uninstall",
-  );
-  yield* checkRootDirectory(path.dirname(layout.configDir));
-  if (yield* checkRootDirectory(layout.configDir)) yield* lockGatewayPath(layout.configPath);
-  const loadedUnits = yield* listUnits("loaded");
-  const enabled = yield* enabledUnits(layout.unitDir);
-  const runtimeEnabled = yield* enabledUnits(layout.runtimeUnitDir);
-  const candidates = new Set([...loadedUnits, ...enabled, ...runtimeEnabled]);
-  if (unmanagedGateway) candidates.delete(GATEWAY_UNIT);
-  const gatewayFragment = managedFiles.has(GATEWAY_UNIT) ? gatewayUnitPath : undefined;
-  const template = path.join(layout.unitDir, GATEWAY_USER_UNIT_TEMPLATE);
-  const managed = new Set(
-    yield* Effect.filter(candidates, (unit) =>
-      hasManagedFragment(unit, unit === GATEWAY_UNIT ? gatewayFragment : template),
-    ),
-  );
-  const loaded = loadedUnits.filter((unit) => managed.has(unit));
-  const persistent = enabled.filter((unit) => managed.has(unit));
-  const runtime = runtimeEnabled.filter((unit) => managed.has(unit));
-  if (loaded.length > 0) yield* runSystemTool("systemctl", ["stop", ...loaded]);
-  if (persistent.length > 0) yield* runSystemTool("systemctl", ["disable", ...persistent]);
-  if (runtime.length > 0) {
-    yield* runSystemTool("systemctl", ["disable", "--runtime", ...runtime]);
+  const { layout } = platform;
+  const configDir = path.dirname(layout.configPath);
+  yield* checkInstallDirectories(platform);
+  yield* lockGatewayPath(layout.installRoot);
+  yield* platform.checkAdminOwned(path.dirname(configDir), "Directory");
+  if (yield* platform.checkAdminOwned(configDir, "Directory")) {
+    yield* lockGatewayPath(layout.configPath);
   }
-
-  for (const unit of managedFiles.keys()) {
-    yield* fs.remove(path.join(layout.unitDir, unit), { force: true });
-  }
-  const marked = yield* hasInstallMarker(layout.installRoot);
+  yield* platform.services.uninstall;
+  const marked = yield* hasInstallMarker(platform);
   if (marked) {
     const launcher = yield* managedLink(layout.launcher, layout.installRoot);
     if (launcher.target !== undefined) yield* fs.remove(layout.launcher);
+    // The marker goes last, so a removal that fails partway can be finished or reinstalled over.
+    for (const name of yield* fs.readDirectory(layout.installRoot)) {
+      if (name !== installMarker) {
+        yield* fs.remove(path.join(layout.installRoot, name), { recursive: true });
+      }
+    }
     yield* fs.remove(layout.installRoot, { recursive: true });
-  } else if (yield* checkRootDirectory(layout.installRoot)) {
+  } else if (yield* platform.checkAdminOwned(layout.installRoot, "Directory")) {
     yield* Console.log(`Kept unmanaged install root ${layout.installRoot}.`);
   }
-  yield* runSystemTool("systemctl", ["daemon-reload"]);
   yield* Console.log(
-    `Removed installer-managed unit files${marked ? " and runtime" : ""}. Kept ${layout.configDir}, ${path.dirname(layout.pairingDir)}, the ${gatewayAccount} account, and each user's T3 Code data.`,
+    `Removed the gateway services${marked ? " and runtime" : ""}. Kept ${[...new Set([configDir, path.dirname(layout.pairingDir)])].join(", ")}, the gateway account, and each user's T3 Code data.`,
   );
 }, Effect.scoped);
-
-export const installGateway = (layout: InstallLayout = systemLayout) => installAt(layout);
-export const uninstallGateway = (layout: InstallLayout = systemLayout) => uninstallAt(layout);

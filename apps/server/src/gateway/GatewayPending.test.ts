@@ -5,10 +5,13 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
 
-import { readPendingUsers } from "./GatewayPending.ts";
+import { readOwnedFile, readPendingUsers } from "./GatewayPending.ts";
+import { posixOwnership } from "./platform/testing.ts";
 
 const NOW = 1_800_000_000_000;
 const uid = NodeOS.userInfo().uid;
+// Windows attributes markers by folder; file owners are a POSIX check.
+const ownAttribution = posixOwnership ? "file-owner" : "folder";
 
 // `files` maps "<user>/<name>" to contents; each user folder is created on demand.
 const pairingDir = async (files: Record<string, string>) => {
@@ -44,6 +47,7 @@ describe("readPendingUsers", () => {
         fixture.dir,
         { alice: { uid, port: 3801 }, bob: { uid, port: 3802 }, carol: { uid, port: 3803 } },
         NOW,
+        ownAttribution,
       ),
     ).toEqual(
       new Map([
@@ -88,19 +92,43 @@ describe("readPendingUsers", () => {
       NodePath.join(fixture.dir, "alice", id(7)),
     );
     await NodeFSP.mkdir(NodePath.join(fixture.dir, "alice", id(8)));
+    // A symlink swapped in after the listing is not read either.
+    expect(await readOwnedFile(NodePath.join(fixture.dir, "alice", id(7)))).toBeUndefined();
+    expect(await readOwnedFile(NodePath.join(fixture.dir, "bob", id(6)))).toMatchObject({
+      text: live,
+    });
+    if (posixOwnership) {
+      expect(
+        await readPendingUsers(
+          fixture.dir,
+          // bob's marker is ours, not owned by bob's registered uid.
+          { alice: { uid, port: 3801 }, bob: { uid: uid + 1, port: 3802 } },
+          NOW,
+          "file-owner",
+        ),
+      ).toEqual(new Map());
+    }
+    // Where the folder attributes markers, bob's own folder vouches for the marker inside it.
     expect(
       await readPendingUsers(
         fixture.dir,
-        // bob's marker is ours, not owned by bob's registered uid.
         { alice: { uid, port: 3801 }, bob: { uid: uid + 1, port: 3802 } },
         NOW,
+        "folder",
       ),
-    ).toEqual(new Map());
+    ).toEqual(
+      new Map([["bob", { expiresAt: NOW + 60_000, tokens: new Map([[hash(0), NOW + 60_000]]) }]]),
+    );
   });
 
   it("treats a missing pairing dir or user folder as nobody pairing", async () => {
     expect(
-      await readPendingUsers("/nonexistent/t3gw", { alice: { uid, port: 3801 } }, NOW),
+      await readPendingUsers(
+        "/nonexistent/t3gw",
+        { alice: { uid, port: 3801 } },
+        NOW,
+        "file-owner",
+      ),
     ).toEqual(new Map());
   });
 
@@ -110,20 +138,21 @@ describe("readPendingUsers", () => {
     );
     await using full = await pairingDir({ ...markers, [`bob/${id(100)}`]: live });
     const users = { alice: { uid, port: 3801 }, bob: { uid, port: 3802 } };
-    expect(await readPendingUsers(full.dir, users, NOW)).toBe("unknown");
+    expect(await readPendingUsers(full.dir, users, NOW, ownAttribution)).toBe("unknown");
 
     await using unreadable = await pairingDir({ [`bob/${id(100)}`]: live });
     // A file where alice's folder belongs fails opendir with ENOTDIR, which is not "missing".
     await NodeFSP.writeFile(NodePath.join(unreadable.dir, "alice"), "");
-    expect(await readPendingUsers(unreadable.dir, users, NOW)).toBe("unknown");
+    expect(await readPendingUsers(unreadable.dir, users, NOW, ownAttribution)).toBe("unknown");
 
-    // Root reads any marker, so only a regular user can see a marker it cannot open.
-    if (process.getuid?.() === 0) return;
+    // Root reads any marker, so only a regular user can see a marker it cannot open. On Windows the
+    // SYSTEM gateway and elevated sessions hold the backup privilege, which libuv's open uses.
+    if (process.getuid?.() === 0 || !posixOwnership) return;
     await using lockedMarker = await pairingDir({
       [`alice/${id(1)}`]: live,
       [`bob/${id(100)}`]: live,
     });
     await NodeFSP.chmod(NodePath.join(lockedMarker.dir, "alice", id(1)), 0o000);
-    expect(await readPendingUsers(lockedMarker.dir, users, NOW)).toBe("unknown");
+    expect(await readPendingUsers(lockedMarker.dir, users, NOW, ownAttribution)).toBe("unknown");
   });
 });

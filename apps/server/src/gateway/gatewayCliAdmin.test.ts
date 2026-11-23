@@ -1,25 +1,26 @@
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import { ExitCode } from "effect/process/ChildProcessSpawner";
 
-import * as ProcessRunner from "../processRunner.ts";
+import { GatewayPlatformError } from "./platform/GatewayPlatform.ts";
+import {
+  makeTestGatewayPlatform,
+  makeTestGatewayRoot,
+  posixOwnership,
+  testGatewayServices,
+} from "./platform/testing.ts";
 import {
   emptyGatewayConfig,
   GATEWAY_BACKEND_PORT_RANGE,
   GATEWAY_CONFIG_PATH_ENV,
   GATEWAY_PAIRING_DIR_ENV,
-  GATEWAY_USER_ENV_DIR,
 } from "./GatewayConfig.ts";
 import {
   addGatewayUser,
   enrollGatewayUser,
-  gatewayUserEnv,
   readGatewayConfig,
   removeGatewayUser,
   unenrollGatewayUser,
@@ -41,10 +42,6 @@ it.effect("allocates the first unused port and keeps an existing user's assignme
     assert.deepEqual(remaining.users, { bob: { uid: 1002, port: 3803 } });
     const reused = yield* addGatewayUser(remaining, "carol", 1003);
     assert.deepEqual(reused.users.carol, { uid: 1003, port: 3801 });
-    assert.equal(
-      gatewayUserEnv(reused.users.carol!.port),
-      "T3CODE_PORT=3801\nT3CODE_HOST=127.0.0.1\n",
-    );
   }),
 );
 
@@ -59,6 +56,13 @@ it.effect("skips occupied ports and the gateway listen port when allocating a ba
       const explicit = yield* Effect.flip(addGatewayUser(config, "alice", 1001, port, occupied));
       assert.include(explicit.message, "must be unused");
     }
+  }),
+);
+
+it.effect("accepts Windows SID account ids in the version 1 config", () =>
+  Effect.gen(function* () {
+    const config = yield* addGatewayUser(emptyGatewayConfig, "alice", "S-1-5-21-100-200-300-1001");
+    assert.equal(config.users.alice?.uid, "S-1-5-21-100-200-300-1001");
   }),
 );
 
@@ -79,8 +83,7 @@ it.effect("rejects uid conflicts and unavailable explicit or automatic ports", (
       ["alice", 2000, last + 1, "must be unused"],
       ["alice", 2000, undefined, "No gateway backend ports"],
       ["alice", 1001, undefined, "already enrolled"],
-      ["root", 0, undefined, "is root"],
-      ["user0", 2000, undefined, "uid has changed"],
+      ["user0", 2000, undefined, "account id has changed"],
     ] as const) {
       const error = yield* Effect.flip(addGatewayUser(full, user, uid, port));
       assert.include(error.message, expected);
@@ -88,372 +91,208 @@ it.effect("rejects uid conflicts and unavailable explicit or automatic ports", (
   }),
 );
 
-const trustedDirectories =
-  (fs: FileSystem.FileSystem): FileSystem.FileSystem["lstat"] =>
-  (file) =>
-    fs
-      .lstat(file)
-      .pipe(Effect.map((info) => ({ ...info, uid: Option.some(0), mode: info.mode & ~0o022 })));
+const fixture = Effect.fn("gatewayCliAdminTest.fixture")(function* () {
+  const root = yield* makeTestGatewayRoot("t3-gateway-admin-");
+  return { root, ...makeTestGatewayPlatform(root) };
+});
 
-it.layer(NodeServices.layer)("gateway administration", (it) => {
+const untrusted = (path: string) =>
+  new GatewayPlatformError({ message: `Expected a root-owned directory at ${path}.` });
+
+it.layer(testGatewayServices)("gateway administration", (it) => {
   it.effect("creates and repairs the enrolled user's pairing directory", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-gateway-add-" });
-      const configPath = path.join(directory, "gateway.json");
-      const pairingDir = path.join(directory, "new-parent", "pairing");
+      const { root, platform, calls } = yield* fixture();
+      const { configPath, pairingDir } = platform.layout;
       const userDir = path.join(pairingDir, "alice");
-      const envDir = path.join(directory, "users");
-      yield* fs.makeDirectory(envDir);
-      const ownership = new Map<string, [number, number]>();
-      const callerPath = path.join(directory, "caller-bin");
-      const enroll = enrollGatewayUser("alice", 3801).pipe(
-        Effect.provideService(HostProcess.Platform, "linux"),
-        Effect.provideService(HostProcess.UserId, 0),
-        Effect.provideService(HostProcess.Environment, {
-          [GATEWAY_CONFIG_PATH_ENV]: configPath,
-          [GATEWAY_PAIRING_DIR_ENV]: pairingDir,
-          PATH: callerPath,
-        }),
-        Effect.provideService(Path.Path, {
-          ...path,
-          join: (first, ...parts) =>
-            path.join(first === GATEWAY_USER_ENV_DIR ? envDir : first, ...parts),
-        }),
-        Effect.provideService(FileSystem.FileSystem, {
-          ...fs,
-          lstat: trustedDirectories(fs),
-          readFileString: (filePath, encoding) =>
-            filePath === "/proc/net/tcp" || filePath === "/proc/net/tcp6"
-              ? Effect.succeed("")
-              : fs.readFileString(filePath, encoding),
-          chown: (filePath, uid, gid) =>
-            fs.stat(filePath).pipe(
-              Effect.tap(() => Effect.sync(() => ownership.set(filePath, [uid, gid]))),
-              Effect.asVoid,
-            ),
-        }),
-        Effect.provideService(ProcessRunner.ProcessRunner, {
-          run: ({ command, env }) => {
-            assert.equal(env?.PATH ?? callerPath, "/usr/sbin:/usr/bin:/sbin:/bin");
-            return Effect.succeed({
-              stdout: command === "getent" ? `alice:x:1001:1002::${directory}:/bin/sh\n` : "",
-              stderr: "",
-              code: ExitCode(0),
-              timedOut: false,
-              stdoutTruncated: false,
-              stderrTruncated: false,
-              stdoutInvalidUtf8: false,
-              stderrInvalidUtf8: false,
-            });
-          },
-        }),
-      );
-      yield* fs.chmod(directory, 0o700);
+      const enroll = enrollGatewayUser(platform, "alice", 3801);
       assert.equal(yield* enroll, 3801);
       const marker = path.join(userDir, "marker");
       yield* fs.writeFileString(marker, "");
-      yield* fs.chmod(userDir, 0o700);
-      yield* fs.chmod(pairingDir, 0o751);
       yield* fs.chmod(configPath, 0o600);
       assert.equal(yield* enroll, 3801);
-      assert.equal((yield* fs.stat(configPath)).mode & 0o777, 0o644);
+      if (posixOwnership) assert.equal((yield* fs.stat(configPath)).mode & 0o777, 0o644);
       assert.isTrue(yield* fs.exists(marker));
-      assert.deepEqual(ownership.get(pairingDir), [0, 0]);
-      assert.deepEqual(ownership.get(userDir), [1001, 1002]);
-      assert.equal((yield* fs.stat(directory)).mode & 0o777, 0o700);
-      assert.isFalse(ownership.has(directory));
-      assert.isFalse(ownership.has(path.dirname(pairingDir)));
-      assert.equal((yield* fs.stat(pairingDir)).mode & 0o777, 0o751);
-      for (const folder of [envDir, userDir]) {
-        assert.equal((yield* fs.stat(folder)).mode & 0o777, 0o755);
-      }
+      assert.deepEqual(calls.slice(-5), [
+        `secure ${path.dirname(configPath)} admin`,
+        `secure ${path.dirname(pairingDir)} admin`,
+        `secure ${pairingDir} admin`,
+        `secure ${userDir} alice`,
+        "enableUser alice",
+      ]);
+
+      // An override pairing dir that already exists keeps its own mode.
+      const override = path.join(root, "override");
+      yield* fs.makeDirectory(override, { mode: 0o751 });
+      yield* fs.chmod(override, 0o751);
+      calls.length = 0;
+      yield* enrollGatewayUser(platform, "alice").pipe(
+        Effect.provideService(HostProcess.Environment, { [GATEWAY_PAIRING_DIR_ENV]: override }),
+      );
+      assert.notInclude(calls, `secure ${override} admin`);
+      assert.include(calls, `secure ${path.join(override, "alice")} alice`);
+      if (posixOwnership) assert.equal((yield* fs.stat(override)).mode & 0o777, 0o751);
     }),
   );
 
-  it.effect.each([
-    ["t3code", /reserved for the gateway/],
-    ["alice", /home directory.*does not exist/],
-  ] as const)("rejects enrollment of %s before touching config or systemd", ([user, expected]) =>
+  it.effect("rejects an unknown user before touching config or services", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-gateway-add-" });
+      const { root, platform, calls } = yield* fixture();
       const error = yield* Effect.flip(
-        enrollGatewayUser(user).pipe(
-          Effect.provideService(HostProcess.Platform, "linux"),
-          Effect.provideService(HostProcess.UserId, 0),
-          Effect.provideService(HostProcess.Environment, {
-            [GATEWAY_CONFIG_PATH_ENV]: path.join(directory, "missing", "gateway.json"),
-          }),
-          Effect.provideService(FileSystem.FileSystem, {
-            ...fs,
-            lstat: trustedDirectories(fs),
-            chown: () => Effect.die("Unexpected ownership change"),
-          }),
-          Effect.provideService(ProcessRunner.ProcessRunner, {
-            run: ({ command }) => {
-              assert.equal(command, "getent");
-              return Effect.succeed({
-                stdout: `${user}:x:1001:1001::${directory}/missing-home:/bin/sh\n`,
-                stderr: "",
-                code: ExitCode(0),
-                timedOut: false,
-                stdoutTruncated: false,
-                stderrTruncated: false,
-                stdoutInvalidUtf8: false,
-                stderrInvalidUtf8: false,
-              });
-            },
-          }),
+        enrollGatewayUser(
+          {
+            ...platform,
+            lookupUser: (name) =>
+              Effect.fail(new GatewayPlatformError({ message: `${name} was not found.` })),
+          },
+          "alice",
         ),
       );
-      assert.match(error.message, expected);
-      assert.deepEqual(yield* fs.readDirectory(directory), []);
+      assert.include(error.message, "alice was not found");
+      assert.deepEqual(yield* fs.readDirectory(root), []);
+      assert.deepEqual(calls, []);
     }),
   );
 
-  it.effect("rejects writable override ancestors before enrollment or cleanup", () =>
+  it.effect("rejects untrusted config or override ancestors before enrollment or cleanup", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-gateway-paths-" });
-      const unsafe = path.join(directory, "shared");
+      const { root, platform, calls } = yield* fixture();
+      const config = JSON.stringify(emptyGatewayConfig);
+      yield* fs.makeDirectory(path.dirname(platform.layout.configPath));
+      yield* fs.writeFileString(platform.layout.configPath, config);
+      const unsafe = path.join(root, "shared");
       yield* fs.makeDirectory(unsafe);
-      for (const mode of [0o775, 0o1777]) {
-        yield* fs.chmod(unsafe, mode);
-        for (const env of [
-          { [GATEWAY_CONFIG_PATH_ENV]: path.join(unsafe, "missing", "gateway.json") },
-          { [GATEWAY_PAIRING_DIR_ENV]: path.join(unsafe, "missing", "pairing") },
+      for (const [rejected, env] of [
+        [platform.layout.configPath, {}],
+        [unsafe, { [GATEWAY_CONFIG_PATH_ENV]: path.join(unsafe, "missing", "gateway.json") }],
+        [unsafe, { [GATEWAY_PAIRING_DIR_ENV]: path.join(unsafe, "missing", "pairing") }],
+      ] as const) {
+        const guarded = {
+          ...platform,
+          checkAdminOwned: (
+            file: string,
+            kind: "File" | "Directory",
+            options?: { readonly ancestor?: boolean },
+          ) =>
+            file === rejected
+              ? Effect.fail(untrusted(file))
+              : platform.checkAdminOwned(file, kind, options),
+        };
+        for (const command of [
+          enrollGatewayUser(guarded, "alice"),
+          unenrollGatewayUser(guarded, "alice"),
         ]) {
-          for (const command of [enrollGatewayUser("alice"), unenrollGatewayUser("alice")]) {
-            const error = yield* Effect.flip(
-              command.pipe(
-                Effect.provideService(HostProcess.Platform, "linux"),
-                Effect.provideService(HostProcess.UserId, 0),
-                Effect.provideService(HostProcess.Environment, {
-                  [GATEWAY_CONFIG_PATH_ENV]: path.join(directory, "gateway.json"),
-                  ...env,
-                }),
-                Effect.provideService(FileSystem.FileSystem, {
-                  ...fs,
-                  lstat: (file) =>
-                    file === unsafe
-                      ? fs
-                          .lstat(file)
-                          .pipe(Effect.map((info) => ({ ...info, uid: Option.some(0) })))
-                      : trustedDirectories(fs)(file),
-                  remove: () => Effect.die("Unexpected filesystem cleanup"),
-                }),
-                Effect.provideService(ProcessRunner.ProcessRunner, {
-                  run: () => Effect.die("Unexpected system tool call"),
-                }),
-              ),
-            );
-            assert.include(error.message, unsafe);
-          }
+          const error = yield* Effect.flip(
+            command.pipe(Effect.provideService(HostProcess.Environment, env)),
+          );
+          assert.include(error.message, rejected);
         }
       }
       assert.deepEqual(yield* fs.readDirectory(unsafe), []);
+      assert.equal(yield* fs.readFileString(platform.layout.configPath), config);
+      assert.deepEqual(calls, []);
     }),
   );
 
-  it.effect("rejects add and remove with an unsafe config owner or mode", () =>
+  it.effect("rejects administration without admin rights", () =>
     Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-gateway-config-" });
-      const configPath = path.join(directory, "gateway.json");
-      const config = JSON.stringify(emptyGatewayConfig);
-      yield* fs.writeFileString(configPath, config);
-      for (const [uid, mode] of [
-        [1001, 0o644],
-        [0, 0o664],
-        [0, 0o646],
-      ] as const) {
-        for (const command of [enrollGatewayUser("alice"), unenrollGatewayUser("alice")]) {
-          const result = yield* Effect.result(
-            command.pipe(
-              Effect.provideService(HostProcess.Platform, "linux"),
-              Effect.provideService(HostProcess.UserId, 0),
-              Effect.provideService(HostProcess.Environment, {
-                [GATEWAY_CONFIG_PATH_ENV]: configPath,
-              }),
-              Effect.provideService(FileSystem.FileSystem, {
-                ...fs,
-                lstat: (file) =>
-                  file === configPath
-                    ? fs
-                        .lstat(file)
-                        .pipe(Effect.map((info) => ({ ...info, uid: Option.some(uid), mode })))
-                    : trustedDirectories(fs)(file),
-                chown: () => Effect.die("Unexpected ownership change"),
-                remove: () => Effect.die("Unexpected filesystem cleanup"),
-              }),
-              Effect.provideService(ProcessRunner.ProcessRunner, {
-                run: () => Effect.die("Unexpected system tool call"),
-              }),
-            ),
-          );
-          assert.propertyVal(result, "_tag", "Failure");
-          if (result._tag === "Failure")
-            assert.match(result.failure.message, /root-owned regular file/);
-          assert.equal(yield* fs.readFileString(configPath), config);
-        }
+      const { platform, calls } = yield* fixture();
+      const user = { ...platform, isAdmin: Effect.succeed(false) };
+      for (const command of [
+        enrollGatewayUser(user, "alice"),
+        unenrollGatewayUser(user, "alice"),
+      ]) {
+        assert.match((yield* Effect.flip(command)).message, /as root or an elevated administrator/);
       }
+      assert.deepEqual(calls, []);
     }),
   );
 
-  it.effect("rejects explicit ports with a listener in either proc TCP table", () =>
+  it.effect("rejects explicit ports another process listens on", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-gateway-add-" });
-      const configPath = path.join(directory, "gateway.json");
-      yield* fs.writeFileString(configPath, JSON.stringify(emptyGatewayConfig));
+      const { platform } = yield* fixture();
       const { first } = GATEWAY_BACKEND_PORT_RANGE;
-      const procTable = (address: string, port: number) =>
-        `sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid\n0: ${address}:${port.toString(16)} ${"0".repeat(address.length)}:0000 0A 0:0 0:0 0 1002\n`;
+      const listening = {
+        ...platform,
+        listeners: Effect.succeed([
+          { port: first, owner: 1002 },
+          { port: first + 1, owner: 1003 },
+        ]),
+      };
       for (const port of [first, first + 1]) {
-        const error = yield* Effect.flip(
-          enrollGatewayUser("alice", port).pipe(
-            Effect.provideService(HostProcess.Platform, "linux"),
-            Effect.provideService(HostProcess.UserId, 0),
-            Effect.provideService(HostProcess.Environment, {
-              [GATEWAY_CONFIG_PATH_ENV]: configPath,
-            }),
-            Effect.provideService(FileSystem.FileSystem, {
-              ...fs,
-              lstat: trustedDirectories(fs),
-              readFileString: (filePath, encoding) => {
-                if (filePath === "/proc/net/tcp")
-                  return Effect.succeed(procTable("0100007F", first));
-                if (filePath === "/proc/net/tcp6") {
-                  return Effect.succeed(procTable("00000000000000000000000000000000", first + 1));
-                }
-                return fs.readFileString(filePath, encoding);
-              },
-              makeTempDirectory: () =>
-                Effect.die("Enrollment attempted to write before validating listeners"),
-            }),
-            Effect.provideService(ProcessRunner.ProcessRunner, {
-              run: ({ command, args }) => {
-                assert.equal(command, "getent");
-                assert.deepEqual(args, ["passwd", "alice"]);
-                return Effect.succeed({
-                  stdout: `alice:x:1001:1001::${directory}:/bin/sh\n`,
-                  stderr: "",
-                  code: ExitCode(0),
-                  timedOut: false,
-                  stdoutTruncated: false,
-                  stderrTruncated: false,
-                  stdoutInvalidUtf8: false,
-                  stderrInvalidUtf8: false,
-                });
-              },
-            }),
-          ),
-        );
+        const error = yield* Effect.flip(enrollGatewayUser(listening, "alice", port));
         assert.include(error.message, "must be unused");
       }
+      assert.isFalse(yield* fs.exists(platform.layout.configPath));
+      assert.equal(yield* enrollGatewayUser(listening, "alice"), first + 2);
+    }),
+  );
+
+  it.effect("retries all cleanup after the routing entry has been removed", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { platform, calls } = yield* fixture();
+      const { configPath, pairingDir } = platform.layout;
+      const userDir = path.join(pairingDir, "alice");
+      const config = yield* addGatewayUser(emptyGatewayConfig, "alice", 1001);
+      yield* fs.makeDirectory(path.dirname(configPath));
+      yield* fs.writeFileString(configPath, JSON.stringify(config));
+      yield* fs.makeDirectory(userDir, { recursive: true });
+      yield* fs.writeFileString(path.join(userDir, "marker"), "");
+      const warnings: Array<string> = [];
+      const remove = unenrollGatewayUser(
+        {
+          ...platform,
+          services: {
+            ...platform.services,
+            disableUser: (user) =>
+              Effect.gen(function* () {
+                calls.push(`disableUser ${user}`);
+                assert.deepEqual(
+                  (yield* readGatewayConfig(configPath).pipe(Effect.orDie)).users,
+                  {},
+                );
+                return yield* new GatewayPlatformError({ message: `Could not stop ${user}.` });
+              }),
+          },
+        },
+        "alice",
+      ).pipe(
+        Effect.updateService(Console.Console, (console) => ({
+          ...console,
+          warn: (...args) => {
+            warnings.push(args.join(" "));
+          },
+        })),
+      );
+      yield* remove;
+      assert.isFalse(yield* fs.exists(userDir));
+      const configWithoutAlice = JSON.stringify(emptyGatewayConfig);
+      yield* fs.writeFileString(configPath, configWithoutAlice);
+      yield* fs.makeDirectory(userDir);
+      yield* remove;
+      assert.isFalse(yield* fs.exists(userDir));
+      assert.equal(yield* fs.readFileString(configPath), configWithoutAlice);
+      assert.deepEqual(warnings, [
+        "Warning: Could not stop alice.",
+        "Warning: Could not stop alice.",
+      ]);
+      assert.deepEqual(calls, [
+        `remove ${userDir}`,
+        "disableUser alice",
+        `remove ${userDir}`,
+        "disableUser alice",
+      ]);
+      yield* fs.writeFileString(configPath, "{ not json");
+      yield* Effect.flip(remove);
+      assert.lengthOf(warnings, 2);
     }),
   );
 });
-
-it.effect("retries all cleanup after the routing entry has been removed", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-gateway-remove-" });
-    const configPath = path.join(directory, "gateway.json");
-    const envPath = path.join(directory, "alice.env");
-    const pairingDir = path.join(directory, "pairing");
-    const userDir = path.join(pairingDir, "alice");
-    const config = yield* addGatewayUser(emptyGatewayConfig, "alice", 1001);
-    yield* fs.writeFileString(configPath, JSON.stringify(config));
-    yield* fs.writeFileString(envPath, gatewayUserEnv(config.users.alice!.port));
-    yield* fs.makeDirectory(userDir, { recursive: true });
-    yield* fs.writeFileString(path.join(userDir, "marker"), "");
-    const otherUserDir = path.join(pairingDir, "bob");
-    yield* fs.makeDirectory(otherUserDir);
-    const otherMarker = path.join(otherUserDir, "marker");
-    yield* fs.writeFileString(otherMarker, "");
-    yield* fs.symlink(otherUserDir, path.join(userDir, "link"));
-    const warnings: Array<string> = [];
-    const callerPath = path.join(directory, "caller-bin");
-    const remove = unenrollGatewayUser("alice").pipe(
-      Effect.provideService(HostProcess.Platform, "linux"),
-      Effect.provideService(HostProcess.UserId, 0),
-      Effect.provideService(HostProcess.Environment, {
-        [GATEWAY_CONFIG_PATH_ENV]: configPath,
-        [GATEWAY_PAIRING_DIR_ENV]: pairingDir,
-        PATH: callerPath,
-      }),
-      Effect.provideService(FileSystem.FileSystem, {
-        ...fs,
-        lstat: trustedDirectories(fs),
-        remove: (filePath, options) =>
-          fs.remove(
-            filePath === path.join(GATEWAY_USER_ENV_DIR, "alice.env") ? envPath : filePath,
-            options,
-          ),
-      }),
-      Effect.provideService(ProcessRunner.ProcessRunner, {
-        run: ({ command, args, env }) =>
-          Effect.gen(function* () {
-            assert.equal(env?.PATH ?? callerPath, "/usr/sbin:/usr/bin:/sbin:/bin");
-            if (command === "rm") {
-              assert.deepEqual(args, [
-                "--recursive",
-                "--force",
-                "--one-file-system",
-                "--",
-                userDir,
-              ]);
-              yield* fs.remove(userDir, { recursive: true });
-            } else {
-              assert.equal(command, "systemctl");
-              assert.deepEqual(args, ["disable", "--now", "t3code@alice.service"]);
-              assert.deepEqual((yield* readGatewayConfig(configPath)).users, {});
-              assert.isFalse(yield* fs.exists(envPath));
-            }
-            return {
-              stdout: "",
-              stderr: command === "systemctl" ? "Unit not found" : "",
-              code: ExitCode(command === "systemctl" ? 1 : 0),
-              timedOut: false,
-              stdoutTruncated: false,
-              stderrTruncated: false,
-              stdoutInvalidUtf8: false,
-              stderrInvalidUtf8: false,
-            };
-          }).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.orDie),
-      }),
-      Effect.updateService(Console.Console, (console) => ({
-        ...console,
-        warn: (...args) => {
-          warnings.push(args.join(" "));
-        },
-      })),
-    );
-    yield* remove;
-    assert.isFalse(yield* fs.exists(userDir));
-    assert.isTrue(yield* fs.exists(otherMarker));
-    const configWithoutAlice = JSON.stringify(emptyGatewayConfig);
-    yield* fs.writeFileString(configPath, configWithoutAlice);
-    yield* fs.writeFileString(envPath, "");
-    yield* fs.makeDirectory(userDir);
-    yield* remove;
-    assert.isFalse(yield* fs.exists(envPath));
-    assert.isFalse(yield* fs.exists(userDir));
-    assert.equal(yield* fs.readFileString(configPath), configWithoutAlice);
-    assert.lengthOf(warnings, 2);
-    assert.include(warnings[0], "systemctl could not disable --now t3code@alice.service");
-    yield* fs.writeFileString(configPath, "{ not json");
-    yield* fs.writeFileString(envPath, "");
-    yield* Effect.flip(remove);
-    assert.isTrue(yield* fs.exists(envPath));
-    assert.lengthOf(warnings, 2);
-  }).pipe(Effect.provide(NodeServices.layer)),
-);
