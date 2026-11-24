@@ -115,6 +115,7 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
     // The owner of the gateway's listener after each start; undefined leaves the port closed.
     gatewayOwner: (_run: number): string | undefined => "S-1-5-18",
     failScripts: [] as Array<string>,
+    failStderr: "Access is denied.",
     acls: new Map<string, AclEntry>(),
     accounts: new Map<string, { readonly sid: string | null; readonly profile: string | null }>(),
     whoamiUser: `"desktop-1\\admin","S-1-5-21-1111-2222-3333-1000"\r\n`,
@@ -239,7 +240,7 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
 
   const powershell = (script: string) => {
     if (state.failScripts.some((fragment) => script.includes(fragment))) {
-      return output("", 1, "Access is denied.");
+      return output("", 1, state.failStderr);
     }
     if (script.includes("Schedule.Service")) return taskScript(script);
     if (script.includes("GetOwnerSid")) {
@@ -1132,6 +1133,14 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       yield* provide(platform.services.disableUser("alice"));
 
       const bobUser = { name: "bob", accountId: bob, home: at("Users", "bob") };
+      state.failScripts = ["T3Register 'Backend-bob'"];
+      state.failStderr =
+        '#< CLIXML <S S="Error">The user name or password is incorrect. (Exception from HRESULT: 0x8007052E)</S>';
+      const wrong = yield* Effect.flip(
+        provide(platform.services.enableUser(bobUser, executable, { password: "wrong" })),
+      );
+      assert.equal(wrong.message, "Windows did not accept the password for bob.");
+      state.failScripts = [];
       yield* provide(
         platform.services.enableUser(bobUser, executable, { password: "passed-directly" }),
       );

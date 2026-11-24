@@ -1050,6 +1050,13 @@ export const makeWin32GatewayPlatform = (
     yield* taskScript(
       `T3Register ${psLiteral(name)} ${psLiteral(xml)} ${s4uLogon} ${psLiteral(sid)} ${psLiteral(managedTaskSddl(sid))}`,
       { stdin: `${password}\n` },
+    ).pipe(
+      // ERROR_LOGON_FAILURE; the rest of PowerShell's CLIXML report means nothing to a member.
+      Effect.mapError((error) =>
+        error.message.includes("0x8007052E")
+          ? fail(`Windows did not accept the password for ${user.name}.`)
+          : error,
+      ),
     );
     yield* startTask(name);
   }, Effect.mapError(asPlatformError));
