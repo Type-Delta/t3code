@@ -500,10 +500,7 @@ const handleRequest = Effect.fn("GatewayHelper.handle")(function* (
           () => new GatewayHelperRequestError({ status: 400, message: "Invalid leave request." }),
         ),
       );
-      // Only an enrollment's own services are touched.
-      if (Object.hasOwn(config.users, caller.name)) {
-        yield* unenrollGatewayUser(platform, caller.name, { strict: true });
-      }
+      yield* unenrollGatewayUser(platform, caller.name, { member: caller.accountId });
       return yield* answer(200);
     }
     default: {

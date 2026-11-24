@@ -200,6 +200,7 @@ const startHelper = Effect.fn("test.startHelper")(function* (
   const updateState = Effect.map(fs.readFileString(updateStatePath), decodeState);
   return {
     calls,
+    configPath,
     logs,
     stagingDirs,
     updateState,
@@ -367,6 +368,25 @@ describe("gateway helper", () => {
       const rejoin = yield* helper.send("POST", "/v1/join", "{}");
       assert.deepInclude(decodeStatus(rejoin.text), { enrolled: true });
       assert.deepStrictEqual(passwords, [PASSWORD]);
+    }),
+  );
+
+  live("lets only the enrolled account leave, not whoever took its name", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const helper = yield* startHelper();
+      // alice was enrolled as uid 2002, then renamed; the caller now named alice is uid 1001.
+      yield* fs.writeFileString(
+        helper.configPath,
+        `{"version":1,"listen":{"host":"0.0.0.0","port":3773},"users":{"alice":{"uid":2002,"port":3801}},"selfService":true}`,
+      );
+      const left = yield* helper.send("POST", "/v1/leave", "{}");
+      assert.equal(
+        decodeError(left.text).error,
+        "The alice enrollment belongs to another account.",
+      );
+      assert.notInclude(helper.calls, "disableUser alice");
+      assert.include(yield* fs.readFileString(helper.configPath), '"uid":2002');
     }),
   );
 

@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- holds the T3 home's real SQLite ownership lock.
+import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -321,9 +322,11 @@ describe("canAttachShared", () => {
   it("attaches only a packaged app on the default T3 home with its local environment", () => {
     const environment = {
       isDevelopment: false,
+      isPackaged: true,
+      platform: "linux",
       baseDir: "/home/alice/.t3",
       homeDirectory: "/home/alice",
-      path: { join: (...parts: Array<string>) => parts.join("/") },
+      path: NodePath.posix,
     } as unknown as Parameters<typeof DesktopGateway.canAttachShared>[0];
     const settings = { localEnvironmentEnabled: true, wslOnly: false, wslBackendEnabled: false };
     const cases: ReadonlyArray<readonly [object, object, boolean]> = [
@@ -331,15 +334,28 @@ describe("canAttachShared", () => {
       [{ isDevelopment: true }, {}, false],
       // The gateway runs the backend on the account's default home, not a T3CODE_HOME.
       [{ baseDir: "/srv/t3" }, {}, false],
+      // An explicit T3CODE_HOME naming the default home still attaches.
+      [{ baseDir: "/home/alice/.t3/" }, {}, true],
+      [
+        {
+          platform: "win32",
+          path: NodePath.win32,
+          homeDirectory: "C:\\Users\\Alice",
+          baseDir: "c:\\users\\alice\\.T3",
+        },
+        {},
+        true,
+      ],
+      [{ isPackaged: false }, {}, false],
       [{}, { localEnvironmentEnabled: false }, false],
       [{}, { wslOnly: true, wslBackendEnabled: true }, false],
       [{}, { wslOnly: true }, true],
     ];
-    for (const [env, set, expected] of cases) {
+    for (const [index, [env, set, expected]] of cases.entries()) {
       assert.strictEqual(
         DesktopGateway.canAttachShared({ ...environment, ...env }, { ...settings, ...set }),
         expected,
-        JSON.stringify([env, set]),
+        `case ${index}`,
       );
     }
   });

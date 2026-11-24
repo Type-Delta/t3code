@@ -55,6 +55,7 @@ const UPDATE_TIMEOUT = Duration.sum(
 const UPDATE_POLL_INTERVAL = Duration.seconds(1);
 // A backend just enrolled or updated may be restarting; Windows retries its task once a minute.
 const ATTACH_READY_TIMEOUT = Duration.minutes(3);
+const HELPER_RESTART_WAIT = Duration.minutes(1);
 const PAIR_TIMEOUT = Duration.seconds(30);
 const PAIR_LABEL = "T3 Code desktop";
 
@@ -81,17 +82,25 @@ const decodeHelperError = Schema.decodeUnknownOption(GatewayHelperError);
 export const canAttachShared = (
   environment: Pick<
     DesktopEnvironment.DesktopEnvironment["Service"],
-    "isDevelopment" | "baseDir" | "homeDirectory" | "path"
+    "isDevelopment" | "isPackaged" | "platform" | "baseDir" | "homeDirectory" | "path"
   >,
   settings: Pick<
     DesktopAppSettings.DesktopSettings,
     "localEnvironmentEnabled" | "wslOnly" | "wslBackendEnabled"
   >,
-): boolean =>
-  !environment.isDevelopment &&
-  settings.localEnvironmentEnabled &&
-  !(settings.wslOnly && settings.wslBackendEnabled) &&
-  environment.baseDir === environment.path.join(environment.homeDirectory, ".t3");
+): boolean => {
+  const { path } = environment;
+  // Windows paths compare case-insensitively; resolving drops a trailing separator.
+  const key = (value: string) =>
+    environment.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
+  return (
+    environment.isPackaged &&
+    !environment.isDevelopment &&
+    settings.localEnvironmentEnabled &&
+    !(settings.wslOnly && settings.wslBackendEnabled) &&
+    key(environment.baseDir) === key(path.join(environment.homeDirectory, ".t3"))
+  );
+};
 
 /** Whether startup should move the shared runtime up to this app's version first. */
 export const shouldUpdateSharedRuntime = (
@@ -356,7 +365,19 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
   const gateway = yield* DesktopGateway;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const dialog = yield* ElectronDialog.ElectronDialog;
-  const found = yield* gateway.status;
+  const first = yield* gateway.status;
+  // While a Windows gateway restarts its helper is briefly gone, but its backend may still hold the home.
+  const found =
+    Option.isSome(first) || !(yield* DesktopHomeOwner.isHomeOwnershipLocked())
+      ? first
+      : yield* gateway.status.pipe(
+          Effect.repeat({
+            schedule: Schedule.spaced(Duration.seconds(2)),
+            while: (current) => Option.isNone(current),
+          }),
+          Effect.timeoutOption(HELPER_RESTART_WAIT),
+          Effect.map(Option.flatten),
+        );
   if (Option.isNone(found) || !found.value.enrolled) return "local" as const;
   let status = found.value;
   yield* logInfo("this account uses shared T3 Code", {
@@ -367,12 +388,15 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
 
   // An update that already switched the runtime is still restarting backends; pairing with one, or
   // asking for another update, now would reach a backend about to stop.
-  if (status.update?.state === "running" && status.update.version === status.runtimeVersion) {
-    const current = status;
-    status = yield* gateway
-      .awaitUpdate(status.update.version)
-      .pipe(Effect.catch(() => gateway.status.pipe(Effect.map(Option.getOrElse(() => current)))));
-  }
+  const settled = (current: GatewayHelperStatus) =>
+    current.update?.state === "running" && current.update.version === current.runtimeVersion
+      ? gateway
+          .awaitUpdate(current.update.version)
+          .pipe(
+            Effect.catch(() => gateway.status.pipe(Effect.map(Option.getOrElse(() => current)))),
+          )
+      : Effect.succeed(current);
+  status = yield* settled(status);
 
   if (shouldUpdateSharedRuntime(status, environment.appVersion)) {
     status = yield* gateway.updateRuntime(environment.appVersion).pipe(
@@ -391,6 +415,8 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
         ),
       ),
     );
+    // A refused update may have met someone else's that is now restarting backends.
+    status = yield* settled(status);
   }
 
   const failure = yield* Effect.gen(function* () {

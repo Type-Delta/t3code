@@ -273,8 +273,11 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
 export const unenrollGatewayUser = Effect.fn("gatewayCli.unenrollUser")(function* (
   platform: GatewayPlatform,
   user: string,
-  /** Stop the backend before removing the enrollment and fail if it does not stop, so Leave can be retried. */
-  options?: { readonly strict?: boolean },
+  /**
+   * A member leaving: only the enrollment of this account id is removed, and its backend must stop
+   * first, so a failed stop leaves the enrollment for a retry. Without an enrollment nothing is touched.
+   */
+  options?: { readonly member?: GatewayAccountId },
 ) {
   yield* requireAdmin(platform);
   const path = yield* Path.Path;
@@ -282,7 +285,14 @@ export const unenrollGatewayUser = Effect.fn("gatewayCli.unenrollUser")(function
   yield* platform.checkAdminOwned(configPath, "File");
   yield* lockGatewayPath(configPath);
   const config = yield* readGatewayConfig(configPath);
-  if (options?.strict === true && Object.hasOwn(config.users, user)) {
+  if (options?.member !== undefined) {
+    if (!Object.hasOwn(config.users, user)) return;
+    // A renamed account's enrollment keeps its id; whoever took the old name does not own it.
+    if (config.users[user]!.uid !== options.member) {
+      return yield* new GatewayCliError({
+        message: `The ${user} enrollment belongs to another account.`,
+      });
+    }
     yield* platform.services.disableUser(user);
   }
   const updated = removeGatewayUser(config, user);
