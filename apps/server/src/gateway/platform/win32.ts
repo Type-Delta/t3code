@@ -1253,9 +1253,13 @@ export const makeWin32GatewayPlatform = (
       yield* Console.warn(`Skipping \\T3Code\\${name}: it is not managed by t3 gateway.`);
       return;
     }
-    // Its log grants that account's SID; a later account reusing the name starts a fresh one.
+    // Its log grants that account's SID; a later account reusing the name starts a fresh one. A log
+    // someone holds open without delete sharing is emptied instead, so Leave still completes.
     const fs = yield* FileSystem.FileSystem;
-    yield* fs.remove(yield* backendLog(user), { force: true });
+    const log = yield* backendLog(user);
+    yield* fs
+      .remove(log, { force: true })
+      .pipe(Effect.catch(() => fs.writeFileString(log, "").pipe(Effect.ignore)));
   }, Effect.mapError(asPlatformError));
 
   return {
