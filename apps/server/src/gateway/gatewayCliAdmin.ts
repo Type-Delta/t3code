@@ -293,7 +293,9 @@ export const unenrollGatewayUser = Effect.fn("gatewayCli.unenrollUser")(function
         message: `The ${user} enrollment belongs to another account.`,
       });
     }
+    // Everything that can fail comes first, so a failed Leave keeps the enrollment to retry.
     yield* platform.services.disableUser(user);
+    yield* platform.removeTree(path.join(pairingDir, user));
   }
   const updated = removeGatewayUser(config, user);
   if (updated !== config) yield* writeGatewayConfig(platform, configPath, updated);

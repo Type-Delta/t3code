@@ -410,6 +410,23 @@ describe("gateway helper", () => {
     }),
   );
 
+  live("keeps the enrollment when its pairing folder cannot be removed", () =>
+    Effect.gen(function* () {
+      const helper = yield* startHelper({
+        platform: (platform) => ({
+          ...platform,
+          removeTree: () =>
+            Effect.fail(new GatewayPlatformError({ message: "The file is in use." })),
+        }),
+      });
+      assert.equal((yield* helper.send("POST", "/v1/join", "{}")).status, 200);
+      const left = yield* helper.send("POST", "/v1/leave", "{}");
+      assert.equal(decodeError(left.text).error, "The file is in use.");
+      const after = yield* helper.send("GET", "/v1/status");
+      assert.deepInclude(decodeStatus(after.text), { enrolled: true });
+    }),
+  );
+
   live("answers enrollment failures without leaking the password or hanging", () =>
     Effect.gen(function* () {
       const refused = yield* startHelper({
