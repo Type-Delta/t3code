@@ -4860,6 +4860,22 @@ function gatewayCooldownResetAt(
     : undefined;
 }
 
+function gateway429Cooldown(result: string) {
+  const proxyHeader =
+    /^API Error: (?:Request rejected \(429\)|Server is temporarily limiting requests \(not your usage limit\)) · All credentials for model (?:requested model|[^\s()]+) are cooling down(?: via provider [^\s()]+)?(?: |$)/.exec(
+      result,
+    );
+  if (proxyHeader === null)
+    return /\(reset after (?:(\d+)h ?)?(?:(\d+)m ?)?(?:(\d+)s)?\)/.exec(result);
+
+  // The proxy appends its countdown before or after the quoted upstream error.
+  const details = result.slice(proxyHeader[0].length);
+  return (
+    /^\(reset after (?:(\d+)h ?)?(?:(\d+)m ?)?(?:(\d+)s)?\)/.exec(details) ??
+    /^\(last error: [\s\S]*\) \(reset after (?:(\d+)h ?)?(?:(\d+)m ?)?(?:(\d+)s)?\)$/.exec(details)
+  );
+}
+
 const CLAUDE_UNSUPPORTED_VERSION_ERROR =
   /^API Error: 400 Claude Code (\d+\.\d+\.\d+) does not support this model; version (\d+\.\d+\.\d+) or newer is required\./;
 
@@ -4937,16 +4953,7 @@ function providerFailureFromResult(
   // API-key sessions get no rate_limit_info, so a gateway's 429 carries its reset only as text.
   const resetAt =
     apiErrorStatus === 429 && message.result.startsWith("API Error:")
-      ? gatewayCooldownResetAt(
-          // CLIProxyAPI nests upstream errors in its message; only its own cooldown counts.
-          (message.result.startsWith(
-            "API Error: Request rejected (429) · All credentials for model ",
-          )
-            ? /^API Error: Request rejected \(429\) · All credentials for model [^\s()]+ are cooling down \(reset after (?:(\d+)h ?)?(?:(\d+)m ?)?(?:(\d+)s)?\)/
-            : /\(reset after (?:(\d+)h ?)?(?:(\d+)m ?)?(?:(\d+)s)?\)/
-          ).exec(message.result),
-          receivedAt,
-        )
+      ? gatewayCooldownResetAt(gateway429Cooldown(message.result), receivedAt)
       : undefined;
   return makeProviderFailure({
     message: listedError ?? structuredError ?? failureHint ?? message.result,
