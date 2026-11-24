@@ -702,7 +702,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
     it.effect("enables, reports and disables one user's backend", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const { alice, calls, launchd, platform, plist, provide } = yield* fixture();
+        const { alice, calls, launchd, paths, platform, plist, provide } = yield* fixture();
         const { enableUser, disableUser, userState } = platform.services;
         const label = backendLabel("alice");
         assert.equal(yield* provide(userState("alice")), "unavailable");
@@ -715,6 +715,8 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
         yield* provide(disableUser("alice"));
         yield* provide(disableUser("alice"));
         assert.isFalse(yield* fs.exists(plist(label)));
+        // A later account reusing the name must not read this one's log.
+        assert.isFalse(yield* fs.exists(`${paths.logDir}/backend.alice.log`));
         assert.equal(yield* provide(userState("alice")), "unavailable");
         assert.deepEqual(
           calls.filter((call) => !call.includes(" print ")),

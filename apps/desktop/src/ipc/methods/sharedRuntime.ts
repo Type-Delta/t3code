@@ -15,12 +15,11 @@ import { makeIpcMethod } from "../DesktopIpc.ts";
 
 // Fork-only (gateway self-service): join or leave shared T3 Code from Settings.
 
-// Startup attaches only in packaged builds with the local environment on and not WSL-only;
-// joining otherwise would start a backend nothing uses.
+// Joining where startup would not attach would start a backend nothing uses.
 const cannotAttach = Effect.gen(function* () {
-  if ((yield* DesktopEnvironment.DesktopEnvironment).isDevelopment) return true;
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const settings = yield* (yield* DesktopAppSettings.DesktopAppSettings).get;
-  return !settings.localEnvironmentEnabled || (settings.wslOnly && settings.wslBackendEnabled);
+  return !DesktopGateway.canAttachShared(environment, settings);
 });
 
 export const getSharedRuntimeState = makeIpcMethod({

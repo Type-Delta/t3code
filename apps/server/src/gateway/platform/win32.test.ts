@@ -1130,6 +1130,8 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
 
       yield* provide(platform.services.disableUser("alice"));
       assert.isFalse(state.tasks.has("Backend-alice"));
+      // A later account reusing the name must not inherit this one's log or its SID's access.
+      assert.isFalse(yield* fs.exists(log));
       yield* provide(platform.services.disableUser("alice"));
 
       const bobUser = { name: "bob", accountId: bob, home: at("Users", "bob") };

@@ -317,6 +317,34 @@ describe("DesktopGateway", () => {
   );
 });
 
+describe("canAttachShared", () => {
+  it("attaches only a packaged app on the default T3 home with its local environment", () => {
+    const environment = {
+      isDevelopment: false,
+      baseDir: "/home/alice/.t3",
+      homeDirectory: "/home/alice",
+      path: { join: (...parts: Array<string>) => parts.join("/") },
+    } as unknown as Parameters<typeof DesktopGateway.canAttachShared>[0];
+    const settings = { localEnvironmentEnabled: true, wslOnly: false, wslBackendEnabled: false };
+    const cases: ReadonlyArray<readonly [object, object, boolean]> = [
+      [{}, {}, true],
+      [{ isDevelopment: true }, {}, false],
+      // The gateway runs the backend on the account's default home, not a T3CODE_HOME.
+      [{ baseDir: "/srv/t3" }, {}, false],
+      [{}, { localEnvironmentEnabled: false }, false],
+      [{}, { wslOnly: true, wslBackendEnabled: true }, false],
+      [{}, { wslOnly: true }, true],
+    ];
+    for (const [env, set, expected] of cases) {
+      assert.strictEqual(
+        DesktopGateway.canAttachShared({ ...environment, ...env }, { ...settings, ...set }),
+        expected,
+        JSON.stringify([env, set]),
+      );
+    }
+  });
+});
+
 describe("shouldUpdateSharedRuntime", () => {
   it("updates only an enrolled self-service runtime older than the app", () => {
     const cases: ReadonlyArray<readonly [Partial<GatewayHelperStatus>, string, boolean]> = [

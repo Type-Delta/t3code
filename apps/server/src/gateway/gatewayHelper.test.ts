@@ -521,12 +521,19 @@ describe("gateway helper", () => {
       // It also keeps the update slot: replacing it would stop that install mid-activation.
       const newer = yield* helper.send("POST", "/v1/update", JSON.stringify({ version: NEXT }));
       assert.equal(newer.status, 409, newer.text);
-      // One left by an install that died long ago is not.
+      // One left by an install that died long ago is not, whatever its version; a failure is.
+      for (const version of [RUNTIME, NEXT]) {
+        yield* fs.writeFileString(
+          helper.updateStatePath,
+          JSON.stringify({ state: "running", version, updatedAt: 0 }),
+        );
+        assert.isUndefined(yield* statusUpdate, version);
+      }
       yield* fs.writeFileString(
         helper.updateStatePath,
-        JSON.stringify({ state: "running", version: RUNTIME, updatedAt: 0 }),
+        JSON.stringify({ state: "failed", version: NEXT, updatedAt: 0 }),
       );
-      assert.isUndefined(yield* statusUpdate);
+      assert.deepInclude((yield* statusUpdate) ?? {}, { state: "failed", version: NEXT });
     }),
   );
 

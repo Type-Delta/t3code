@@ -1251,7 +1251,11 @@ export const makeWin32GatewayPlatform = (
     const outcome = (yield* taskScript(`T3Unregister ${psLiteral(name)}`)).trim();
     if (outcome === "unmanaged") {
       yield* Console.warn(`Skipping \\T3Code\\${name}: it is not managed by t3 gateway.`);
+      return;
     }
+    // Its log grants that account's SID; a later account reusing the name starts a fresh one.
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.remove(yield* backendLog(user), { force: true });
   }, Effect.mapError(asPlatformError));
 
   return {

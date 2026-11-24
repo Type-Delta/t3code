@@ -30,6 +30,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
@@ -132,7 +133,10 @@ export const writeUpdateState = Effect.fn("GatewayHelper.writeUpdateState")(func
       mode: 0o644,
     },
   );
-  yield* fs.rename(staged, statePath);
+  // Windows refuses a rename while another process, such as a scanner, has either file open.
+  yield* fs
+    .rename(staged, statePath)
+    .pipe(Effect.retry({ times: 5, schedule: Schedule.spaced("100 millis") }));
 });
 
 const callerUnknown = new GatewayHelperRequestError({
@@ -169,11 +173,13 @@ const helperStatus = Effect.fn("GatewayHelper.status")(function* (
   const entry = Object.hasOwn(config.users, caller.name) ? config.users[caller.name] : undefined;
   const backendPort = entry?.uid === caller.accountId ? entry.port : undefined;
   // An update to this helper's own version is still restarting backends until the install settles it.
+  // A running claim older than the stale limit belongs to an install that died.
+  const fresh =
+    update !== undefined && (yield* Clock.currentTimeMillis) - update.updatedAt < STALE_UPDATE_MS;
   const showUpdate =
     update !== undefined &&
-    (isNewer(update.version, runtimeVersion) ||
-      (update.version === runtimeVersion &&
-        (yield* Clock.currentTimeMillis) - update.updatedAt < STALE_UPDATE_MS));
+    ((isNewer(update.version, runtimeVersion) && (update.state === "failed" || fresh)) ||
+      (update.version === runtimeVersion && fresh));
   return {
     version: 1,
     runtimeVersion,

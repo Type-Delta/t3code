@@ -28,6 +28,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
+import type * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
 import * as DesktopHomeOwner from "./DesktopHomeOwner.ts";
@@ -72,6 +73,25 @@ class DesktopGatewayError extends Schema.TaggedError<DesktopGatewayError>()("Des
 
 const decodeStatus = Schema.decodeUnknownOption(GatewayHelperStatus);
 const decodeHelperError = Schema.decodeUnknownOption(GatewayHelperError);
+
+/**
+ * Whether this app may use a shared backend. The gateway runs it on the account's default T3 home,
+ * and development and WSL-only startup never attach.
+ */
+export const canAttachShared = (
+  environment: Pick<
+    DesktopEnvironment.DesktopEnvironment["Service"],
+    "isDevelopment" | "baseDir" | "homeDirectory" | "path"
+  >,
+  settings: Pick<
+    DesktopAppSettings.DesktopSettings,
+    "localEnvironmentEnabled" | "wslOnly" | "wslBackendEnabled"
+  >,
+): boolean =>
+  !environment.isDevelopment &&
+  settings.localEnvironmentEnabled &&
+  !(settings.wslOnly && settings.wslBackendEnabled) &&
+  environment.baseDir === environment.path.join(environment.homeDirectory, ".t3");
 
 /** Whether startup should move the shared runtime up to this app's version first. */
 export const shouldUpdateSharedRuntime = (
@@ -345,6 +365,15 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
   });
   yield* (yield* DesktopWindow.DesktopWindow).showConnectingSplash("Connecting to shared T3 Code…");
 
+  // An update that already switched the runtime is still restarting backends; pairing with one, or
+  // asking for another update, now would reach a backend about to stop.
+  if (status.update?.state === "running" && status.update.version === status.runtimeVersion) {
+    const current = status;
+    status = yield* gateway
+      .awaitUpdate(status.update.version)
+      .pipe(Effect.catch(() => gateway.status.pipe(Effect.map(Option.getOrElse(() => current)))));
+  }
+
   if (shouldUpdateSharedRuntime(status, environment.appVersion)) {
     status = yield* gateway.updateRuntime(environment.appVersion).pipe(
       Effect.catch((error) =>
@@ -362,12 +391,6 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
         ),
       ),
     );
-  } else if (status.update?.state === "running") {
-    // Someone else's update is restarting backends; pairing now could reach one about to stop.
-    const current = status;
-    status = yield* gateway
-      .awaitUpdate(status.update.version)
-      .pipe(Effect.catch(() => gateway.status.pipe(Effect.map(Option.getOrElse(() => current)))));
   }
 
   const failure = yield* Effect.gen(function* () {

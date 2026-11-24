@@ -201,7 +201,7 @@ const startLocalBackend = Effect.gen(function* () {
   }
 
   // Fork-only (gateway self-service): an enrolled account uses its shared gateway backend.
-  if (!environment.isDevelopment && !(settings.wslOnly && settings.wslBackendEnabled)) {
+  if (DesktopGateway.canAttachShared(environment, settings)) {
     const shared = yield* DesktopGateway.attachAtStartup();
     if (shared === "attached") return true;
     if (shared === "quit") {

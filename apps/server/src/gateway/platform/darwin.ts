@@ -1009,6 +1009,8 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
     yield* stopService(label);
     const fs = yield* FileSystem.FileSystem;
     yield* fs.remove(file, { force: true });
+    // Its log is that account's; a later account reusing the name starts a fresh one.
+    yield* fs.remove(`${paths.logDir}/backend.${user}.log`, { force: true });
   }, Effect.mapError(asPlatformError));
 
   const uninstall = Effect.gen(function* () {
