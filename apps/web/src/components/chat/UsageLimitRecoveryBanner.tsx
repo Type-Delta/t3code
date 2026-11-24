@@ -4,6 +4,7 @@ import {
   type RunId,
 } from "@t3tools/contracts";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
+import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 import { deadlineStore } from "@t3tools/client-runtime/clock";
 import { limitRecoveryOwnsSnooze } from "@t3tools/client-runtime/state/thread-execution";
 import {
@@ -16,6 +17,7 @@ import { useDeadlinePassed } from "../../hooks/useDeadline";
 import { OpenAI } from "../Icons";
 import { ChatGptUsageButton } from "../settings/ChatGptUsageButton";
 import { Button, InlineButton } from "../ui/button";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { toastManager } from "../ui/toast";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
@@ -32,6 +34,8 @@ type RecoveryProps = {
   recovery: OrchestrationV2LimitRecovery | null;
   timestampFormat: TimestampFormat;
   onChange: (recovery: OrchestrationV2LimitRecoveryUpdate) => Promise<void>;
+  retryPresets?: ReadonlyArray<SnoozePreset>;
+  onScheduleRetry?: (snoozedUntil: string) => Promise<void>;
 };
 
 export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBannerStackItem {
@@ -56,6 +60,14 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
   const recoveryActions = canSchedule ? (
     <RecoveryActions key={`${runId}:${resetAt}`} {...props} />
   ) : null;
+  const scheduleAction =
+    canSchedule && props.onScheduleRetry && props.retryPresets?.length ? (
+      <ScheduleRetryAction
+        {...props}
+        onScheduleRetry={props.onScheduleRetry}
+        retryPresets={props.retryPresets}
+      />
+    ) : null;
   const displayAt =
     resumes && resetAt && snoozedUntil && Date.parse(snoozedUntil) > Date.parse(resetAt)
       ? snoozedUntil
@@ -71,7 +83,12 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
       icon: <GaugeIcon />,
       title: "Usage limit reached",
       description: resetDescription,
-      actions: recoveryActions,
+      actions: (
+        <>
+          {recoveryActions}
+          {scheduleAction}
+        </>
+      ),
     };
   }
   // OpenAI's partner guidelines specify this ChatGPT notice and its actions.
@@ -87,6 +104,7 @@ export function usageLimitRecoveryBannerItem(props: RecoveryProps): ComposerBann
     actions: (
       <>
         {recoveryActions}
+        {scheduleAction}
         {workspaceLimit ? (
           <Button size="xs" variant="ghost" onClick={copyAdminRequest}>
             Copy request for admin
@@ -151,5 +169,48 @@ function RecoveryActions({ runId, resetAt, recovery, snoozedUntil, onChange }: R
         {pending ? "Saving..." : snoozed ? "Wake now" : "Snooze until reset"}
       </InlineButton>
     </span>
+  );
+}
+
+function ScheduleRetryAction({
+  retryPresets,
+  onScheduleRetry,
+}: Required<Pick<RecoveryProps, "retryPresets" | "onScheduleRetry">>) {
+  const [pending, setPending] = useState(false);
+  return (
+    <Popover>
+      <PopoverTrigger render={<Button size="xs" variant="ghost" disabled={pending} />}>
+        {pending ? "Scheduling…" : "Schedule retry"}
+      </PopoverTrigger>
+      <PopoverPopup aria-label="Schedule retry" width="sm" side="top" align="start">
+        <div className="flex flex-col gap-1 p-1">
+          <p className="px-2 pb-1 text-xs text-muted-foreground">Retry this thread</p>
+          {retryPresets.map((preset) => (
+            <Button
+              key={preset.id}
+              type="button"
+              variant="ghost"
+              className="justify-between"
+              disabled={pending}
+              onClick={() => {
+                setPending(true);
+                void onScheduleRetry(preset.snoozedUntil)
+                  .catch((cause) => {
+                    toastManager.add({
+                      type: "error",
+                      title: "Could not schedule retry",
+                      description: cause instanceof Error ? cause.message : "An error occurred.",
+                    });
+                  })
+                  .finally(() => setPending(false));
+              }}
+            >
+              <span>{preset.label}</span>
+              <span className="text-xs text-muted-foreground">{preset.whenLabel}</span>
+            </Button>
+          ))}
+        </div>
+      </PopoverPopup>
+    </Popover>
   );
 }

@@ -6,6 +6,16 @@ This fork keeps the Windows reliability, durable checkpointing, and workspace ca
 
 ## Divergence Log
 
+### DL060 — Usage-limit retry scheduling
+
+When a provider usage limit stops a thread and automatic recovery has not resumed it, the web client offers a Schedule retry popup from the Usage limit reached banner. Its choices use the environment's configurable snooze presets, arm the existing usage-limit auto-resume recovery, and snooze the thread until the selected local time.
+
+**Implementation evidence:** `apps/web/src/components/chat/UsageLimitRecoveryBanner.tsx`, `apps/web/src/components/ChatView.tsx`, and `apps/web/src/components/chat/UsageLimitRecoveryBanner.test.tsx`.
+
+**Recorded validation:** Web package typecheck, focused Oxlint, formatting, and `git diff --check` pass. The integrated preview reached the dev splash screen after the web bundle loaded.
+
+**Last updated:** 2026-11-23
+
 Each behavior where this fork differs from upstream has one entry here. If you change code in this repository, check if this log needs an update.
 
 The rules:
