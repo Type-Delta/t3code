@@ -63,6 +63,7 @@ describe("Antigravity process environment", () => {
       google_api_key: "case-insensitive-api-key",
       GOOGLE_CLOUD_PROJECT: "do-not-use-project",
       GOOGLE_CLOUD_LOCATION: "do-not-use-location",
+      GOOGLE_GEMINI_BASE_URL: "https://ambient-gateway.invalid",
       GOOGLE_APPLICATION_CREDENTIALS: "/credentials.json",
       GOOGLE_CLOUD_QUOTA_PROJECT: "do-not-use-quota-project",
       GOOGLE_GENAI_USE_VERTEXAI: "true",
@@ -107,6 +108,42 @@ describe("Antigravity process environment", () => {
         TMPDIR: profile.tempDirectory,
       },
     });
+  });
+
+  it("uses the configured Gemini gateway only for Gemini API-key auth", () => {
+    const build = (auth: AntigravityAuthConfig) =>
+      buildAntigravityAcpSpawnInput({
+        installation: { executablePath: "/release/acp", harnessPath: "/release/harness" },
+        profile,
+        cwd: "/project",
+        baseEnv: { PATH: "/usr/bin", GOOGLE_GEMINI_BASE_URL: "https://ambient.invalid" },
+        auth,
+        apiGateway: {
+          enabled: true,
+          baseUrl: " https://proxy.example/v1beta ",
+          useCodexCatalog: false,
+          codexImageGeneration: false,
+          catalogFormat: "auto",
+          authMode: "bearer",
+        },
+      }).env ?? {};
+
+    expect(
+      build({
+        authMethod: "gemini-api-key",
+        apiKey: "proxy-key",
+        gcpProject: "",
+        gcpLocation: "",
+      }).GOOGLE_GEMINI_BASE_URL,
+    ).toBe("https://proxy.example/v1beta");
+    expect(
+      build({
+        authMethod: "oauth-personal",
+        apiKey: "",
+        gcpProject: "",
+        gcpLocation: "",
+      }).GOOGLE_GEMINI_BASE_URL,
+    ).toBeUndefined();
   });
 
   it("runs the agy CLI as `agy acp` without a harness", () => {

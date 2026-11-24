@@ -1,7 +1,11 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off - Effect's symlink has no type argument, and Windows needs a junction to link without elevation.
 import * as NodeFSP from "node:fs/promises";
 
-import type { AntigravityAuthMethod, ProviderInstanceId } from "@t3tools/contracts";
+import type {
+  AntigravityAuthMethod,
+  ApiGatewaySettings,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveNodeExecutable, nodeRuntimeUnavailableMessage } from "@t3tools/shared/nodeRuntime";
 import * as Digest from "effect/crypto/Digest";
@@ -60,6 +64,7 @@ const browserPreflightUrl = "https://example.invalid/t3-antigravity-browser-pref
 
 const removedEnvironmentKeys = new Set([
   "GEMINI_API_KEY",
+  "GOOGLE_GEMINI_BASE_URL",
   "GOOGLE_API_KEY",
   "GOOGLE_APPLICATION_CREDENTIALS",
   "GOOGLE_CLOUD_PROJECT",
@@ -197,6 +202,7 @@ function antigravityEnvironment(
   profile: AntigravityProfile,
   baseEnv: NodeJS.ProcessEnv,
   auth: AntigravityAuthConfig,
+  apiGateway?: ApiGatewaySettings,
   runtimeTempDirectory?: string,
 ) {
   const environment: NodeJS.ProcessEnv = {};
@@ -213,9 +219,12 @@ function antigravityEnvironment(
         : {};
   // Each launch unpacks about 1 GB; use T3-owned temp so the driver can reclaim files after force-kill.
   const tempDirectory = runtimeTempDirectory ?? profile.tempDirectory;
+  const gatewayUrl =
+    auth.authMethod === "gemini-api-key" && apiGateway?.enabled ? apiGateway.baseUrl.trim() : "";
   return {
     ...environment,
     ...credential,
+    ...(gatewayUrl ? { GOOGLE_GEMINI_BASE_URL: gatewayUrl } : {}),
     ...(profile.caBundlePath !== undefined &&
     baseEnv.SSL_CERT_FILE === undefined &&
     baseEnv.SSL_CERT_DIR === undefined
@@ -460,6 +469,7 @@ export function buildAntigravityAcpSpawnInput(input: {
   readonly cwd: string;
   readonly baseEnv?: NodeJS.ProcessEnv;
   readonly auth?: AntigravityAuthConfig;
+  readonly apiGateway?: ApiGatewaySettings;
   readonly runtimeTempDirectory?: string;
 }): AcpSessionRuntime.AcpSpawnInput {
   return {
@@ -484,6 +494,7 @@ export function buildAntigravityAcpSpawnInput(input: {
         input.profile,
         input.baseEnv ?? process.env,
         input.auth ?? ANTIGRAVITY_PERSONAL_AUTH,
+        input.apiGateway,
         input.runtimeTempDirectory,
       ),
       ...(input.installation.harnessPath === null

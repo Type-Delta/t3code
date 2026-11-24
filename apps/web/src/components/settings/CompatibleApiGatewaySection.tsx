@@ -214,6 +214,8 @@ interface CompatibleApiGatewaySectionProps {
   readonly idPrefix: string;
   readonly variant: "card" | "dialog";
   readonly showCodexOptions?: boolean;
+  readonly showApiKey?: boolean;
+  readonly protocol?: "openai-anthropic" | "gemini";
   readonly onChange: (
     nextConfig: Record<string, unknown>,
     nextEnvironment: ReadonlyArray<ProviderInstanceEnvironmentVariable>,
@@ -274,6 +276,8 @@ export function CompatibleApiGatewaySection({
   idPrefix,
   variant,
   showCodexOptions = false,
+  showApiKey = true,
+  protocol = "openai-anthropic",
   onChange,
 }: CompatibleApiGatewaySectionProps) {
   const [gateway, setGateway] = useState(() => readApiGatewayDraft(value));
@@ -288,6 +292,7 @@ export function CompatibleApiGatewaySection({
   }
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Migrate legacy keys through the settings change callback.
   useEffect(() => {
+    if (!showApiKey) return;
     const configured = readApiGatewayDraft(value).apiKeyEnvironmentVariable;
     const fingerprint = `${idPrefix}\0${configured}`;
     if (gatewayMigrationFingerprint.current === fingerprint) return;
@@ -297,7 +302,7 @@ export function CompatibleApiGatewaySection({
     // oxlint-disable-next-line react/set-state-in-effect -- The legacy key migration publishes through onChange, which must not run during render.
     setGateway(readApiGatewayDraft(migrated.config));
     onChange(migrated.config, migrated.environment);
-  }, [environment, idPrefix, onChange, value]);
+  }, [environment, idPrefix, onChange, showApiKey, value]);
 
   const validationErrors = validateApiGatewayDraft(gateway);
   const publish = (patch: Partial<ApiGatewayDraft>) => {
@@ -340,7 +345,9 @@ export function CompatibleApiGatewaySection({
         <div className="min-w-0">
           <div className="text-xs font-medium text-foreground">Compatible API gateway</div>
           <p className="mt-0.5 text-2xs leading-snug text-muted-foreground">
-            Let T3 discover models and relay their metadata to this provider.
+            {protocol === "gemini"
+              ? "Send Antigravity's Gemini API requests through a compatible endpoint."
+              : "Let T3 discover models and relay their metadata to this provider."}
           </p>
         </div>
         <Switch
@@ -354,8 +361,12 @@ export function CompatibleApiGatewaySection({
         <div className="grid gap-3 border-t border-border/60 pt-3">
           <GatewayTextField
             id={`${idPrefix}-gateway-base-url`}
-            label="Gateway base URL"
-            description="The OpenAI or Anthropic-compatible inference endpoint."
+            label={protocol === "gemini" ? "Gemini gateway URL" : "Gateway base URL"}
+            description={
+              protocol === "gemini"
+                ? "Used when Antigravity uses the Gemini API key sign-in method."
+                : "The OpenAI or Anthropic-compatible inference endpoint."
+            }
             placeholder="https://gateway.example.com"
             value={gateway.baseUrl}
             error={validationErrors.baseUrl}
@@ -363,16 +374,18 @@ export function CompatibleApiGatewaySection({
             onChange={(baseUrl) => publish({ baseUrl })}
           />
 
-          <GatewayTextField
-            id={`${idPrefix}-gateway-catalog-url`}
-            label="Model catalog URL"
-            description="Optional. Leave empty to derive /v1/models from the base URL."
-            placeholder="https://gateway.example.com/v1/models"
-            value={gateway.catalogUrl}
-            error={validationErrors.catalogUrl}
-            variant={variant}
-            onChange={(catalogUrl) => publish({ catalogUrl })}
-          />
+          {protocol === "gemini" ? null : (
+            <GatewayTextField
+              id={`${idPrefix}-gateway-catalog-url`}
+              label="Model catalog URL"
+              description="Optional. Leave empty to derive /v1/models from the base URL."
+              placeholder="https://gateway.example.com/v1/models"
+              value={gateway.catalogUrl}
+              error={validationErrors.catalogUrl}
+              variant={variant}
+              onChange={(catalogUrl) => publish({ catalogUrl })}
+            />
+          )}
 
           {showCodexOptions ? (
             <label className="flex items-start justify-between gap-3 rounded-md border border-border/60 p-2.5">
@@ -413,100 +426,106 @@ export function CompatibleApiGatewaySection({
             </label>
           ) : null}
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Catalog format</span>
-              <Select
-                value={gateway.catalogFormat}
-                onValueChange={(catalogFormat) =>
-                  publish({ catalogFormat: catalogFormat as ApiGatewayCatalogFormat })
-                }
-              >
-                <SelectTrigger id={`${idPrefix}-gateway-catalog-format`}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectPopup>
-                  {Object.entries(CATALOG_FORMAT_LABELS).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            </label>
-
-            <label className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">Authentication</span>
-              <Select
-                value={gateway.authMode}
-                onValueChange={(authMode) => publish({ authMode: authMode as ApiGatewayAuthMode })}
-              >
-                <SelectTrigger id={`${idPrefix}-gateway-auth-mode`}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectPopup>
-                  {Object.entries(AUTH_MODE_LABELS).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            </label>
-          </div>
-
-          <div className="grid gap-1.5">
-            <label
-              htmlFor={`${idPrefix}-gateway-api-key`}
-              className="text-xs font-medium text-foreground"
-            >
-              API key
-            </label>
-            <div className="flex items-center gap-2">
-              {variant === "card" ? (
-                <DraftInput
-                  id={`${idPrefix}-gateway-api-key`}
-                  className="min-w-0 flex-1"
-                  value={apiKey}
-                  onCommit={commitApiKey}
-                  type="password"
-                  autoComplete="off"
-                  placeholder={
-                    hasStoredApiKey ? "Stored secret - enter a new key to replace" : "API key"
+          {protocol === "gemini" ? null : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium text-foreground">Catalog format</span>
+                <Select
+                  value={gateway.catalogFormat}
+                  onValueChange={(catalogFormat) =>
+                    publish({ catalogFormat: catalogFormat as ApiGatewayCatalogFormat })
                   }
-                  spellCheck={false}
-                />
-              ) : (
-                <Input
-                  id={`${idPrefix}-gateway-api-key`}
-                  className="min-w-0 flex-1"
-                  value={apiKey}
-                  onChange={(event) => commitApiKey(event.target.value)}
-                  type="password"
-                  autoComplete="off"
-                  placeholder="API key"
-                  spellCheck={false}
-                />
-              )}
-              {hasStoredApiKey ? (
-                <Button
-                  type="button"
-                  variant="ghost-destructive"
-                  size="compact"
-                  className="h-8 shrink-0"
-                  onClick={removeApiKey}
-                  aria-label="Remove stored API key"
                 >
-                  Remove
-                </Button>
-              ) : null}
+                  <SelectTrigger id={`${idPrefix}-gateway-catalog-format`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {Object.entries(CATALOG_FORMAT_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </label>
+
+              <label className="grid gap-1.5">
+                <span className="text-xs font-medium text-foreground">Authentication</span>
+                <Select
+                  value={gateway.authMode}
+                  onValueChange={(authMode) =>
+                    publish({ authMode: authMode as ApiGatewayAuthMode })
+                  }
+                >
+                  <SelectTrigger id={`${idPrefix}-gateway-auth-mode`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {Object.entries(AUTH_MODE_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </label>
             </div>
-            <span className="text-2xs text-muted-foreground">
-              {hasStoredApiKey
-                ? "Stored as a sensitive value. Enter a new key to replace it."
-                : "Stored as a sensitive value for this provider instance. Leave empty for no authentication."}
-            </span>
-          </div>
+          )}
+
+          {showApiKey ? (
+            <div className="grid gap-1.5">
+              <label
+                htmlFor={`${idPrefix}-gateway-api-key`}
+                className="text-xs font-medium text-foreground"
+              >
+                API key
+              </label>
+              <div className="flex items-center gap-2">
+                {variant === "card" ? (
+                  <DraftInput
+                    id={`${idPrefix}-gateway-api-key`}
+                    className="min-w-0 flex-1"
+                    value={apiKey}
+                    onCommit={commitApiKey}
+                    type="password"
+                    autoComplete="off"
+                    placeholder={
+                      hasStoredApiKey ? "Stored secret - enter a new key to replace" : "API key"
+                    }
+                    spellCheck={false}
+                  />
+                ) : (
+                  <Input
+                    id={`${idPrefix}-gateway-api-key`}
+                    className="min-w-0 flex-1"
+                    value={apiKey}
+                    onChange={(event) => commitApiKey(event.target.value)}
+                    type="password"
+                    autoComplete="off"
+                    placeholder="API key"
+                    spellCheck={false}
+                  />
+                )}
+                {hasStoredApiKey ? (
+                  <Button
+                    type="button"
+                    variant="ghost-destructive"
+                    size="compact"
+                    className="h-8 shrink-0"
+                    onClick={removeApiKey}
+                    aria-label="Remove stored API key"
+                  >
+                    Remove
+                  </Button>
+                ) : null}
+              </div>
+              <span className="text-2xs text-muted-foreground">
+                {hasStoredApiKey
+                  ? "Stored as a sensitive value. Enter a new key to replace it."
+                  : "Stored as a sensitive value for this provider instance. Leave empty for no authentication."}
+              </span>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </section>

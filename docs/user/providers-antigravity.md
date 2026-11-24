@@ -49,6 +49,13 @@ ambient `GEMINI_API_KEY` and Google credential variables do not override them.
 Changing the method stops the instance's sessions. Sign out before replacing an
 account.
 
+### Use a Gemini-compatible gateway
+
+When **Sign-in method** is **Gemini API key**, enable **Compatible API gateway** and enter the
+gateway URL. T3 passes that URL to Antigravity as `GOOGLE_GEMINI_BASE_URL` and keeps using the
+provider's API key. The gateway must accept Gemini `v1beta` model requests and expose the model
+IDs Antigravity sends after it separates the thinking level from the model family.
+
 ## Runtime installation
 
 Managed installation supports Apple Silicon and Intel macOS, Linux x64 or ARM64
