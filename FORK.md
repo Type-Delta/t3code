@@ -6,16 +6,6 @@ This fork keeps the Windows reliability, durable checkpointing, and workspace ca
 
 ## Divergence Log
 
-### DL060 — Usage-limit retry scheduling
-
-When a provider usage limit stops a thread and automatic recovery has not resumed it, the web client offers a Schedule retry popup from the Usage limit reached banner. Its choices use the environment's configurable snooze presets, arm the existing usage-limit auto-resume recovery, and snooze the thread until the selected local time.
-
-**Implementation evidence:** `apps/web/src/components/chat/UsageLimitRecoveryBanner.tsx`, `apps/web/src/components/ChatView.tsx`, and `apps/web/src/components/chat/UsageLimitRecoveryBanner.test.tsx`.
-
-**Recorded validation:** Web package typecheck, focused Oxlint, formatting, and `git diff --check` pass. The integrated preview reached the dev splash screen after the web bundle loaded.
-
-**Last updated:** 2026-11-23
-
 Each behavior where this fork differs from upstream has one entry here. If you change code in this repository, check if this log needs an update.
 
 The rules:
@@ -27,16 +17,6 @@ The rules:
 - Never reuse an ID. Retire an entry only with the user's explicit approval: delete it and name the retired ID in the next Merge History entry.
 - When an ID conflicts from merges, renumber the IDs as needed.
 - A change that does not alter how the fork differs from upstream (formatting, or an edit to this file) needs no entry.
-
-### DL066 — Antigravity Gemini gateway configuration
-
-Antigravity provider instances can route Gemini API-key sessions through a configured Gemini-compatible gateway. The provider settings editor exposes the gateway URL, and the server passes it as `GOOGLE_GEMINI_BASE_URL` for the instance's ACP process while keeping ambient gateway values out. Antigravity's existing API key field remains the credential source. OAuth and Agent Platform sessions do not receive the Gemini gateway override because the Antigravity CLI only applies it to Gemini API-key authentication.
-
-**Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/server/src/provider/antigravityAuthSupport.ts`, `apps/server/src/provider/Drivers/AntigravityDriver.ts`, and `apps/web/src/components/settings/{CompatibleApiGatewaySection,ProviderInstanceCard,AddProviderInstanceDialog}.tsx`.
-
-**Recorded validation:** Antigravity environment, contracts, and gateway UI tests, plus the integrated web provider-settings verification for the Antigravity gateway flow.
-
-**Last updated:** 2026-11-24
 
 ### DL001 — Provider startup and artifact safeguards
 
@@ -1102,6 +1082,26 @@ Thread timelines keep the bounded initial history window and fetch earlier pages
 **Implementation evidence:** `apps/web/src/components/chat/MessagesTimeline.tsx`, `apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`, and `apps/mobile/src/features/threads/ThreadFeed.tsx`.
 
 **Recorded validation:** Chromium tests cover delayed status across cursor changes, retry, an empty bounded window after switching threads, and paging after a guest reconnect. Web and native row tests cover an expanded work group when a history page prepends tools from the same run. Real-server runs in Chromium, Electron, and Android reached the oldest turn in the same fixture of replayed messages, plans, and tool activity. Chromium and Electron observed two page requests. Chromium also verified prefetch before the top and preserved the visible row when a delayed page arrived. Android also exercised a separate thread with short and wrapped messages.
+
+**Last updated:** 2026-11-24
+
+### DL068 — Usage-limit retry scheduling
+
+When a provider usage limit stops a thread and automatic recovery has not resumed it, the web client offers a Schedule retry popup from the Usage limit reached banner. Its choices use the environment's configurable snooze presets, arm the existing usage-limit auto-resume recovery, and snooze the thread until the selected local time.
+
+**Implementation evidence:** `apps/web/src/components/chat/UsageLimitRecoveryBanner.tsx`, `apps/web/src/components/ChatView.tsx`, and `apps/web/src/components/chat/UsageLimitRecoveryBanner.test.tsx`.
+
+**Recorded validation:** Web package typecheck, focused Oxlint, formatting, and `git diff --check` pass. The integrated preview reached the dev splash screen after the web bundle loaded.
+
+**Last updated:** 2026-11-23
+
+### DL069 — Antigravity Gemini gateway configuration
+
+Antigravity provider instances can route Gemini API-key sessions through a configured Gemini-compatible gateway. The provider settings editor exposes the gateway URL, and the server passes it as `GOOGLE_GEMINI_BASE_URL` for the instance's ACP process while keeping ambient gateway values out. Antigravity's existing API key field remains the credential source. OAuth and Agent Platform sessions do not receive the Gemini gateway override because the Antigravity CLI only applies it to Gemini API-key authentication.
+
+**Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/server/src/provider/antigravityAuthSupport.ts`, `apps/server/src/provider/Drivers/AntigravityDriver.ts`, and `apps/web/src/components/settings/{CompatibleApiGatewaySection,ProviderInstanceCard,AddProviderInstanceDialog}.tsx`.
+
+**Recorded validation:** Antigravity environment, contracts, and gateway UI tests, plus the integrated web provider-settings verification for the Antigravity gateway flow.
 
 **Last updated:** 2026-11-24
 
