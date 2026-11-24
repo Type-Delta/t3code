@@ -3,7 +3,7 @@ import * as NodeSqlite from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { AuthStandardClientScopes, type GatewayHelperStatus } from "@t3tools/contracts";
+import type { GatewayHelperStatus } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -303,10 +303,8 @@ describe("shouldUpdateSharedRuntime", () => {
 });
 
 describe("pairing helpers", () => {
-  it("grants every scope of the desktop's own session", () => {
-    const args = DesktopGateway.pairCommandArgs("/home");
-    const scopes = args.flatMap((arg, index) => (args[index - 1] === "--scope" ? [arg] : []));
-    assert.deepStrictEqual(scopes, [...AuthStandardClientScopes]);
+  it("leaves scopes to the shared runtime, which may predate this app's", () => {
+    assert.notInclude(DesktopGateway.pairCommandArgs("/home"), "--scope");
   });
 
   it("reads the token line from t3 pair output", () => {

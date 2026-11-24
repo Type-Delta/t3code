@@ -462,21 +462,16 @@ const handleRequest = Effect.fn("GatewayHelper.handle")(function* (
         encryptedPassword === undefined
           ? undefined
           : yield* decryptPassword(options.passwordKey, encryptedPassword);
-      const wasEnrolled = Object.hasOwn(config.users, caller.name);
-      yield* enrollGatewayUser(
-        platform,
-        caller.name,
-        undefined,
-        password === undefined ? undefined : { password },
-      ).pipe(
-        // An admin's retry repairs a partial enrollment; a member would only see an absent backend.
-        Effect.onError(() =>
-          wasEnrolled
-            ? Effect.void
-            : unenrollGatewayUser(platform, caller.name).pipe(Effect.ignore),
-        ),
-        Effect.catchCause((cause) => Effect.flip(failureResponse(cause, password))),
-      );
+      if (password === undefined && platform.joinNeedsPassword) {
+        // Without one, Windows registration would wait on the gateway's own console for it.
+        if (Object.hasOwn(config.users, caller.name)) return yield* answer(200);
+        return yield* fail(400, "Joining needs your Windows password.");
+      }
+      // An admin's retry repairs a partial enrollment; a member would only see an absent backend.
+      yield* enrollGatewayUser(platform, caller.name, undefined, {
+        rollbackNew: true,
+        ...(password === undefined ? {} : { password }),
+      }).pipe(Effect.catchCause((cause) => Effect.flip(failureResponse(cause, password))));
       return yield* answer(200);
     }
     case "/v1/leave": {
@@ -485,7 +480,10 @@ const handleRequest = Effect.fn("GatewayHelper.handle")(function* (
           () => new GatewayHelperRequestError({ status: 400, message: "Invalid leave request." }),
         ),
       );
-      yield* unenrollGatewayUser(platform, caller.name);
+      // Only an enrollment's own services are touched.
+      if (Object.hasOwn(config.users, caller.name)) {
+        yield* unenrollGatewayUser(platform, caller.name);
+      }
       return yield* answer(200);
     }
     default: {

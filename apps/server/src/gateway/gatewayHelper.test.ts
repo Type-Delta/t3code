@@ -342,6 +342,33 @@ describe("gateway helper", () => {
     }),
   );
 
+  live("asks for the Windows password instead of waiting on the gateway's console", () =>
+    Effect.gen(function* () {
+      const passwords: Array<string | undefined> = [];
+      const helper = yield* startHelper({
+        passwordKey: KEYS.privateKey,
+        platform: (platform) => ({
+          ...platform,
+          joinNeedsPassword: true,
+          services: {
+            ...platform.services,
+            enableUser: (_user, _executable, options) =>
+              Effect.sync(() => void passwords.push(options?.password)),
+          },
+        }),
+      });
+      // Leaving without an enrollment touches no service.
+      assert.equal((yield* helper.send("POST", "/v1/leave", "{}")).status, 200);
+      assert.notInclude(helper.calls, "disableUser alice");
+      const bare = yield* helper.send("POST", "/v1/join", "{}");
+      assert.equal(decodeError(bare.text).error, "Joining needs your Windows password.");
+      assert.equal((yield* helper.send("POST", "/v1/join", joinBody(PASSWORD))).status, 200);
+      const rejoin = yield* helper.send("POST", "/v1/join", "{}");
+      assert.deepInclude(decodeStatus(rejoin.text), { enrolled: true });
+      assert.deepStrictEqual(passwords, [PASSWORD]);
+    }),
+  );
+
   live("answers enrollment failures without leaking the password or hanging", () =>
     Effect.gen(function* () {
       const refused = yield* startHelper({

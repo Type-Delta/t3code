@@ -216,7 +216,9 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const { at, install, layout, platform, provide } = yield* fixture();
-      yield* install;
+      // A managed root with no runtime yet, so this build counts as newer than the active one.
+      yield* fs.makeDirectory(at("install"), { recursive: true });
+      yield* fs.writeFileString(at("install/.t3code-gateway-install"), "");
       const staging = at("install/.helper-staging-test");
       yield* fs.copy(at("archive"), staging);
       const fromStaging = (changed: GatewayPlatform) =>
@@ -253,6 +255,8 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
         version: packageJson.version,
         message: "did not start",
       });
+      // The fake activation leaves the new runtime linked; a real one rolls it back.
+      yield* fs.remove(at("install/current"));
       // So does an archive that fails its checks before the install lock.
       yield* claim;
       yield* fs.remove(path.join(staging, "lib"), { recursive: true });
@@ -270,6 +274,14 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       assert.isTrue(yield* fs.exists(pending));
       yield* install;
       assert.isFalse(yield* fs.exists(pending));
+
+      // A helper that predates that install may still ask for a version that is no longer newer.
+      yield* fs.copy(at("archive"), staging);
+      yield* claim;
+      assert.match(
+        (yield* Effect.flip(fromStaging(platform))).message,
+        /The shared runtime .* is not older than/,
+      );
     }),
   );
 

@@ -207,7 +207,11 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
   platform: GatewayPlatform,
   user: string,
   requestedPort?: number,
-  options?: { readonly password?: string },
+  options?: {
+    readonly password?: string;
+    /** Undo a first enrollment whose backend could not be registered, instead of keeping its port. */
+    readonly rollbackNew?: boolean;
+  },
 ) {
   yield* requireAdmin(platform);
   const path = yield* Path.Path;
@@ -242,11 +246,22 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
   yield* platform.secureDirectory(path.join(pairingDir, user), record);
   // Keep the port reserved if the backend cannot start. Retrying repairs the partial enrollment.
   if (updated !== config) yield* writeGatewayConfig(platform, configPath, updated);
-  yield* platform.services.enableUser(
-    record,
-    path.join(platform.layout.installRoot, "current", platform.layout.executableName),
-    options,
-  );
+  yield* platform.services
+    .enableUser(
+      record,
+      path.join(platform.layout.installRoot, "current", platform.layout.executableName),
+      options?.password === undefined ? undefined : { password: options.password },
+    )
+    .pipe(
+      Effect.onError(() =>
+        options?.rollbackNew === true && !Object.hasOwn(config.users, user)
+          ? writeGatewayConfig(platform, configPath, config).pipe(
+              Effect.andThen(platform.services.disableUser(user)),
+              Effect.ignore,
+            )
+          : Effect.void,
+      ),
+    );
   return port;
 }, Effect.scoped);
 

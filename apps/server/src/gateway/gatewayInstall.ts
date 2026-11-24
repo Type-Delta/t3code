@@ -1,4 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
@@ -321,6 +322,17 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   const executable = path.join(current, layout.executableName);
   const activeLink = yield* managedLink(current, layout.installRoot);
   const activeRuntime = activeLink.target;
+  // A helper process that predates a newer install judged "newer" against its own version.
+  if (
+    selfServiceUpdate &&
+    activeRuntime !== undefined &&
+    parseSemver(path.basename(activeRuntime)) !== null &&
+    compareSemverVersions(path.basename(activeRuntime), packageJson.version) >= 0
+  ) {
+    return yield* fail(
+      `The shared runtime ${path.basename(activeRuntime)} is not older than ${packageJson.version}.`,
+    );
+  }
   const previousLink = yield* managedLink(previous, layout.installRoot);
   const launcher = yield* managedLink(layout.launcher, layout.installRoot);
   for (const [file, link] of [

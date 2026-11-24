@@ -2,7 +2,6 @@
 import * as NodeCrypto from "node:crypto";
 
 import {
-  AuthStandardClientScopes,
   GATEWAY_HELPER_HEADER,
   GATEWAY_HELPER_PORT,
   GATEWAY_HELPER_STAGE_TIMEOUT_MS,
@@ -47,7 +46,11 @@ const UPDATE_REQUEST_TIMEOUT = Duration.sum(
   Duration.millis(GATEWAY_HELPER_STAGE_TIMEOUT_MS),
   Duration.minutes(1),
 );
-const UPDATE_TIMEOUT = Duration.minutes(5);
+// Another app's update may still be downloading when this one asks for the same version.
+const UPDATE_TIMEOUT = Duration.sum(
+  Duration.millis(GATEWAY_HELPER_STAGE_TIMEOUT_MS),
+  Duration.minutes(5),
+);
 const UPDATE_POLL_INTERVAL = Duration.seconds(1);
 // A backend just enrolled or updated may be restarting; Windows retries its task once a minute.
 const ATTACH_READY_TIMEOUT = Duration.minutes(3);
@@ -92,15 +95,16 @@ const sharedRuntimeUpdateProgress = (
       ? "failed"
       : "running";
 
-/** Arguments for the bundled CLI that mint a one-time token on the backend serving `baseDir`. */
+/**
+ * Arguments for the shared runtime's CLI that mint a one-time token on the backend serving `baseDir`.
+ * Its default scopes are its server's standard ones; naming this app's could list one it lacks.
+ */
 export const pairCommandArgs = (baseDir: string): ReadonlyArray<string> => [
   "pair",
   "--base-dir",
   baseDir,
   "--label",
   PAIR_LABEL,
-  // The scopes the desktop's own launch credential grants, so attaching loses nothing.
-  ...AuthStandardClientScopes.flatMap((scope) => ["--scope", scope]),
 ];
 
 export const parsePairToken = (output: string): Option.Option<string> =>
@@ -147,6 +151,13 @@ export const hostLayer = Layer.effect(
       runtimeExecutable: files?.runtimeExecutable ?? "",
       encryptPassword: Effect.fn("DesktopGatewayHost.encryptPassword")(function* (password) {
         if (files?.helperKeyFile === undefined) return yield* notReady();
+        // RSA-OAEP with SHA-256 and a 2048-bit key fits 190 bytes.
+        if (Buffer.byteLength(password) > 190) {
+          return yield* new DesktopGatewayError({
+            operation: "join",
+            reason: "This password is too long for shared T3 Code to take.",
+          });
+        }
         const key = yield* fileSystem
           .readFileString(files.helperKeyFile)
           .pipe(Effect.mapError(notReady));

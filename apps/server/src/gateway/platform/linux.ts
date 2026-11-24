@@ -99,8 +99,8 @@ export function renderGatewayUnits(executable: string) {
       "",
       "[Socket]",
       "ListenStream=127.0.0.1:3774",
+      // Accept=yes starts the matching `t3code-gateway-helper@.service` per connection.
       "Accept=yes",
-      `Service=${HELPER_SERVICE_UNIT_TEMPLATE}`,
       "",
       "[Install]",
       "WantedBy=sockets.target",
