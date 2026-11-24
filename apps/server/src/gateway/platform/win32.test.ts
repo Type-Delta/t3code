@@ -677,9 +677,11 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
 
   it.effect("resolves a SID to its local account name", () =>
     Effect.gen(function* () {
-      const { platform, provide } = yield* fixture();
+      const { platform, provide, state } = yield* fixture();
       assert.equal(yield* provide(platform.accountName(alice)), "alice");
-      assert.equal(yield* provide(platform.accountName(alice)), "alice");
+      // A renamed account is named by its current name at once.
+      state.accountNames.set(alice, "DESKTOP-1\\alicia");
+      assert.equal(yield* provide(platform.accountName(alice)), "alicia");
     }),
   );
 

@@ -15,6 +15,7 @@ import { vi } from "vite-plus/test";
 
 import type { GatewayConfig } from "./GatewayConfig.ts";
 import { connectVerified, serveGateway } from "./GatewayServer.ts";
+import type { ConnectionOwner } from "./platform/GatewayPlatform.ts";
 import { testGatewayServices } from "./platform/testing.ts";
 
 const uid = NodeOS.userInfo().uid;
@@ -729,6 +730,30 @@ describe("serveGateway", () => {
       const unenrolled = yield* session("Bearer t3gw~mallory~alice-token.sig");
       expect(unenrolled.response.status).toBe(421);
     }).pipe(Effect.scoped, Effect.provide(testGatewayServices)),
+  );
+
+  it.live("asks again without a cache before refusing a backend owned by another account", () =>
+    Effect.gen(function* () {
+      const port = yield* fakeBackend("alice");
+      const asked: Array<boolean> = [];
+      // A cache that still names the account a reused name used to belong to.
+      const owner: ConnectionOwner = async (_backendPort, _clientPort, options) => {
+        asked.push(options?.fresh === true);
+        return options?.fresh === true ? uid : "S-1-5-21-1-1-1-1999";
+      };
+      const result = yield* Effect.callback<Error | null>((resume) => {
+        connectVerified(
+          { user: "alice", uid, port },
+          () => {},
+          owner,
+        )({}, (error, socket) => {
+          socket?.destroy();
+          resume(Effect.succeed(error ?? null));
+        });
+      });
+      expect(result).toBeNull();
+      expect(asked).toEqual([false, true]);
+    }).pipe(Effect.scoped),
   );
 
   it.live("fails a verifying connection that is closed before it connects", () =>

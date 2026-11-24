@@ -559,16 +559,14 @@ export const makeWin32GatewayPlatform = (
     if (sid === undefined) return yield* fail("Could not determine the current Windows account.");
     return sid;
   });
-  const accountNames = new Map<string, string>();
+  // Uncached: an account renamed and enrolled again must be named by its current name.
   const accountName = Effect.fn("GatewayPlatform.win32.accountName")(function* (
     accountId: GatewayAccountId,
   ) {
     if (typeof accountId !== "string" || !sidPattern.test(accountId)) {
       return yield* fail(`Windows account id ${String(accountId)} is not a SID.`);
     }
-    const cached = accountNames.get(accountId);
-    if (cached !== undefined) return cached;
-    const output = yield* powershell(
+    return yield* powershell(
       [
         `$s=New-Object System.Security.Principal.SecurityIdentifier(${psLiteral(accountId)})`,
         `$n=$s.Translate([System.Security.Principal.NTAccount]).Value`,
@@ -576,8 +574,6 @@ export const makeWin32GatewayPlatform = (
         "J $n",
       ].join(";"),
     ).pipe(Effect.flatMap(decodeAccountName));
-    accountNames.set(accountId, output);
-    return output;
   }, Effect.mapError(asPlatformError));
   // checkRuntimeSource runs once per archive file; the invoking account does not change.
   let invokingAccount: string | undefined;
