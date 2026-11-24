@@ -579,6 +579,10 @@ passed, the thread is still eligible, and its persisted run/message identity is 
 scheduler's tick therefore adds at most five seconds of timing slack, while the provider reset time
 controls the earliest continuation.
 
+Claude gateway 429 responses can put their cooldown after a nested upstream error and include
+the provider name in the message. The adapter reads the gateway's countdown in either position
+and leaves any countdown quoted inside the upstream error out of the recovery time.
+
 The fork retains its explicit continuation prompt, which asks the provider to resume only incomplete
 work, inspect the current workspace and subagent state, repair partial operations, and avoid
 repeating completed work or expanding scope. Recovery survives a server restart, as upstream now supports. An explicit thread restart, archive, settle, a newer turn, or a changed provider selection invalidates the saved recovery. The one-hour wait and scheduler behavior are

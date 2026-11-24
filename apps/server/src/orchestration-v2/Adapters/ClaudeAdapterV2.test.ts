@@ -10045,6 +10045,24 @@ describe("ClaudeAdapterV2 background wake turns", () => {
   it.effect.each([
     { cooldown: " (reset after 1h2m3s)", seconds: 3723 },
     { cooldown: " (reset after 4m 6s) (last error: rate limited)", seconds: 246 },
+    {
+      cooldown:
+        " via provider claude (last error: rate_limit_error: Please try again later.) (reset after 1h39m47s)",
+      seconds: 5987,
+    },
+    {
+      cooldown: " via provider claude (reset after 1m) (last error: rate limited (reset after 1h))",
+      seconds: 60,
+    },
+    {
+      cooldown: " (last error: rate limited (reset after 1h)) (reset after 1m)",
+      seconds: 60,
+      description: "Server is temporarily limiting requests (not your usage limit)",
+    },
+    {
+      cooldown: " via provider claude (last error: rate limited (reset after 1h))",
+      seconds: 0,
+    },
     { cooldown: "", seconds: 0 },
   ])("keeps a gateway's reset on a direct 429 with cooldown '$cooldown'", (input) =>
     Effect.gen(function* () {
@@ -10061,7 +10079,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         }),
       );
       // An API-key session reports a gateway 429 only as text, with no rate_limit_info.
-      const result = `API Error: Request rejected (429) · All credentials for model claude-opus-5-5 are cooling down${input.cooldown}`;
+      const result = `API Error: ${input.description ?? "Request rejected (429)"} · All credentials for model claude-opus-5-5 are cooling down${input.cooldown}`;
       yield* Queue.offerAll(harness.sdkMessages, [
         makeAssistantErrorFrame({
           uuid: "00000000-0000-4000-8000-000000000654",
