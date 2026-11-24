@@ -1118,6 +1118,12 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       assert.include(backendXml, `<WorkingDirectory>${at("Users", "alice")}</WorkingDirectory>`);
       assert.include(backendXml, `gateway run-backend &gt;&gt; &quot;${log}`);
       assert.isTrue(yield* fs.exists(log));
+      // Entries a previous account of the same name kept on its log are dropped before granting.
+      assert.isBelow(
+        calls.indexOf(`icacls.exe ${log} /reset /L /Q`),
+        calls.findIndex((call) => call.startsWith(`icacls.exe ${log} /inheritance:r`)),
+      );
+      assert.isAtLeast(calls.indexOf(`icacls.exe ${log} /reset /L /Q`), 0);
       assert.include(
         calls,
         `icacls.exe ${log} /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F *${alice}:(GR,GW) /L /Q`,

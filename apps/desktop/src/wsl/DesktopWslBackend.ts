@@ -1,3 +1,4 @@
+import { GATEWAY_HELPER_PORT } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -42,8 +43,6 @@ const buildLabel = (distro: string | null): string =>
   distro === null ? "WSL (default distro)" : `WSL (${distro})`;
 
 // WSL auto-forwards loopback ports, so only IPv4 loopback availability matters.
-const DEFAULT_PRIMARY_PORT = 3773;
-
 const scanForWslPort = Effect.fn("desktop.wslBackend.scanForWslPort")(function* (
   startPort: number,
 ): Effect.fn.Return<number, NetService.NetError, NetService.NetService> {
@@ -95,9 +94,9 @@ export const layer = Layer.effect(
       readonly distro: string | null;
     }) {
       const primaryConfig = yield* serverExposure.backendConfig;
-      // Attached to a shared backend, the app configures no port of its own (0); scan from where its
-      // own backend would listen rather than from privileged ports.
-      const port = yield* scanForWslPort((primaryConfig.port || DEFAULT_PRIMARY_PORT) + 1).pipe(
+      // Attached to a shared backend, the app configures no port of its own (0); scan past the
+      // gateway helper's port rather than from privileged ports.
+      const port = yield* scanForWslPort((primaryConfig.port || GATEWAY_HELPER_PORT) + 1).pipe(
         Effect.provideService(NetService.NetService, net),
         Effect.asSome,
         Effect.catch((error) =>

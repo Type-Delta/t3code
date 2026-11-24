@@ -991,6 +991,8 @@ export const makeWin32GatewayPlatform = (
       const log = yield* backendLog(user.name);
       // A running backend's cmd.exe holds its log open for writing, so only a new one is created.
       if (!(yield* fs.exists(log))) yield* fs.writeFileString(log, "", { flag: "a" });
+      // Drops explicit entries a previous account of the same name kept on a log it could not delete.
+      yield* runTool(tool.icacls, [log, "/reset", "/L", "/Q"]);
       yield* runTool(tool.icacls, [
         log,
         "/inheritance:r",
