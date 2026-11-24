@@ -272,8 +272,11 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       assert.isFalse(yield* fs.exists(staging));
       // Another member's fresh update stays staged; an administrator's install supersedes it.
       assert.isTrue(yield* fs.exists(pending));
-      yield* install;
+      const reports: Array<string> = [];
+      yield* install.pipe(capture(reports));
       assert.isFalse(yield* fs.exists(pending));
+      // Staging is removed, not reported as an unexpected runtime.
+      assert.deepEqual(reports, []);
 
       // A helper that predates that install may still ask for a version that is no longer newer.
       // The active build reports its version; its folder name may carry a build suffix.

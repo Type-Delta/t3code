@@ -247,6 +247,8 @@ const pruneRuntimes = Effect.fn("gatewayInstall.pruneRuntimes")(function* (
   if (!(yield* hasInstallMarker(platform))) return;
   for (const name of yield* fs.readDirectory(installRoot)) {
     if (name === installMarker || name === "current" || name === "previous") continue;
+    // Self-service staging is cleaned up separately, after pruning.
+    if (name.startsWith(".helper-staging-")) continue;
     const directory = path.join(installRoot, name);
     if (directory === current || directory === previous || directory === path.dirname(launcher)) {
       continue;
