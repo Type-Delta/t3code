@@ -884,12 +884,21 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       assert.equal(yield* lookup(50500), alice);
       assert.equal(ownerLookups(), 3);
 
+      // An administrator enrolled a different account under the cached name: only a fresh lookup sees it.
+      state.accountNames.set(bob, "DESKTOP-1\\alice");
+      state.owners.set(5000, bob);
+      assert.equal(yield* lookup(50510), alice);
+      assert.equal(yield* Effect.promise(() => owner(3801, 50511, { fresh: true })), bob);
+      state.accountNames.set(bob, "DESKTOP-1\\bob");
+      state.owners.set(5000, alice);
+      const freshLookups = ownerLookups();
+
       // A name tasklist may have garbled is never matched against the cache.
       state.accountNames.set(bob, "DESKTOP-1\\b\u00f8b");
       state.owners.set(5000, bob);
       assert.equal(yield* lookup(50501), bob);
       assert.equal(yield* lookup(50502), bob);
-      assert.equal(ownerLookups(), 5);
+      assert.equal(ownerLookups(), freshLookups + 2);
 
       state.netstatExtra = ["  TCP    0.0.0.0:3801   0.0.0.0:0   LISTENING   5001"];
       assert.isUndefined(yield* lookup(50600));

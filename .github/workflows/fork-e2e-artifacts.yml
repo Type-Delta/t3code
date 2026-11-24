@@ -41,7 +41,7 @@ jobs:
           fi
           {
             echo "version=$VERSION"
-            echo "ref=$GITHUB_REF"
+            echo "ref=$GITHUB_SHA"
           } >> "$GITHUB_OUTPUT"
 
   linux:
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - name: Checkout dispatched ref
+      - name: Checkout dispatched commit
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.ref }}
@@ -137,7 +137,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - name: Checkout dispatched ref
+      - name: Checkout dispatched commit
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.ref }}
@@ -261,7 +261,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 75
     steps:
-      - name: Checkout dispatched ref
+      - name: Checkout dispatched commit
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.ref }}

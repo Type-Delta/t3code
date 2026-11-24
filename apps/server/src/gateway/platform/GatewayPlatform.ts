@@ -47,6 +47,8 @@ export interface GatewayLayout {
 export type ConnectionOwner = (
   backendPort: number,
   clientPort: number,
+  /** `fresh` skips any cache, to confirm an owner that did not match the expected account. */
+  options?: { readonly fresh?: boolean },
 ) => Promise<GatewayAccountId | undefined>;
 
 /** What `services.activate` needs to define and start everything for one runtime. */

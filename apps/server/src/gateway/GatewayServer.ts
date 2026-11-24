@@ -135,7 +135,11 @@ export const connectVerified =
       const peerOwner = async () => {
         for (let attempt = 0; attempt < 2; attempt++) {
           const owner = await connectionOwner(backend.port, socket.localPort ?? 0);
-          if (owner !== undefined) return owner;
+          if (owner === undefined) continue;
+          // A cached owner can name an account since replaced under the same name; confirm afresh.
+          return owner === backend.uid
+            ? owner
+            : await connectionOwner(backend.port, socket.localPort ?? 0, { fresh: true });
         }
         return undefined;
       };

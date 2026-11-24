@@ -22,6 +22,7 @@ import {
   type GatewayPlatformServices,
   type GatewayUserRecord,
   readRuntimeVersion,
+  type ConnectionOwner,
 } from "./GatewayPlatform.ts";
 
 export const GATEWAY_TASK = "Gateway";
@@ -869,6 +870,7 @@ export const makeWin32GatewayPlatform = (
     const lookup = Effect.fn("GatewayPlatform.win32.connectionOwner")(function* (
       backendPort: number,
       clientPort: number,
+      fresh: boolean,
     ) {
       const pid = connectionPid(yield* netstatRows, backendPort, clientPort);
       if (pid === undefined) return undefined;
@@ -878,16 +880,18 @@ export const makeWin32GatewayPlatform = (
         pid,
       )?.toLowerCase();
       const cached = name === undefined ? undefined : accounts.get(name);
-      if (cached !== undefined && cached.expiresAt > now) return cached.sid;
+      if (!fresh && cached !== undefined && cached.expiresAt > now) return cached.sid;
       const owner = (yield* processOwners([pid])).get(pid);
       if (owner?.name)
         accounts.set(owner.name.toLowerCase(), { sid: owner.sid, expiresAt: now + ownerCacheMs });
       return owner?.sid;
     });
-    return async (backendPort: number, clientPort: number) => {
-      const exit = await run(lookup(backendPort, clientPort));
+    // An administrator may enroll a different account under a cached name.
+    const owner: ConnectionOwner = async (backendPort, clientPort, options) => {
+      const exit = await run(lookup(backendPort, clientPort, options?.fresh === true));
       return Exit.isSuccess(exit) ? exit.value : undefined;
     };
+    return owner;
   });
 
   const tasks = powershell(
@@ -1049,7 +1053,9 @@ export const makeWin32GatewayPlatform = (
       yield* fs.remove(log, { force: true }).pipe(
         Effect.catch(() => fs.writeFileString(log, "")),
         Effect.mapError(() =>
-          fail(`${log} is open in another program. Close it, then try joining again.`),
+          fail(
+            `${log} is still open in another program. Ask an administrator to close it, then try joining again.`,
+          ),
         ),
       );
     }
