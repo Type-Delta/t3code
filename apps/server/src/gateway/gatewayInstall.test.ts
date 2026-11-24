@@ -12,6 +12,7 @@ import {
   GATEWAY_CONFIG_PATH_ENV,
   GATEWAY_PAIRING_DIR_ENV,
 } from "./GatewayConfig.ts";
+import { readUpdateState, updateStatePath, writeUpdateState } from "./gatewayHelper.ts";
 import { installGateway, treesMatch, uninstallGateway } from "./gatewayInstall.ts";
 import { GatewayPlatformError, type GatewayPlatform } from "./platform/GatewayPlatform.ts";
 import {
@@ -107,7 +108,10 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       if (posixOwnership) assert.equal((yield* fs.stat(layout.launcher)).mode & 0o777, 0o755);
       assert.equal(yield* fs.readFileString(at("install/current/lib/native.node")), "native addon");
       assert.isFalse(yield* fs.exists(at("install/current/notes.txt")));
-      assert.deepEqual(JSON.parse(yield* fs.readFileString(layout.configPath)), emptyGatewayConfig);
+      assert.deepEqual(JSON.parse(yield* fs.readFileString(layout.configPath)), {
+        ...emptyGatewayConfig,
+        selfService: true,
+      });
       if (posixOwnership) assert.equal((yield* fs.stat(layout.configPath)).mode & 0o777, 0o644);
       assert.isTrue(yield* fs.exists(layout.pairingDir));
       assert.deepEqual(serviceCalls(calls), ["preflight", "ensureGatewayAccount", "activate "]);
@@ -120,6 +124,7 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       const config = JSON.stringify({
         ...emptyGatewayConfig,
         users: { alice: { uid: 1001, port: 3801 }, bob: { uid: 1002, port: 3802 } },
+        selfService: true,
       });
       yield* fs.writeFileString(layout.configPath, config);
       yield* fs.chmod(layout.configPath, 0o600);
@@ -203,6 +208,86 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       assert.equal((yield* Effect.flip(failing.install)).message, "rolled back");
       assert.equal(yield* fs.readLink(current), first);
       assert.isFalse(yield* fs.exists(at("install/previous")));
+    }),
+  );
+
+  it.effect("runs a self-service update only while its claim stands and records its failure", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { at, install, layout, platform, provide } = yield* fixture();
+      // A managed root with no runtime yet, so this build counts as newer than the active one.
+      yield* fs.makeDirectory(at("install"), { recursive: true });
+      yield* fs.writeFileString(at("install/.t3code-gateway-install"), "");
+      const staging = at("install/.helper-staging-test");
+      yield* fs.copy(at("archive"), staging);
+      const fromStaging = (changed: GatewayPlatform) =>
+        provide(
+          installGateway(changed).pipe(
+            Effect.provideService(HostProcess.ExecutablePath, path.join(staging, "t3")),
+          ),
+        );
+      const statePath = updateStatePath(path, layout.configPath);
+      yield* fs.makeDirectory(path.dirname(statePath), { recursive: true });
+      const claim = writeUpdateState(layout.configPath, "running", packageJson.version, "");
+
+      // Another install cleared the claim, so this older request must not replace its runtime.
+      assert.match((yield* Effect.flip(fromStaging(platform))).message, /Another install replaced/);
+      // Nor may it touch a claim another member made since.
+      yield* writeUpdateState(layout.configPath, "running", "99.0.0", "");
+      assert.match((yield* Effect.flip(fromStaging(platform))).message, /Another install replaced/);
+      assert.deepInclude(yield* readUpdateState(layout.configPath), {
+        state: "running",
+        version: "99.0.0",
+      });
+
+      yield* claim;
+      const failing = {
+        ...platform,
+        services: {
+          ...platform.services,
+          activate: () => Effect.fail(new GatewayPlatformError({ message: "did not start" })),
+        },
+      };
+      assert.equal((yield* Effect.flip(fromStaging(failing))).message, "did not start");
+      assert.deepInclude(yield* readUpdateState(layout.configPath), {
+        state: "failed",
+        version: packageJson.version,
+        message: "did not start",
+      });
+      // The fake activation leaves the new runtime linked; a real one rolls it back.
+      yield* fs.remove(at("install/current"));
+      // So does an archive that fails its checks before the install lock.
+      yield* claim;
+      yield* fs.remove(path.join(staging, "lib"), { recursive: true });
+      assert.match((yield* Effect.flip(fromStaging(platform))).message, /missing lib/);
+      assert.deepInclude(yield* readUpdateState(layout.configPath), { state: "failed" });
+      yield* fs.copy(at("archive/lib"), path.join(staging, "lib"));
+
+      yield* claim;
+      const pending = at("install/.helper-staging-pending");
+      yield* fs.makeDirectory(pending);
+      yield* fromStaging(platform);
+      assert.isFalse(yield* fs.exists(statePath));
+      assert.isFalse(yield* fs.exists(staging));
+      // Another member's fresh update stays staged; an administrator's install supersedes it.
+      assert.isTrue(yield* fs.exists(pending));
+      const reports: Array<string> = [];
+      yield* install.pipe(capture(reports));
+      assert.isFalse(yield* fs.exists(pending));
+      // Staging is removed, not reported as an unexpected runtime.
+      assert.deepEqual(reports, []);
+
+      // A helper that predates that install may still ask for a version that is no longer newer.
+      // The active build reports its version; its folder name may carry a build suffix.
+      yield* fs.copy(at("archive"), staging);
+      yield* claim;
+      assert.match(
+        (yield* Effect.flip(
+          fromStaging({ ...platform, runtimeVersion: () => Effect.succeed(packageJson.version) }),
+        )).message,
+        /The shared runtime .* is not older than/,
+      );
     }),
   );
 
@@ -407,7 +492,10 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       assert.deepEqual(calls, ["uninstall"]);
       assert.isFalse(yield* fs.exists(layout.installRoot));
       assert.isFalse(yield* fs.exists(layout.launcher));
-      assert.deepEqual(JSON.parse(yield* fs.readFileString(layout.configPath)), emptyGatewayConfig);
+      assert.deepEqual(JSON.parse(yield* fs.readFileString(layout.configPath)), {
+        ...emptyGatewayConfig,
+        selfService: true,
+      });
       assert.equal(yield* fs.readFileString(marker), "pairing");
       yield* uninstall;
       assert.deepEqual(calls, ["uninstall", "uninstall"]);

@@ -58,6 +58,7 @@ import * as DesktopCliCommand from "./DesktopCliCommand.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as DesktopConnectionCatalogStore from "./DesktopConnectionCatalogStore.ts";
 import * as DesktopIpc from "../ipc/DesktopIpc.ts";
+import * as DesktopGateway from "../backend/DesktopGateway.ts";
 import * as DesktopLocalEnvironmentAuth from "../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopManagedPolicy from "./DesktopManagedPolicy.ts";
 import * as DesktopPrimaryPaste from "./DesktopPrimaryPaste.ts";
@@ -107,11 +108,18 @@ it.effect.each([false, true])(
           Effect.provideService(ElectronDialog.ElectronDialog, {
             showErrorBox: () => Effect.die("unexpected fatal startup error"),
           } as unknown as ElectronDialog.ElectronDialog["Service"]),
+          Effect.provideService(DesktopGateway.DesktopGateway, {
+            status: Effect.succeedNone,
+          } as unknown as DesktopGateway.DesktopGateway["Service"]),
           Effect.provideService(DesktopEnvironment.DesktopEnvironment, {
             platform: "linux",
             isDevelopment: false,
             isPackaged: true,
             stateDir: "/isolated/userdata",
+            // A separate T3 home, so startup never looks for a shared gateway backend.
+            baseDir: "/isolated",
+            homeDirectory: "/home/test",
+            path: { join: (...parts: Array<string>) => parts.join("/"), resolve: (p: string) => p },
             configuredBackendPort: Option.some(3773),
             defaultDesktopSettings: { serverExposureMode: "local-only" },
           } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]),

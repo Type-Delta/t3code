@@ -18,6 +18,7 @@ import { currentGatewayPlatform, type GatewayActivation } from "./GatewayPlatfor
 import {
   GATEWAY_UNIT,
   GATEWAY_USER_UNIT_TEMPLATE,
+  HELPER_SERVICE_UNIT_TEMPLATE,
   linuxGatewayPaths,
   makeLinuxGatewayPlatform,
   renderGatewayUnits,
@@ -62,6 +63,7 @@ const fixture = Effect.fn("linuxGatewayTest.fixture")(function* () {
     listenerUid: 123,
     failBackendRestart: false,
     rollbackListenerUid: undefined as number | undefined,
+    detachedState: "" as string,
   };
   const listenerRead = yield* Deferred.make<void>();
   const rollbackListenerRead = yield* Deferred.make<void>();
@@ -83,6 +85,15 @@ const fixture = Effect.fn("linuxGatewayTest.fixture")(function* () {
       }
       if (command !== "systemctl") return output();
       const unit = args.at(-1)!;
+      const unitFile = (name: string) =>
+        path.join(
+          paths.unitDir,
+          name.startsWith("t3code@") && name !== GATEWAY_USER_UNIT_TEMPLATE
+            ? GATEWAY_USER_UNIT_TEMPLATE
+            : name.startsWith("t3code-gateway-helper@") && name !== HELPER_SERVICE_UNIT_TEMPLATE
+              ? HELPER_SERVICE_UNIT_TEMPLATE
+              : name,
+        );
       switch (args[0]) {
         case "list-units":
           return output(args.includes("--state=active") ? manager.active : manager.loaded);
@@ -111,10 +122,12 @@ const fixture = Effect.fn("linuxGatewayTest.fixture")(function* () {
         }
         case "show":
         case "cat": {
-          const file = path.join(
-            paths.unitDir,
-            unit === GATEWAY_UNIT ? GATEWAY_UNIT : GATEWAY_USER_UNIT_TEMPLATE,
-          );
+          if (args[0] === "show" && args.includes("ActiveState")) {
+            return manager.detachedState === ""
+              ? output("", 1, "Unit not found")
+              : output(`${manager.detachedState}\n`);
+          }
+          const file = unitFile(unit);
           const fragment = manager.fragments.get(unit) ?? ((yield* fs.exists(file)) ? file : "");
           if (args[0] === "show") return output(fragment + "\n");
           return fragment
@@ -203,6 +216,8 @@ const capture = (field: "log" | "warn", reports: Array<string>) =>
 const unitLookups = [
   "systemctl show --property=FragmentPath --value t3code-gateway.service",
   "systemctl cat --no-pager t3code@.service",
+  "systemctl cat --no-pager t3code-gateway-helper@.service",
+  "systemctl show --property=FragmentPath --value t3code-gateway-helper.socket",
 ];
 
 it("renders the gateway and per-user systemd units", () => {
@@ -262,6 +277,14 @@ RestartSec=5
 WantedBy=multi-user.target
 `,
   );
+  assert.include(units["t3code-gateway-helper.socket"], "ListenStream=127.0.0.1:3774");
+  assert.include(units["t3code-gateway-helper.socket"], "Accept=yes");
+  assert.include(units["t3code-gateway-helper@.service"], "StandardInput=socket");
+  assert.include(units["t3code-gateway-helper@.service"], "StandardOutput=journal");
+  assert.include(
+    units["t3code-gateway-helper@.service"],
+    "ExecStart=/opt/t3code/current/t3 gateway helper",
+  );
 });
 
 describe("platform selection", () => {
@@ -303,10 +326,13 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
         assert.deepEqual(calls, [
           ...unitLookups,
           "systemctl daemon-reload",
-          "systemctl list-units --plain --state=active --no-legend --no-pager t3code-gateway.service t3code@*.service",
+          "systemctl list-units --plain --state=active --no-legend --no-pager t3code-gateway.service t3code@*.service t3code-gateway-helper.socket t3code-gateway-helper@*.service",
           "systemctl show --property=FragmentPath --value t3code-gateway.service",
+          "systemctl show --property=FragmentPath --value t3code-gateway-helper.socket",
           "systemctl reset-failed t3code-gateway.service",
           "systemctl enable --now t3code-gateway.service",
+          "systemctl reset-failed t3code-gateway-helper.socket",
+          "systemctl enable --now t3code-gateway-helper.socket",
         ]);
 
         manager.active = [
@@ -571,7 +597,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
           assert.deepEqual(
             calls.filter((call) => !call.startsWith("systemctl show ")),
             [
-              "systemctl list-units --plain --all --no-legend --no-pager t3code-gateway.service t3code@*.service",
+              "systemctl list-units --plain --all --no-legend --no-pager t3code-gateway.service t3code@*.service t3code-gateway-helper.socket t3code-gateway-helper@*.service",
               `systemctl stop${gateway} t3code@alice.service`,
               `systemctl disable${gateway} t3code@alice.service t3code@bob.service`,
               "systemctl disable --runtime t3code@carol.service",
@@ -612,6 +638,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
           error.message,
           "systemctl could not disable --now t3code@alice.service (exit 1).",
         );
+
         assert.deepEqual(calls, [
           "systemctl enable --now t3code@alice.service",
           "systemctl is-active t3code@alice.service",
@@ -642,22 +669,26 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
 
   it.layer(NodeServices.layer)("accounts and ownership", (it) => {
     it.effect(
-      "looks up enrollable users and rejects reserved, root, unknown or homeless ones",
+      "looks up enrollable users and rejects reserved, root, system, unknown or homeless ones",
       () =>
         Effect.gen(function* () {
           const { at, calls, manager, platform, provide } = yield* fixture();
           manager.passwd.set("alice", `alice:x:1001:1002::${at()}:/bin/sh`);
+          manager.passwd.set("1001", `alice:x:1001:1002::${at()}:/bin/sh`);
           manager.passwd.set("bob", `bob:x:1003:1003::${at("missing-home")}:/bin/sh`);
           manager.passwd.set("root", `root:x:0:0::${at()}:/bin/sh`);
+          manager.passwd.set("daemon", `daemon:x:1:1::${at()}:/usr/sbin/nologin`);
           assert.deepEqual(yield* provide(platform.lookupUser("alice")), {
             name: "alice",
             accountId: 1001,
             home: at(),
           });
+          assert.equal(yield* provide(platform.accountName(1001)), "alice");
           for (const [user, expected] of [
             ["t3code", /reserved for the gateway/],
             ["bob", /home directory for bob does not exist/],
             ["root", /root and cannot be enrolled/],
+            ["daemon", /system account and cannot be enrolled/],
             ["carol", /Linux user carol was not found/],
           ] as const) {
             assert.match(

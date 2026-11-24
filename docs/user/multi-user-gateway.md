@@ -1,6 +1,7 @@
 # Share T3 Code with several users on one computer
 
-The multi-user gateway is available in this fork on Linux with systemd, macOS, and Windows.
+The multi-user gateway is available in this fork on Linux with systemd, macOS on Apple
+silicon, and Windows.
 Each enrolled account gets its own T3 Code server, projects, settings, and provider
 credentials. Browsers and phones connect to a single gateway address.
 
@@ -10,13 +11,34 @@ since everyone on it shares one browser origin. Other services on the same hostn
 receive gateway cookies. Guest links, webhooks, and outside agents connecting over MCP use
 each user's T3 Connect address.
 
-Each enrolled user's backend uses their existing T3 Code data. If someone used the T3 Code
-desktop app on this computer, have them quit it before you enroll them, and don't run it
-alongside the gateway. Their projects and threads carry over.
+Each enrolled user's backend uses their existing T3 Code data, so their projects and
+threads carry over. A desktop app built from this fork finds the gateway and uses its
+user's shared server instead of starting its own. Other desktop builds start their own
+server on the same data, so have those users quit them before they join and not run them
+alongside the gateway.
 
 ## Install and enroll a user
 
-Use a CLI archive you trust, built from this fork for your operating system. Extract it
+The simplest install is this fork's command-line installer run as an administrator. On
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Type-Delta/t3code/main/scripts/install.sh | sudo sh
+```
+
+On Windows, from an elevated PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Type-Delta/t3code/main/scripts/install.ps1 | iex
+```
+
+It asks once whether to install
+T3 Code for everyone on this computer; answer yes. To answer without the question, set
+`T3CODE_INSTALL_MODE=gateway`. After that, users join from the desktop app (see
+[Join from the desktop app](#join-from-the-desktop-app)), or an administrator enrolls them
+with `t3 gateway add`.
+
+To install from an archive instead, download the CLI archive for your operating system from this fork's GitHub release and check it against the release's `SHA256SUMS`. Extract it
 into a private, administrator-owned folder, because the executable loads its bundled
 libraries before the installer can check them. Then install the gateway and enroll each
 person with their existing account name in place of `alice`.
@@ -77,6 +99,25 @@ The install allows port 3773 through Windows Firewall on private and domain netw
 the computer's network is set to Public, the install warns you and shows how to change it.
 The config is `%ProgramData%\T3Code\gateway.json`, and logs are in `%ProgramData%\T3Code\logs`.
 
+## Join from the desktop app
+
+When this computer has shared T3 Code, the desktop app offers to join it the first time it
+starts. You can also join or leave later in Settings → Connections, under
+**Shared T3 Code on this computer**. Joining starts your own server in the shared service,
+which keeps running after you close the app, and the app restarts to use it. Your projects
+and history stay. On Windows, joining asks for your Windows password once so your server
+can start when you're signed out; T3 Code doesn't store it. Leaving stops your shared
+server, keeps your data, and restarts the app with its own server.
+
+When a member's desktop app is newer than the shared T3 Code, it updates the shared
+installation to its own version before connecting. That restarts every member's server and
+stops their running agent turns.
+
+An administrator can turn off joining, leaving and updating by members by setting
+`"selfService": false` in the gateway config. Updates download from this fork's GitHub
+releases; to use a mirror, set `"updates": { "baseUrl": "..." }` to a location laid out like
+`<baseUrl>/v<version>/<file>`.
+
 ## Pair a browser or phone
 
 As the enrolled user, run:
@@ -94,16 +135,21 @@ After scanning another account's code on your phone, pair your own account again
 
 ## Update or remove the gateway
 
-To update, extract a newer archive the same way and run its `gateway install` as an
-administrator. The gateway and running backends restart, stopping any running agent
+Members' desktop apps keep the shared installation up to date (see above). To update by
+hand, run the installer again as an administrator, or extract a newer archive the same way
+and run its `gateway install`. The gateway and running backends restart, stopping any running agent
 turns. The installer reports the restarted backends' states. To check them later, run
 `t3 gateway list`. On Windows, if the installer names a user, run `t3 gateway add` for them
 again.
 
-Skip the in-app server update and `t3 service install`, which can start a separate server.
+Skip `t3 service install`, which would start a separate server.
 
 To unenroll an account, run `t3 gateway remove alice` as an administrator. This stops its
 backend and leaves the account's T3 Code data in place.
+After renaming an enrolled account, remove it under its old name and add it again under the
+new one.
+Remove an account's enrollment before deleting that account. On Windows, a new account created
+under the same name could otherwise receive the old account's connections for a few minutes.
 
 To remove the shared service, run `t3 gateway uninstall` as an administrator. It removes
 the services and installed runtime and keeps the gateway config, pairing folders, the

@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as References from "effect/References";
 import { Argument, Command, Flag } from "effect/cli";
+import { FetchHttpClient } from "effect/http";
 
 import packageJson from "../../package.json" with { type: "json" };
 import { GatewayUserName } from "../gateway/GatewayConfig.ts";
@@ -17,6 +18,7 @@ import {
 } from "../gateway/gatewayCliAdmin.ts";
 import { currentGatewayPlatform } from "../gateway/platform/GatewayPlatform.ts";
 import { installGateway, uninstallGateway } from "../gateway/gatewayInstall.ts";
+import { gatewayHelperFromStdin } from "../gateway/gatewayHelper.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { renderTerminalQrCode } from "../startupAccess.ts";
 import { serveCommand } from "./server.ts";
@@ -63,6 +65,22 @@ const gatewayRun = Command.make("run", {
         pairingDir: paths.pairingDir,
       });
     }).pipe(Effect.provide(ProcessRunner.layer)),
+  ),
+);
+
+const gatewayHelper = Command.make("helper").pipe(
+  Command.withDescription("Serve one privileged self-service gateway helper connection."),
+  Command.withHandler(() =>
+    Effect.gen(function* () {
+      const platform = yield* currentGatewayPlatform();
+      const paths = yield* gatewayPaths(platform);
+      if (platform.helperHost !== "service") {
+        return yield* new GatewayCliError({
+          message: "The gateway helper is hosted by the gateway process on this platform.",
+        });
+      }
+      yield* gatewayHelperFromStdin({ platform, configPath: paths.configPath });
+    }).pipe(Effect.provide([ProcessRunner.layer, FetchHttpClient.layer])),
   ),
 );
 
@@ -181,6 +199,7 @@ export const gatewayCommand = Command.make("gateway").pipe(
     gatewayInstall,
     gatewayUninstall,
     gatewayRun,
+    gatewayHelper,
     gatewayRunBackend,
     gatewayAdd,
     gatewayRemove,

@@ -102,6 +102,7 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
     registered: [] as Array<
       readonly [name: string, xml: string, logonType: string, user: string | undefined]
     >,
+    sddl: new Map<string, string>(),
     listeners: new Map<number, number>(),
     netstatExtra: [] as Array<string>,
     owners: new Map<number, string>(),
@@ -114,6 +115,7 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
     // The owner of the gateway's listener after each start; undefined leaves the port closed.
     gatewayOwner: (_run: number): string | undefined => "S-1-5-18",
     failScripts: [] as Array<string>,
+    failStderr: "Access is denied.",
     acls: new Map<string, AclEntry>(),
     accounts: new Map<string, { readonly sid: string | null; readonly profile: string | null }>(),
     whoamiUser: `"desktop-1\\admin","S-1-5-21-1111-2222-3333-1000"\r\n`,
@@ -152,7 +154,9 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
 
   const taskScript = (script: string) => {
     const match = (pattern: string) => new RegExp(`;${pattern}$`, "s").exec(script);
-    const register = match(`T3Register ${literal} ${literal} (\\d+)(?: ${literal})?`);
+    const register = match(
+      `T3Register ${literal} ${literal} (\\d+) (?:\\$null|${literal}) ${literal}`,
+    );
     if (register) {
       const name = unquote(register[1]!);
       const xml = unquote(register[2]!);
@@ -162,6 +166,7 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
         register[3]!,
         register[4] === undefined ? undefined : unquote(register[4]),
       ]);
+      state.sddl.set(name, unquote(register[5]!));
       state.tasks.set(name, { description: MANAGED_MARKER, xml, running: false });
       return output();
     }
@@ -235,7 +240,7 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
 
   const powershell = (script: string) => {
     if (state.failScripts.some((fragment) => script.includes(fragment))) {
-      return output("", 1, "Access is denied.");
+      return output("", 1, state.failStderr);
     }
     if (script.includes("Schedule.Service")) return taskScript(script);
     if (script.includes("GetOwnerSid")) {
@@ -253,6 +258,11 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
       );
     }
     if (script.includes("NTAccount")) {
+      if (script.includes("$s.Translate")) {
+        const sid = unquote(new RegExp(`SecurityIdentifier\\(${literal}`).exec(script)?.[1] ?? "");
+        const name = state.accountNames.get(sid)?.split("\\").at(-1) ?? "";
+        return output(JSON.stringify(name));
+      }
       const name = unquote(new RegExp(`\\$n=${literal}`).exec(script)![1]!);
       return output(JSON.stringify(state.accounts.get(name) ?? { sid: null, profile: null }));
     }
@@ -594,6 +604,19 @@ describe("win32 parsers", () => {
     ]) {
       assert.include(xml, fragment);
     }
+    const detached = renderTaskXml({
+      userId: "S-1-5-18",
+      logonType: "ServiceAccount",
+      runLevel: "HighestAvailable",
+      command: "C:\\T3\\t3.exe",
+      arguments: "gateway install",
+      workingDirectory: "C:\\T3",
+      oneShot: true,
+      executionTimeLimit: "PT30M",
+    });
+    assert.include(detached, "<Triggers />");
+    assert.include(detached, "<ExecutionTimeLimit>PT30M</ExecutionTimeLimit>");
+    assert.notInclude(detached, "<BootTrigger>");
   });
 });
 
@@ -650,6 +673,16 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
         assert.isTrue(Result.isFailure(result) && result.failure.message.includes(message), name);
       }
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("resolves a SID to its local account name", () =>
+    Effect.gen(function* () {
+      const { platform, provide, state } = yield* fixture();
+      assert.equal(yield* provide(platform.accountName(alice)), "alice");
+      // A renamed account is named by its current name at once.
+      state.accountNames.set(alice, "DESKTOP-1\\alicia");
+      assert.equal(yield* provide(platform.accountName(alice)), "alicia");
+    }),
   );
 
   it.effect("checks admin ownership through SIDs, letting users only add to ancestors", () =>
@@ -853,12 +886,21 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       assert.equal(yield* lookup(50500), alice);
       assert.equal(ownerLookups(), 3);
 
+      // An administrator enrolled a different account under the cached name: only a fresh lookup sees it.
+      state.accountNames.set(bob, "DESKTOP-1\\alice");
+      state.owners.set(5000, bob);
+      assert.equal(yield* lookup(50510), alice);
+      assert.equal(yield* Effect.promise(() => owner(3801, 50511, { fresh: true })), bob);
+      state.accountNames.set(bob, "DESKTOP-1\\bob");
+      state.owners.set(5000, alice);
+      const freshLookups = ownerLookups();
+
       // A name tasklist may have garbled is never matched against the cache.
       state.accountNames.set(bob, "DESKTOP-1\\b\u00f8b");
       state.owners.set(5000, bob);
       assert.equal(yield* lookup(50501), bob);
       assert.equal(yield* lookup(50502), bob);
-      assert.equal(ownerLookups(), 5);
+      assert.equal(ownerLookups(), freshLookups + 2);
 
       state.netstatExtra = ["  TCP    0.0.0.0:3801   0.0.0.0:0   LISTENING   5001"];
       assert.isUndefined(yield* lookup(50600));
@@ -1052,8 +1094,14 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       const log = path.join(paths.logDir, "backend-alice.log");
       assert.equal(yield* provide(platform.services.userState("alice")), "unavailable");
 
+      // A log a previous account of the same name left behind holds none of its output afterwards.
+      yield* fs.makeDirectory(paths.logDir, { recursive: true });
+      yield* fs.writeFileString(log, "previous account's output");
       const refused = yield* provide(platform.services.enableUser(user, executable)).pipe(
         Effect.result,
+      );
+      assert.isFalse(
+        (yield* fs.readFileString(log).pipe(Effect.orElseSucceed(() => ""))).includes("previous"),
       );
       assert.isTrue(Result.isFailure(refused));
       assert.isFalse(state.tasks.has("Backend-alice"));
@@ -1069,6 +1117,8 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
         readonly [string, string, string, string | undefined],
       ];
       assert.deepEqual([name, logonType, principal], ["Backend-alice", "2", alice]);
+      // Administrators keep full control even of a task the SYSTEM helper registers.
+      assert.equal(state.sddl.get("Backend-alice"), `D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;${alice})`);
       const grant = powershellRuns.findIndex((script) => script.includes("LsaAddAccountRights"));
       assert.include(powershellRuns[grant], `SecurityIdentifier('${alice}')`);
       assert.include(powershellRuns[grant], "Grant($b,'SeBatchLogonRight')");
@@ -1085,6 +1135,12 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       assert.include(backendXml, `<WorkingDirectory>${at("Users", "alice")}</WorkingDirectory>`);
       assert.include(backendXml, `gateway run-backend &gt;&gt; &quot;${log}`);
       assert.isTrue(yield* fs.exists(log));
+      // Entries a previous account of the same name kept on its log are dropped before granting.
+      assert.isBelow(
+        calls.indexOf(`icacls.exe ${log} /reset /L /Q`),
+        calls.findIndex((call) => call.startsWith(`icacls.exe ${log} /inheritance:r`)),
+      );
+      assert.isAtLeast(calls.indexOf(`icacls.exe ${log} /reset /L /Q`), 0);
       assert.include(
         calls,
         `icacls.exe ${log} /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F *${alice}:(GR,GW) /L /Q`,
@@ -1097,7 +1153,24 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
 
       yield* provide(platform.services.disableUser("alice"));
       assert.isFalse(state.tasks.has("Backend-alice"));
+      // A later account reusing the name must not inherit this one's log or its SID's access.
+      assert.isFalse(yield* fs.exists(log));
       yield* provide(platform.services.disableUser("alice"));
+
+      const bobUser = { name: "bob", accountId: bob, home: at("Users", "bob") };
+      state.failScripts = ["T3Register 'Backend-bob'"];
+      state.failStderr =
+        '#< CLIXML <S S="Error">The user name or password is incorrect. (Exception from HRESULT: 0x8007052E)</S>';
+      const wrong = yield* Effect.flip(
+        provide(platform.services.enableUser(bobUser, executable, { password: "wrong" })),
+      );
+      assert.equal(wrong.message, "Windows did not accept the password for bob.");
+      state.failScripts = [];
+      yield* provide(
+        platform.services.enableUser(bobUser, executable, { password: "passed-directly" }),
+      );
+      assert.equal(state.prompts.length, 2);
+      assert.equal(state.stdins.at(-1), "passed-directly\n");
 
       state.tasks.set("Backend-bob", { description: null, xml: "<Task/>", running: true });
       const warnings: Array<string> = [];
@@ -1110,6 +1183,21 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       state.failScripts = ["Schedule.Service"];
       assert.equal(yield* provide(platform.services.userState("alice")), "unavailable");
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("registers and starts a one-shot detached SYSTEM task", () =>
+    Effect.gen(function* () {
+      const { platform, provide, state } = yield* fixture();
+      yield* provide(
+        platform.services.runDetached("update", ["C:\\T3 Code\\t3.exe", "gateway", "install"]),
+      );
+      const task = state.tasks.get("Update");
+      assert.isDefined(task);
+      assert.include(task!.xml, "<Triggers />");
+      assert.include(task!.xml, "<ExecutionTimeLimit>PT30M</ExecutionTimeLimit>");
+      assert.isTrue(task!.running);
+      assert.isFalse(state.prompts.length > 0);
+    }),
   );
 
   it.effect("uninstalls managed tasks, the firewall rule, the PATH entry and its own exe", () =>

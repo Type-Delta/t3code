@@ -1,12 +1,23 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 
 import packageJson from "../../package.json" with { type: "json" };
+import {
+  readUpdateState,
+  settleUpdateClaim,
+  STALE_UPDATE_MS,
+  updateStatePath,
+} from "./gatewayHelper.ts";
 import {
   emptyGatewayConfig,
   GATEWAY_CONFIG_PATH_ENV,
@@ -236,6 +247,8 @@ const pruneRuntimes = Effect.fn("gatewayInstall.pruneRuntimes")(function* (
   if (!(yield* hasInstallMarker(platform))) return;
   for (const name of yield* fs.readDirectory(installRoot)) {
     if (name === installMarker || name === "current" || name === "previous") continue;
+    // Self-service staging is cleaned up separately, after pruning.
+    if (name.startsWith(".helper-staging-")) continue;
     const directory = path.join(installRoot, name);
     if (directory === current || directory === previous || directory === path.dirname(launcher)) {
       continue;
@@ -265,15 +278,37 @@ const pruneRuntimes = Effect.fn("gatewayInstall.pruneRuntimes")(function* (
 export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   platform: GatewayPlatform,
 ) {
-  yield* requireAdmin(platform);
-  yield* requireDefaultPaths;
-  const source = yield* runtimeSource(platform);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const { layout } = platform;
   const configDir = path.dirname(layout.configPath);
+  // A self-service update runs from the helper's staging folder and owns the claim for its version.
+  const stagedFrom = path.dirname(yield* HostProcess.ExecutablePath);
+  const selfServiceUpdate =
+    path.dirname(stagedFrom) === layout.installRoot &&
+    path.basename(stagedFrom).startsWith(".helper-staging-");
+  if (selfServiceUpdate) {
+    // Members' apps wait on the claim, so a failed install must not leave it running.
+    yield* Effect.addFinalizer((exit) => {
+      if (Exit.isSuccess(exit)) return Effect.void;
+      const error = Cause.squash(exit.cause);
+      const reason = error instanceof Error ? error.message : "The update could not be installed.";
+      return settleUpdateClaim(layout.configPath, packageJson.version, reason).pipe(Effect.ignore);
+    });
+  }
+  yield* requireAdmin(platform);
+  yield* requireDefaultPaths;
+  const source = yield* runtimeSource(platform);
   yield* checkInstallDirectories(platform);
   yield* lockGatewayPath(layout.installRoot);
+  // Every finished install clears the claim, so one made since this update was requested may hold a
+  // newer runtime that this one must not replace.
+  if (selfServiceUpdate) {
+    const claim = yield* readUpdateState(layout.configPath);
+    if (claim?.state !== "running" || claim.version !== packageJson.version) {
+      return yield* fail(`Another install replaced the update to ${packageJson.version}.`);
+    }
+  }
   const marked = yield* hasInstallMarker(platform);
   if (
     !marked &&
@@ -289,6 +324,20 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   const executable = path.join(current, layout.executableName);
   const activeLink = yield* managedLink(current, layout.installRoot);
   const activeRuntime = activeLink.target;
+  // A helper process that predates a newer install judged "newer" against its own version.
+  const activeVersion =
+    selfServiceUpdate && activeRuntime !== undefined
+      ? yield* platform.runtimeVersion(activeRuntime)
+      : undefined;
+  if (
+    activeVersion !== undefined &&
+    parseSemver(activeVersion) !== null &&
+    compareSemverVersions(activeVersion, packageJson.version) >= 0
+  ) {
+    return yield* fail(
+      `The shared runtime ${activeVersion} is not older than ${packageJson.version}.`,
+    );
+  }
   const previousLink = yield* managedLink(previous, layout.installRoot);
   const launcher = yield* managedLink(layout.launcher, layout.installRoot);
   for (const [file, link] of [
@@ -332,6 +381,8 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
     yield* writeGatewayConfig(platform, layout.configPath, emptyGatewayConfig);
   }
   const config = yield* readGatewayConfig(layout.configPath);
+  const configured = config.selfService === undefined ? { ...config, selfService: true } : config;
+  if (configured !== config) yield* writeGatewayConfig(platform, layout.configPath, configured);
   const destination = yield* publishRuntime(platform, source, activeRuntime);
   const gatewayAccount = yield* platform.services.ensureGatewayAccount;
   if (activeRuntime !== destination) yield* platform.replaceLink(destination, current);
@@ -345,7 +396,7 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   const activation = yield* platform.services
     .activate({
       executable,
-      config,
+      config: configured,
       gatewayAccount,
       users: users.flat(),
       restorePreviousRuntime:
@@ -368,6 +419,26 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   }
   if (Result.isFailure(activation)) return yield* activation.failure;
   yield* pruneRuntimes(platform, destination, previousRuntime);
+  // An administrator's install supersedes every pending update. A self-service one keeps the
+  // fresh staging of an update another member requested meanwhile.
+  const now = yield* Clock.currentTimeMillis;
+  for (const name of yield* fs.readDirectory(layout.installRoot)) {
+    const staging = path.join(layout.installRoot, name);
+    if (!name.startsWith(".helper-staging-")) continue;
+    if (selfServiceUpdate && staging !== stagedFrom) {
+      const modified = yield* fs.stat(staging).pipe(
+        Effect.map((info) => Option.getOrUndefined(info.mtime)?.getTime()),
+        Effect.orElseSucceed(() => undefined),
+      );
+      if (modified !== undefined && now - modified < STALE_UPDATE_MS) continue;
+    }
+    yield* fs.remove(staging, { recursive: true }).pipe(Effect.ignore);
+  }
+  yield* (
+    selfServiceUpdate
+      ? settleUpdateClaim(layout.configPath, packageJson.version, undefined)
+      : fs.remove(updateStatePath(path, layout.configPath), { force: true })
+  ).pipe(Effect.ignore);
   yield* Console.log(`Installed ${destination} and started the gateway. CLI: ${layout.launcher}.`);
 }, Effect.scoped);
 

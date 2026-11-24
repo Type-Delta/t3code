@@ -23,8 +23,11 @@ jobs:
         include:
           - arch: arm64
             rust_target: aarch64-apple-darwin
+            cli_archive: true
+          # No CLI archive: Node single-executables are unsupported on x64 macOS.
           - arch: x64
             rust_target: x86_64-apple-darwin
+            cli_archive: false
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -63,6 +66,44 @@ jobs:
       - name: Configure public T3 Connect identifiers
         run: cp .env.example .env
 
+      - name: Build web client for the CLI archive
+        if: matrix.cli_archive
+        run: vp run --filter=@t3tools/web build
+
+      - name: Build CLI single-executable
+        if: matrix.cli_archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          node apps/server/scripts/cli.ts build
+          node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build and smoke-test CLI archive
+        if: matrix.cli_archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          monitor="native/resource-monitor/target/${{ matrix.rust_target }}/release/t3-resource-monitor"
+          [[ -f "$monitor" ]] || cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target "${{ matrix.rust_target }}"
+          resource_monitor_dir="$RUNNER_TEMP/cli-resource-monitor"
+          mkdir -p "$resource_monitor_dir"
+          cp "$monitor" "$resource_monitor_dir/"
+          node scripts/build-cli-archive.ts \
+            --platform mac \
+            --arch "${{ matrix.arch }}" \
+            --version "${{ inputs.version }}" \
+            --resource-monitor-dir "$resource_monitor_dir" \
+            --output-dir release-cli
+          node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "${{ inputs.version }}"
+
+      - name: Upload CLI archive
+        if: matrix.cli_archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-mac-${{ matrix.arch }}
+          path: release-cli/*
+          if-no-files-found: error
+
       - name: Ensure Rosetta for macOS x64 bytecode generation
         if: matrix.arch == 'x64'
         shell: bash
@@ -97,7 +138,7 @@ jobs:
         env:
           CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
-          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' || matrix.cli_archive }}
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
         run: |
           vp run dist:desktop:artifact \

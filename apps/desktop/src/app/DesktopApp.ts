@@ -21,6 +21,7 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as PreviewPasskeys from "../preview/Passkeys.ts";
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
+import * as DesktopGateway from "../backend/DesktopGateway.ts";
 import * as DesktopHomeOwner from "../backend/DesktopHomeOwner.ts";
 import * as DesktopLocalEnvironmentAuth from "../backend/DesktopLocalEnvironmentAuth.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -199,6 +200,16 @@ const startLocalBackend = Effect.gen(function* () {
     return false;
   }
 
+  // Fork-only (gateway self-service): an enrolled account uses its shared gateway backend.
+  if (DesktopGateway.canAttachShared(environment, settings)) {
+    const shared = yield* DesktopGateway.attachAtStartup();
+    if (shared === "attached") return true;
+    if (shared === "quit") {
+      yield* (yield* ElectronApp.ElectronApp).quit;
+      return false;
+    }
+  }
+
   const primaryBackend = yield* (yield* DesktopBackendPool.DesktopBackendPool).primary;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
 
@@ -262,7 +273,7 @@ const startLocalBackend = Effect.gen(function* () {
     return false;
   }
   if (settings.wslOnly === true && settings.wslBackendEnabled === true) {
-    yield* desktopWindow.showConnectingSplash;
+    yield* desktopWindow.showConnectingSplash();
   }
   yield* primaryBackend.start;
   yield* logBootstrapInfo("bootstrap backend start requested");

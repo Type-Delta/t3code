@@ -207,6 +207,11 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
   platform: GatewayPlatform,
   user: string,
   requestedPort?: number,
+  options?: {
+    readonly password?: string;
+    /** Undo a first enrollment whose backend could not be registered, instead of keeping its port. */
+    readonly rollbackNew?: boolean;
+  },
 ) {
   yield* requireAdmin(platform);
   const path = yield* Path.Path;
@@ -241,16 +246,39 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
   yield* platform.secureDirectory(path.join(pairingDir, user), record);
   // Keep the port reserved if the backend cannot start. Retrying repairs the partial enrollment.
   if (updated !== config) yield* writeGatewayConfig(platform, configPath, updated);
-  yield* platform.services.enableUser(
-    record,
-    path.join(platform.layout.installRoot, "current", platform.layout.executableName),
-  );
+  yield* platform.services
+    .enableUser(
+      record,
+      path.join(platform.layout.installRoot, "current", platform.layout.executableName),
+      options?.password === undefined ? undefined : { password: options.password },
+    )
+    .pipe(
+      Effect.onError(() =>
+        options?.rollbackNew === true && !Object.hasOwn(config.users, user)
+          ? writeGatewayConfig(platform, configPath, config).pipe(
+              Effect.andThen(
+                Effect.all([
+                  platform.services.disableUser(user).pipe(Effect.ignore),
+                  platform.removeTree(path.join(pairingDir, user)).pipe(Effect.ignore),
+                ]),
+              ),
+              Effect.ignore,
+            )
+          : Effect.void,
+      ),
+    );
   return port;
 }, Effect.scoped);
 
 export const unenrollGatewayUser = Effect.fn("gatewayCli.unenrollUser")(function* (
   platform: GatewayPlatform,
   user: string,
+  /**
+   * A member leaving: only the enrollment of this account id is removed. Its backend stops and its
+   * pairing folder goes first, so either failing leaves the enrollment for a retry. Without an
+   * enrollment nothing is touched.
+   */
+  options?: { readonly member?: GatewayAccountId },
 ) {
   yield* requireAdmin(platform);
   const path = yield* Path.Path;
@@ -258,6 +286,18 @@ export const unenrollGatewayUser = Effect.fn("gatewayCli.unenrollUser")(function
   yield* platform.checkAdminOwned(configPath, "File");
   yield* lockGatewayPath(configPath);
   const config = yield* readGatewayConfig(configPath);
+  if (options?.member !== undefined) {
+    if (!Object.hasOwn(config.users, user)) return;
+    // A renamed account's enrollment keeps its id; whoever took the old name does not own it.
+    if (config.users[user]!.uid !== options.member) {
+      return yield* new GatewayCliError({
+        message: `The ${user} enrollment belongs to another account.`,
+      });
+    }
+    // Everything that can fail comes first, so a failed Leave keeps the enrollment to retry.
+    yield* platform.services.disableUser(user);
+    yield* platform.removeTree(path.join(pairingDir, user));
+  }
   const updated = removeGatewayUser(config, user);
   if (updated !== config) yield* writeGatewayConfig(platform, configPath, updated);
   // Cleanup starts only once the gateway stops routing to the user, and runs on every retry.

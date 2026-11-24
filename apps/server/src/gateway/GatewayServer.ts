@@ -13,6 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import { FetchHttpClient } from "effect/http";
 import * as Mime from "effect/http/Mime";
 
 import { resolveStaticDir } from "../config.ts";
@@ -26,6 +27,7 @@ import {
   type ConnectionOwner,
 } from "./platform/GatewayPlatform.ts";
 import { readPendingUsers } from "./GatewayPending.ts";
+import { listenGatewayHelper, publishHelperKey } from "./gatewayHelper.ts";
 import {
   backendCookieHeader,
   backendRequestHeaders,
@@ -133,7 +135,11 @@ export const connectVerified =
       const peerOwner = async () => {
         for (let attempt = 0; attempt < 2; attempt++) {
           const owner = await connectionOwner(backend.port, socket.localPort ?? 0);
-          if (owner !== undefined) return owner;
+          if (owner === undefined) continue;
+          // A cached owner can name an account since replaced under the same name; confirm afresh.
+          return owner === backend.uid
+            ? owner
+            : await connectionOwner(backend.port, socket.localPort ?? 0, { fresh: true });
         }
         return undefined;
       };
@@ -848,6 +854,22 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
   );
 
   const { host, port } = configSource.initial.listen;
+  if (platform.helperHost === "gateway") {
+    // Only this process holds the private key, so a squatter on the helper port gets no password.
+    const { publicKey, privateKey } = NodeCrypto.generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+    });
+    yield* listenGatewayHelper({
+      platform,
+      configPath: options.configPath,
+      passwordKey: privateKey,
+    }).pipe(
+      Effect.provide(FetchHttpClient.layer),
+      Effect.andThen(publishHelperKey(platform, options.configPath, publicKey)),
+      // Routing does not depend on self-service.
+      Effect.catch((error) => Effect.logWarning(`Gateway helper unavailable: ${error.message}`)),
+    );
+  }
   yield* Effect.acquireRelease(
     Effect.callback<void, GatewayError>((resume) => {
       const onError = (error: Error) =>

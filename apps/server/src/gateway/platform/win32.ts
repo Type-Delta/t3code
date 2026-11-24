@@ -21,6 +21,8 @@ import {
   type GatewayPlatform,
   type GatewayPlatformServices,
   type GatewayUserRecord,
+  readRuntimeVersion,
+  type ConnectionOwner,
 } from "./GatewayPlatform.ts";
 
 export const GATEWAY_TASK = "Gateway";
@@ -114,6 +116,8 @@ export interface TaskDefinition {
   readonly command: string;
   readonly arguments: string;
   readonly workingDirectory: string;
+  readonly oneShot?: boolean;
+  readonly executionTimeLimit?: string;
 }
 
 /**
@@ -135,19 +139,23 @@ const taskXmlLines = (task: TaskDefinition, version: string) => [
   `    <Version>${version}</Version>`,
   `    <Description>${MANAGED_MARKER}</Description>`,
   `  </RegistrationInfo>`,
-  `  <Triggers>`,
-  `    <BootTrigger>`,
-  `      <Enabled>true</Enabled>`,
-  `    </BootTrigger>`,
-  // Task Scheduler restarts nothing whose action exits, even with an error. With IgnoreNew,
-  // this relaunches a stopped task within a minute and does nothing while it runs.
-  `    <TimeTrigger>`,
-  `      <StartBoundary>2000-01-01T00:00:00</StartBoundary>`,
-  `      <Repetition>`,
-  `        <Interval>PT1M</Interval>`,
-  `      </Repetition>`,
-  `    </TimeTrigger>`,
-  `  </Triggers>`,
+  ...(task.oneShot
+    ? [`  <Triggers />`]
+    : [
+        `  <Triggers>`,
+        `    <BootTrigger>`,
+        `      <Enabled>true</Enabled>`,
+        `    </BootTrigger>`,
+        // Task Scheduler restarts nothing whose action exits, even with an error. With IgnoreNew,
+        // this relaunches a stopped task within a minute and does nothing while it runs.
+        `    <TimeTrigger>`,
+        `      <StartBoundary>2000-01-01T00:00:00</StartBoundary>`,
+        `      <Repetition>`,
+        `        <Interval>PT1M</Interval>`,
+        `      </Repetition>`,
+        `    </TimeTrigger>`,
+        `  </Triggers>`,
+      ]),
   `  <Principals>`,
   `    <Principal id="Author">`,
   `      <UserId>${xmlText(task.userId)}</UserId>`,
@@ -160,7 +168,7 @@ const taskXmlLines = (task: TaskDefinition, version: string) => [
   `    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`,
   `    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`,
   `    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`,
-  `    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`,
+  `    <ExecutionTimeLimit>${task.executionTimeLimit ?? "PT0S"}</ExecutionTimeLimit>`,
   `    <Priority>5</Priority>`,
   `  </Settings>`,
   `  <Actions Context="Author">`,
@@ -347,8 +355,16 @@ const TaskInfo = Schema.Struct({
 });
 const decodeTasks = Schema.decodeEffect(Schema.fromJsonString(Schema.Array(TaskInfo)));
 const decodeNames = Schema.decodeEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
+const decodeAccountName = Schema.decodeEffect(Schema.fromJsonString(Schema.String));
 
 // Task Scheduler's COM API: no module import, and IRunningTask names the action's process.
+/**
+ * Without one, a task SYSTEM registers (the helper's joins and updates) grants full access to SYSTEM
+ * only, and an administrator's later install cannot restart it. The backend's user may read its task.
+ */
+export const managedTaskSddl = (readerSid?: string) =>
+  `D:(A;;FA;;;BA)(A;;FA;;;SY)${readerSid === undefined ? "" : `(A;;FR;;;${readerSid})`}`;
+
 // S kills the action's process tree: ending a task stops cmd.exe but not the t3.exe it started.
 const psTaskFunctions = (taskkill: string) =>
   [
@@ -358,8 +374,9 @@ const psTaskFunctions = (taskkill: string) =>
     "function T3Folder{try{$sched.GetFolder('\\T3Code')}catch{$null}}",
     "function T3Task($n){$f=T3Folder;if(-not $f){return $null};try{$f.GetTask($n)}catch{$null}}",
     `function T3Stop($n){$t=T3Task $n;if(-not $t){return};foreach($i in @($t.GetInstances(0))){if($i.EnginePID){try{& ${psLiteral(taskkill)} /PID $i.EnginePID /T /F|Out-Null}catch{}}};$t.Stop(0)}`,
-    // With a user, that user's password arrives as one line on stdin.
-    "function T3Register($n,$x,$l,$u){$t=T3Task $n;if($t -and $t.Definition.RegistrationInfo.Description -ne $M){throw \"\\T3Code\\$n is not managed by t3 gateway.\"};$p=$null;if($u){$p=[Console]::In.ReadLine()};T3Stop $n;$f=T3Folder;if(-not $f){$f=$sched.GetFolder('\\').CreateFolder('T3Code')};if($t){$f.DeleteTask($n,0)};$f.RegisterTask($n,$x,2,$u,$p,$l)|Out-Null}",
+    // With a user, that user's password arrives as one UTF-8 line on stdin; Console.In would decode it
+    // with the console's legacy code page, and BOM detection would drop a leading U+FEFF.
+    "function T3Register($n,$x,$l,$u,$d){$t=T3Task $n;if($t -and $t.Definition.RegistrationInfo.Description -ne $M){throw \"\\T3Code\\$n is not managed by t3 gateway.\"};$p=$null;if($u){$p=(New-Object System.IO.StreamReader([Console]::OpenStandardInput(),(New-Object System.Text.UTF8Encoding($false)),$false)).ReadLine()};T3Stop $n;$f=T3Folder;if(-not $f){$f=$sched.GetFolder('\\').CreateFolder('T3Code')};if($t){$f.DeleteTask($n,0)};$f.RegisterTask($n,$x,2,$u,$p,$l,$d)|Out-Null}",
     "function T3Version($n){$t=T3Task $n;if(-not $t){'absent'}elseif($t.Definition.RegistrationInfo.Description -ne $M){'unmanaged'}else{'managed '+$t.Definition.RegistrationInfo.Version}}",
     "function T3Unregister($n){$t=T3Task $n;if(-not $t){return 'absent'};if($t.Definition.RegistrationInfo.Description -ne $M){return 'unmanaged'};T3Stop $n;(T3Folder).DeleteTask($n,0);'removed'}",
   ].join(";");
@@ -542,6 +559,22 @@ export const makeWin32GatewayPlatform = (
     if (sid === undefined) return yield* fail("Could not determine the current Windows account.");
     return sid;
   });
+  // Uncached: an account renamed and enrolled again must be named by its current name.
+  const accountName = Effect.fn("GatewayPlatform.win32.accountName")(function* (
+    accountId: GatewayAccountId,
+  ) {
+    if (typeof accountId !== "string" || !sidPattern.test(accountId)) {
+      return yield* fail(`Windows account id ${String(accountId)} is not a SID.`);
+    }
+    return yield* powershell(
+      [
+        `$s=New-Object System.Security.Principal.SecurityIdentifier(${psLiteral(accountId)})`,
+        `$n=$s.Translate([System.Security.Principal.NTAccount]).Value`,
+        "$n=$n -replace '^[^\\\\]+\\\\',''",
+        "J $n",
+      ].join(";"),
+    ).pipe(Effect.flatMap(decodeAccountName));
+  }, Effect.mapError(asPlatformError));
   // checkRuntimeSource runs once per archive file; the invoking account does not change.
   let invokingAccount: string | undefined;
 
@@ -833,6 +866,7 @@ export const makeWin32GatewayPlatform = (
     const lookup = Effect.fn("GatewayPlatform.win32.connectionOwner")(function* (
       backendPort: number,
       clientPort: number,
+      fresh: boolean,
     ) {
       const pid = connectionPid(yield* netstatRows, backendPort, clientPort);
       if (pid === undefined) return undefined;
@@ -842,16 +876,18 @@ export const makeWin32GatewayPlatform = (
         pid,
       )?.toLowerCase();
       const cached = name === undefined ? undefined : accounts.get(name);
-      if (cached !== undefined && cached.expiresAt > now) return cached.sid;
+      if (!fresh && cached !== undefined && cached.expiresAt > now) return cached.sid;
       const owner = (yield* processOwners([pid])).get(pid);
       if (owner?.name)
         accounts.set(owner.name.toLowerCase(), { sid: owner.sid, expiresAt: now + ownerCacheMs });
       return owner?.sid;
     });
-    return async (backendPort: number, clientPort: number) => {
-      const exit = await run(lookup(backendPort, clientPort));
+    // An administrator may enroll a different account under a cached name.
+    const owner: ConnectionOwner = async (backendPort, clientPort, options) => {
+      const exit = await run(lookup(backendPort, clientPort, options?.fresh === true));
       return Exit.isSuccess(exit) ? exit.value : undefined;
     };
+    return owner;
   });
 
   const tasks = powershell(
@@ -861,7 +897,9 @@ export const makeWin32GatewayPlatform = (
   const taskScript = (script: string, options?: ToolOptions) =>
     powershell(`${psTaskFunctions(tool.taskkill)};${script}`, options);
   const registerTask = (name: string, xml: string, logonType: number) =>
-    taskScript(`T3Register ${psLiteral(name)} ${psLiteral(xml)} ${logonType}`);
+    taskScript(
+      `T3Register ${psLiteral(name)} ${psLiteral(xml)} ${logonType} $null ${psLiteral(managedTaskSddl())}`,
+    );
   const stopTask = (name: string) => taskScript(`T3Stop ${psLiteral(name)}`);
   const startTask = (name: string) => taskScript(`(T3Task ${psLiteral(name)}).Run($null)|Out-Null`);
 
@@ -886,6 +924,29 @@ export const makeWin32GatewayPlatform = (
       command: tool.cmd,
       arguments: `/d /c ""${executable}" gateway ${verb} >> "${log}" 2>&1"`,
     };
+  });
+
+  const quoteCommandArgument = (value: string) => {
+    if (value !== "" && !/[\s"]/.test(value)) return value;
+    return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, "$1$1")}"`;
+  };
+
+  const detachedTaskXml = Effect.fn("GatewayPlatform.win32.detachedTaskXml")(function* (
+    argv: ReadonlyArray<string>,
+  ) {
+    const path = yield* Path.Path;
+    const command = argv[0];
+    if (command === undefined) return yield* fail("Detached jobs require a non-empty command.");
+    return renderTaskXml({
+      userId: systemSid,
+      logonType: "ServiceAccount",
+      runLevel: "HighestAvailable",
+      workingDirectory: path.dirname(paths.configPath),
+      command,
+      arguments: argv.slice(1).map(quoteCommandArgument).join(" "),
+      oneShot: true,
+      executionTimeLimit: "PT30M",
+    });
   });
 
   const gatewayTaskXml = Effect.fn("GatewayPlatform.win32.gatewayTaskXml")(function* (
@@ -931,6 +992,8 @@ export const makeWin32GatewayPlatform = (
       const log = yield* backendLog(user.name);
       // A running backend's cmd.exe holds its log open for writing, so only a new one is created.
       if (!(yield* fs.exists(log))) yield* fs.writeFileString(log, "", { flag: "a" });
+      // Drops explicit entries a previous account of the same name kept on a log it could not delete.
+      yield* runTool(tool.icacls, [log, "/reset", "/L", "/Q"]);
       yield* runTool(tool.icacls, [
         log,
         "/inheritance:r",
@@ -974,20 +1037,57 @@ export const makeWin32GatewayPlatform = (
   const enableUser = Effect.fn("GatewayPlatform.win32.enableUser")(function* (
     user: GatewayUserRecord,
     executable: string,
+    options?: { readonly password?: string },
   ) {
-    const { name, xml, current } = yield* backendTask(user, executable);
+    const { name, xml, managed, current } = yield* backendTask(user, executable);
     if (current) return yield* restartBackend(user, name);
-    const password = yield* readPassword(
-      `Windows password for ${user.name} (registers their backend task; it is not stored): `,
-    );
+    // A first registration may follow another account of the same name, whose log Leave could not
+    // delete or empty; this account gets its log only once nothing of that one is left in it.
+    if (!managed) {
+      const fs = yield* FileSystem.FileSystem;
+      const log = yield* backendLog(user.name);
+      yield* fs.remove(log, { force: true }).pipe(
+        Effect.catch(() => fs.writeFileString(log, "")),
+        Effect.mapError(() =>
+          fail(
+            `${log} is still open in another program. Ask an administrator to close it, then try joining again.`,
+          ),
+        ),
+      );
+    }
+    const password =
+      options?.password ??
+      (yield* readPassword(
+        `Windows password for ${user.name} (registers their backend task; it is not stored): `,
+      ));
     const sid = yield* accountSid(user);
     yield* secureLogs([user]);
     yield* powershell(grantBatchLogonScript(sid));
     // Registering stops a running instance first.
     yield* taskScript(
-      `T3Register ${psLiteral(name)} ${psLiteral(xml)} ${s4uLogon} ${psLiteral(sid)}`,
+      `T3Register ${psLiteral(name)} ${psLiteral(xml)} ${s4uLogon} ${psLiteral(sid)} ${psLiteral(managedTaskSddl(sid))}`,
       { stdin: `${password}\n` },
+    ).pipe(
+      // ERROR_LOGON_FAILURE; the rest of PowerShell's CLIXML report means nothing to a member.
+      Effect.mapError((error) =>
+        error.message.includes("0x8007052E")
+          ? fail(`Windows did not accept the password for ${user.name}.`)
+          : error,
+      ),
     );
+    yield* startTask(name);
+  }, Effect.mapError(asPlatformError));
+
+  const runDetached = Effect.fn("GatewayPlatform.win32.runDetached")(function* (
+    label: string,
+    argv: ReadonlyArray<string>,
+  ) {
+    if (!/^[a-z]+$/.test(label) || argv.length === 0) {
+      return yield* fail("Detached jobs require a lowercase label and a non-empty command.");
+    }
+    const name = `${label[0]!.toUpperCase()}${label.slice(1)}`;
+    const xml = yield* detachedTaskXml(argv);
+    yield* registerTask(name, xml, serviceLogon);
     yield* startTask(name);
   }, Effect.mapError(asPlatformError));
 
@@ -1168,7 +1268,15 @@ export const makeWin32GatewayPlatform = (
     const outcome = (yield* taskScript(`T3Unregister ${psLiteral(name)}`)).trim();
     if (outcome === "unmanaged") {
       yield* Console.warn(`Skipping \\T3Code\\${name}: it is not managed by t3 gateway.`);
+      return;
     }
+    // Its log grants that account's SID; a later account reusing the name starts a fresh one. A log
+    // someone holds open without delete sharing is emptied instead, so Leave still completes.
+    const fs = yield* FileSystem.FileSystem;
+    const log = yield* backendLog(user);
+    yield* fs
+      .remove(log, { force: true })
+      .pipe(Effect.catch(() => fs.writeFileString(log, "").pipe(Effect.ignore)));
   }, Effect.mapError(asPlatformError));
 
   return {
@@ -1189,6 +1297,8 @@ export const makeWin32GatewayPlatform = (
     currentAccount: currentAccount.pipe(Effect.mapError(asPlatformError)),
     isAdmin: isAdmin.pipe(Effect.mapError(asPlatformError)),
     lookupUser,
+    accountName,
+    runtimeVersion: readRuntimeVersion("t3.exe"),
     checkAdminOwned,
     checkRuntimeSource,
     secureDirectory,
@@ -1200,6 +1310,8 @@ export const makeWin32GatewayPlatform = (
     listeners: listenersOn(undefined).pipe(Effect.mapError(asPlatformError)),
     makeConnectionOwner,
     markerAttribution: "folder",
+    helperHost: "gateway",
+    joinNeedsPassword: true,
     services: {
       ensureGatewayAccount: Effect.succeed(systemSid),
       preflight,
@@ -1207,6 +1319,7 @@ export const makeWin32GatewayPlatform = (
       enableUser,
       disableUser,
       userState: (user) => taskState(backendTaskName(user)),
+      runDetached,
       uninstall,
       logHint,
     },
