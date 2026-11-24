@@ -3031,6 +3031,31 @@ describe("v2 run and attempt history", () => {
       expect.objectContaining({ id: "work-1" }),
       expect.objectContaining({ id: "provider-recovered" }),
     ]);
+
+    const olderTool = {
+      id: "older-tool",
+      kind: "work" as const,
+      createdAt: "2026-01-01T00:00:07Z",
+      entry: {
+        id: "older-tool",
+        createdAt: "2026-01-01T00:00:07Z",
+        runId: RunId.make("turn-1"),
+        label: "Earlier command",
+        tone: "tool" as const,
+      },
+    };
+    const prepended = deriveMessagesTimelineRows({
+      timelineEntries: [...timelineEntries.slice(0, 2), olderTool, ...timelineEntries.slice(2)],
+      expandedRunIds: new Set([RunId.make("turn-1")]),
+      expandedWorkGroupIds: new Set(["work-group:work-entry-1"]),
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(prepended.find((row) => row.id === expandedWork?.id)).toEqual(expandedWork);
+    expect(prepended.find((row) => row.id === "work-toggle:work-entry-1")).toMatchObject({
+      expanded: true,
+    });
   });
   it("hides tool calls or everything but the final answer", () => {
     const runId = RunId.make("turn-1");

@@ -1501,6 +1501,7 @@ function ThreadDetailBody(
                   freeze={freeze}
                   anchorMessageId={anchorMessageId}
                   jumpToMessageId={jumpMessageLoaded ? jumpMessageId : null}
+                  historyJumpPending={jumpMessageId !== null}
                   onJumpedToMessage={() => finishThreadMessageJump(selectedThreadKey)}
                   contentInsetEndAdjustment={combinedContentInsetEndAdjustment}
                   keyboardOffset={composerKeyboardOffset}

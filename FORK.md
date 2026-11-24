@@ -1085,6 +1085,16 @@ On macOS, a new self-signed fork build asked for keychain access to the "T3 Code
 
 **Last updated:** 2026-11-24
 
+### DL067 — Scroll to load earlier thread turns
+
+Thread timelines keep the bounded initial history window and fetch earlier pages as the reader approaches its start. Web, desktop and guest timelines observe the top of the loaded history. The native feed uses its virtual list's start threshold. Both keep the visible rows anchored as pages are prepended and show a delayed loading label or a retry action when a page fails. While a work group is open, earlier tools stay in a separate group so the open header and detail rows keep their scroll anchors.
+
+**Implementation evidence:** `apps/web/src/components/chat/MessagesTimeline.tsx`, `apps/web/src/components/chat/MessagesTimeline.browser.test.tsx`, and `apps/mobile/src/features/threads/ThreadFeed.tsx`.
+
+**Recorded validation:** Chromium tests cover delayed status across cursor changes, retry, an empty bounded window after switching threads, and paging after a guest reconnect. Web and native row tests cover an expanded work group when a history page prepends tools from the same run. Real-server runs in Chromium, Electron, and Android reached the oldest turn in the same fixture of replayed messages, plans, and tool activity. Chromium and Electron observed two page requests. Chromium also verified prefetch before the top and preserved the visible row when a delayed page arrived. Android also exercised a separate thread with short and wrapped messages.
+
+**Last updated:** 2026-11-24
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.

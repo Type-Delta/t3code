@@ -434,15 +434,15 @@ function ThreadRouteContent(
       return undefined;
     }
     return {
+      cursor: history.historyCursor,
       hasMoreHistory: history.hasMoreHistory,
       loading: history.loading,
       error: history.error,
-      onLoadEarlier: () => {
-        void loadEarlierHistory({
+      onLoadEarlier: () =>
+        loadEarlierHistory({
           environmentId: selectedThread.environmentId,
           input: { threadId: selectedThread.id },
-        });
-      },
+        }),
       onLoadThrough: (throughEntryId: string) => {
         void loadEarlierHistory({
           environmentId: selectedThread.environmentId,

@@ -27,7 +27,7 @@ export interface GuestStreamState {
   readonly sequence: number;
   /** Set while the snapshot is a window of a longer history, as the owner's client tracks it. */
   readonly partial: { readonly latestLocalTurnOrdinal: number | null } | null;
-  /** Where "Load earlier turns" continues, or null once the whole thread is loaded. */
+  /** Where older history continues, or null once the whole thread is loaded. */
   readonly historyCursor: string | null;
   readonly ended: boolean;
   /**
