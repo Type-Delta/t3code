@@ -208,6 +208,8 @@ export const hostLayer = Layer.effect(
 export class DesktopGateway extends Context.Service<
   DesktopGateway,
   {
+    /** Whether an administrator installed a gateway on this computer. */
+    readonly installed: Effect.Effect<boolean>;
     /** None when there is no helper or it answers with anything but a valid status. */
     readonly status: Effect.Effect<Option.Option<GatewayHelperStatus>>;
     readonly join: (password?: string) => Effect.Effect<GatewayHelperStatus, DesktopGatewayError>;
@@ -341,6 +343,7 @@ const make = Effect.gen(function* () {
   });
 
   return DesktopGateway.of({
+    installed: host.trusted,
     status,
     join: Effect.fn("DesktopGateway.join")(function* (password?: string) {
       if (password === undefined) return yield* change("join", {});
@@ -366,17 +369,25 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const dialog = yield* ElectronDialog.ElectronDialog;
   const first = yield* gateway.status;
-  // While a Windows gateway restarts its helper is briefly gone, but its backend may still hold the home.
+  // While a Windows gateway restarts its helper is briefly gone, but its backend may still hold the
+  // home. Only an installed gateway is waited for, and only while the home stays locked.
   const found =
-    Option.isSome(first) || !(yield* DesktopHomeOwner.isHomeOwnershipLocked())
+    Option.isSome(first) ||
+    !(yield* gateway.installed) ||
+    !(yield* DesktopHomeOwner.isHomeOwnershipLocked())
       ? first
-      : yield* gateway.status.pipe(
+      : yield* Effect.gen(function* () {
+          const current = yield* gateway.status;
+          const locked =
+            Option.isNone(current) && (yield* DesktopHomeOwner.isHomeOwnershipLocked());
+          return { current, locked };
+        }).pipe(
           Effect.repeat({
             schedule: Schedule.spaced(Duration.seconds(2)),
-            while: (current) => Option.isNone(current),
+            while: ({ locked }) => locked,
           }),
           Effect.timeoutOption(HELPER_RESTART_WAIT),
-          Effect.map(Option.flatten),
+          Effect.map(Option.flatMap(({ current }) => current)),
         );
   if (Option.isNone(found) || !found.value.enrolled) return "local" as const;
   let status = found.value;

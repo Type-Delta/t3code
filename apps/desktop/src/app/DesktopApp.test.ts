@@ -116,6 +116,10 @@ it.effect.each([false, true])(
             isDevelopment: false,
             isPackaged: true,
             stateDir: "/isolated/userdata",
+            // A separate T3 home, so startup never looks for a shared gateway backend.
+            baseDir: "/isolated",
+            homeDirectory: "/home/test",
+            path: { join: (...parts: Array<string>) => parts.join("/"), resolve: (p: string) => p },
             configuredBackendPort: Option.some(3773),
             defaultDesktopSettings: { serverExposureMode: "local-only" },
           } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]),
