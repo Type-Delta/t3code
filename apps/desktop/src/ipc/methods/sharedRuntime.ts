@@ -8,10 +8,17 @@ import * as DesktopLifecycle from "../../app/DesktopLifecycle.ts";
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as DesktopGateway from "../../backend/DesktopGateway.ts";
+import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
 import * as IpcChannels from "../channels.ts";
 import { makeIpcMethod } from "../DesktopIpc.ts";
 
 // Fork-only (gateway self-service): join or leave shared T3 Code from Settings.
+
+// WSL-only startup never uses the shared backend, so joining there would start one nothing uses.
+const wslOnly = Effect.flatMap(
+  DesktopAppSettings.DesktopAppSettings,
+  (settings) => settings.get,
+).pipe(Effect.map((settings) => settings.wslOnly && settings.wslBackendEnabled));
 
 export const getSharedRuntimeState = makeIpcMethod({
   channel: IpcChannels.GET_SHARED_RUNTIME_STATE_CHANNEL,
@@ -20,7 +27,7 @@ export const getSharedRuntimeState = makeIpcMethod({
   handler: Effect.fn("desktop.ipc.sharedRuntime.getState")(function* () {
     const gateway = yield* DesktopGateway.DesktopGateway;
     const status = yield* gateway.status;
-    if (Option.isNone(status)) return null;
+    if (Option.isNone(status) || (!status.value.enrolled && (yield* wslOnly))) return null;
     const { enrolled, selfService, joinNeedsPassword, runtimeVersion } = status.value;
     return {
       attached: yield* Ref.get(gateway.attached),
@@ -37,6 +44,7 @@ export const joinSharedRuntime = makeIpcMethod({
   payload: Schema.UndefinedOr(Schema.String),
   result: Schema.Void,
   handler: Effect.fn("desktop.ipc.sharedRuntime.join")(function* (password) {
+    if (yield* wslOnly) return;
     const gateway = yield* DesktopGateway.DesktopGateway;
     const primary = yield* (yield* DesktopBackendPool.DesktopBackendPool).primary;
     // The shared backend needs this T3 home, which the app's own backend holds while it runs.

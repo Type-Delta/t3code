@@ -1,11 +1,12 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
-import type * as Path from "effect/Path";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type { GatewayConfig } from "../GatewayConfig.ts";
-import type * as ProcessRunner from "../../processRunner.ts";
+import * as ProcessRunner from "../../processRunner.ts";
 
 /** Services adapter methods may use. Adapters run OS tools only through ProcessRunner; HostProcess values are references. */
 export type GatewayPlatformServices =
@@ -78,6 +79,10 @@ export interface GatewayPlatform {
   readonly lookupUser: (name: string) => Op<GatewayUserRecord>;
   /** The OS login name of an account id (for the helper's caller); fails when there is none. */
   readonly accountName: (accountId: GatewayAccountId) => Op<string>;
+  /** The version a runtime folder's executable reports, or undefined when it cannot tell. */
+  readonly runtimeVersion: (
+    runtimeDir: string,
+  ) => Effect.Effect<string | undefined, never, GatewayPlatformServices>;
 
   /**
    * False when nothing exists at `path`. True when it is a `kind` entry that only admins can
@@ -192,3 +197,21 @@ export const currentGatewayPlatform = Effect.fn("GatewayPlatform.current")(funct
       return yield* new GatewayPlatformError({ message: unsupportedPlatformMessage(platform) });
   }
 });
+
+/** `runtimeVersion` for every adapter: runtime folder names can carry a build suffix, so ask the build. */
+export const readRuntimeVersion = (executableName: string) =>
+  Effect.fn("GatewayPlatform.runtimeVersion")(function* (runtimeDir: string) {
+    const path = yield* Path.Path;
+    const runner = yield* ProcessRunner.ProcessRunner;
+    const result = yield* runner
+      .run({
+        command: path.join(runtimeDir, executableName),
+        args: ["--version"],
+        timeout: "30 seconds",
+        maxOutputBytes: 4096,
+        outputMode: "truncate",
+      })
+      .pipe(Effect.option);
+    if (Option.isNone(result) || result.value.code !== 0) return undefined;
+    return /^t3 v(\S+)\s*$/m.exec(result.value.stdout)?.[1];
+  });

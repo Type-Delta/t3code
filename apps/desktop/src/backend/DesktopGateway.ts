@@ -89,11 +89,14 @@ const sharedRuntimeUpdateProgress = (
   status: GatewayHelperStatus,
   version: string,
 ): "done" | "failed" | "running" =>
-  compareSemverVersions(status.runtimeVersion, version) >= 0
-    ? "done"
-    : status.update?.state === "failed" && status.update.version === version
-      ? "failed"
-      : "running";
+  // The install clears its claim only after restarting the backends, after the runtime switched.
+  status.update?.state === "running"
+    ? "running"
+    : compareSemverVersions(status.runtimeVersion, version) >= 0
+      ? "done"
+      : status.update?.state === "failed" && status.update.version === version
+        ? "failed"
+        : "running";
 
 /**
  * Arguments for the shared runtime's CLI that mint a one-time token on the backend serving `baseDir`.

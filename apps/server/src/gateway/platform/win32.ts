@@ -21,6 +21,7 @@ import {
   type GatewayPlatform,
   type GatewayPlatformServices,
   type GatewayUserRecord,
+  readRuntimeVersion,
 } from "./GatewayPlatform.ts";
 
 export const GATEWAY_TASK = "Gateway";
@@ -1256,6 +1257,7 @@ export const makeWin32GatewayPlatform = (
     isAdmin: isAdmin.pipe(Effect.mapError(asPlatformError)),
     lookupUser,
     accountName,
+    runtimeVersion: readRuntimeVersion("t3.exe"),
     checkAdminOwned,
     checkRuntimeSource,
     secureDirectory,

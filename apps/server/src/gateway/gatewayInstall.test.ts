@@ -276,10 +276,13 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       assert.isFalse(yield* fs.exists(pending));
 
       // A helper that predates that install may still ask for a version that is no longer newer.
+      // The active build reports its version; its folder name may carry a build suffix.
       yield* fs.copy(at("archive"), staging);
       yield* claim;
       assert.match(
-        (yield* Effect.flip(fromStaging(platform))).message,
+        (yield* Effect.flip(
+          fromStaging({ ...platform, runtimeVersion: () => Effect.succeed(packageJson.version) }),
+        )).message,
         /The shared runtime .* is not older than/,
       );
     }),

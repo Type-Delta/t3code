@@ -227,56 +227,93 @@ describe("DesktopGateway", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("mints a token with the bundled CLI only for the server holding this T3 home", () =>
+  it.effect("waits for the backends to restart after the runtime switches", () =>
     Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-desktop-gateway-" });
-      yield* fs.writeFileString(
-        path.join(stateDir, "server-runtime.json"),
-        JSON.stringify({ pid: process.pid, port: 41001 }),
+      const polls = yield* Ref.make(0);
+      const running = { state: "running", version: "0.1.9", updatedAt: 1 } as const;
+      const fiber = yield* Effect.flatMap(DesktopGateway.DesktopGateway, (g) =>
+        g.updateRuntime("0.1.9"),
+      ).pipe(
+        Effect.provide(
+          layerGateway({
+            respond: (request) =>
+              request.method === "POST"
+                ? Effect.succeed(json(request, 202, status({ update: running })))
+                : Ref.updateAndGet(polls, (count) => count + 1).pipe(
+                    // The new runtime answers at once; its claim clears once backends restarted.
+                    Effect.map((count) =>
+                      json(
+                        request,
+                        200,
+                        status({
+                          runtimeVersion: "0.1.9",
+                          ...(count < 3 ? { update: running } : {}),
+                        }),
+                      ),
+                    ),
+                  ),
+          }),
+        ),
+        Effect.forkChild,
       );
-      const lock = new NodeSqlite.DatabaseSync(path.join(stateDir, "server-owner.sqlite"));
-      yield* Effect.addFinalizer(() => Effect.sync(() => lock.close()));
-      const spawned: Array<SpawnedCommand> = [];
-      const mint = (port: number) =>
-        Effect.flatMap(DesktopGateway.DesktopGateway, (g) => g.mintPairingToken(port)).pipe(
-          Effect.provide(
-            layerGateway({
-              respond: () => Effect.never,
-              spawned,
-              stateDir,
-              pairOutput:
-                "Pair with Alice's Mac\nToken: ABCD-1234\nExpires: 2026-11-23T10:00:00Z\n",
-            }),
-          ),
+      yield* TestClock.adjust(Duration.seconds(3));
+      assert.strictEqual((yield* Fiber.join(fiber)).runtimeVersion, "0.1.9");
+      assert.strictEqual(yield* Ref.get(polls), 3);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "mints a token with the shared runtime's CLI only for the server holding this T3 home",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-desktop-gateway-" });
+        yield* fs.writeFileString(
+          path.join(stateDir, "server-runtime.json"),
+          JSON.stringify({ pid: process.pid, port: 41001 }),
         );
-      // A runtime file alone, as a crashed server leaves it, is not an owner.
-      assert.strictEqual(
-        (yield* Effect.flip(mint(41001))).reason,
-        "The server holding this T3 home is not on the shared port.",
-      );
-      assert.lengthOf(spawned, 0);
-      lock.exec("BEGIN EXCLUSIVE");
-      assert.strictEqual(yield* mint(41001), "ABCD-1234");
-      // Whoever answered on the helper port named a port this home's server does not listen on.
-      const refused = yield* Effect.flip(mint(41002));
-      assert.strictEqual(
-        refused.reason,
-        "The server holding this T3 home is not on the shared port.",
-      );
-      const [command] = spawned;
-      assert.isDefined(command);
-      // The shared runtime's own CLI, which matches the server whatever this app's version.
-      assert.strictEqual(command?.command, "/opt/t3code/current/t3");
-      assert.deepStrictEqual(command?.args.slice(0, 5), [
-        "pair",
-        "--base-dir",
-        "/home/alice/.t3",
-        "--label",
-        "T3 Code desktop",
-      ]);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        const lock = new NodeSqlite.DatabaseSync(path.join(stateDir, "server-owner.sqlite"));
+        yield* Effect.addFinalizer(() => Effect.sync(() => lock.close()));
+        const spawned: Array<SpawnedCommand> = [];
+        const mint = (port: number) =>
+          Effect.flatMap(DesktopGateway.DesktopGateway, (g) => g.mintPairingToken(port)).pipe(
+            Effect.provide(
+              layerGateway({
+                respond: () => Effect.never,
+                spawned,
+                stateDir,
+                pairOutput:
+                  "Pair with Alice's Mac\nToken: ABCD-1234\nExpires: 2026-11-23T10:00:00Z\n",
+              }),
+            ),
+          );
+        // A runtime file alone, as a crashed server leaves it, is not an owner.
+        assert.strictEqual(
+          (yield* Effect.flip(mint(41001))).reason,
+          "The server holding this T3 home is not on the shared port.",
+        );
+        assert.lengthOf(spawned, 0);
+        lock.exec("BEGIN EXCLUSIVE");
+        assert.strictEqual(yield* mint(41001), "ABCD-1234");
+        // Whoever answered on the helper port named a port this home's server does not listen on.
+        const refused = yield* Effect.flip(mint(41002));
+        assert.strictEqual(
+          refused.reason,
+          "The server holding this T3 home is not on the shared port.",
+        );
+        const [command] = spawned;
+        assert.isDefined(command);
+        // The shared runtime's own CLI, which matches the server whatever this app's version.
+        assert.strictEqual(command?.command, "/opt/t3code/current/t3");
+        assert.deepStrictEqual(command?.args.slice(0, 5), [
+          "pair",
+          "--base-dir",
+          "/home/alice/.t3",
+          "--label",
+          "T3 Code desktop",
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
 

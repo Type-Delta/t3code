@@ -68,6 +68,7 @@ export const makeTestGatewayPlatform = (root: string) => {
       ],
     },
     currentAccount: Effect.succeed(1001),
+    runtimeVersion: () => Effect.undefined,
     accountName: Effect.fn("TestGatewayPlatform.accountName")(function* (account) {
       return account === 1001
         ? "alice"

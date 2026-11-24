@@ -14,6 +14,7 @@ import {
   type GatewayActivation,
   type GatewayPlatform,
   type GatewayUserRecord,
+  readRuntimeVersion,
 } from "./GatewayPlatform.ts";
 import { loopbackPeerUid, parseProcNetTcp, readTcpSockets } from "./linuxProc.ts";
 
@@ -777,6 +778,7 @@ export const makeLinuxGatewayPlatform = (paths: LinuxGatewayPaths): GatewayPlatf
     isAdmin: Effect.map(HostProcess.UserId, (uid) => uid === 0),
     lookupUser,
     accountName,
+    runtimeVersion: readRuntimeVersion("t3"),
     checkAdminOwned,
     checkRuntimeSource,
     secureDirectory,

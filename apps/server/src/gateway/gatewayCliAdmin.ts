@@ -257,6 +257,7 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
         options?.rollbackNew === true && !Object.hasOwn(config.users, user)
           ? writeGatewayConfig(platform, configPath, config).pipe(
               Effect.andThen(platform.services.disableUser(user)),
+              Effect.andThen(platform.removeTree(path.join(pairingDir, user))),
               Effect.ignore,
             )
           : Effect.void,

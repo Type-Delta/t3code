@@ -16,6 +16,7 @@ import {
   type GatewayActivation,
   type GatewayPlatform,
   type GatewayUserRecord,
+  readRuntimeVersion,
 } from "./GatewayPlatform.ts";
 
 export const GATEWAY_LABEL = "com.t3tools.t3code.gateway";
@@ -1108,6 +1109,7 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
     isAdmin: Effect.map(HostProcess.UserId, (uid) => uid === 0),
     lookupUser,
     accountName,
+    runtimeVersion: readRuntimeVersion("t3"),
     checkAdminOwned,
     checkRuntimeSource,
     secureDirectory,

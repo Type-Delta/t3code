@@ -323,14 +323,17 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   const activeLink = yield* managedLink(current, layout.installRoot);
   const activeRuntime = activeLink.target;
   // A helper process that predates a newer install judged "newer" against its own version.
+  const activeVersion =
+    selfServiceUpdate && activeRuntime !== undefined
+      ? yield* platform.runtimeVersion(activeRuntime)
+      : undefined;
   if (
-    selfServiceUpdate &&
-    activeRuntime !== undefined &&
-    parseSemver(path.basename(activeRuntime)) !== null &&
-    compareSemverVersions(path.basename(activeRuntime), packageJson.version) >= 0
+    activeVersion !== undefined &&
+    parseSemver(activeVersion) !== null &&
+    compareSemverVersions(activeVersion, packageJson.version) >= 0
   ) {
     return yield* fail(
-      `The shared runtime ${path.basename(activeRuntime)} is not older than ${packageJson.version}.`,
+      `The shared runtime ${activeVersion} is not older than ${packageJson.version}.`,
     );
   }
   const previousLink = yield* managedLink(previous, layout.installRoot);
