@@ -1083,8 +1083,14 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
       const log = path.join(paths.logDir, "backend-alice.log");
       assert.equal(yield* provide(platform.services.userState("alice")), "unavailable");
 
+      // A log a previous account of the same name left behind holds none of its output afterwards.
+      yield* fs.makeDirectory(paths.logDir, { recursive: true });
+      yield* fs.writeFileString(log, "previous account's output");
       const refused = yield* provide(platform.services.enableUser(user, executable)).pipe(
         Effect.result,
+      );
+      assert.isFalse(
+        (yield* fs.readFileString(log).pipe(Effect.orElseSucceed(() => ""))).includes("previous"),
       );
       assert.isTrue(Result.isFailure(refused));
       assert.isFalse(state.tasks.has("Backend-alice"));

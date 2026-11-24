@@ -374,8 +374,8 @@ const psTaskFunctions = (taskkill: string) =>
     "function T3Task($n){$f=T3Folder;if(-not $f){return $null};try{$f.GetTask($n)}catch{$null}}",
     `function T3Stop($n){$t=T3Task $n;if(-not $t){return};foreach($i in @($t.GetInstances(0))){if($i.EnginePID){try{& ${psLiteral(taskkill)} /PID $i.EnginePID /T /F|Out-Null}catch{}}};$t.Stop(0)}`,
     // With a user, that user's password arrives as one UTF-8 line on stdin; Console.In would decode it
-    // with the console's legacy code page and change any non-ASCII character.
-    "function T3Register($n,$x,$l,$u,$d){$t=T3Task $n;if($t -and $t.Definition.RegistrationInfo.Description -ne $M){throw \"\\T3Code\\$n is not managed by t3 gateway.\"};$p=$null;if($u){$p=(New-Object System.IO.StreamReader([Console]::OpenStandardInput(),(New-Object System.Text.UTF8Encoding($false)))).ReadLine()};T3Stop $n;$f=T3Folder;if(-not $f){$f=$sched.GetFolder('\\').CreateFolder('T3Code')};if($t){$f.DeleteTask($n,0)};$f.RegisterTask($n,$x,2,$u,$p,$l,$d)|Out-Null}",
+    // with the console's legacy code page, and BOM detection would drop a leading U+FEFF.
+    "function T3Register($n,$x,$l,$u,$d){$t=T3Task $n;if($t -and $t.Definition.RegistrationInfo.Description -ne $M){throw \"\\T3Code\\$n is not managed by t3 gateway.\"};$p=$null;if($u){$p=(New-Object System.IO.StreamReader([Console]::OpenStandardInput(),(New-Object System.Text.UTF8Encoding($false)),$false)).ReadLine()};T3Stop $n;$f=T3Folder;if(-not $f){$f=$sched.GetFolder('\\').CreateFolder('T3Code')};if($t){$f.DeleteTask($n,0)};$f.RegisterTask($n,$x,2,$u,$p,$l,$d)|Out-Null}",
     "function T3Version($n){$t=T3Task $n;if(-not $t){'absent'}elseif($t.Definition.RegistrationInfo.Description -ne $M){'unmanaged'}else{'managed '+$t.Definition.RegistrationInfo.Version}}",
     "function T3Unregister($n){$t=T3Task $n;if(-not $t){return 'absent'};if($t.Definition.RegistrationInfo.Description -ne $M){return 'unmanaged'};T3Stop $n;(T3Folder).DeleteTask($n,0);'removed'}",
   ].join(";");
@@ -1039,8 +1039,20 @@ export const makeWin32GatewayPlatform = (
     executable: string,
     options?: { readonly password?: string },
   ) {
-    const { name, xml, current } = yield* backendTask(user, executable);
+    const { name, xml, managed, current } = yield* backendTask(user, executable);
     if (current) return yield* restartBackend(user, name);
+    // A first registration may follow another account of the same name, whose log Leave could not
+    // delete or empty; this account gets its log only once nothing of that one is left in it.
+    if (!managed) {
+      const fs = yield* FileSystem.FileSystem;
+      const log = yield* backendLog(user.name);
+      yield* fs.remove(log, { force: true }).pipe(
+        Effect.catch(() => fs.writeFileString(log, "")),
+        Effect.mapError(() =>
+          fail(`${log} is open in another program. Close it, then try joining again.`),
+        ),
+      );
+    }
     const password =
       options?.password ??
       (yield* readPassword(
