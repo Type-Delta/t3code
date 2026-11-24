@@ -115,7 +115,9 @@ export function renderGatewayUnits(executable: string) {
       "Type=exec",
       "User=root",
       "StandardInput=socket",
-      "StandardOutput=socket",
+      // The reply goes out on stdin's socket; log lines on stdout would corrupt it.
+      "StandardOutput=journal",
+      "StandardError=journal",
       `Environment=PATH=${systemPath}`,
       `ExecStart=${executable} gateway helper`,
       "NoNewPrivileges=no",
@@ -127,6 +129,8 @@ export function renderGatewayUnits(executable: string) {
   };
 }
 
+// UID_MIN in most distributions' login.defs; lower uids are system accounts.
+const firstPersonUid = 1000;
 const fail = (message: string) => new GatewayPlatformError({ message });
 const asPlatformError = (error: { readonly message: string }) => fail(error.message);
 
@@ -189,6 +193,9 @@ const lookupUser = Effect.fn("GatewayPlatform.linux.lookupUser")(function* (name
   const passwd = yield* readPasswd(name);
   if (passwd === undefined) return yield* fail(`Linux user ${name} was not found.`);
   if (passwd.uid === 0) return yield* fail(`Linux user ${name} is root and cannot be enrolled.`);
+  if (passwd.uid < firstPersonUid) {
+    return yield* fail(`Linux user ${name} is a system account and cannot be enrolled.`);
+  }
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const home = passwd.home;

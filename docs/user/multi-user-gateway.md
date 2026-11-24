@@ -1,6 +1,7 @@
 # Share T3 Code with several users on one computer
 
-The multi-user gateway is available in this fork on Linux with systemd, macOS, and Windows.
+The multi-user gateway is available in this fork on Linux with systemd, macOS on Apple
+silicon, and Windows.
 Each enrolled account gets its own T3 Code server, projects, settings, and provider
 credentials. Browsers and phones connect to a single gateway address.
 
@@ -18,8 +19,20 @@ alongside the gateway.
 
 ## Install and enroll a user
 
-The simplest install is the command-line installer run as an administrator: with `sudo` on
-Linux and macOS, or from an elevated PowerShell on Windows. It asks once whether to install
+The simplest install is this fork's command-line installer run as an administrator. On
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Type-Delta/t3code/main/scripts/install.sh | sudo sh
+```
+
+On Windows, from an elevated PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Type-Delta/t3code/main/scripts/install.ps1 | iex
+```
+
+It asks once whether to install
 T3 Code for everyone on this computer; answer yes. To answer without the question, set
 `T3CODE_INSTALL_MODE=gateway`. After that, users join from the desktop app (see
 [Join from the desktop app](#join-from-the-desktop-app)), or an administrator enrolls them

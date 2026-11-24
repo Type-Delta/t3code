@@ -9,8 +9,10 @@ import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -105,7 +107,8 @@ export class DesktopGateway extends Context.Service<
     readonly updateRuntime: (
       version: string,
     ) => Effect.Effect<GatewayHelperStatus, DesktopGatewayError>;
-    readonly mintPairingToken: Effect.Effect<string, DesktopGatewayError>;
+    /** A one-time token for this account's T3 home, only when the server holding it listens on `port`. */
+    readonly mintPairingToken: (port: number) => Effect.Effect<string, DesktopGatewayError>;
     /** Set once startup uses the shared backend for this launch. */
     readonly attached: Ref.Ref<boolean>;
   }
@@ -115,6 +118,8 @@ const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const attached = yield* Ref.make(false);
 
   const send = (request: HttpClientRequest.HttpClientRequest, timeout: Duration.Duration) =>
@@ -175,7 +180,7 @@ const make = Effect.gen(function* () {
     return settled.value;
   });
 
-  const mintPairingToken = Effect.gen(function* () {
+  const mintPairingToken = Effect.fn("DesktopGateway.mintPairingToken")(function* (port: number) {
     const fail = (reason: string, cause?: unknown) =>
       new DesktopGatewayError({
         operation: "pair",
@@ -198,10 +203,21 @@ const make = Effect.gen(function* () {
         Effect.timeout(PAIR_TIMEOUT),
         Effect.mapError((cause) => fail("Could not run t3 pair for the shared server.", cause)),
       );
-    return yield* Effect.fromOption(parsePairToken(output)).pipe(
+    const token = yield* Effect.fromOption(parsePairToken(output)).pipe(
       Effect.mapError(() => fail("t3 pair did not print a token for the shared server.")),
     );
-  }).pipe(Effect.withSpan("DesktopGateway.mintPairingToken"));
+    // Any local account can answer on the helper's port while the gateway restarts, so the token
+    // goes only to the server that holds this T3 home.
+    const owner = yield* DesktopHomeOwner.readLiveHomeOwner().pipe(
+      Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
+    if (Option.isNone(owner) || owner.value.port !== port) {
+      return yield* fail("The server holding this T3 home is not on the shared port.");
+    }
+    return token;
+  });
 
   return DesktopGateway.of({
     status,
@@ -256,12 +272,15 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
 
   const failure = yield* Effect.gen(function* () {
     if (status.backendPort === undefined) return "Shared T3 Code has no server for this account.";
-    const httpBaseUrl = new URL(`http://127.0.0.1:${status.backendPort}/`);
+    const port = status.backendPort;
+    const httpBaseUrl = new URL(`http://127.0.0.1:${port}/`);
     // Minting proves the shared server serves this T3 home before the app commits to it.
-    const credential = yield* gateway.mintPairingToken.pipe(
-      Effect.retry({ schedule: Schedule.spaced(Duration.seconds(2)) }),
-      Effect.timeoutOption(ATTACH_READY_TIMEOUT),
-    );
+    const credential = yield* gateway
+      .mintPairingToken(port)
+      .pipe(
+        Effect.retry({ schedule: Schedule.spaced(Duration.seconds(2)) }),
+        Effect.timeoutOption(ATTACH_READY_TIMEOUT),
+      );
     if (Option.isNone(credential))
       return "The shared T3 Code server for this account did not answer.";
     // The first session uses the token that proved the server; later ones mint their own.
@@ -271,7 +290,7 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
       httpBaseUrl,
       mintCredential: Ref.getAndSet(unused, Option.none()).pipe(
         Effect.flatMap((token) =>
-          Option.isSome(token) ? Effect.succeed(token.value) : gateway.mintPairingToken,
+          Option.isSome(token) ? Effect.succeed(token.value) : gateway.mintPairingToken(port),
         ),
       ),
     });

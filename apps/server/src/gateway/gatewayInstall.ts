@@ -1,12 +1,15 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 
 import packageJson from "../../package.json" with { type: "json" };
+import { readUpdateState, updateStatePath, writeUpdateState } from "./gatewayHelper.ts";
 import {
   emptyGatewayConfig,
   GATEWAY_CONFIG_PATH_ENV,
@@ -274,6 +277,26 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   const configDir = path.dirname(layout.configPath);
   yield* checkInstallDirectories(platform);
   yield* lockGatewayPath(layout.installRoot);
+  // A self-service update runs from the helper's staging folder. Another install since it was
+  // requested cleared its claim, and running it then could replace a newer runtime.
+  if (
+    path.dirname(source.directory) === layout.installRoot &&
+    path.basename(source.directory).startsWith(".helper-staging-")
+  ) {
+    const claim = yield* readUpdateState(layout.configPath);
+    if (claim?.state !== "running" || claim.version !== packageJson.version) {
+      return yield* fail(`Another install replaced the update to ${packageJson.version}.`);
+    }
+    // Members' apps wait on this state, so a failed install must not leave it running.
+    yield* Effect.addFinalizer((exit) => {
+      if (Exit.isSuccess(exit)) return Effect.void;
+      const error = Cause.squash(exit.cause);
+      const reason = error instanceof Error ? error.message : "The update could not be installed.";
+      return writeUpdateState(layout.configPath, "failed", packageJson.version, reason).pipe(
+        Effect.ignore,
+      );
+    });
+  }
   const marked = yield* hasInstallMarker(platform);
   if (
     !marked &&
@@ -377,9 +400,7 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
         .pipe(Effect.ignore);
     }
   }
-  yield* fs
-    .remove(path.join(configDir, ".t3code-gateway-helper", "update.json"), { force: true })
-    .pipe(Effect.ignore);
+  yield* fs.remove(updateStatePath(path, layout.configPath), { force: true }).pipe(Effect.ignore);
   yield* Console.log(`Installed ${destination} and started the gateway. CLI: ${layout.launcher}.`);
 }, Effect.scoped);
 

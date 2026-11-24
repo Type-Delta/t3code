@@ -12,6 +12,7 @@ import {
   GATEWAY_CONFIG_PATH_ENV,
   GATEWAY_PAIRING_DIR_ENV,
 } from "./GatewayConfig.ts";
+import { readUpdateState, updateStatePath, writeUpdateState } from "./gatewayHelper.ts";
 import { installGateway, treesMatch, uninstallGateway } from "./gatewayInstall.ts";
 import { GatewayPlatformError, type GatewayPlatform } from "./platform/GatewayPlatform.ts";
 import {
@@ -207,6 +208,49 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       assert.equal((yield* Effect.flip(failing.install)).message, "rolled back");
       assert.equal(yield* fs.readLink(current), first);
       assert.isFalse(yield* fs.exists(at("install/previous")));
+    }),
+  );
+
+  it.effect("runs a self-service update only while its claim stands and records its failure", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { at, install, layout, platform, provide } = yield* fixture();
+      yield* install;
+      const staging = at("install/.helper-staging-test");
+      yield* fs.copy(at("archive"), staging);
+      const fromStaging = (changed: GatewayPlatform) =>
+        provide(
+          installGateway(changed).pipe(
+            Effect.provideService(HostProcess.ExecutablePath, path.join(staging, "t3")),
+          ),
+        );
+      const statePath = updateStatePath(path, layout.configPath);
+      yield* fs.makeDirectory(path.dirname(statePath), { recursive: true });
+      const claim = writeUpdateState(layout.configPath, "running", packageJson.version, "");
+
+      // Another install cleared the claim, so this older request must not replace its runtime.
+      assert.match((yield* Effect.flip(fromStaging(platform))).message, /Another install replaced/);
+
+      yield* claim;
+      const failing = {
+        ...platform,
+        services: {
+          ...platform.services,
+          activate: () => Effect.fail(new GatewayPlatformError({ message: "did not start" })),
+        },
+      };
+      assert.equal((yield* Effect.flip(fromStaging(failing))).message, "did not start");
+      assert.deepInclude(yield* readUpdateState(layout.configPath), {
+        state: "failed",
+        version: packageJson.version,
+        message: "did not start",
+      });
+
+      yield* claim;
+      yield* fromStaging(platform);
+      assert.isFalse(yield* fs.exists(statePath));
+      assert.isFalse(yield* fs.exists(staging));
     }),
   );
 

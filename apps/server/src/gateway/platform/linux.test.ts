@@ -280,6 +280,7 @@ WantedBy=multi-user.target
   assert.include(units["t3code-gateway-helper.socket"], "ListenStream=127.0.0.1:3774");
   assert.include(units["t3code-gateway-helper.socket"], "Accept=yes");
   assert.include(units["t3code-gateway-helper@.service"], "StandardInput=socket");
+  assert.include(units["t3code-gateway-helper@.service"], "StandardOutput=journal");
   assert.include(
     units["t3code-gateway-helper@.service"],
     "ExecStart=/opt/t3code/current/t3 gateway helper",
@@ -668,7 +669,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
 
   it.layer(NodeServices.layer)("accounts and ownership", (it) => {
     it.effect(
-      "looks up enrollable users and rejects reserved, root, unknown or homeless ones",
+      "looks up enrollable users and rejects reserved, root, system, unknown or homeless ones",
       () =>
         Effect.gen(function* () {
           const { at, calls, manager, platform, provide } = yield* fixture();
@@ -676,6 +677,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
           manager.passwd.set("1001", `alice:x:1001:1002::${at()}:/bin/sh`);
           manager.passwd.set("bob", `bob:x:1003:1003::${at("missing-home")}:/bin/sh`);
           manager.passwd.set("root", `root:x:0:0::${at()}:/bin/sh`);
+          manager.passwd.set("daemon", `daemon:x:1:1::${at()}:/usr/sbin/nologin`);
           assert.deepEqual(yield* provide(platform.lookupUser("alice")), {
             name: "alice",
             accountId: 1001,
@@ -686,6 +688,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
             ["t3code", /reserved for the gateway/],
             ["bob", /home directory for bob does not exist/],
             ["root", /root and cannot be enrolled/],
+            ["daemon", /system account and cannot be enrolled/],
             ["carol", /Linux user carol was not found/],
           ] as const) {
             assert.match(

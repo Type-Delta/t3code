@@ -1,10 +1,13 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { AuthStandardClientScopes, type GatewayHelperStatus } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -49,6 +52,7 @@ const layerGateway = (input: {
   ) => Effect.Effect<HttpClientResponse.HttpClientResponse>;
   readonly pairOutput?: string;
   readonly spawned?: Array<SpawnedCommand>;
+  readonly stateDir?: string;
 }) =>
   DesktopGateway.layer.pipe(
     Layer.provide(
@@ -78,9 +82,12 @@ const layerGateway = (input: {
         Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
           backendEntryPath: "/app/server/bin.mjs",
           baseDir: "/home/alice/.t3",
+          stateDir: input.stateDir ?? "/home/alice/.t3/userdata",
         } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]),
       ),
     ),
+    // Real files for the home-owner check, provided after the fake spawner so it stays in use.
+    Layer.provide(NodeServices.layer),
   );
 
 describe("DesktopGateway", () => {
@@ -175,22 +182,35 @@ describe("DesktopGateway", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("mints a token with the bundled CLI against this app's T3 home", () =>
+  it.effect("mints a token with the bundled CLI only for the server holding this T3 home", () =>
     Effect.gen(function* () {
-      const spawned: Array<SpawnedCommand> = [];
-      const token = yield* Effect.flatMap(
-        DesktopGateway.DesktopGateway,
-        (g) => g.mintPairingToken,
-      ).pipe(
-        Effect.provide(
-          layerGateway({
-            respond: () => Effect.never,
-            spawned,
-            pairOutput: "Pair with Alice's Mac\nToken: ABCD-1234\nExpires: 2026-11-23T10:00:00Z\n",
-          }),
-        ),
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-desktop-gateway-" });
+      yield* fs.writeFileString(
+        path.join(stateDir, "server-runtime.json"),
+        JSON.stringify({ pid: process.pid, port: 41001 }),
       );
-      assert.strictEqual(token, "ABCD-1234");
+      const spawned: Array<SpawnedCommand> = [];
+      const mint = (port: number) =>
+        Effect.flatMap(DesktopGateway.DesktopGateway, (g) => g.mintPairingToken(port)).pipe(
+          Effect.provide(
+            layerGateway({
+              respond: () => Effect.never,
+              spawned,
+              stateDir,
+              pairOutput:
+                "Pair with Alice's Mac\nToken: ABCD-1234\nExpires: 2026-11-23T10:00:00Z\n",
+            }),
+          ),
+        );
+      assert.strictEqual(yield* mint(41001), "ABCD-1234");
+      // Whoever answered on the helper port named a port this home's server does not listen on.
+      const refused = yield* Effect.flip(mint(41002));
+      assert.strictEqual(
+        refused.reason,
+        "The server holding this T3 home is not on the shared port.",
+      );
       const [command] = spawned;
       assert.isDefined(command);
       assert.strictEqual(command?.command, process.execPath);
@@ -203,7 +223,7 @@ describe("DesktopGateway", () => {
         "T3 Code desktop",
       ]);
       assert.strictEqual(command?.options.env?.ELECTRON_RUN_AS_NODE, "1");
-    }),
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
 

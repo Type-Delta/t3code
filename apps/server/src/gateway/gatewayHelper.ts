@@ -99,17 +99,19 @@ const isNewer = (version: string, than: string) =>
   compareSemverVersions(version, than) > 0;
 
 // `gateway install` deletes this file once the new runtime is active.
-const updateStatePath = (path: Path.Path, configPath: string) =>
+export const updateStatePath = (path: Path.Path, configPath: string) =>
   path.join(path.dirname(configPath), ".t3code-gateway-helper", "update.json");
 
-const readUpdateState = Effect.fn("GatewayHelper.readUpdateState")(function* (configPath: string) {
+export const readUpdateState = Effect.fn("GatewayHelper.readUpdateState")(function* (
+  configPath: string,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const contents = yield* fs.readFileString(updateStatePath(path, configPath)).pipe(Effect.option);
   return Option.getOrUndefined(Option.flatMap(contents, decodeUpdateState));
 });
 
-const writeUpdateState = Effect.fn("GatewayHelper.writeUpdateState")(function* (
+export const writeUpdateState = Effect.fn("GatewayHelper.writeUpdateState")(function* (
   configPath: string,
   state: GatewayHelperUpdateState["state"],
   version: string,
@@ -252,7 +254,7 @@ const stageRelease = Effect.fn("GatewayHelper.stageRelease")(function* (
 
 const STALE_UPDATE_MS = 30 * 60 * 1000;
 
-/** Claims the single update slot, or fails while another update to a newer runtime is running. */
+/** Claims the single update slot. False when this same update is already running; fails while another is. */
 const claimUpdate = Effect.fn("GatewayHelper.claimUpdate")(function* (
   options: GatewayHelperOptions,
   version: string,
@@ -270,9 +272,11 @@ const claimUpdate = Effect.fn("GatewayHelper.claimUpdate")(function* (
     isNewer(previous.version, runtimeVersion) &&
     now - previous.updatedAt < STALE_UPDATE_MS
   ) {
+    if (previous.version === version) return false;
     return yield* fail(409, `An update to ${previous.version} is already in progress.`);
   }
   yield* writeUpdateState(options.configPath, "running", version, "Downloading update");
+  return true;
 }, Effect.scoped);
 
 const updateRuntime = Effect.fn("GatewayHelper.update")(function* (
@@ -283,7 +287,8 @@ const updateRuntime = Effect.fn("GatewayHelper.update")(function* (
   const fs = yield* FileSystem.FileSystem;
   const { platform } = options;
   const runtimeVersion = options.runtimeVersion ?? packageJson.version;
-  if (parseSemver(version) === null) {
+  // The version becomes part of a file name, so build metadata and path characters are refused.
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) || parseSemver(version) === null) {
     return yield* fail(400, "Update version must be a semantic version.");
   }
   const order = compareSemverVersions(version, runtimeVersion);
@@ -291,7 +296,7 @@ const updateRuntime = Effect.fn("GatewayHelper.update")(function* (
   if (order < 0) {
     return yield* fail(400, `The shared runtime ${runtimeVersion} is newer than ${version}.`);
   }
-  yield* claimUpdate(options, version, runtimeVersion);
+  if (!(yield* claimUpdate(options, version, runtimeVersion))) return 202;
   yield* Effect.gen(function* () {
     const staging = yield* fs.makeTempDirectory({
       directory: platform.layout.installRoot,

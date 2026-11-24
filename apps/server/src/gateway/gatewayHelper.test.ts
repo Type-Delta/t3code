@@ -348,6 +348,9 @@ describe("gateway helper", () => {
       assert.equal((yield* update("0.1.9-gwtest.0")).status, 400);
       assert.equal((yield* update("0.1.8")).status, 400);
       assert.equal((yield* update("latest")).status, 400);
+      for (const unsafe of ["0.1.10-../../../etc/x", "0.1.10+build", "v0.1.10", " 0.1.10"]) {
+        assert.equal((yield* update(unsafe)).status, 400, unsafe);
+      }
       assert.deepStrictEqual(yield* helper.stagingDirs, []);
 
       const started = yield* update(NEXT);
@@ -363,8 +366,11 @@ describe("gateway helper", () => {
       assert.include(helper.calls, `runDetached update ${executable} gateway install`);
       assert.deepInclude(yield* helper.updateState, { state: "running", version: NEXT });
 
-      assert.equal((yield* update(NEXT)).status, 409);
+      // A second app asking for the same update waits on the running one.
+      assert.equal((yield* update(NEXT)).status, 202);
+      assert.equal((yield* update("0.1.9-gwtest.3")).status, 409);
       assert.equal((yield* helper.stagingDirs).length, 1);
+      assert.equal(helper.calls.filter((call) => call.startsWith("runDetached")).length, 1);
 
       // An install that died long ago no longer holds the slot.
       yield* fs.writeFileString(
