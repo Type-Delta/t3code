@@ -518,6 +518,9 @@ describe("gateway helper", () => {
         }),
       );
       assert.deepInclude((yield* statusUpdate) ?? {}, { state: "running", version: RUNTIME });
+      // It also keeps the update slot: replacing it would stop that install mid-activation.
+      const newer = yield* helper.send("POST", "/v1/update", JSON.stringify({ version: NEXT }));
+      assert.equal(newer.status, 409, newer.text);
       // One left by an install that died long ago is not.
       yield* fs.writeFileString(
         helper.updateStatePath,

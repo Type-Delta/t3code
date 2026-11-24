@@ -4,6 +4,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
+import * as DesktopEnvironment from "../../app/DesktopEnvironment.ts";
 import * as DesktopLifecycle from "../../app/DesktopLifecycle.ts";
 import * as DesktopBackendManager from "../../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
@@ -14,17 +15,13 @@ import { makeIpcMethod } from "../DesktopIpc.ts";
 
 // Fork-only (gateway self-service): join or leave shared T3 Code from Settings.
 
-// Startup attaches only with the local environment on and not WSL-only; joining otherwise would
-// start a backend nothing uses.
-const cannotAttach = Effect.flatMap(
-  DesktopAppSettings.DesktopAppSettings,
-  (settings) => settings.get,
-).pipe(
-  Effect.map(
-    (settings) =>
-      !settings.localEnvironmentEnabled || (settings.wslOnly && settings.wslBackendEnabled),
-  ),
-);
+// Startup attaches only in packaged builds with the local environment on and not WSL-only;
+// joining otherwise would start a backend nothing uses.
+const cannotAttach = Effect.gen(function* () {
+  if ((yield* DesktopEnvironment.DesktopEnvironment).isDevelopment) return true;
+  const settings = yield* (yield* DesktopAppSettings.DesktopAppSettings).get;
+  return !settings.localEnvironmentEnabled || (settings.wslOnly && settings.wslBackendEnabled);
+});
 
 export const getSharedRuntimeState = makeIpcMethod({
   channel: IpcChannels.GET_SHARED_RUNTIME_STATE_CHANNEL,

@@ -187,6 +187,10 @@ export class DesktopGateway extends Context.Service<
     readonly updateRuntime: (
       version: string,
     ) => Effect.Effect<GatewayHelperStatus, DesktopGatewayError>;
+    /** Waits for a requested update to settle, its backends restarted. */
+    readonly awaitUpdate: (
+      version: string,
+    ) => Effect.Effect<GatewayHelperStatus, DesktopGatewayError>;
     /** A one-time token for this account's T3 home, only when the server holding it listens on `port`. */
     readonly mintPairingToken: (port: number) => Effect.Effect<string, DesktopGatewayError>;
     /** Set once startup uses the shared backend for this launch. */
@@ -250,9 +254,8 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const updateRuntime = Effect.fn("DesktopGateway.updateRuntime")(function* (version: string) {
+  const awaitUpdate = Effect.fn("DesktopGateway.awaitUpdate")(function* (version: string) {
     const fail = (reason: string) => new DesktopGatewayError({ operation: "update", reason });
-    yield* change("update", { version });
     const settled = yield* status.pipe(
       Effect.repeat({
         schedule: Schedule.spaced(UPDATE_POLL_INTERVAL),
@@ -268,6 +271,11 @@ const make = Effect.gen(function* () {
       return yield* fail(settled.value.update?.message ?? "The shared T3 Code update failed.");
     }
     return settled.value;
+  });
+
+  const updateRuntime = Effect.fn("DesktopGateway.updateRuntime")(function* (version: string) {
+    yield* change("update", { version });
+    return yield* awaitUpdate(version);
   });
 
   const mintPairingToken = Effect.fn("DesktopGateway.mintPairingToken")(function* (port: number) {
@@ -311,6 +319,7 @@ const make = Effect.gen(function* () {
     }),
     leave: change("leave", {}),
     updateRuntime,
+    awaitUpdate,
     mintPairingToken,
     attached,
   });
@@ -353,6 +362,12 @@ export const attachAtStartup = Effect.fn("desktop.gateway.attachAtStartup")(func
         ),
       ),
     );
+  } else if (status.update?.state === "running") {
+    // Someone else's update is restarting backends; pairing now could reach one about to stop.
+    const current = status;
+    status = yield* gateway
+      .awaitUpdate(status.update.version)
+      .pipe(Effect.catch(() => gateway.status.pipe(Effect.map(Option.getOrElse(() => current)))));
   }
 
   const failure = yield* Effect.gen(function* () {

@@ -122,11 +122,17 @@ export const writeUpdateState = Effect.fn("GatewayHelper.writeUpdateState")(func
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const updatedAt = yield* Clock.currentTimeMillis;
+  const statePath = updateStatePath(path, configPath);
+  // Renamed into place, so a status read never sees a half-written claim and drops it.
+  const staged = `${statePath}.${process.pid}.tmp`;
   yield* fs.writeFileString(
-    updateStatePath(path, configPath),
+    staged,
     `${encodeUpdateState({ state, version, message, updatedAt })}\n`,
-    { mode: 0o644 },
+    {
+      mode: 0o644,
+    },
   );
+  yield* fs.rename(staged, statePath);
 });
 
 const callerUnknown = new GatewayHelperRequestError({
@@ -338,7 +344,9 @@ const claimUpdate = Effect.fn("GatewayHelper.claimUpdate")(function* (
   // A detached install that died never clears its state; stop it blocking updates forever.
   if (
     previous?.state === "running" &&
-    isNewer(previous.version, runtimeVersion) &&
+    // An update to this helper's own version may still be restarting backends.
+    parseSemver(previous.version) !== null &&
+    compareSemverVersions(previous.version, runtimeVersion) >= 0 &&
     now - previous.updatedAt < STALE_UPDATE_MS
   ) {
     if (previous.version === version) return false;
