@@ -475,7 +475,7 @@ Preflight accepts only `X.Y.Z` or `X.Y.Z-nightly.YYYYMMDD.N`, because the update
 
 Published AppImages use upstream's versionless, channel-specific names so installed apps can update in place. The completeness check reads the AppImage filename from the Linux manifest and verifies its version against the selected release, alongside the required platform assets.
 
-The workflow does not publish a `t3` npm package or CLI archives, so `t3 update` and remote server self-update still follow upstream; do not use them on fork servers.
+The macOS arm64 and Windows x64 jobs also build that platform's CLI archive before the desktop app, as upstream's release does, and the publish job attaches them with the Linux one and a `SHA256SUMS` written from the uploaded bytes. The install scripts and shared T3 Code updates (DL066) download these, so the publish job refuses to run without all three. There is no macOS x64 archive, as upstream. The workflow does not publish a `t3` npm package, and `t3 update` and remote server self-update still read upstream's releases; do not use them on fork servers.
 
 **Implementation evidence:** `.github/workflows/fork-release.yml`, `fork-windows-release.yml`, `fork-macos-release.yml`, `fork-linux-release.yml`, and `WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT` in `scripts/build-desktop-artifact.ts`.
 

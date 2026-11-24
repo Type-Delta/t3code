@@ -89,7 +89,7 @@ jobs:
     name: Build Windows x64
     needs: [build_wsl_runtime]
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -162,10 +162,44 @@ jobs:
             exit $code
           }
 
+      - name: Build web client for the CLI archive
+        run: vp run --filter=@t3tools/web build
+
+      - name: Build Windows CLI single-executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          node apps/server/scripts/cli.ts build
+          node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build and smoke-test Windows CLI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          monitor=native/resource-monitor/target/x86_64-pc-windows-msvc/release/t3-resource-monitor.exe
+          [[ -f "$monitor" ]] || cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-pc-windows-msvc
+          resource_monitor_dir="$RUNNER_TEMP/cli-resource-monitor"
+          mkdir -p "$resource_monitor_dir"
+          cp "$monitor" "$resource_monitor_dir/"
+          node scripts/build-cli-archive.ts \
+            --platform win \
+            --arch x64 \
+            --version "${{ inputs.version }}" \
+            --resource-monitor-dir "$resource_monitor_dir" \
+            --output-dir release-cli
+          node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "${{ inputs.version }}"
+
+      - name: Upload Windows CLI archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-win-x64
+          path: release-cli/*
+          if-no-files-found: error
+
       - name: Build unsigned desktop artifact
         shell: bash
         env:
-          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
         run: |
           vp run dist:desktop:artifact \

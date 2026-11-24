@@ -25,7 +25,7 @@ T3 Code for everyone on this computer; answer yes. To answer without the questio
 [Join from the desktop app](#join-from-the-desktop-app)), or an administrator enrolls them
 with `t3 gateway add`.
 
-To install from an archive instead, use a CLI archive you trust, built from this fork for your operating system. Extract it
+To install from an archive instead, download the CLI archive for your operating system from this fork's GitHub release and check it against the release's `SHA256SUMS`. Extract it
 into a private, administrator-owned folder, because the executable loads its bundled
 libraries before the installer can check them. Then install the gateway and enroll each
 person with their existing account name in place of `alice`.
