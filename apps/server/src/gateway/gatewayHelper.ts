@@ -5,6 +5,7 @@ import * as NodeNet from "node:net";
 
 import {
   GATEWAY_HELPER_HEADER,
+  GATEWAY_HELPER_STAGE_TIMEOUT_MS,
   GATEWAY_HELPER_PORT,
   GatewayHelperError,
   GatewayHelperJoinRequest,
@@ -62,6 +63,8 @@ interface GatewayHelperOptions {
   readonly configPath: string;
   /** Defaults to this binary's version. */
   readonly runtimeVersion?: string;
+  /** Windows: decrypts join passwords, which desktop apps encrypt to the published public key. */
+  readonly passwordKey?: NodeCrypto.KeyObject;
 }
 
 type GatewayHelperServices = GatewayPlatformServices | HttpClient.HttpClient;
@@ -75,7 +78,6 @@ interface HelperRequest {
 }
 
 const MAX_BODY_BYTES = 16 * 1024;
-const DOWNLOAD_TIMEOUT = "15 minutes";
 const ROUTES = new Set(["GET /v1/status", "POST /v1/join", "POST /v1/leave", "POST /v1/update"]);
 
 const fail = (status: number, message: string) =>
@@ -214,7 +216,6 @@ const stageRelease = Effect.fn("GatewayHelper.stageRelease")(function* (
         Stream.run(fs.sink(archive, { flag: "wx" })),
       ),
     ),
-    Effect.timeout(DOWNLOAD_TIMEOUT),
     Effect.mapError(downloadFailed),
   );
   if (parseChecksums(checksums).get(archiveName) !== hash.digest("hex")) {
@@ -254,6 +255,19 @@ const stageRelease = Effect.fn("GatewayHelper.stageRelease")(function* (
 
 export const STALE_UPDATE_MS = 30 * 60 * 1000;
 
+/** Marks this version's claim as installing, only while it still holds it. */
+const advanceUpdateClaim = Effect.fn("GatewayHelper.advanceUpdateClaim")(function* (
+  configPath: string,
+  version: string,
+) {
+  const path = yield* Path.Path;
+  yield* lockGatewayPath(updateStatePath(path, configPath));
+  const claim = yield* readUpdateState(configPath);
+  if (claim?.state !== "running" || claim.version !== version) return false;
+  yield* writeUpdateState(configPath, "running", version, "Installing update");
+  return true;
+}, Effect.scoped);
+
 /** Ends this version's update claim if it still holds it: as failed with a reason, or by clearing it. */
 export const settleUpdateClaim = Effect.fn("GatewayHelper.settleUpdateClaim")(function* (
   configPath: string,
@@ -270,20 +284,38 @@ export const settleUpdateClaim = Effect.fn("GatewayHelper.settleUpdateClaim")(fu
   else yield* writeUpdateState(configPath, "failed", version, failure);
 }, Effect.scoped);
 
-/** Where the Windows gateway records the process serving the helper, for desktop apps to check. */
-export const helperPidPath = (path: Pick<Path.Path, "dirname" | "join">, configPath: string) =>
-  path.join(path.dirname(configPath), ".t3code-gateway-helper", "helper.pid");
+/** Where the Windows gateway publishes the key desktop apps encrypt join passwords to. */
+export const helperKeyPath = (path: Pick<Path.Path, "dirname" | "join">, configPath: string) =>
+  path.join(path.dirname(configPath), ".t3code-gateway-helper", "helper-key.pem");
 
-export const recordHelperPid = Effect.fn("GatewayHelper.recordPid")(function* (
+export const publishHelperKey = Effect.fn("GatewayHelper.publishKey")(function* (
   platform: GatewayPlatform,
   configPath: string,
+  publicKey: NodeCrypto.KeyObject,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const file = helperPidPath(path, configPath);
+  const file = helperKeyPath(path, configPath);
   yield* platform.secureDirectory(path.dirname(file), "admin");
-  yield* fs.writeFileString(file, `${process.pid}\n`);
+  yield* fs.writeFileString(file, publicKey.export({ type: "spki", format: "pem" }).toString());
 });
+
+/** Anyone can listen on the helper port while the gateway restarts, so passwords travel encrypted. */
+const decryptPassword = (key: NodeCrypto.KeyObject | undefined, encrypted: string) =>
+  key === undefined
+    ? fail(400, "This gateway takes no password.")
+    : Effect.try({
+        try: () =>
+          NodeCrypto.privateDecrypt(
+            { key, oaepHash: "sha256" },
+            Buffer.from(encrypted, "base64"),
+          ).toString("utf8"),
+        catch: () =>
+          new GatewayHelperRequestError({
+            status: 400,
+            message: "Shared T3 Code could not read the password. Try again.",
+          }),
+      });
 
 /** Claims the single update slot. False when this same update is already running; fails while another is. */
 const claimUpdate = Effect.fn("GatewayHelper.claimUpdate")(function* (
@@ -336,8 +368,16 @@ const updateRuntime = Effect.fn("GatewayHelper.update")(function* (
     // A started installer owns the staging directory; `gateway install` prunes it.
     yield* Effect.gen(function* () {
       yield* platform.secureDirectory(staging, "admin");
-      const executable = yield* stageRelease(platform, config, version, staging);
-      yield* writeUpdateState(options.configPath, "running", version, "Installing update");
+      const executable = yield* stageRelease(platform, config, version, staging).pipe(
+        Effect.timeoutOrElse({
+          duration: GATEWAY_HELPER_STAGE_TIMEOUT_MS,
+          orElse: () => fail(504, "Downloading the update took too long."),
+        }),
+      );
+      // An install that finished during the download cleared the claim and pruned staging.
+      if (!(yield* advanceUpdateClaim(options.configPath, version))) {
+        return yield* fail(409, `Another install replaced the update to ${version}.`);
+      }
       yield* platform.services.runDetached("update", [executable, "gateway", "install"]).pipe(
         Effect.mapError(
           (error) =>
@@ -356,7 +396,7 @@ const updateRuntime = Effect.fn("GatewayHelper.update")(function* (
     Effect.onError((cause) => {
       const error = Cause.squash(cause);
       const message = isRequestError(error) ? error.message : "The update failed.";
-      return writeUpdateState(options.configPath, "failed", version, message).pipe(Effect.ignore);
+      return settleUpdateClaim(options.configPath, version, message).pipe(Effect.ignore);
     }),
   );
   return 202;
@@ -413,17 +453,30 @@ const handleRequest = Effect.fn("GatewayHelper.handle")(function* (
   const body = yield* request.body;
   switch (request.url) {
     case "/v1/join": {
-      const { password } = yield* decodeJoin(body).pipe(
+      const { encryptedPassword } = yield* decodeJoin(body).pipe(
         Effect.mapError(
           () => new GatewayHelperRequestError({ status: 400, message: "Invalid join request." }),
         ),
       );
+      const password =
+        encryptedPassword === undefined
+          ? undefined
+          : yield* decryptPassword(options.passwordKey, encryptedPassword);
+      const wasEnrolled = Object.hasOwn(config.users, caller.name);
       yield* enrollGatewayUser(
         platform,
         caller.name,
         undefined,
         password === undefined ? undefined : { password },
-      ).pipe(Effect.catchCause((cause) => Effect.flip(failureResponse(cause, password))));
+      ).pipe(
+        // An admin's retry repairs a partial enrollment; a member would only see an absent backend.
+        Effect.onError(() =>
+          wasEnrolled
+            ? Effect.void
+            : unenrollGatewayUser(platform, caller.name).pipe(Effect.ignore),
+        ),
+        Effect.catchCause((cause) => Effect.flip(failureResponse(cause, password))),
+      );
       return yield* answer(200);
     }
     case "/v1/leave": {

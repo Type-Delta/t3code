@@ -7,6 +7,8 @@ import * as Schema from "effect/Schema";
 export const GATEWAY_HELPER_PORT = 3774;
 /** Required on every request with value "1"; browsers cannot send it cross-origin without a preflight the helper never allows. */
 export const GATEWAY_HELPER_HEADER = "x-t3-gateway-helper";
+/** How long the helper may take to download and stage an update before it answers the request. */
+export const GATEWAY_HELPER_STAGE_TIMEOUT_MS = 15 * 60 * 1000;
 
 export const GatewayHelperUpdateState = Schema.Struct({
   state: Schema.Literals(["running", "failed"]),
@@ -39,7 +41,8 @@ export type GatewayHelperStatus = typeof GatewayHelperStatus.Type;
 
 /** `POST /v1/join`. Answers with the new status. */
 export const GatewayHelperJoinRequest = Schema.Struct({
-  password: Schema.optional(Schema.String),
+  /** Windows: the caller's password, RSA-OAEP (SHA-256) encrypted to the gateway's published key, base64. */
+  encryptedPassword: Schema.optional(Schema.String),
 });
 
 /** `POST /v1/leave` takes an empty object and answers with the new status. */

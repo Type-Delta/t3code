@@ -1,11 +1,15 @@
+// @effect-diagnostics nodeBuiltinImport:off - Encrypts the Windows join password to the gateway's key.
+import * as NodeCrypto from "node:crypto";
+
 import {
   AuthStandardClientScopes,
   GATEWAY_HELPER_HEADER,
   GATEWAY_HELPER_PORT,
+  GATEWAY_HELPER_STAGE_TIMEOUT_MS,
   GatewayHelperError,
   GatewayHelperStatus,
 } from "@t3tools/contracts";
-import { gatewayHostFiles, parseNetstat } from "@t3tools/shared/gatewayHost";
+import { gatewayHostFiles } from "@t3tools/shared/gatewayHost";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Cause from "effect/Cause";
@@ -39,6 +43,10 @@ const HELPER_URL = `http://127.0.0.1:${GATEWAY_HELPER_PORT}`;
 const STATUS_TIMEOUT = Duration.seconds(10);
 // Joining registers OS services (on Windows a scheduled task), which can take a while.
 const CHANGE_TIMEOUT = Duration.seconds(60);
+const UPDATE_REQUEST_TIMEOUT = Duration.sum(
+  Duration.millis(GATEWAY_HELPER_STAGE_TIMEOUT_MS),
+  Duration.minutes(1),
+);
 const UPDATE_TIMEOUT = Duration.minutes(5);
 const UPDATE_POLL_INTERVAL = Duration.seconds(1);
 // A backend just enrolled or updated may be restarting; Windows retries its task once a minute.
@@ -85,8 +93,7 @@ const sharedRuntimeUpdateProgress = (
       : "running";
 
 /** Arguments for the bundled CLI that mint a one-time token on the backend serving `baseDir`. */
-export const pairCommandArgs = (entryPath: string, baseDir: string): ReadonlyArray<string> => [
-  entryPath,
+export const pairCommandArgs = (baseDir: string): ReadonlyArray<string> => [
   "pair",
   "--base-dir",
   baseDir,
@@ -99,50 +106,59 @@ export const pairCommandArgs = (entryPath: string, baseDir: string): ReadonlyArr
 export const parsePairToken = (output: string): Option.Option<string> =>
   Option.fromNullishOr(/^Token: (\S+)$/m.exec(output)?.[1]);
 
-/** Whether netstat shows exactly one 127.0.0.1 helper listener and it is the recorded gateway PID. */
-export const helperListenerMatches = (netstat: string, recordedPid: string): boolean => {
-  const listeners = parseNetstat(netstat).filter(
-    (row) =>
-      row.local.address === "127.0.0.1" &&
-      row.local.port === GATEWAY_HELPER_PORT &&
-      row.remote.port === 0,
-  );
-  return listeners.length === 1 && String(listeners[0]!.pid) === recordedPid.trim();
-};
-
-/**
- * Whether the helper port belongs to an administrator's gateway. Any local account can listen on it,
- * so the app asks the helper nothing without an installed gateway. On Windows, whose helper lives in
- * the gateway process, the port is also free while the gateway restarts, so the listener must be the
- * process the gateway recorded in its administrator-only folder.
- */
+/** The administrator's gateway install, seen from a desktop app. */
 export class DesktopGatewayHost extends Context.Service<
   DesktopGatewayHost,
-  { readonly trusted: Effect.Effect<boolean> }
+  {
+    /**
+     * Whether an administrator installed a gateway here. Any local account can listen on the helper
+     * port where none holds it, so the app asks the helper nothing otherwise.
+     */
+    readonly trusted: Effect.Effect<boolean>;
+    /** The shared runtime's CLI. Its tokens suit its backends whatever this app's version. */
+    readonly runtimeExecutable: string;
+    /**
+     * Windows: the join password encrypted to the key only the gateway process holds, since anyone can
+     * listen on the helper port while the gateway restarts.
+     */
+    readonly encryptPassword: (password: string) => Effect.Effect<string, DesktopGatewayError>;
+  }
 >()("@t3tools/desktop/backend/DesktopGateway/DesktopGatewayHost") {}
 
 export const hostLayer = Layer.effect(
   DesktopGatewayHost,
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
-    const env = yield* HostProcess.Environment;
-    const files = gatewayHostFiles(environment.platform, env);
-    const netstat = `${env["SystemRoot"] ?? "C:\\Windows"}\\System32\\netstat.exe`;
-    const trusted = Effect.gen(function* () {
-      if (files === undefined) return false;
-      const link = yield* fileSystem.lstat(files.currentLink);
-      // Only administrators can create entries under Program Files.
-      if (environment.platform !== "win32" && Option.getOrUndefined(link.uid) !== 0) return false;
-      if (files.helperPidFile === undefined) return true;
-      const recordedPid = yield* fileSystem.readFileString(files.helperPidFile);
-      const rows = yield* spawner.string(
-        ChildProcess.make(netstat, ["-ano", "-p", "TCP"], { stdin: "ignore" }),
-      );
-      return helperListenerMatches(rows, recordedPid);
-    }).pipe(Effect.orElseSucceed(() => false));
-    return DesktopGatewayHost.of({ trusted });
+    const files = gatewayHostFiles(environment.platform, yield* HostProcess.Environment);
+    const notReady = (cause?: unknown) =>
+      new DesktopGatewayError({
+        operation: "join",
+        reason: "Shared T3 Code is not ready to take a password. Try again in a minute.",
+        ...(cause === undefined ? {} : { cause }),
+      });
+    return DesktopGatewayHost.of({
+      trusted: Effect.gen(function* () {
+        if (files === undefined) return false;
+        const link = yield* fileSystem.lstat(files.currentLink);
+        // Only administrators can create entries under Program Files.
+        return environment.platform === "win32" || Option.getOrUndefined(link.uid) === 0;
+      }).pipe(Effect.orElseSucceed(() => false)),
+      runtimeExecutable: files?.runtimeExecutable ?? "",
+      encryptPassword: Effect.fn("DesktopGatewayHost.encryptPassword")(function* (password) {
+        if (files?.helperKeyFile === undefined) return yield* notReady();
+        const key = yield* fileSystem
+          .readFileString(files.helperKeyFile)
+          .pipe(Effect.mapError(notReady));
+        return yield* Effect.try({
+          try: () =>
+            NodeCrypto.publicEncrypt({ key, oaepHash: "sha256" }, Buffer.from(password)).toString(
+              "base64",
+            ),
+          catch: notReady,
+        });
+      }),
+    });
   }),
 );
 
@@ -204,8 +220,8 @@ const make = Effect.gen(function* () {
       HttpClientRequest.post(`${HELPER_URL}/v1/${operation}`).pipe(
         HttpClientRequest.bodyJsonUnsafe(body),
       ),
-      // The helper downloads and verifies the whole update before it answers.
-      operation === "update" ? UPDATE_TIMEOUT : CHANGE_TIMEOUT,
+      // The helper downloads and stages the whole update before it answers.
+      operation === "update" ? UPDATE_REQUEST_TIMEOUT : CHANGE_TIMEOUT,
     ).pipe(Effect.mapError((cause) => fail("Shared T3 Code did not answer.", cause)));
     if (response.status < 200 || response.status >= 300) {
       return yield* fail(
@@ -257,15 +273,10 @@ const make = Effect.gen(function* () {
     if (Option.isNone(owner) || owner.value.port !== port) {
       return yield* fail("The server holding this T3 home is not on the shared port.");
     }
-    const [command, ...args] = [
-      process.execPath,
-      ...pairCommandArgs(environment.backendEntryPath, environment.baseDir),
-    ];
+    // This app's own CLI could need a database migration that an older shared server blocks.
     const output = yield* spawner
       .string(
-        ChildProcess.make(command!, args, {
-          env: { ELECTRON_RUN_AS_NODE: "1" },
-          extendEnv: true,
+        ChildProcess.make(host.runtimeExecutable, pairCommandArgs(environment.baseDir), {
           stdin: "ignore",
         }),
       )
@@ -280,9 +291,10 @@ const make = Effect.gen(function* () {
 
   return DesktopGateway.of({
     status,
-    join: Effect.fn("DesktopGateway.join")((password?: string) =>
-      change("join", password === undefined ? {} : { password }),
-    ),
+    join: Effect.fn("DesktopGateway.join")(function* (password?: string) {
+      if (password === undefined) return yield* change("join", {});
+      return yield* change("join", { encryptedPassword: yield* host.encryptPassword(password) });
+    }),
     leave: change("leave", {}),
     updateRuntime,
     mintPairingToken,

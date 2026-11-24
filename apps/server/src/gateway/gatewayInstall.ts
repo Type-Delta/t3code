@@ -275,17 +275,15 @@ const pruneRuntimes = Effect.fn("gatewayInstall.pruneRuntimes")(function* (
 export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   platform: GatewayPlatform,
 ) {
-  yield* requireAdmin(platform);
-  yield* requireDefaultPaths;
-  const source = yield* runtimeSource(platform);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const { layout } = platform;
   const configDir = path.dirname(layout.configPath);
   // A self-service update runs from the helper's staging folder and owns the claim for its version.
+  const stagedFrom = path.dirname(yield* HostProcess.ExecutablePath);
   const selfServiceUpdate =
-    path.dirname(source.directory) === layout.installRoot &&
-    path.basename(source.directory).startsWith(".helper-staging-");
+    path.dirname(stagedFrom) === layout.installRoot &&
+    path.basename(stagedFrom).startsWith(".helper-staging-");
   if (selfServiceUpdate) {
     // Members' apps wait on the claim, so a failed install must not leave it running.
     yield* Effect.addFinalizer((exit) => {
@@ -295,6 +293,9 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
       return settleUpdateClaim(layout.configPath, packageJson.version, reason).pipe(Effect.ignore);
     });
   }
+  yield* requireAdmin(platform);
+  yield* requireDefaultPaths;
+  const source = yield* runtimeSource(platform);
   yield* checkInstallDirectories(platform);
   yield* lockGatewayPath(layout.installRoot);
   // Every finished install clears the claim, so one made since this update was requested may hold a
@@ -407,7 +408,7 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   for (const name of yield* fs.readDirectory(layout.installRoot)) {
     const staging = path.join(layout.installRoot, name);
     if (!name.startsWith(".helper-staging-")) continue;
-    if (selfServiceUpdate && staging !== source.directory) {
+    if (selfServiceUpdate && staging !== stagedFrom) {
       const modified = yield* fs.stat(staging).pipe(
         Effect.map((info) => Option.getOrUndefined(info.mtime)?.getTime()),
         Effect.orElseSucceed(() => undefined),

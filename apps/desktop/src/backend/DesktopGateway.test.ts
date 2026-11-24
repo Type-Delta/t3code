@@ -64,6 +64,8 @@ const layerGateway = (input: {
         Layer.succeed(HttpClient.HttpClient, HttpClient.make(input.respond)),
         Layer.succeed(DesktopGateway.DesktopGatewayHost, {
           trusted: Effect.succeed(input.hostTrusted ?? true),
+          runtimeExecutable: "/opt/t3code/current/t3",
+          encryptPassword: (password) => Effect.succeed(`sealed(${password})`),
         }),
         Layer.succeed(
           ChildProcessSpawner.ChildProcessSpawner,
@@ -167,6 +169,26 @@ describe("DesktopGateway", () => {
     }),
   );
 
+  it.effect("sends the Windows password only encrypted to the gateway's key", () =>
+    Effect.gen(function* () {
+      const bodies: Array<unknown> = [];
+      yield* Effect.flatMap(DesktopGateway.DesktopGateway, (g) => g.join("hunter2")).pipe(
+        Effect.provide(
+          layerGateway({
+            respond: (request) =>
+              Effect.sync(() => {
+                if (request.body._tag === "Uint8Array") {
+                  bodies.push(JSON.parse(new TextDecoder().decode(request.body.body)));
+                }
+                return json(request, 200, status());
+              }),
+          }),
+        ),
+      );
+      assert.deepStrictEqual(bodies, [{ encryptedPassword: "sealed(hunter2)" }]);
+    }),
+  );
+
   it.effect("waits for a requested update until the helper reports it failed", () =>
     Effect.gen(function* () {
       const polls = yield* Ref.make(0);
@@ -245,38 +267,17 @@ describe("DesktopGateway", () => {
       );
       const [command] = spawned;
       assert.isDefined(command);
-      assert.strictEqual(command?.command, process.execPath);
-      assert.deepStrictEqual(command?.args.slice(0, 6), [
-        "/app/server/bin.mjs",
+      // The shared runtime's own CLI, which matches the server whatever this app's version.
+      assert.strictEqual(command?.command, "/opt/t3code/current/t3");
+      assert.deepStrictEqual(command?.args.slice(0, 5), [
         "pair",
         "--base-dir",
         "/home/alice/.t3",
         "--label",
         "T3 Code desktop",
       ]);
-      assert.strictEqual(command?.options.env?.ELECTRON_RUN_AS_NODE, "1");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
-});
-
-describe("helperListenerMatches", () => {
-  it("accepts only the recorded gateway process as the one helper listener", () => {
-    const netstat = (...rows: ReadonlyArray<string>) =>
-      ["Active Connections", "  Proto  Local Address  Foreign Address  State  PID", ...rows].join(
-        "\r\n",
-      );
-    const gateway = "  TCP    127.0.0.1:3774         0.0.0.0:0              LISTENING       4120";
-    assert.isTrue(DesktopGateway.helperListenerMatches(netstat(gateway), "4120\r\n"));
-    assert.isFalse(DesktopGateway.helperListenerMatches(netstat(gateway), "5000"));
-    assert.isFalse(DesktopGateway.helperListenerMatches(netstat(), "4120"));
-    // A client connection from the gateway's PID is not a listener.
-    assert.isFalse(
-      DesktopGateway.helperListenerMatches(
-        netstat("  TCP    127.0.0.1:3774   127.0.0.1:50211   ESTABLISHED   4120"),
-        "4120",
-      ),
-    );
-  });
 });
 
 describe("shouldUpdateSharedRuntime", () => {
@@ -303,7 +304,7 @@ describe("shouldUpdateSharedRuntime", () => {
 
 describe("pairing helpers", () => {
   it("grants every scope of the desktop's own session", () => {
-    const args = DesktopGateway.pairCommandArgs("/entry", "/home");
+    const args = DesktopGateway.pairCommandArgs("/home");
     const scopes = args.flatMap((arg, index) => (args[index - 1] === "--scope" ? [arg] : []));
     assert.deepStrictEqual(scopes, [...AuthStandardClientScopes]);
   });

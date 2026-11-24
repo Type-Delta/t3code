@@ -253,6 +253,12 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
         version: packageJson.version,
         message: "did not start",
       });
+      // So does an archive that fails its checks before the install lock.
+      yield* claim;
+      yield* fs.remove(path.join(staging, "lib"), { recursive: true });
+      assert.match((yield* Effect.flip(fromStaging(platform))).message, /missing lib/);
+      assert.deepInclude(yield* readUpdateState(layout.configPath), { state: "failed" });
+      yield* fs.copy(at("archive/lib"), path.join(staging, "lib"));
 
       yield* claim;
       const pending = at("install/.helper-staging-pending");

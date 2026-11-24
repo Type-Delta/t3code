@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- real loopback HTTP is the protocol under test.
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
@@ -24,7 +25,7 @@ import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as ProcessRunner from "../processRunner.ts";
-import { helperPidPath, listenGatewayHelper } from "./gatewayHelper.ts";
+import { helperKeyPath, listenGatewayHelper } from "./gatewayHelper.ts";
 import { darwinGatewayPaths } from "./platform/darwin.ts";
 import { linuxGatewayPaths } from "./platform/linux.ts";
 import { win32GatewayPaths } from "./platform/win32.ts";
@@ -39,6 +40,16 @@ const RUNTIME = "0.1.9-gwtest.1";
 const NEXT = "0.1.9-gwtest.2";
 const BASE_URL = "https://updates.test/download";
 const PASSWORD = "hunter2-correct-horse";
+const KEYS = NodeCrypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+// As desktop apps read it from the file the gateway publishes.
+const PUBLISHED_KEY = KEYS.publicKey.export({ type: "spki", format: "pem" }).toString();
+const joinBody = (password: string) =>
+  JSON.stringify({
+    encryptedPassword: NodeCrypto.publicEncrypt(
+      { key: PUBLISHED_KEY, oaepHash: "sha256" },
+      Buffer.from(password),
+    ).toString("base64"),
+  });
 const HELPER_HEADERS = { host: "127.0.0.1:3774", [GATEWAY_HELPER_HEADER]: "1" };
 
 const services = Layer.mergeAll(
@@ -88,16 +99,20 @@ const send = (
       }),
   );
 
-const releaseFiles = (files: ReadonlyMap<string, Uint8Array | string>) =>
+const releaseFiles = (
+  files: ReadonlyMap<string, Uint8Array | string>,
+  onRequest: (url: string) => void = () => {},
+) =>
   HttpClient.make((request) =>
-    Effect.succeed(
-      HttpClientResponse.fromWeb(
+    Effect.sync(() => {
+      onRequest(request.url);
+      return HttpClientResponse.fromWeb(
         request,
         files.has(request.url)
           ? new Response(files.get(request.url))
           : new Response("missing", { status: 404 }),
-      ),
-    ),
+      );
+    }),
   );
 
 /** A real `t3-<version>-linux-x64.tar.gz` whose top-level folder holds an executable `t3`. */
@@ -130,6 +145,8 @@ const startHelper = Effect.fn("test.startHelper")(function* (
     readonly owner?: GatewayAccountId | undefined;
     readonly platform?: (platform: GatewayPlatform) => GatewayPlatform;
     readonly files?: ReadonlyMap<string, Uint8Array | string>;
+    readonly onRequest?: (url: string) => void;
+    readonly passwordKey?: NodeCrypto.KeyObject;
   } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -150,10 +167,18 @@ const startHelper = Effect.fn("test.startHelper")(function* (
   );
   const logs: Array<string> = [];
   const port = yield* listenGatewayHelper(
-    { platform, configPath, runtimeVersion: RUNTIME },
+    {
+      platform,
+      configPath,
+      runtimeVersion: RUNTIME,
+      ...(input.passwordKey === undefined ? {} : { passwordKey: input.passwordKey }),
+    },
     0,
   ).pipe(
-    Effect.provideService(HttpClient.HttpClient, releaseFiles(input.files ?? new Map())),
+    Effect.provideService(
+      HttpClient.HttpClient,
+      releaseFiles(input.files ?? new Map(), input.onRequest),
+    ),
     Effect.provideService(HostProcess.Architecture, "x64"),
     Effect.provide(
       Logger.layer([Logger.make(({ message }) => void logs.push(String(message)))], {
@@ -197,6 +222,7 @@ describe("gateway host files", () => {
     ] as const) {
       assert.deepEqual(gatewayHostFiles(platform, {}), {
         currentLink: `${paths.installRoot}/current`,
+        runtimeExecutable: `${paths.installRoot}/current/t3`,
       });
     }
     const { programFiles, programData, installRoot, configPath } = win32GatewayPaths;
@@ -204,7 +230,8 @@ describe("gateway host files", () => {
       gatewayHostFiles("win32", { ProgramFiles: programFiles, ProgramData: programData }),
       {
         currentLink: `${installRoot}\\current`,
-        helperPidFile: helperPidPath(NodePath.win32, configPath),
+        runtimeExecutable: `${installRoot}\\current\\t3.exe`,
+        helperKeyFile: helperKeyPath(NodePath.win32, configPath),
       },
     );
   });
@@ -270,6 +297,7 @@ describe("gateway helper", () => {
     Effect.gen(function* () {
       const passwords: Array<string | undefined> = [];
       const helper = yield* startHelper({
+        passwordKey: KEYS.privateKey,
         platform: (platform) => ({
           ...platform,
           accountName: () => Effect.succeed("Alice"),
@@ -290,7 +318,16 @@ describe("gateway helper", () => {
       assert.deepInclude(before, { user: "alice", enrolled: false, selfService: true });
       assert.isUndefined(before.backendPort);
 
-      const join = yield* helper.send("POST", "/v1/join", JSON.stringify({ password: PASSWORD }));
+      const unreadable = yield* helper.send(
+        "POST",
+        "/v1/join",
+        JSON.stringify({ encryptedPassword: Buffer.from(PASSWORD).toString("base64") }),
+      );
+      assert.equal(
+        decodeError(unreadable.text).error,
+        "Shared T3 Code could not read the password. Try again.",
+      );
+      const join = yield* helper.send("POST", "/v1/join", joinBody(PASSWORD));
       assert.equal(join.status, 200);
       assert.deepInclude(decodeStatus(join.text), { enrolled: true, backendPort: 3801 });
       const rejoin = yield* helper.send("POST", "/v1/join", "{}");
@@ -308,6 +345,7 @@ describe("gateway helper", () => {
   live("answers enrollment failures without leaking the password or hanging", () =>
     Effect.gen(function* () {
       const refused = yield* startHelper({
+        passwordKey: KEYS.privateKey,
         platform: (platform) => ({
           ...platform,
           services: {
@@ -319,15 +357,15 @@ describe("gateway helper", () => {
           },
         }),
       });
-      const failed = yield* refused.send(
-        "POST",
-        "/v1/join",
-        JSON.stringify({ password: PASSWORD }),
-      );
+      const failed = yield* refused.send("POST", "/v1/join", joinBody(PASSWORD));
       assert.equal(failed.status, 400);
       assert.equal(decodeError(failed.text).error, "Logon failure for [redacted]");
+      // A refused first join leaves no enrollment whose backend never starts.
+      const after = yield* refused.send("GET", "/v1/status");
+      assert.deepInclude(decodeStatus(after.text), { enrolled: false });
 
       const crashed = yield* startHelper({
+        passwordKey: KEYS.privateKey,
         platform: (platform) => ({
           ...platform,
           services: {
@@ -337,11 +375,16 @@ describe("gateway helper", () => {
           },
         }),
       });
-      const died = yield* crashed.send("POST", "/v1/join", JSON.stringify({ password: PASSWORD }));
+      const died = yield* crashed.send("POST", "/v1/join", joinBody(PASSWORD));
       assert.equal(died.status, 500);
       assert.equal(decodeError(died.text).error, "Gateway helper request failed.");
       assert.isNotEmpty(crashed.logs);
       assert.notInclude(crashed.logs.join("\n"), PASSWORD);
+
+      // Without the gateway's key, there is no password to read.
+      const keyless = yield* startHelper();
+      const noKey = yield* keyless.send("POST", "/v1/join", joinBody(PASSWORD));
+      assert.equal(decodeError(noKey.text).error, "This gateway takes no password.");
     }),
   );
 
@@ -404,6 +447,28 @@ describe("gateway helper", () => {
         JSON.stringify({ state: "running", version: NEXT, updatedAt: 0 }),
       );
       assert.equal((yield* update(NEXT)).status, 202);
+    }),
+  );
+
+  live("drops an update whose claim another install cleared during the download", () =>
+    Effect.gen(function* () {
+      let statePath = "";
+      const helper = yield* startHelper({
+        files: yield* buildRelease(yield* makeTestGatewayRoot("t3-gateway-release-"), NEXT),
+        onRequest: (url) => {
+          if (url.endsWith(".tar.gz")) NodeFS.rmSync(statePath, { force: true });
+        },
+      });
+      statePath = helper.updateStatePath;
+      const answer = yield* helper.send("POST", "/v1/update", JSON.stringify({ version: NEXT }));
+      assert.equal(answer.status, 409);
+      assert.equal(
+        decodeError(answer.text).error,
+        `Another install replaced the update to ${NEXT}.`,
+      );
+      assert.isFalse(helper.calls.some((call) => call.startsWith("runDetached")));
+      assert.deepStrictEqual(yield* helper.stagingDirs, []);
+      assert.isFalse(NodeFS.existsSync(statePath));
     }),
   );
 

@@ -2,7 +2,6 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 
-import { parseNetstat, type NetstatRow } from "@t3tools/shared/gatewayHost";
 import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
@@ -204,6 +203,44 @@ const isRegularUserSid = (sid: string) => {
   const rid = /^S-1-5-21-\d+-\d+-\d+-(\d+)$/.exec(sid)?.[1];
   return rid !== undefined && Number(rid) >= 1000;
 };
+
+interface Endpoint {
+  readonly address: string;
+  readonly port: number;
+}
+export interface NetstatRow {
+  readonly local: Endpoint;
+  readonly remote: Endpoint;
+  readonly pid: number;
+}
+
+const parseEndpoint = (text: string): Endpoint | undefined => {
+  const colon = text.lastIndexOf(":");
+  const port = Number(text.slice(colon + 1));
+  if (colon < 1 || !Number.isInteger(port) || port < 0 || port > 65535) return undefined;
+  return {
+    address: text
+      .slice(0, colon)
+      .replace(/^\[(.*)\]$/, "$1")
+      .replace(/%\d+$/, "")
+      .toLowerCase(),
+    port,
+  };
+};
+
+/**
+ * TCP rows of `netstat -ano`. The state column is localized and may hold spaces, so it is skipped:
+ * a listener is the row whose remote port is 0.
+ */
+export const parseNetstat = (text: string): ReadonlyArray<NetstatRow> =>
+  text.split(/\r?\n/).flatMap((line) => {
+    const fields = line.trim().split(/\s+/);
+    const pid = fields.at(-1) ?? "";
+    if (fields[0] !== "TCP" || fields.length < 4 || !/^\d+$/.test(pid)) return [];
+    const local = parseEndpoint(fields[1] ?? "");
+    const remote = parseEndpoint(fields[2] ?? "");
+    return local === undefined || remote === undefined ? [] : [{ local, remote, pid: Number(pid) }];
+  });
 
 const isListening = (row: NetstatRow) => row.remote.port === 0;
 const isLoopbackV4 = (address: string) => address === "127.0.0.1" || address === "::ffff:127.0.0.1";

@@ -24,6 +24,7 @@ import {
   isElevatedAdministrator,
   makeWin32GatewayPlatform,
   MANAGED_MARKER,
+  parseNetstat,
   parseTasklistAccount,
   parseWhoamiUser,
   psLiteral,
@@ -32,7 +33,6 @@ import {
   type AclEntry,
   type Win32GatewayPaths,
 } from "./win32.ts";
-import { parseNetstat } from "@t3tools/shared/gatewayHost";
 import { makeTestGatewayRoot } from "./testing.ts";
 
 const output = (stdout = "", code = 0, stderr = "") => ({

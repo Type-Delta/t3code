@@ -54,7 +54,8 @@ gateway_install=false
 if [ "$(id -u)" -eq 0 ] && [ "$install_mode" != user ]; then
   if [ "$install_mode" = gateway ]; then
     gateway_install=true
-  elif [ -r /dev/tty ]; then
+  # Without a controlling terminal /dev/tty can look readable yet fail to open.
+  elif (: <>/dev/tty) 2>/dev/null; then
     answer=
     printf 'Install T3 Code for everyone on this computer? [y/N] ' >/dev/tty
     if IFS= read -r answer < /dev/tty; then

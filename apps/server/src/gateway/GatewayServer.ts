@@ -27,7 +27,7 @@ import {
   type ConnectionOwner,
 } from "./platform/GatewayPlatform.ts";
 import { readPendingUsers } from "./GatewayPending.ts";
-import { listenGatewayHelper, recordHelperPid } from "./gatewayHelper.ts";
+import { listenGatewayHelper, publishHelperKey } from "./gatewayHelper.ts";
 import {
   backendCookieHeader,
   backendRequestHeaders,
@@ -851,14 +851,19 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
 
   const { host, port } = configSource.initial.listen;
   if (platform.helperHost === "gateway") {
-    yield* listenGatewayHelper({ platform, configPath: options.configPath }).pipe(
+    // Only this process holds the private key, so a squatter on the helper port gets no password.
+    const { publicKey, privateKey } = NodeCrypto.generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+    });
+    yield* listenGatewayHelper({
+      platform,
+      configPath: options.configPath,
+      passwordKey: privateKey,
+    }).pipe(
       Effect.provide(FetchHttpClient.layer),
-    );
-    // Without it desktop apps refuse the helper, so joining stops working but routing does not.
-    yield* recordHelperPid(platform, options.configPath).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning(`Could not record the helper process: ${error.message}`),
-      ),
+      Effect.andThen(publishHelperKey(platform, options.configPath, publicKey)),
+      // Routing does not depend on self-service.
+      Effect.catch((error) => Effect.logWarning(`Gateway helper unavailable: ${error.message}`)),
     );
   }
   yield* Effect.acquireRelease(
