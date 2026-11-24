@@ -11,6 +11,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClientServerSettingsPatch,
+  AntigravitySettings,
   ClaudeSettings,
   CodexSettings,
   DEFAULT_SERVER_SETTINGS,
@@ -44,6 +45,7 @@ const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownSync(CodexSettings);
+const decodeAntigravitySettings = Schema.decodeUnknownSync(AntigravitySettings);
 
 describe("auto resume on usage limit", () => {
   it("defaults existing settings to enabled", () => {
@@ -75,6 +77,22 @@ it("decodes settings containing retired agent access options", () => {
 });
 
 describe("provider API gateway model settings", () => {
+  it("accepts a Gemini gateway on Antigravity settings", () => {
+    const decoded = decodeAntigravitySettings({
+      authMethod: "gemini-api-key",
+      apiKey: "proxy-key",
+      apiGateway: { enabled: true, baseUrl: " https://gateway.example/v1beta " },
+    });
+
+    expect(decoded.apiGateway).toEqual({
+      enabled: true,
+      baseUrl: "https://gateway.example/v1beta",
+      useCodexCatalog: false,
+      codexImageGeneration: false,
+      catalogFormat: "auto",
+      authMode: "bearer",
+    });
+  });
   it("keeps gateway configuration and manual model metadata per provider instance", () => {
     const decoded = decodeCodexSettings({
       apiGateway: {

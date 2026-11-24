@@ -973,9 +973,11 @@ export function ProviderInstanceCard({
   const supportsApiGateway =
     (driverKind === ProviderDriverKind.make("codex") &&
       readCodexSetupMode(instance.config) !== "managed") ||
-    driverKind === ProviderDriverKind.make("claudeAgent");
+    driverKind === ProviderDriverKind.make("claudeAgent") ||
+    driverKind === ProviderDriverKind.make("antigravity");
   const managedGatewayEnvironmentVariable = instance.environment?.find(
     (variable) =>
+      driverKind !== ProviderDriverKind.make("antigravity") &&
       apiGateway.apiKeyEnvironmentVariable === API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE &&
       variable.name === API_GATEWAY_API_KEY_ENVIRONMENT_VARIABLE,
   );
@@ -1500,6 +1502,12 @@ export function ProviderInstanceCard({
               idPrefix={`provider-instance-${instanceId}`}
               variant="card"
               showCodexOptions={driverKind === ProviderDriverKind.make("codex")}
+              showApiKey={driverKind !== ProviderDriverKind.make("antigravity")}
+              protocol={
+                driverKind === ProviderDriverKind.make("antigravity")
+                  ? "gemini"
+                  : "openai-anthropic"
+              }
               onChange={updateGateway}
             />
           </div>

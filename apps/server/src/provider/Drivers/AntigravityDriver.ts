@@ -288,6 +288,7 @@ export const AntigravityDriver: ProviderDriver<
               input,
             ),
             auth,
+            apiGateway: settings.apiGateway,
             runtimeTempDirectory,
           }),
         }).pipe(Effect.provideService(SecureRandom.SecureRandom, random));

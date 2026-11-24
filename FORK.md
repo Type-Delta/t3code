@@ -28,6 +28,16 @@ The rules:
 - When an ID conflicts from merges, renumber the IDs as needed.
 - A change that does not alter how the fork differs from upstream (formatting, or an edit to this file) needs no entry.
 
+### DL066 — Antigravity Gemini gateway configuration
+
+Antigravity provider instances can route Gemini API-key sessions through a configured Gemini-compatible gateway. The provider settings editor exposes the gateway URL, and the server passes it as `GOOGLE_GEMINI_BASE_URL` for the instance's ACP process while keeping ambient gateway values out. Antigravity's existing API key field remains the credential source. OAuth and Agent Platform sessions do not receive the Gemini gateway override because the Antigravity CLI only applies it to Gemini API-key authentication.
+
+**Implementation evidence:** `packages/contracts/src/settings.ts`, `apps/server/src/provider/antigravityAuthSupport.ts`, `apps/server/src/provider/Drivers/AntigravityDriver.ts`, and `apps/web/src/components/settings/{CompatibleApiGatewaySection,ProviderInstanceCard,AddProviderInstanceDialog}.tsx`.
+
+**Recorded validation:** Antigravity environment, contracts, and gateway UI tests, plus the integrated web provider-settings verification for the Antigravity gateway flow.
+
+**Last updated:** 2026-11-24
+
 ### DL001 — Provider startup and artifact safeguards
 
 Windows Claude commands are resolved before the Agent SDK starts a session. The resolver follows npm launcher shims to the installed native executable or JavaScript entry point and preserves explicit executable paths. Provider snapshots and DevTools expose sanitized resolver diagnostics; startup provenance identifies installed web artifacts without exposing command output or environment values.
