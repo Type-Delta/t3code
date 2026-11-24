@@ -104,6 +104,7 @@ import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { textDirection } from "@t3tools/shared/textDirection";
 import { useFocusEffect, useIsFocused, useNavigation } from "@react-navigation/native";
 import { useNativeWorkspaceColumnsSupported } from "../../native/NativeWorkspaceColumns";
+import { useDelayedStatus } from "../../lib/useDelayedStatus";
 import { useDeviceType } from "../../native/native-layout-metrics";
 import { isDuoDevice } from "../../lib/device-type";
 import {
@@ -322,10 +323,11 @@ function isFreshTimestamp(input: string): boolean {
 }
 
 export interface ThreadFeedHistoryControls {
+  readonly cursor: string | null;
   readonly hasMoreHistory: boolean;
   readonly loading: boolean;
   readonly error: string | null;
-  readonly onLoadEarlier: () => void;
+  readonly onLoadEarlier: () => Promise<unknown>;
   /** Loads earlier history down to the entry, in one request. */
   readonly onLoadThrough: (entryId: string) => void;
 }
@@ -355,6 +357,7 @@ export interface ThreadFeedProps {
   readonly anchorMessageId: MessageId | null;
   /** A message to scroll to once it is in the feed; see `onJumpedToMessage`. */
   readonly jumpToMessageId?: MessageId | null;
+  readonly historyJumpPending?: boolean;
   readonly onJumpedToMessage?: () => void;
   readonly contentInsetEndAdjustment: SharedValue<number>;
   readonly keyboardOffset: number;
@@ -3522,6 +3525,49 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         ? setupAnchorIndex
         : undefined,
   });
+  const history = props.historyControls;
+  const historyCursor = history?.cursor;
+  const canPrefetchHistory =
+    focused &&
+    !props.historyJumpPending &&
+    loadedListKey === feedThreadKey &&
+    history?.hasMoreHistory === true &&
+    !history.loading &&
+    history.error === null;
+  const requestedHistory = useRef<{
+    threadKey: string;
+    cursor: string;
+    rowCount: number;
+  } | null>(null);
+  const prefetchHistory = () => {
+    if (!canPrefetchHistory || !history || !historyCursor) return;
+    if (
+      requestedHistory.current?.threadKey === feedThreadKey &&
+      requestedHistory.current.cursor === historyCursor
+    ) {
+      return;
+    }
+    requestedHistory.current = {
+      threadKey: feedThreadKey,
+      cursor: historyCursor,
+      rowCount: groupedFeed.length,
+    };
+    return history.onLoadEarlier();
+  };
+  const prefetchUnchangedHistory = useEffectEvent(() => {
+    const previous = requestedHistory.current;
+    if (
+      groupedFeed.length === 0 ||
+      ((previous?.threadKey !== feedThreadKey || previous.rowCount === groupedFeed.length) &&
+        listRef.current?.getState().isNearStart)
+    ) {
+      void prefetchHistory();
+    }
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- rechecks the viewport when a page advances without changing the visible row count
+  useEffect(() => {
+    if (canPrefetchHistory && historyCursor) prefetchUnchangedHistory();
+  }, [canPrefetchHistory, historyCursor]);
   const { contentInsetEndAdjustment } = props;
   const attachList = (list: LegendListRef | null) => {
     listRef.current = list;
@@ -3983,6 +4029,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onLayout={handleMetricsChange}
             onItemSizeChanged={handleItemSizeChanged}
             onScroll={handleScroll}
+            onStartReached={canPrefetchHistory ? prefetchHistory : undefined}
+            onStartReachedThreshold={0.6}
             scrollEventThrottle={16}
             ListHeaderComponent={
               <>
@@ -3993,7 +4041,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
                   <WorktreePreparingHeader />
                 ) : null}
                 {props.historyControls ? (
-                  <ThreadFeedLoadEarlierControl {...props.historyControls} />
+                  <ThreadFeedHistoryStatus key={feedThreadKey} {...props.historyControls} />
                 ) : null}
               </>
             }
@@ -4040,32 +4088,40 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   );
 });
 
-function ThreadFeedLoadEarlierControl(props: ThreadFeedHistoryControls) {
+function ThreadFeedHistoryStatus(props: ThreadFeedHistoryControls) {
   const theme = useUniwindTheme();
   const mutedColor = theme["--color-icon-subtle"];
+  const loadingLabel = useDelayedStatus(
+    props.loading ? "loading" : "idle",
+    props.loading ? "Loading earlier activity…" : null,
+  );
   if (!props.hasMoreHistory && props.error === null) {
     return null;
   }
   return (
-    <View className="mb-3 items-center gap-1.5 px-2">
-      {props.hasMoreHistory ? (
-        <View className="self-center">
-          <Button
-            label={props.loading ? "Loading earlier activity…" : "Load earlier activity"}
-            tone="secondary"
-            accessibilityLabel="Load earlier activity"
-            disabled={props.loading}
-            onPress={props.onLoadEarlier}
-            icon="chevron.up"
-            loading={props.loading}
-          />
-        </View>
-      ) : null}
+    <View className="min-h-6 items-center justify-center gap-1.5 px-2">
       {props.error !== null ? (
-        <Text className="text-center text-xs" style={{ color: mutedColor }}>
-          {props.error}
+        <>
+          <Text
+            accessibilityLiveRegion="polite"
+            className="text-center text-xs"
+            style={{ color: mutedColor }}
+          >
+            {props.error}
+          </Text>
+          {props.hasMoreHistory ? (
+            <Button label="Retry" tone="secondary" onPress={() => void props.onLoadEarlier()} />
+          ) : null}
+        </>
+      ) : (
+        <Text
+          accessibilityLiveRegion="polite"
+          className="text-center text-xs"
+          style={{ color: mutedColor }}
+        >
+          {loadingLabel}
         </Text>
-      ) : null}
+      )}
     </View>
   );
 }
