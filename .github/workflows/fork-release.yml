@@ -1,25 +1,73 @@
 name: Fork Release
 
+# Stable ships from main on every push. Nightly ships from dev: the daily schedule starts a dev run
+# when dev has changed and the last nightly is at least two days old.
 on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 19 * * *"
   workflow_dispatch:
     inputs:
+      channel:
+        description: "stable builds the dispatched ref; nightly must be dispatched on dev."
+        required: false
+        default: stable
+        type: choice
+        options:
+          - stable
+          - nightly
       version:
-        description: "Leave blank for the next fork build of the upstream base in apps/desktop/package.json (0.1.7 → 0.1.701, 0.1.702…). Required for nightly."
+        description: "Leave blank to derive the next fork build of the upstream base in apps/desktop/package.json (0.1.7 → 0.1.701, 0.1.702…; nightly adds -nightly.YYYYMMDD.N)."
         required: false
         default: ""
         type: string
 
-# Serialize whole runs so preflight's newer-than-latest check sees the previous release.
+# Serialize each channel so preflight sees the previous release of that channel.
 concurrency:
-  group: fork-release
+  group: fork-release-${{ github.event_name == 'schedule' && 'schedule' || inputs.channel || 'stable' }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  schedule_nightly:
+    name: Start nightly when due
+    if: github.event_name == 'schedule' && github.repository == 'Type-Delta/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch a dev nightly if dev changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dev="$(gh api "repos/$GITHUB_REPOSITORY/commits/dev" --jq .sha)"
+          last="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '[.[] | select(.draft | not) | select(.tag_name | test("-nightly\\."))][0] // empty | [.tag_name, .created_at] | @tsv')"
+          if [[ -n "$last" ]]; then
+            IFS=$'\t' read -r tag created <<< "$last"
+            built="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
+            if [[ "$built" == "$dev" ]]; then
+              echo "dev is still at $tag ($dev); no nightly."
+              exit 0
+            fi
+            # 47 hours, so a run a few minutes early on the second day still counts.
+            if (( $(date -u +%s) - $(date -u -d "$created" +%s) < 47 * 3600 )); then
+              echo "$tag was published at $created; the next nightly is due two days after it."
+              exit 0
+            fi
+          fi
+          gh workflow run fork-release.yml --repo "$GITHUB_REPOSITORY" --ref dev -f channel=nightly
+          echo "Started a nightly for dev at $dev."
+
   preflight:
     name: Validate release version
+    if: github.event_name != 'schedule' && github.repository == 'Type-Delta/t3code'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -32,9 +80,14 @@ jobs:
         shell: bash
         env:
           VERSION_INPUT: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel || 'stable' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [[ "$CHANNEL" == nightly && "$GITHUB_REF" != refs/heads/dev ]]; then
+            echo "::error::Nightly builds dev; dispatch it on dev, not $GITHUB_REF."
+            exit 1
+          fi
           gh api --paginate "repos/$GITHUB_REPOSITORY/tags?per_page=100" --jq '.[].name' > "$RUNNER_TEMP/fork-tags"
           version="${VERSION_INPUT#v}"
           if [[ -z "$version" ]]; then
@@ -60,7 +113,18 @@ jobs:
           print(f'{major}.{minor}.{build}')
           PY
             )"
+            if [[ "$CHANNEL" == nightly ]]; then
+              date="$(date -u +%Y%m%d)"
+              build="$(grep -c -E "^v${version//./\\.}-nightly\.$date\.[0-9]+$" "$RUNNER_TEMP/fork-tags" || true)"
+              version="$version-nightly.$date.$((build + 1))"
+            fi
             echo "Derived version $version from upstream base $base."
+          fi
+          kind=stable
+          [[ "$version" == *-nightly.* ]] && kind=nightly
+          if [[ "$kind" != "$CHANNEL" ]]; then
+            echo "::error::Version $version is a $kind version, but the $CHANNEL channel was requested."
+            exit 1
           fi
           number='(0|[1-9][0-9]*)'
           if [[ ! "$version" =~ ^${number}\.${number}\.${number}(-nightly\.[0-9]{8}\.${number})?$ ]]; then
