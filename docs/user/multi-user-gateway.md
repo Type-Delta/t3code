@@ -148,6 +148,8 @@ To unenroll an account, run `t3 gateway remove alice` as an administrator. This 
 backend and leaves the account's T3 Code data in place.
 After renaming an enrolled account, remove it under its old name and add it again under the
 new one.
+Remove an account's enrollment before deleting that account. On Windows, a new account created
+under the same name could otherwise receive the old account's connections for a few minutes.
 
 To remove the shared service, run `t3 gateway uninstall` as an administrator. It removes
 the services and installed runtime and keeps the gateway config, pairing folders, the
