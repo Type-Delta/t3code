@@ -338,6 +338,7 @@ describe("gateway helper", () => {
   live("updates only to a newer version, one at a time", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const helper = yield* startHelper({
         files: yield* buildRelease(yield* makeTestGatewayRoot("t3-gateway-release-"), NEXT),
       });
@@ -357,8 +358,9 @@ describe("gateway helper", () => {
       });
       const [staging] = yield* helper.stagingDirs;
       assert.isDefined(staging);
-      assert.isTrue(yield* fs.exists(`${staging}/t3`));
-      assert.include(helper.calls, `runDetached update ${staging}/t3 gateway install`);
+      const executable = path.join(staging!, "t3");
+      assert.isTrue(yield* fs.exists(executable));
+      assert.include(helper.calls, `runDetached update ${executable} gateway install`);
       assert.deepInclude(yield* helper.updateState, { state: "running", version: NEXT });
 
       assert.equal((yield* update(NEXT)).status, 409);

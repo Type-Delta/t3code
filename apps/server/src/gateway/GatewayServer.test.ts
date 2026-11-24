@@ -29,6 +29,8 @@ vi.mock("./platform/GatewayPlatform.ts", async (importOriginal) => {
       Effect.map(actual.currentGatewayPlatform(), (platform) => ({
         ...platform,
         makeConnectionOwner: Effect.succeed(async () => uid),
+        // The helper has its own tests; on Windows it would bind the real helper port.
+        helperHost: "service" as const,
       })),
   };
 });
