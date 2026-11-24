@@ -357,6 +357,13 @@ const decodeNames = Schema.decodeEffect(Schema.fromJsonString(Schema.Array(Schem
 const decodeAccountName = Schema.decodeEffect(Schema.fromJsonString(Schema.String));
 
 // Task Scheduler's COM API: no module import, and IRunningTask names the action's process.
+/**
+ * Without one, a task SYSTEM registers (the helper's joins and updates) grants full access to SYSTEM
+ * only, and an administrator's later install cannot restart it. The backend's user may read its task.
+ */
+export const managedTaskSddl = (readerSid?: string) =>
+  `D:(A;;FA;;;BA)(A;;FA;;;SY)${readerSid === undefined ? "" : `(A;;FR;;;${readerSid})`}`;
+
 // S kills the action's process tree: ending a task stops cmd.exe but not the t3.exe it started.
 const psTaskFunctions = (taskkill: string) =>
   [
@@ -367,7 +374,7 @@ const psTaskFunctions = (taskkill: string) =>
     "function T3Task($n){$f=T3Folder;if(-not $f){return $null};try{$f.GetTask($n)}catch{$null}}",
     `function T3Stop($n){$t=T3Task $n;if(-not $t){return};foreach($i in @($t.GetInstances(0))){if($i.EnginePID){try{& ${psLiteral(taskkill)} /PID $i.EnginePID /T /F|Out-Null}catch{}}};$t.Stop(0)}`,
     // With a user, that user's password arrives as one line on stdin.
-    "function T3Register($n,$x,$l,$u){$t=T3Task $n;if($t -and $t.Definition.RegistrationInfo.Description -ne $M){throw \"\\T3Code\\$n is not managed by t3 gateway.\"};$p=$null;if($u){$p=[Console]::In.ReadLine()};T3Stop $n;$f=T3Folder;if(-not $f){$f=$sched.GetFolder('\\').CreateFolder('T3Code')};if($t){$f.DeleteTask($n,0)};$f.RegisterTask($n,$x,2,$u,$p,$l)|Out-Null}",
+    "function T3Register($n,$x,$l,$u,$d){$t=T3Task $n;if($t -and $t.Definition.RegistrationInfo.Description -ne $M){throw \"\\T3Code\\$n is not managed by t3 gateway.\"};$p=$null;if($u){$p=[Console]::In.ReadLine()};T3Stop $n;$f=T3Folder;if(-not $f){$f=$sched.GetFolder('\\').CreateFolder('T3Code')};if($t){$f.DeleteTask($n,0)};$f.RegisterTask($n,$x,2,$u,$p,$l,$d)|Out-Null}",
     "function T3Version($n){$t=T3Task $n;if(-not $t){'absent'}elseif($t.Definition.RegistrationInfo.Description -ne $M){'unmanaged'}else{'managed '+$t.Definition.RegistrationInfo.Version}}",
     "function T3Unregister($n){$t=T3Task $n;if(-not $t){return 'absent'};if($t.Definition.RegistrationInfo.Description -ne $M){return 'unmanaged'};T3Stop $n;(T3Folder).DeleteTask($n,0);'removed'}",
   ].join(";");
@@ -889,7 +896,9 @@ export const makeWin32GatewayPlatform = (
   const taskScript = (script: string, options?: ToolOptions) =>
     powershell(`${psTaskFunctions(tool.taskkill)};${script}`, options);
   const registerTask = (name: string, xml: string, logonType: number) =>
-    taskScript(`T3Register ${psLiteral(name)} ${psLiteral(xml)} ${logonType}`);
+    taskScript(
+      `T3Register ${psLiteral(name)} ${psLiteral(xml)} ${logonType} $null ${psLiteral(managedTaskSddl())}`,
+    );
   const stopTask = (name: string) => taskScript(`T3Stop ${psLiteral(name)}`);
   const startTask = (name: string) => taskScript(`(T3Task ${psLiteral(name)}).Run($null)|Out-Null`);
 
@@ -1039,7 +1048,7 @@ export const makeWin32GatewayPlatform = (
     yield* powershell(grantBatchLogonScript(sid));
     // Registering stops a running instance first.
     yield* taskScript(
-      `T3Register ${psLiteral(name)} ${psLiteral(xml)} ${s4uLogon} ${psLiteral(sid)}`,
+      `T3Register ${psLiteral(name)} ${psLiteral(xml)} ${s4uLogon} ${psLiteral(sid)} ${psLiteral(managedTaskSddl(sid))}`,
       { stdin: `${password}\n` },
     );
     yield* startTask(name);

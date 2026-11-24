@@ -102,6 +102,7 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
     registered: [] as Array<
       readonly [name: string, xml: string, logonType: string, user: string | undefined]
     >,
+    sddl: new Map<string, string>(),
     listeners: new Map<number, number>(),
     netstatExtra: [] as Array<string>,
     owners: new Map<number, string>(),
@@ -152,7 +153,9 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
 
   const taskScript = (script: string) => {
     const match = (pattern: string) => new RegExp(`;${pattern}$`, "s").exec(script);
-    const register = match(`T3Register ${literal} ${literal} (\\d+)(?: ${literal})?`);
+    const register = match(
+      `T3Register ${literal} ${literal} (\\d+) (?:\\$null|${literal}) ${literal}`,
+    );
     if (register) {
       const name = unquote(register[1]!);
       const xml = unquote(register[2]!);
@@ -162,6 +165,7 @@ const fixture = Effect.fn("win32GatewayTest.fixture")(function* () {
         register[3]!,
         register[4] === undefined ? undefined : unquote(register[4]),
       ]);
+      state.sddl.set(name, unquote(register[5]!));
       state.tasks.set(name, { description: MANAGED_MARKER, xml, running: false });
       return output();
     }
@@ -1095,6 +1099,8 @@ it.layer(NodeServices.layer)("win32 gateway platform", (it) => {
         readonly [string, string, string, string | undefined],
       ];
       assert.deepEqual([name, logonType, principal], ["Backend-alice", "2", alice]);
+      // Administrators keep full control even of a task the SYSTEM helper registers.
+      assert.equal(state.sddl.get("Backend-alice"), `D:(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;${alice})`);
       const grant = powershellRuns.findIndex((script) => script.includes("LsaAddAccountRights"));
       assert.include(powershellRuns[grant], `SecurityIdentifier('${alice}')`);
       assert.include(powershellRuns[grant], "Grant($b,'SeBatchLogonRight')");
