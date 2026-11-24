@@ -274,8 +274,9 @@ export const unenrollGatewayUser = Effect.fn("gatewayCli.unenrollUser")(function
   platform: GatewayPlatform,
   user: string,
   /**
-   * A member leaving: only the enrollment of this account id is removed, and its backend must stop
-   * first, so a failed stop leaves the enrollment for a retry. Without an enrollment nothing is touched.
+   * A member leaving: only the enrollment of this account id is removed. Its backend stops and its
+   * pairing folder goes first, so either failing leaves the enrollment for a retry. Without an
+   * enrollment nothing is touched.
    */
   options?: { readonly member?: GatewayAccountId },
 ) {
