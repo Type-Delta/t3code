@@ -231,6 +231,13 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
 
       // Another install cleared the claim, so this older request must not replace its runtime.
       assert.match((yield* Effect.flip(fromStaging(platform))).message, /Another install replaced/);
+      // Nor may it touch a claim another member made since.
+      yield* writeUpdateState(layout.configPath, "running", "99.0.0", "");
+      assert.match((yield* Effect.flip(fromStaging(platform))).message, /Another install replaced/);
+      assert.deepInclude(yield* readUpdateState(layout.configPath), {
+        state: "running",
+        version: "99.0.0",
+      });
 
       yield* claim;
       const failing = {
@@ -248,9 +255,15 @@ it.layer(testGatewayServices)("gateway installation", (it) => {
       });
 
       yield* claim;
+      const pending = at("install/.helper-staging-pending");
+      yield* fs.makeDirectory(pending);
       yield* fromStaging(platform);
       assert.isFalse(yield* fs.exists(statePath));
       assert.isFalse(yield* fs.exists(staging));
+      // Another member's fresh update stays staged; an administrator's install supersedes it.
+      assert.isTrue(yield* fs.exists(pending));
+      yield* install;
+      assert.isFalse(yield* fs.exists(pending));
     }),
   );
 

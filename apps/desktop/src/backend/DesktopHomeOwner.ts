@@ -89,6 +89,12 @@ export const readLiveHomeOwner = Effect.fn("DesktopHomeOwner.readLiveHomeOwner")
   );
 });
 
+/** The live server holding the desktop's T3 home's ownership lock, if any. */
+export const readLockedHomeOwner = Effect.fn("DesktopHomeOwner.readLockedHomeOwner")(function* () {
+  if (!(yield* isHomeOwnershipLocked())) return Option.none<HomeOwner>();
+  return yield* readLiveHomeOwner();
+});
+
 export const homeOwnedMessage = (owner: Option.Option<HomeOwner>): string =>
   Option.match(owner, {
     onNone: () =>

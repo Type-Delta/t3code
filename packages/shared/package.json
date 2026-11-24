@@ -471,6 +471,10 @@
       "types": "./src/forkRepository.ts",
       "import": "./src/forkRepository.ts"
     },
+    "./gatewayHost": {
+      "types": "./src/gatewayHost.ts",
+      "import": "./src/gatewayHost.ts"
+    },
     "./diffCutLines": {
       "types": "./src/diffCutLines.ts",
       "import": "./src/diffCutLines.ts"

@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off -- holds the T3 home's real SQLite ownership lock.
+import * as NodeSqlite from "node:sqlite";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { AuthStandardClientScopes, type GatewayHelperStatus } from "@t3tools/contracts";
@@ -53,11 +56,15 @@ const layerGateway = (input: {
   readonly pairOutput?: string;
   readonly spawned?: Array<SpawnedCommand>;
   readonly stateDir?: string;
+  readonly hostTrusted?: boolean;
 }) =>
   DesktopGateway.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(HttpClient.HttpClient, HttpClient.make(input.respond)),
+        Layer.succeed(DesktopGateway.DesktopGatewayHost, {
+          trusted: Effect.succeed(input.hostTrusted ?? true),
+        }),
         Layer.succeed(
           ChildProcessSpawner.ChildProcessSpawner,
           ChildProcessSpawner.make((command) => {
@@ -115,6 +122,22 @@ describe("DesktopGateway", () => {
         assert.strictEqual(Option.isSome(result), found);
         assert.deepStrictEqual(headers, ["1"]);
       }
+      // Without an administrator's gateway, whoever listens on the port is never asked.
+      const asked: Array<string> = [];
+      const untrusted = yield* Effect.flatMap(DesktopGateway.DesktopGateway, (g) => g.status).pipe(
+        Effect.provide(
+          layerGateway({
+            hostTrusted: false,
+            respond: (request) =>
+              Effect.sync(() => {
+                asked.push(request.url);
+                return json(request, 200, status());
+              }),
+          }),
+        ),
+      );
+      assert.isTrue(Option.isNone(untrusted));
+      assert.deepStrictEqual(asked, []);
     }),
   );
 
@@ -191,6 +214,8 @@ describe("DesktopGateway", () => {
         path.join(stateDir, "server-runtime.json"),
         JSON.stringify({ pid: process.pid, port: 41001 }),
       );
+      const lock = new NodeSqlite.DatabaseSync(path.join(stateDir, "server-owner.sqlite"));
+      yield* Effect.addFinalizer(() => Effect.sync(() => lock.close()));
       const spawned: Array<SpawnedCommand> = [];
       const mint = (port: number) =>
         Effect.flatMap(DesktopGateway.DesktopGateway, (g) => g.mintPairingToken(port)).pipe(
@@ -204,6 +229,13 @@ describe("DesktopGateway", () => {
             }),
           ),
         );
+      // A runtime file alone, as a crashed server leaves it, is not an owner.
+      assert.strictEqual(
+        (yield* Effect.flip(mint(41001))).reason,
+        "The server holding this T3 home is not on the shared port.",
+      );
+      assert.lengthOf(spawned, 0);
+      lock.exec("BEGIN EXCLUSIVE");
       assert.strictEqual(yield* mint(41001), "ABCD-1234");
       // Whoever answered on the helper port named a port this home's server does not listen on.
       const refused = yield* Effect.flip(mint(41002));
@@ -225,6 +257,26 @@ describe("DesktopGateway", () => {
       assert.strictEqual(command?.options.env?.ELECTRON_RUN_AS_NODE, "1");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+});
+
+describe("helperListenerMatches", () => {
+  it("accepts only the recorded gateway process as the one helper listener", () => {
+    const netstat = (...rows: ReadonlyArray<string>) =>
+      ["Active Connections", "  Proto  Local Address  Foreign Address  State  PID", ...rows].join(
+        "\r\n",
+      );
+    const gateway = "  TCP    127.0.0.1:3774         0.0.0.0:0              LISTENING       4120";
+    assert.isTrue(DesktopGateway.helperListenerMatches(netstat(gateway), "4120\r\n"));
+    assert.isFalse(DesktopGateway.helperListenerMatches(netstat(gateway), "5000"));
+    assert.isFalse(DesktopGateway.helperListenerMatches(netstat(), "4120"));
+    // A client connection from the gateway's PID is not a listener.
+    assert.isFalse(
+      DesktopGateway.helperListenerMatches(
+        netstat("  TCP    127.0.0.1:3774   127.0.0.1:50211   ESTABLISHED   4120"),
+        "4120",
+      ),
+    );
+  });
 });
 
 describe("shouldUpdateSharedRuntime", () => {

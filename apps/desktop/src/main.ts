@@ -222,7 +222,7 @@ const layerDesktopLocalEnvironmentAuth = DesktopLocalEnvironmentAuth.layer.pipe(
 
 const layerDesktopApplication = Layer.mergeAll(
   DesktopLifecycle.layer,
-  DesktopGateway.layer,
+  DesktopGateway.layer.pipe(Layer.provide(DesktopGateway.hostLayer)),
   layerDesktopAppActivation,
   DesktopWebLinks.layer,
   DesktopApplicationMenu.layer,

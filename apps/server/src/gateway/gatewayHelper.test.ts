@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- real loopback HTTP is the protocol under test.
 import * as NodeCrypto from "node:crypto";
 import * as NodeHttp from "node:http";
+import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
@@ -11,6 +12,7 @@ import {
   GatewayHelperUpdateState,
 } from "@t3tools/contracts";
 import { cliReleaseAssetUrl } from "@t3tools/shared/cliRelease";
+import { gatewayHostFiles } from "@t3tools/shared/gatewayHost";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -22,7 +24,10 @@ import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as ProcessRunner from "../processRunner.ts";
-import { listenGatewayHelper } from "./gatewayHelper.ts";
+import { helperPidPath, listenGatewayHelper } from "./gatewayHelper.ts";
+import { darwinGatewayPaths } from "./platform/darwin.ts";
+import { linuxGatewayPaths } from "./platform/linux.ts";
+import { win32GatewayPaths } from "./platform/win32.ts";
 import {
   GatewayPlatformError,
   type GatewayAccountId,
@@ -183,6 +188,27 @@ const live = <E>(
   name: string,
   test: () => Effect.Effect<void, E, Layer.Success<typeof services> | Scope.Scope>,
 ) => it.live(name, () => test().pipe(Effect.provide(services)));
+
+describe("gateway host files", () => {
+  it("match where each platform installs the gateway", () => {
+    for (const [platform, paths] of [
+      ["linux", linuxGatewayPaths],
+      ["darwin", darwinGatewayPaths],
+    ] as const) {
+      assert.deepEqual(gatewayHostFiles(platform, {}), {
+        currentLink: `${paths.installRoot}/current`,
+      });
+    }
+    const { programFiles, programData, installRoot, configPath } = win32GatewayPaths;
+    assert.deepEqual(
+      gatewayHostFiles("win32", { ProgramFiles: programFiles, ProgramData: programData }),
+      {
+        currentLink: `${installRoot}\\current`,
+        helperPidFile: helperPidPath(NodePath.win32, configPath),
+      },
+    );
+  });
+});
 
 describe("gateway helper", () => {
   live("refuses requests a browser or another host could make", () =>

@@ -5,6 +5,7 @@ import {
   GatewayHelperError,
   GatewayHelperStatus,
 } from "@t3tools/contracts";
+import { gatewayHostFiles, parseNetstat } from "@t3tools/shared/gatewayHost";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -96,6 +97,52 @@ export const pairCommandArgs = (entryPath: string, baseDir: string): ReadonlyArr
 export const parsePairToken = (output: string): Option.Option<string> =>
   Option.fromNullishOr(/^Token: (\S+)$/m.exec(output)?.[1]);
 
+/** Whether netstat shows exactly one 127.0.0.1 helper listener and it is the recorded gateway PID. */
+export const helperListenerMatches = (netstat: string, recordedPid: string): boolean => {
+  const listeners = parseNetstat(netstat).filter(
+    (row) =>
+      row.local.address === "127.0.0.1" &&
+      row.local.port === GATEWAY_HELPER_PORT &&
+      row.remote.port === 0,
+  );
+  return listeners.length === 1 && String(listeners[0]!.pid) === recordedPid.trim();
+};
+
+/**
+ * Whether the helper port belongs to an administrator's gateway. Any local account can listen on it,
+ * so the app asks the helper nothing without an installed gateway. On Windows, whose helper lives in
+ * the gateway process, the port is also free while the gateway restarts, so the listener must be the
+ * process the gateway recorded in its administrator-only folder.
+ */
+export class DesktopGatewayHost extends Context.Service<
+  DesktopGatewayHost,
+  { readonly trusted: Effect.Effect<boolean> }
+>()("@t3tools/desktop/backend/DesktopGatewayHost") {}
+
+export const hostLayer = Layer.effect(
+  DesktopGatewayHost,
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const files = gatewayHostFiles(environment.platform, process.env);
+    const netstat = `${process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\netstat.exe`;
+    const trusted = Effect.gen(function* () {
+      if (files === undefined) return false;
+      const link = yield* fileSystem.lstat(files.currentLink);
+      // Only administrators can create entries under Program Files.
+      if (environment.platform !== "win32" && Option.getOrUndefined(link.uid) !== 0) return false;
+      if (files.helperPidFile === undefined) return true;
+      const recordedPid = yield* fileSystem.readFileString(files.helperPidFile);
+      const rows = yield* spawner.string(
+        ChildProcess.make(netstat, ["-ano", "-p", "TCP"], { stdin: "ignore" }),
+      );
+      return helperListenerMatches(rows, recordedPid);
+    }).pipe(Effect.orElseSucceed(() => false));
+    return DesktopGatewayHost.of({ trusted });
+  }),
+);
+
 export class DesktopGateway extends Context.Service<
   DesktopGateway,
   {
@@ -118,12 +165,19 @@ const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const host = yield* DesktopGatewayHost;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const attached = yield* Ref.make(false);
 
   const send = (request: HttpClientRequest.HttpClientRequest, timeout: Duration.Duration) =>
-    httpClient.execute(request.pipe(HttpClientRequest.setHeader(GATEWAY_HELPER_HEADER, "1"))).pipe(
+    host.trusted.pipe(
+      Effect.flatMap((trusted) =>
+        trusted ? Effect.void : Effect.fail(new Error("No shared T3 Code is installed here.")),
+      ),
+      Effect.andThen(
+        httpClient.execute(request.pipe(HttpClientRequest.setHeader(GATEWAY_HELPER_HEADER, "1"))),
+      ),
       Effect.flatMap((response) =>
         response.json.pipe(Effect.map((body) => ({ status: response.status, body }))),
       ),
@@ -145,7 +199,8 @@ const make = Effect.gen(function* () {
       HttpClientRequest.post(`${HELPER_URL}/v1/${operation}`).pipe(
         HttpClientRequest.bodyJsonUnsafe(body),
       ),
-      CHANGE_TIMEOUT,
+      // The helper downloads and verifies the whole update before it answers.
+      operation === "update" ? UPDATE_TIMEOUT : CHANGE_TIMEOUT,
     ).pipe(Effect.mapError((cause) => fail("Shared T3 Code did not answer.", cause)));
     if (response.status < 200 || response.status >= 300) {
       return yield* fail(
@@ -187,6 +242,16 @@ const make = Effect.gen(function* () {
         reason,
         ...(cause === undefined ? {} : { cause }),
       });
+    // Any local account can answer on the helper's port while the gateway restarts, so the token
+    // goes only to the server that holds this T3 home.
+    const owner = yield* DesktopHomeOwner.readLockedHomeOwner().pipe(
+      Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
+    if (Option.isNone(owner) || owner.value.port !== port) {
+      return yield* fail("The server holding this T3 home is not on the shared port.");
+    }
     const [command, ...args] = [
       process.execPath,
       ...pairCommandArgs(environment.backendEntryPath, environment.baseDir),
@@ -203,20 +268,9 @@ const make = Effect.gen(function* () {
         Effect.timeout(PAIR_TIMEOUT),
         Effect.mapError((cause) => fail("Could not run t3 pair for the shared server.", cause)),
       );
-    const token = yield* Effect.fromOption(parsePairToken(output)).pipe(
+    return yield* Effect.fromOption(parsePairToken(output)).pipe(
       Effect.mapError(() => fail("t3 pair did not print a token for the shared server.")),
     );
-    // Any local account can answer on the helper's port while the gateway restarts, so the token
-    // goes only to the server that holds this T3 home.
-    const owner = yield* DesktopHomeOwner.readLiveHomeOwner().pipe(
-      Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(Path.Path, path),
-    );
-    if (Option.isNone(owner) || owner.value.port !== port) {
-      return yield* fail("The server holding this T3 home is not on the shared port.");
-    }
-    return token;
   });
 
   return DesktopGateway.of({

@@ -1,15 +1,22 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 
 import packageJson from "../../package.json" with { type: "json" };
-import { readUpdateState, updateStatePath, writeUpdateState } from "./gatewayHelper.ts";
+import {
+  readUpdateState,
+  settleUpdateClaim,
+  STALE_UPDATE_MS,
+  updateStatePath,
+} from "./gatewayHelper.ts";
 import {
   emptyGatewayConfig,
   GATEWAY_CONFIG_PATH_ENV,
@@ -275,27 +282,28 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   const path = yield* Path.Path;
   const { layout } = platform;
   const configDir = path.dirname(layout.configPath);
-  yield* checkInstallDirectories(platform);
-  yield* lockGatewayPath(layout.installRoot);
-  // A self-service update runs from the helper's staging folder. Another install since it was
-  // requested cleared its claim, and running it then could replace a newer runtime.
-  if (
+  // A self-service update runs from the helper's staging folder and owns the claim for its version.
+  const selfServiceUpdate =
     path.dirname(source.directory) === layout.installRoot &&
-    path.basename(source.directory).startsWith(".helper-staging-")
-  ) {
-    const claim = yield* readUpdateState(layout.configPath);
-    if (claim?.state !== "running" || claim.version !== packageJson.version) {
-      return yield* fail(`Another install replaced the update to ${packageJson.version}.`);
-    }
-    // Members' apps wait on this state, so a failed install must not leave it running.
+    path.basename(source.directory).startsWith(".helper-staging-");
+  if (selfServiceUpdate) {
+    // Members' apps wait on the claim, so a failed install must not leave it running.
     yield* Effect.addFinalizer((exit) => {
       if (Exit.isSuccess(exit)) return Effect.void;
       const error = Cause.squash(exit.cause);
       const reason = error instanceof Error ? error.message : "The update could not be installed.";
-      return writeUpdateState(layout.configPath, "failed", packageJson.version, reason).pipe(
-        Effect.ignore,
-      );
+      return settleUpdateClaim(layout.configPath, packageJson.version, reason).pipe(Effect.ignore);
     });
+  }
+  yield* checkInstallDirectories(platform);
+  yield* lockGatewayPath(layout.installRoot);
+  // Every finished install clears the claim, so one made since this update was requested may hold a
+  // newer runtime that this one must not replace.
+  if (selfServiceUpdate) {
+    const claim = yield* readUpdateState(layout.configPath);
+    if (claim?.state !== "running" || claim.version !== packageJson.version) {
+      return yield* fail(`Another install replaced the update to ${packageJson.version}.`);
+    }
   }
   const marked = yield* hasInstallMarker(platform);
   if (
@@ -393,14 +401,26 @@ export const installGateway = Effect.fn("gatewayInstall.install")(function* (
   }
   if (Result.isFailure(activation)) return yield* activation.failure;
   yield* pruneRuntimes(platform, destination, previousRuntime);
+  // An administrator's install supersedes every pending update. A self-service one keeps the
+  // fresh staging of an update another member requested meanwhile.
+  const now = yield* Clock.currentTimeMillis;
   for (const name of yield* fs.readDirectory(layout.installRoot)) {
-    if (name.startsWith(".helper-staging-")) {
-      yield* fs
-        .remove(path.join(layout.installRoot, name), { recursive: true })
-        .pipe(Effect.ignore);
+    const staging = path.join(layout.installRoot, name);
+    if (!name.startsWith(".helper-staging-")) continue;
+    if (selfServiceUpdate && staging !== source.directory) {
+      const modified = yield* fs.stat(staging).pipe(
+        Effect.map((info) => Option.getOrUndefined(info.mtime)?.getTime()),
+        Effect.orElseSucceed(() => undefined),
+      );
+      if (modified !== undefined && now - modified < STALE_UPDATE_MS) continue;
     }
+    yield* fs.remove(staging, { recursive: true }).pipe(Effect.ignore);
   }
-  yield* fs.remove(updateStatePath(path, layout.configPath), { force: true }).pipe(Effect.ignore);
+  yield* (
+    selfServiceUpdate
+      ? settleUpdateClaim(layout.configPath, packageJson.version, undefined)
+      : fs.remove(updateStatePath(path, layout.configPath), { force: true })
+  ).pipe(Effect.ignore);
   yield* Console.log(`Installed ${destination} and started the gateway. CLI: ${layout.launcher}.`);
 }, Effect.scoped);
 

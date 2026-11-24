@@ -252,7 +252,38 @@ const stageRelease = Effect.fn("GatewayHelper.stageRelease")(function* (
   return executable;
 });
 
-const STALE_UPDATE_MS = 30 * 60 * 1000;
+export const STALE_UPDATE_MS = 30 * 60 * 1000;
+
+/** Ends this version's update claim if it still holds it: as failed with a reason, or by clearing it. */
+export const settleUpdateClaim = Effect.fn("GatewayHelper.settleUpdateClaim")(function* (
+  configPath: string,
+  version: string,
+  failure: string | undefined,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const statePath = updateStatePath(path, configPath);
+  yield* lockGatewayPath(statePath);
+  const claim = yield* readUpdateState(configPath);
+  if (claim?.state !== "running" || claim.version !== version) return;
+  if (failure === undefined) yield* fs.remove(statePath, { force: true });
+  else yield* writeUpdateState(configPath, "failed", version, failure);
+}, Effect.scoped);
+
+/** Where the Windows gateway records the process serving the helper, for desktop apps to check. */
+export const helperPidPath = (path: Pick<Path.Path, "dirname" | "join">, configPath: string) =>
+  path.join(path.dirname(configPath), ".t3code-gateway-helper", "helper.pid");
+
+export const recordHelperPid = Effect.fn("GatewayHelper.recordPid")(function* (
+  platform: GatewayPlatform,
+  configPath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = helperPidPath(path, configPath);
+  yield* platform.secureDirectory(path.dirname(file), "admin");
+  yield* fs.writeFileString(file, `${process.pid}\n`);
+});
 
 /** Claims the single update slot. False when this same update is already running; fails while another is. */
 const claimUpdate = Effect.fn("GatewayHelper.claimUpdate")(function* (

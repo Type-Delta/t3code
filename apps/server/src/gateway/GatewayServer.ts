@@ -27,7 +27,7 @@ import {
   type ConnectionOwner,
 } from "./platform/GatewayPlatform.ts";
 import { readPendingUsers } from "./GatewayPending.ts";
-import { listenGatewayHelper } from "./gatewayHelper.ts";
+import { listenGatewayHelper, recordHelperPid } from "./gatewayHelper.ts";
 import {
   backendCookieHeader,
   backendRequestHeaders,
@@ -853,6 +853,12 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
   if (platform.helperHost === "gateway") {
     yield* listenGatewayHelper({ platform, configPath: options.configPath }).pipe(
       Effect.provide(FetchHttpClient.layer),
+    );
+    // Without it desktop apps refuse the helper, so joining stops working but routing does not.
+    yield* recordHelperPid(platform, options.configPath).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning(`Could not record the helper process: ${error.message}`),
+      ),
     );
   }
   yield* Effect.acquireRelease(
