@@ -256,8 +256,12 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
       Effect.onError(() =>
         options?.rollbackNew === true && !Object.hasOwn(config.users, user)
           ? writeGatewayConfig(platform, configPath, config).pipe(
-              Effect.andThen(platform.services.disableUser(user)),
-              Effect.andThen(platform.removeTree(path.join(pairingDir, user))),
+              Effect.andThen(
+                Effect.all([
+                  platform.services.disableUser(user).pipe(Effect.ignore),
+                  platform.removeTree(path.join(pairingDir, user)).pipe(Effect.ignore),
+                ]),
+              ),
               Effect.ignore,
             )
           : Effect.void,
@@ -269,6 +273,8 @@ export const enrollGatewayUser = Effect.fn("gatewayCli.enrollUser")(function* (
 export const unenrollGatewayUser = Effect.fn("gatewayCli.unenrollUser")(function* (
   platform: GatewayPlatform,
   user: string,
+  /** Stop the backend before removing the enrollment and fail if it does not stop, so Leave can be retried. */
+  options?: { readonly strict?: boolean },
 ) {
   yield* requireAdmin(platform);
   const path = yield* Path.Path;
@@ -276,6 +282,9 @@ export const unenrollGatewayUser = Effect.fn("gatewayCli.unenrollUser")(function
   yield* platform.checkAdminOwned(configPath, "File");
   yield* lockGatewayPath(configPath);
   const config = yield* readGatewayConfig(configPath);
+  if (options?.strict === true && Object.hasOwn(config.users, user)) {
+    yield* platform.services.disableUser(user);
+  }
   const updated = removeGatewayUser(config, user);
   if (updated !== config) yield* writeGatewayConfig(platform, configPath, updated);
   // Cleanup starts only once the gateway stops routing to the user, and runs on every retry.

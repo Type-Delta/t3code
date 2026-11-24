@@ -1292,14 +1292,19 @@ function ConnectionsSettingsContent({
                 }
               />
             ) : null}
-            {sharedRuntimeAttached ? null : canManageLocalBackend && desktopBridge ? (
+            {canManageLocalBackend && desktopBridge ? (
               <>
-                {renderNetworkAccessRow()}
-                {renderEndpointRows()}
-                {renderTailscaleRow()}
+                {/* The shared gateway owns network access; this app still runs its WSL backend. */}
+                {sharedRuntimeAttached ? null : (
+                  <>
+                    {renderNetworkAccessRow()}
+                    {renderEndpointRows()}
+                    {renderTailscaleRow()}
+                  </>
+                )}
                 {renderWslRow()}
               </>
-            ) : canManageLocalBackend ? (
+            ) : canManageLocalBackend && !sharedRuntimeAttached ? (
               renderDisabledNetworkAccessRow()
             ) : null}
             {canReadRelay || canManageRelay ? (

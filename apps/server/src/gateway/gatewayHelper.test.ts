@@ -15,6 +15,7 @@ import {
 import { cliReleaseAssetUrl } from "@t3tools/shared/cliRelease";
 import { gatewayHostFiles } from "@t3tools/shared/gatewayHost";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -494,6 +495,35 @@ describe("gateway helper", () => {
         JSON.stringify({ state: "running", version: NEXT, updatedAt: 0 }),
       );
       assert.equal((yield* update(NEXT)).status, 202);
+    }),
+  );
+
+  live("shows an update to its own version until the install settles it", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const helper = yield* startHelper();
+      yield* fs.makeDirectory(path.dirname(helper.updateStatePath), { recursive: true });
+      const statusUpdate = Effect.map(
+        helper.send("GET", "/v1/status"),
+        (answer) => decodeStatus(answer.text).update,
+      );
+      // The new runtime answers while the install is still restarting backends.
+      yield* fs.writeFileString(
+        helper.updateStatePath,
+        JSON.stringify({
+          state: "running",
+          version: RUNTIME,
+          updatedAt: yield* Clock.currentTimeMillis,
+        }),
+      );
+      assert.deepInclude((yield* statusUpdate) ?? {}, { state: "running", version: RUNTIME });
+      // One left by an install that died long ago is not.
+      yield* fs.writeFileString(
+        helper.updateStatePath,
+        JSON.stringify({ state: "running", version: RUNTIME, updatedAt: 0 }),
+      );
+      assert.isUndefined(yield* statusUpdate);
     }),
   );
 

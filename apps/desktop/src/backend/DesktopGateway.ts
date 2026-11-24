@@ -89,13 +89,13 @@ const sharedRuntimeUpdateProgress = (
   status: GatewayHelperStatus,
   version: string,
 ): "done" | "failed" | "running" =>
-  // The install clears its claim only after restarting the backends, after the runtime switched.
+  // The new runtime answers before the install has restarted the backends and settled its claim.
   status.update?.state === "running"
     ? "running"
-    : compareSemverVersions(status.runtimeVersion, version) >= 0
-      ? "done"
-      : status.update?.state === "failed" && status.update.version === version
-        ? "failed"
+    : status.update?.state === "failed" && status.update.version === version
+      ? "failed"
+      : compareSemverVersions(status.runtimeVersion, version) >= 0
+        ? "done"
         : "running";
 
 /**

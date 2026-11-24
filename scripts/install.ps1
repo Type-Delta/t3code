@@ -125,8 +125,12 @@ $gatewayInstall = $false
 if ($isAdministrator -and $env:T3CODE_INSTALL_MODE -ne "user") {
   if ($env:T3CODE_INSTALL_MODE -eq "gateway") {
     $gatewayInstall = $true
-  } elseif (-not [Console]::IsInputRedirected -and $Host.UI.SupportsUserInteraction) {
-    $gatewayInstall = (Read-Host "Install T3 Code for everyone on this computer? [y/N]") -match '^(?i:y|yes)$'
+  } elseif (-not [Console]::IsInputRedirected -and [Environment]::UserInteractive) {
+    try {
+      $gatewayInstall = (Read-Host "Install T3 Code for everyone on this computer? [y/N]") -match '^(?i:y|yes)$'
+    } catch {
+      $gatewayInstall = $false
+    }
   }
 }
 if ($interactive) {

@@ -162,6 +162,12 @@ const helperStatus = Effect.fn("GatewayHelper.status")(function* (
   const runtimeVersion = options.runtimeVersion ?? packageJson.version;
   const entry = Object.hasOwn(config.users, caller.name) ? config.users[caller.name] : undefined;
   const backendPort = entry?.uid === caller.accountId ? entry.port : undefined;
+  // An update to this helper's own version is still restarting backends until the install settles it.
+  const showUpdate =
+    update !== undefined &&
+    (isNewer(update.version, runtimeVersion) ||
+      (update.version === runtimeVersion &&
+        (yield* Clock.currentTimeMillis) - update.updatedAt < STALE_UPDATE_MS));
   return {
     version: 1,
     runtimeVersion,
@@ -170,7 +176,7 @@ const helperStatus = Effect.fn("GatewayHelper.status")(function* (
     user: caller.name,
     enrolled: backendPort !== undefined,
     ...(backendPort === undefined ? {} : { backendPort }),
-    ...(update !== undefined && isNewer(update.version, runtimeVersion) ? { update } : {}),
+    ...(showUpdate ? { update } : {}),
   } satisfies GatewayHelperStatus;
 });
 
@@ -480,11 +486,9 @@ const handleRequest = Effect.fn("GatewayHelper.handle")(function* (
           () => new GatewayHelperRequestError({ status: 400, message: "Invalid leave request." }),
         ),
       );
-      // Only an enrollment's own services are touched. Its backend stops first, so a failed stop
-      // keeps the enrollment for the member to retry rather than a backend still holding their home.
+      // Only an enrollment's own services are touched.
       if (Object.hasOwn(config.users, caller.name)) {
-        yield* platform.services.disableUser(caller.name);
-        yield* unenrollGatewayUser(platform, caller.name);
+        yield* unenrollGatewayUser(platform, caller.name, { strict: true });
       }
       return yield* answer(200);
     }
