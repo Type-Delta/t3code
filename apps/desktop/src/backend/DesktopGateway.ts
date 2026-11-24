@@ -6,7 +6,9 @@ import {
   GatewayHelperStatus,
 } from "@t3tools/contracts";
 import { gatewayHostFiles, parseNetstat } from "@t3tools/shared/gatewayHost";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -117,7 +119,7 @@ export const helperListenerMatches = (netstat: string, recordedPid: string): boo
 export class DesktopGatewayHost extends Context.Service<
   DesktopGatewayHost,
   { readonly trusted: Effect.Effect<boolean> }
->()("@t3tools/desktop/backend/DesktopGatewayHost") {}
+>()("@t3tools/desktop/backend/DesktopGateway/DesktopGatewayHost") {}
 
 export const hostLayer = Layer.effect(
   DesktopGatewayHost,
@@ -125,8 +127,9 @@ export const hostLayer = Layer.effect(
     const fileSystem = yield* FileSystem.FileSystem;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
-    const files = gatewayHostFiles(environment.platform, process.env);
-    const netstat = `${process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\netstat.exe`;
+    const env = yield* HostProcess.Environment;
+    const files = gatewayHostFiles(environment.platform, env);
+    const netstat = `${env["SystemRoot"] ?? "C:\\Windows"}\\System32\\netstat.exe`;
     const trusted = Effect.gen(function* () {
       if (files === undefined) return false;
       const link = yield* fileSystem.lstat(files.currentLink);
@@ -173,7 +176,9 @@ const make = Effect.gen(function* () {
   const send = (request: HttpClientRequest.HttpClientRequest, timeout: Duration.Duration) =>
     host.trusted.pipe(
       Effect.flatMap((trusted) =>
-        trusted ? Effect.void : Effect.fail(new Error("No shared T3 Code is installed here.")),
+        trusted
+          ? Effect.void
+          : Effect.fail(new Cause.NoSuchElementError("No shared T3 Code is installed here.")),
       ),
       Effect.andThen(
         httpClient.execute(request.pipe(HttpClientRequest.setHeader(GATEWAY_HELPER_HEADER, "1"))),
