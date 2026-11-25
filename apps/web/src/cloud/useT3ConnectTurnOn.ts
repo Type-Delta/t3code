@@ -6,7 +6,10 @@ import {
 } from "@t3tools/contracts";
 
 import { isElectron } from "../env";
+import { desktopSharedRuntimeAtom } from "../state/desktopSharedRuntime";
+import { usePrimaryEnvironmentId } from "../state/environments";
 import { useManagedPolicy } from "../state/managedPolicy";
+import { useEnvironmentQuery } from "../state/query";
 import { useEnvironmentScope } from "../state/session";
 import { useCloudLinkState } from "./cloudLinkState";
 import { hasCloudPublicConfig } from "./publicConfig";
@@ -18,8 +21,17 @@ export function useT3ConnectTurnOn(environmentId: EnvironmentId | null) {
   const canWriteRelay = useEnvironmentScope(environmentId, AuthRelayWriteScope);
   const connectDenial = managedCapabilityDenial(useManagedPolicy(environmentId), "connect");
   const linkState = useCloudLinkState(environmentId).data;
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const sharedRuntime = useEnvironmentQuery(
+    isElectron && environmentId !== null && environmentId === primaryEnvironmentId
+      ? desktopSharedRuntimeAtom
+      : null,
+  ).data;
   return resolveT3ConnectTurnOn({
     desktopApp: isElectron,
+    environmentId,
+    // The bridge reports an actual attachment, which installs the shared backend as primary.
+    attachedGatewayEnvironmentId: sharedRuntime?.attached === true ? primaryEnvironmentId : null,
     // Unknown while loading and on older servers, which keep today's switch in Settings.
     linkableHere: linkState?.linkableHere ?? true,
     cloudConfigured: hasCloudPublicConfig(),
