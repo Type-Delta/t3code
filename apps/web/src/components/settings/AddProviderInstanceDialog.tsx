@@ -805,9 +805,6 @@ export function AddProviderInstanceDialog({
                       : "Add instance"}
                 </Button>
               )}
-              {!isAcpRegistry && wizardStep === 0 ? (
-                <ChatGptConnectionButton size="sm" onClick={() => setAddingChatGptAccount(true)} />
-              ) : null}
             </WizardFooter>
           </>
         )}
