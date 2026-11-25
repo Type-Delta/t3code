@@ -500,24 +500,18 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
             log: `${paths.logDir}/gateway.log`,
           }),
         );
-        // Backends join the user's launchd session; Codex cannot read managed preferences otherwise.
         assert.equal(
           yield* fs.readFileString(backendFile),
           renderLaunchDaemon({
             label: backendLabel("alice"),
             userName: "root",
             arguments: [
-              "/bin/launchctl",
-              "asuser",
-              "501",
-              "/usr/bin/sudo",
-              "-u",
+              "/usr/bin/login",
+              "-fql",
               "alice",
-              "-H",
-              "--",
               "/bin/sh",
               "-c",
-              'unset SUDO_COMMAND SUDO_USER SUDO_UID SUDO_GID SUDO_HOME; TMPDIR="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)" && export TMPDIR && exec "$@"',
+              'TMPDIR="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)" && export TMPDIR PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin && exec "$@"',
               "sh",
               "/usr/local/t3code/current/t3",
               "gateway",

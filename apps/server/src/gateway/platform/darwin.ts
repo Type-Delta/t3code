@@ -25,9 +25,6 @@ export const backendLabel = (user: string) => `${backendLabelPrefix}${user}`;
 export const SOCKETS_LABEL = "com.t3tools.t3code.sockets";
 export const HELPER_LABEL = "com.t3tools.t3code.helper";
 const gatewayAccount = "_t3code";
-// Restores the per-user TMPDIR launchd gives a UserName job and drops sudo's bookkeeping.
-const userSessionScript =
-  'unset SUDO_COMMAND SUDO_USER SUDO_UID SUDO_GID SUDO_HOME; TMPDIR="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)" && export TMPDIR && exec "$@"';
 const plistMarker = "<!-- Managed by t3 gateway install -->";
 const servicePath = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const toolEnv = { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" };
@@ -775,27 +772,18 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
     home: "/var/empty",
     log: `${paths.logDir}/gateway.log`,
   });
-  const backendSpec = (
-    user: GatewayUserRecord,
-    uid: number,
-    executable: string,
-  ): LaunchDaemonSpec => ({
+  const backendSpec = (user: GatewayUserRecord, executable: string): LaunchDaemonSpec => ({
     label: backendLabel(user.name),
-    // A system-domain job cannot reach the user's cfprefsd, so CFPreferences calls such as
-    // Codex's managed-config sync fail. Only root may join the user's launchd session.
+    // login opens the user's Background bootstrap through pam_launchd. launchctl asuser can
+    // select Aqua instead, leaving Codex without a preferences service after GUI logout.
     userName: "root",
     arguments: [
-      "/bin/launchctl",
-      "asuser",
-      String(uid),
-      "/usr/bin/sudo",
-      "-u",
+      "/usr/bin/login",
+      "-fql",
       user.name,
-      "-H",
-      "--",
       "/bin/sh",
       "-c",
-      userSessionScript,
+      `TMPDIR="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)" && export TMPDIR PATH=${servicePath} && exec "$@"`,
       "sh",
       executable,
       "gateway",
@@ -959,7 +947,7 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
       if (gateway.changed) changed.push({ file: gatewayPlist, previous: gateway.previous });
       for (const user of activation.users) {
         if (typeof user.accountId !== "number") continue;
-        const spec = backendSpec(user, user.accountId, activation.executable);
+        const spec = backendSpec(user, activation.executable);
         const backend = yield* defineJob(spec, user.accountId);
         if (backend.changed) changed.push(backend);
         backends.push({ label: spec.label, file: backend.file, changed: backend.changed });
@@ -1021,7 +1009,7 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
       return yield* fail(`Expected a numeric uid for macOS user ${user.name}.`);
     }
     yield* checkDaemonDirectories;
-    const spec = backendSpec(user, user.accountId, executable);
+    const spec = backendSpec(user, executable);
     const { file, changed } = yield* defineJob(spec, user.accountId);
     yield* startService(spec.label, file, { changed, restart: false });
   }, Effect.mapError(asPlatformError));
