@@ -413,7 +413,9 @@ Codex adapter setup retains the original shared/shadow-home configuration while 
 
 CLI-managed Codex gateways can opt into native catalog discovery. T3 configures Codex with the
 gateway's `model_catalog_url` and a command-backed bearer token reader, so Codex can use gateway
-model metadata that its bundled catalog does not contain. x-api-key gateways keep their
+model metadata that its bundled catalog does not contain. The reader runs T3's own executable:
+`-e` under Node or Electron, and the hidden `__env-value` fast path in a single-executable `t3`
+(CLI archives and gateway installs), which rejects `-e`. x-api-key gateways keep their
 environment-backed header when native discovery is enabled.
 
 A separate, default-off **Image generation** option in Codex gateway settings and the
@@ -425,7 +427,8 @@ of catalog discovery and preserves the existing bearer or x-api-key credential c
 **Implementation evidence:** `packages/contracts/src/{model,server,settings}.ts`,
 `apps/server/src/provider/{Drivers/ClaudeDriver.ts,ClaudeProvider.ts,GatewayModelCatalog.ts}`,
 `apps/server/src/orchestration-v2/{ProviderAdapterRegistry,ProviderSessionManager}.ts` and their tests,
-`apps/server/src/textGeneration/ClaudeTextGeneration.ts`,
+`apps/server/src/textGeneration/ClaudeTextGeneration.ts`, `apps/server/src/provider/codexLaunchArgs.ts`,
+`apps/server/src/binMain.ts`,
 `apps/web/src/components/settings/{AddProviderInstanceDialog,CompatibleApiGatewaySection,CustomModelMetadataDialog,ProviderInstanceCard,ProviderModelsSection,ProviderSettingsPanel}.tsx`,
 and `apps/web/src/components/settings/providerModelDetails.ts`.
 
@@ -444,7 +447,7 @@ and launch configuration without restarting T3 or changing the native conversati
 
 Claude adapter and text-generation launches now resolve each selected gateway model through the per-instance catalog, applying `[1m]` model IDs and normalized CLI effort before opening or spawning.
 
-**Last updated:** 2026-11-16
+**Last updated:** 2026-11-25
 
 ### DL027 — Remote editor links select the server account
 
