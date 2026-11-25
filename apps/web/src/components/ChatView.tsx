@@ -141,7 +141,6 @@ import {
   use,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -874,14 +873,10 @@ export default function ChatView(props: ChatViewProps) {
     }
   }
   const nowMinute = useNowMinute();
-  const retryPresets = useMemo(
-    () =>
-      resolveSnoozePresets(new Date(Date.parse(`${nowMinute}:00Z`)), {
-        presets: settings.snoozePresets,
-        formatTime: (date) => formatUpcomingTimestamp(date.toISOString(), timestampFormat),
-      }),
-    [nowMinute, settings.snoozePresets, timestampFormat],
-  );
+  const retryPresets = resolveSnoozePresets(new Date(Date.parse(`${nowMinute}:00Z`)), {
+    presets: settings.snoozePresets,
+    formatTime: (date) => formatUpcomingTimestamp(date.toISOString(), timestampFormat),
+  });
   const draftDefaultModelSelection = draftThread
     ? resolveProjectSettings(
         settings,

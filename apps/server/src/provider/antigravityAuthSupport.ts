@@ -469,7 +469,7 @@ export function buildAntigravityAcpSpawnInput(input: {
   readonly cwd: string;
   readonly baseEnv?: NodeJS.ProcessEnv;
   readonly auth?: AntigravityAuthConfig;
-  readonly apiGateway?: ApiGatewaySettings;
+  readonly apiGateway?: ApiGatewaySettings | undefined;
   readonly runtimeTempDirectory?: string;
 }): AcpSessionRuntime.AcpSpawnInput {
   return {
