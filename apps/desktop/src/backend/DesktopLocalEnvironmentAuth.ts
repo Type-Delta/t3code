@@ -122,15 +122,9 @@ export const make = Effect.gen(function* () {
         // exchange can run long after launch (e.g. after a suspend).
         const secret = config.bootstrap.desktopBootstrapSecret;
         const launchCredential = secret ?? config.bootstrap.desktopBootstrapToken;
-        if (!launchCredential) {
+        if (!launchCredential && instance.mintCredential === undefined) {
           return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
         }
-        const credential =
-          secret === undefined
-            ? launchCredential
-            : yield* currentDesktopBootstrapToken(secret, now).pipe(
-                Effect.provideService(Mac.Mac, mac),
-              );
 
         const httpBaseUrl = config.httpBaseUrl.href;
         const cached = (yield* Ref.get(tokenRef)).get(instance.id);
@@ -143,6 +137,20 @@ export const make = Effect.gen(function* () {
         ) {
           return cached.token;
         }
+
+        // Fork-only: a shared gateway backend takes a fresh one-time token per session.
+        const credential =
+          instance.mintCredential !== undefined
+            ? yield* instance.mintCredential.pipe(
+                Effect.mapError(
+                  (cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
+                ),
+              )
+            : secret === undefined
+              ? launchCredential
+              : yield* currentDesktopBootstrapToken(secret, now).pipe(
+                  Effect.provideService(Mac.Mac, mac),
+                );
 
         // Timestamp before the exchange so network latency shortens the
         // usable cache lifetime instead of extending the server's expiry.

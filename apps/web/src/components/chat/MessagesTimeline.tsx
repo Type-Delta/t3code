@@ -24,6 +24,7 @@ import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/s
 import type { WorkflowOpening } from "@t3tools/client-runtime/state/subagentRuntime";
 import { observeResize } from "~/lib/observeResize";
 import { useStableCallback } from "~/hooks/useStableCallback";
+import { useDelayedStatus } from "~/hooks/useDelayedStatus";
 
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const EMPTY_PENDING_APPROVALS: ReadonlyArray<PendingApproval> = [];
@@ -212,6 +213,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END_SMOOTH = {
 const CITED_HISTORY_LOADING: CitedHistory = { _tag: "loading" };
 
 export interface MessagesTimelineHistoryControls {
+  readonly cursor: string | null;
   readonly hasMoreHistory: boolean;
   readonly loading: boolean;
   readonly error: string | null;
@@ -482,6 +484,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const normalizedFindQuery = findQuery.trim();
   const findActive = findExpanded;
+  const findHasSelection = findActive && activeFindMatch !== null;
 
   const disclosureRevealRef = useRef<{
     key: string;
@@ -1227,7 +1230,18 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const listHeader = (
     <>
       {parentThreadLink === null ? listHeaderLeadingContent : null}
-      {historyControls ? <TimelineHistoryControl {...historyControls} /> : null}
+      {historyControls ? (
+        <TimelineHistoryControl
+          key={listIdentityKey}
+          {...historyControls}
+          listRef={listRef}
+          canPrefetch={
+            (rows.length === 0 || (findListReady && !restoringThreadPosition)) &&
+            !findHasSelection &&
+            !citationPositioning
+          }
+        />
+      ) : null}
       {parentThreadLink !== null ? listHeaderLeadingContent : null}
     </>
   );
@@ -1468,7 +1482,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
                     : TIMELINE_MAINTAIN_SCROLL_AT_END
               }
               maintainVisibleContentPosition={
-                findActive ||
+                findHasSelection ||
                 citationPositioning ||
                 (restoringThreadPosition && rememberedPosition?.atEnd === false)
                   ? false
@@ -1512,33 +1526,67 @@ const ConversationTimeline = memo(function ConversationTimeline({
   );
 });
 
-function TimelineHistoryControl(props: MessagesTimelineHistoryControls) {
+function TimelineHistoryControl(
+  props: MessagesTimelineHistoryControls & {
+    readonly listRef: { readonly current: LegendListRef | null };
+    readonly canPrefetch: boolean;
+  },
+) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const requestedCursor = useRef<string | null>(null);
+  const { cursor, listRef } = props;
+  const canPrefetch =
+    props.canPrefetch && props.hasMoreHistory && !props.loading && props.error === null;
+  const loadEarlier = useEffectEvent((observedCursor: string) => {
+    if (!canPrefetch || cursor !== observedCursor || requestedCursor.current === observedCursor)
+      return;
+    requestedCursor.current = observedCursor;
+    props.onLoadEarlier();
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- observes the history boundary within the list's scroll viewport
+  useEffect(() => {
+    if (requestedCursor.current !== cursor) requestedCursor.current = null;
+    const sentinel = sentinelRef.current;
+    const root = listRef.current?.getScrollableNode();
+    if (!canPrefetch || cursor === null || !sentinel || !root) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.at(-1)?.isIntersecting) loadEarlier(cursor);
+      },
+      { root, rootMargin: "400px 0px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+      observer.takeRecords();
+    };
+  }, [canPrefetch, cursor, listRef]);
+  const loadingLabel = useDelayedStatus(
+    props.loading ? "loading" : "idle",
+    props.loading ? "Loading earlier turns…" : null,
+  );
   if (!props.hasMoreHistory && props.error === null) {
     return null;
   }
   return (
-    <div className="messages-timeline-row-frame">
-      <div className="chat-content-lane flex flex-col gap-1.5 pb-2">
-        {props.hasMoreHistory ? (
-          <button
-            type="button"
-            disabled={props.loading}
-            aria-label="Load earlier turns"
-            onClick={() => props.onLoadEarlier()}
-            className="flex w-full cursor-pointer items-center gap-3 py-1.5 text-muted-foreground text-xs hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-default"
-          >
-            <span aria-hidden="true" className="h-px flex-1 bg-border/70" />
-            <span className="shrink-0">
-              {props.loading ? "Loading earlier turns…" : "Load earlier turns"}
-            </span>
-            <span aria-hidden="true" className="h-px flex-1 bg-border/70" />
-          </button>
-        ) : null}
+    <div ref={sentinelRef} className="messages-timeline-row-frame">
+      <div className="chat-content-lane flex min-h-6 items-center justify-center gap-2 text-center text-muted-foreground text-xs">
         {props.error !== null ? (
-          <p role="status" className="text-center text-muted-foreground text-xs">
-            {props.error}
-          </p>
-        ) : null}
+          <>
+            <span role="status">{props.error}</span>
+            {props.hasMoreHistory ? (
+              <button
+                type="button"
+                onClick={() => props.onLoadEarlier()}
+                className="cursor-pointer rounded-sm px-1 py-0.5 underline hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                Retry
+              </button>
+            ) : null}
+          </>
+        ) : (
+          <span role="status">{loadingLabel}</span>
+        )}
       </div>
     </div>
   );

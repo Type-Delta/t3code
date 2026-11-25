@@ -41,7 +41,7 @@ const COULD_NOT_LOAD = {
   _tag: "failed",
   title: "Could not load the cited response",
   description:
-    "Load earlier turns, then click the citation to try again. Your saved quote is unchanged.",
+    "Scroll up to load earlier turns, then click the citation to try again. Your saved quote is unchanged.",
 } as const;
 
 const UNAVAILABLE = {

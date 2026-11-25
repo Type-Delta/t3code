@@ -465,6 +465,146 @@ describe("MessagesTimeline work rows", () => {
   );
 });
 
+describe("MessagesTimeline history", () => {
+  it("prefetches before the top, preserves the visible row, and fetches the next cursor", async () => {
+    setup();
+    const props = baseProps();
+    const load = vi.fn();
+    const historyPage = (prefix: string) =>
+      Array.from({ length: 20 }, (_, i) =>
+        i % 2 === 0
+          ? message(`${prefix} question ${i}`, {}, `${prefix}-${i}`)
+          : message(
+              `## ${prefix} answer ${i}\n\n${"A paragraph of markdown. ".repeat(i * 8)}\n\n\`\`\`ts\nconsole.log("history");\n\`\`\``,
+              { role: "assistant" },
+              `${prefix}-${i}`,
+            ),
+      );
+    const recent = historyPage("recent");
+    const older = historyPage("older");
+    const ui = (
+      entries: Entry[],
+      cursor: string | null,
+      loading = false,
+      error: string | null = null,
+      findExpanded = false,
+    ) => (
+      <MessagesTimeline
+        {...props}
+        timelineEntries={entries}
+        findExpanded={findExpanded}
+        findQuery={findExpanded ? "Search with no matches" : ""}
+        historyControls={{
+          cursor,
+          hasMoreHistory: cursor !== null,
+          loading,
+          error,
+          onLoadEarlier: load,
+        }}
+      />
+    );
+    await using screen = await renderElement(ui(recent, "page-one"));
+    screen.container.style.height = "600px";
+    screen.container.style.width = "490px";
+    const viewport = props.listRef.current!.getScrollableNode()!;
+    await vi.waitFor(() => {
+      expect(viewport.scrollTop).toBeGreaterThan(500);
+      expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThan(2);
+    });
+    expect(load).not.toHaveBeenCalled();
+
+    await screen.rerender(ui(recent, "page-one", false, null, true));
+    viewport.scrollTop = 260;
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    expect(viewport.scrollTop).toBeGreaterThan(0);
+    await screen.rerender(ui(recent, "page-one", true));
+    expect(screen.text()).not.toContain("Loading earlier turns…");
+    await expect.element(page.getByText("Loading earlier turns…")).toBeInTheDocument();
+    await screen.rerender(ui(recent, "page-one-continued", true));
+    expect(screen.text()).toContain("Loading earlier turns…");
+    expect(load).toHaveBeenCalledTimes(1);
+
+    const rowTop = () =>
+      viewport.querySelector('[data-timeline-row-id="entry-recent-1"]')?.getBoundingClientRect()
+        .top ?? Number.NaN;
+    const before = rowTop();
+    expect(Number.isFinite(before)).toBe(true);
+    const combined = [...older, ...recent];
+    await screen.rerender(ui(combined, "page-two"));
+    await vi.waitFor(() => {
+      expect(viewport.scrollTop).toBeGreaterThan(500);
+      expect(Math.abs(rowTop() - before)).toBeLessThan(3);
+    });
+    expect(screen.text()).not.toContain("Loading earlier turns…");
+    expect(load).toHaveBeenCalledTimes(1);
+
+    viewport.scrollTop = 0;
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    await screen.rerender(ui(combined, "page-two", false, "History request failed."));
+    await expect.element(page.getByText("History request failed.")).toBeVisible();
+    expect(load).toHaveBeenCalledTimes(2);
+    await userEvent.click(page.getByRole("button", { name: "Retry" }));
+    expect(load).toHaveBeenCalledTimes(3);
+    await screen.rerender(ui([...historyPage("oldest"), ...combined], null));
+    expect(screen.buttons("Retry")).toHaveLength(0);
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it("fills a short viewport even when a page leaves the visible rows unchanged", async () => {
+    setup();
+    const props = baseProps();
+    const load = vi.fn();
+    const entries = [message("Short latest turn")];
+    const ui = (cursor: string | null, loading = false) => (
+      <MessagesTimeline
+        {...props}
+        timelineEntries={entries}
+        historyControls={{
+          cursor,
+          hasMoreHistory: cursor !== null,
+          loading,
+          error: null,
+          onLoadEarlier: load,
+        }}
+      />
+    );
+    await using screen = await renderElement(ui("page-one"));
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    await screen.rerender(ui("page-two", true));
+    await screen.rerender(ui("page-one"));
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    await screen.rerender(ui("page-two"));
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+    await screen.rerender(ui(null));
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it("loads history after switching to a thread whose bounded window renders no rows", async () => {
+    setup();
+    const props = baseProps();
+    const load = vi.fn();
+    await using screen = await renderElement(
+      <MessagesTimeline {...props} timelineEntries={[message("First thread")]} />,
+    );
+    await expect.element(page.getByText("First thread")).toBeVisible();
+    await screen.rerender(
+      <MessagesTimeline
+        {...props}
+        routeThreadKey={`${props.routeThreadKey}-empty`}
+        timelineEntries={[]}
+        historyControls={{
+          cursor: "empty-window",
+          hasMoreHistory: true,
+          loading: false,
+          error: null,
+          onLoadEarlier: load,
+        }}
+      />,
+    );
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+  });
+});
+
 describe("MessagesTimeline messages", () => {
   it("settles when equally long messages have very different rendered heights", async () => {
     const props = baseProps();

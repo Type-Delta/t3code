@@ -2161,6 +2161,30 @@ describe("streamed feed updates", () => {
   });
 });
 
+it("keeps an expanded work group anchored when earlier tools load", () => {
+  const commands = ["older", "first", "second"].map((id, index) =>
+    projected({ ...command(), id: TurnItemId.make(id), ordinal: index + 1 }, index + 1),
+  );
+  const render = (items: typeof commands, expandedWorkGroupIds = new Set<string>()) =>
+    deriveThreadFeedPresentation(
+      buildThreadFeed(items),
+      null,
+      new Set([runId]),
+      expandedWorkGroupIds,
+      "2026-06-20T00:00:02.000Z",
+    );
+  const recent = commands.slice(1);
+  const toggle = render(recent).find((row) => row.type === "work-toggle")!;
+  const expanded = new Set([toggle.groupId]);
+  const before = render(recent, expanded);
+  const after = render(commands, expanded);
+  expect(after.find((row) => row.id === toggle.id)).toMatchObject({ expanded: true });
+  const detail = before.find((row) => row.type === "activity-group")!;
+  expect(after.find((row) => row.id === detail.id)).toMatchObject({
+    activities: detail.activities.map(({ id }) => expect.objectContaining({ id })),
+  });
+});
+
 it.each([false, true])(
   "caps live approval headers while preserving the prompt (grouped: %s)",
   (grouped) => {

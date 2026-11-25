@@ -236,7 +236,8 @@ export function AddProviderInstanceDialog({
   const driverSettingsFields = deriveProviderSettingsFields(driverOption);
   const supportsApiGateway =
     driver === ProviderDriverKind.make("codex") ||
-    driver === ProviderDriverKind.make("claudeAgent");
+    driver === ProviderDriverKind.make("claudeAgent") ||
+    driver === ProviderDriverKind.make("antigravity");
   const instanceIdError = validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
   const identityStep = 1;
@@ -739,6 +740,12 @@ export function AddProviderInstanceDialog({
                     idPrefix={`add-provider-${driver}`}
                     variant="dialog"
                     showCodexOptions={driver === ProviderDriverKind.make("codex")}
+                    showApiKey={driver !== ProviderDriverKind.make("antigravity")}
+                    protocol={
+                      driver === ProviderDriverKind.make("antigravity")
+                        ? "gemini"
+                        : "openai-anthropic"
+                    }
                     onChange={setGatewayDraft}
                   />
                 ) : null}
@@ -798,9 +805,6 @@ export function AddProviderInstanceDialog({
                       : "Add instance"}
                 </Button>
               )}
-              {!isAcpRegistry && wizardStep === 0 ? (
-                <ChatGptConnectionButton size="sm" onClick={() => setAddingChatGptAccount(true)} />
-              ) : null}
             </WizardFooter>
           </>
         )}

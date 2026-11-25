@@ -1300,6 +1300,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     desktopOnly: true,
   },
   {
+    id: "shared-runtime",
+    title: "Shared T3 Code on this computer",
+    to: "/settings/connections",
+    searchTerms: ["gateway multi user shared server join leave everyone this computer"],
+    desktopOnly: true,
+  },
+  {
     id: "network-access",
     title: "Network access",
     to: "/settings/access",

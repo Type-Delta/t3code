@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Codex launch args are built synchronously from settings.
+import * as NodeSea from "node:sea";
+
 import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
 import type { ApiGatewaySettings } from "@t3tools/contracts";
 
@@ -36,9 +39,14 @@ const codexGatewayCatalogUrl = (url: URL): string => {
 
 const CODEX_GATEWAY_AUTH_SCRIPT = 'process.stdout.write(process.env[process.argv[1]] ?? "")';
 
+// A single-executable `t3` has no `-e`; it prints the variable through its `__env-value` fast path.
+const codexGatewayAuthArgs = (variable: string, selfExecutable: boolean) =>
+  selfExecutable ? ["__env-value", variable] : ["-e", CODEX_GATEWAY_AUTH_SCRIPT, variable];
+
 export function codexGatewayLaunchArgv(input: {
   readonly apiGateway: ApiGatewaySettings | undefined;
   readonly codexCatalogPath?: string | undefined;
+  readonly selfExecutable?: boolean;
 }): ReadonlyArray<string> {
   const args: string[] = [];
   const gateway = input.apiGateway;
@@ -88,7 +96,7 @@ export function codexGatewayLaunchArgv(input: {
           if (gateway.apiKeyEnvironmentVariable && gateway.authMode === "bearer") {
             args.push(
               "-c",
-              `model_providers.t3_api_gateway.auth={command=${codexConfigValue(process.execPath)}, args=${codexConfigArray(["-e", CODEX_GATEWAY_AUTH_SCRIPT, gateway.apiKeyEnvironmentVariable])}}`,
+              `model_providers.t3_api_gateway.auth={command=${codexConfigValue(process.execPath)}, args=${codexConfigArray(codexGatewayAuthArgs(gateway.apiKeyEnvironmentVariable, input.selfExecutable ?? NodeSea.isSea()))}}`,
             );
           } else if (gateway.apiKeyEnvironmentVariable && gateway.authMode === "x-api-key") {
             args.push(

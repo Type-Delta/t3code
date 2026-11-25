@@ -346,6 +346,7 @@ const presentedActivityGroupsCache = new WeakMap<
     readonly activeRunId: RunId | null;
     readonly isWorking: boolean;
     readonly activeTail: boolean;
+    readonly expandedWorkGroupIds: ReadonlySet<string>;
     readonly rows: ReadonlyArray<ThreadFeedEntry>;
   }
 >();
@@ -2002,13 +2003,15 @@ function appendPresentedFeedEntry(
     cached.activeRunId !== activeRunId ||
     cached.isWorking !== isWorking ||
     cached.activeTail !== activeTail ||
-    cached.rows.some(
-      (row) => row.type === "work-toggle" && expandedWorkGroupIds.has(row.groupId) !== row.expanded,
-    )
+    (cached.expandedWorkGroupIds !== expandedWorkGroupIds &&
+      entry.activities.some(({ id }) => {
+        const key = `work-group:${id}`;
+        return cached!.expandedWorkGroupIds.has(key) !== expandedWorkGroupIds.has(key);
+      }))
   ) {
     const rows: ThreadFeedEntry[] = [];
     appendActivityGroupRows(rows, entry, expandedWorkGroupIds, activeRunId, isWorking, activeTail);
-    cached = { activeRunId, isWorking, activeTail, rows };
+    cached = { activeRunId, isWorking, activeTail, expandedWorkGroupIds, rows };
     presentedActivityGroupsCache.set(entry, cached);
   }
   for (const row of cached.rows) {
@@ -2032,7 +2035,9 @@ function appendActivityGroupRows(
       groupAnchorId = null;
       continue;
     }
-    groupAnchorId ??= activity.id;
+    if (groupAnchorId === null || expandedWorkGroupIds.has(`work-group:${activity.id}`)) {
+      groupAnchorId = activity.id;
+    }
     groupAnchorIdByActivityId.set(activity.id, groupAnchorId);
   }
   const activities = entry.activities.filter(
@@ -2074,6 +2079,13 @@ function appendActivityGroupRows(
     const item = activity.projectedItem.item;
     const severeProviderError = item.type === "error" && item.status === "failed";
     if (!activity.prominent && !severeProviderError && item.type !== "notification") {
+      const first = groupableRun[0];
+      if (
+        first &&
+        groupAnchorIdByActivityId.get(first.id) !== groupAnchorIdByActivityId.get(activity.id)
+      ) {
+        flushGroupableRun(false);
+      }
       groupableRun.push(activity);
       continue;
     }

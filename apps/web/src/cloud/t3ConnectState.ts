@@ -1,4 +1,4 @@
-import type { EnvironmentCloudLinkStateResult } from "@t3tools/contracts";
+import type { EnvironmentCloudLinkStateResult, EnvironmentId } from "@t3tools/contracts";
 import type {
   RelayManagedEndpoint,
   RelayManagedEndpointProviderKind,
@@ -47,12 +47,11 @@ export type T3ConnectTurnOn =
   | { readonly kind: "policy"; readonly reason: string }
   | { readonly kind: "on-host" };
 
-/**
- * Settings and the MCP wizard share this, so a Turn on control shows only where linking works.
- * `linkableHere` is the environment's own answer for this session (its link state).
- */
+/** Settings and the MCP wizard share the same Turn on eligibility. */
 export function resolveT3ConnectTurnOn(input: {
   readonly desktopApp: boolean;
+  readonly environmentId: EnvironmentId | null;
+  readonly attachedGatewayEnvironmentId: EnvironmentId | null;
   readonly linkableHere: boolean;
   readonly cloudConfigured: boolean;
   readonly canReadRelay: boolean;
@@ -60,8 +59,10 @@ export function resolveT3ConnectTurnOn(input: {
   readonly connectDenial: string | undefined;
 }): T3ConnectTurnOn {
   if (input.connectDenial !== undefined) return { kind: "policy", reason: input.connectDenial };
+  const isAttachedGatewayBackend =
+    input.environmentId !== null && input.environmentId === input.attachedGatewayEnvironmentId;
   return input.desktopApp &&
-    input.linkableHere &&
+    (input.linkableHere || isAttachedGatewayBackend) &&
     input.cloudConfigured &&
     input.canReadRelay &&
     input.canWriteRelay

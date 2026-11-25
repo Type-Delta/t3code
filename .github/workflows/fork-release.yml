@@ -219,6 +219,13 @@ jobs:
           merge-multiple: true
           path: release-assets
 
+      - name: Download CLI archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: release-assets
+
       - name: Merge and validate release assets
         shell: bash
         env:
@@ -241,6 +248,12 @@ jobs:
             "$appimage" "T3-Code-$VERSION-amd64.deb"; do
             [[ -s "release-assets/$file" ]] || { echo "::error::Missing release asset: $file"; exit 1; }
           done
+          # The install scripts and shared T3 Code updates verify these archives against SHA256SUMS.
+          archives=("t3-$VERSION-darwin-arm64.tar.gz" "t3-$VERSION-linux-x64.tar.gz" "t3-$VERSION-win32-x64.zip")
+          for file in "${archives[@]}"; do
+            [[ -s "release-assets/$file" ]] || { echo "::error::Missing CLI archive: $file"; exit 1; }
+          done
+          (cd release-assets && sha256sum -- "${archives[@]}" > SHA256SUMS && cat SHA256SUMS)
           node scripts/merge-update-manifests.ts --platform mac "release-assets/$channel-mac.yml" "release-assets/$channel-mac-x64.yml"
           rm "release-assets/$channel-mac-x64.yml"
 
@@ -269,7 +282,7 @@ jobs:
           body: |
             Windows and Linux builds are unsigned. macOS builds are self-signed and not notarized. On first install, use System Settings → Privacy & Security → Open Anyway. Later updates install in-app.
 
-            No `t3` npm package or CLI archives are published. Remote server self-update to this version is unavailable.
+            CLI archives for macOS arm64, Linux x64 and Windows x64 are attached with `SHA256SUMS` for the install scripts and shared T3 Code updates. No `t3` npm package is published, and `t3 update` and remote server self-update still follow upstream releases.
           draft: true
           prerelease: ${{ needs.preflight.outputs.prerelease }}
           files: release-assets/*

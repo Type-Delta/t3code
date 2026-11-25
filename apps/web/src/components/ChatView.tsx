@@ -45,6 +45,7 @@ import { ThreadFind, ThreadFindCanvas } from "./chat/ThreadFindProvider";
 import { closeThreadFind, openThreadFind, useThreadFindOpen } from "./chat/threadFindStore";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
+import { resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import { isThreadEnvironmentLocked, resolveDraftHeroState } from "./ChatView.logic";
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
 import {
@@ -237,6 +238,7 @@ import {
   useEnvironmentSettings,
 } from "../hooks/useSettings";
 import { useNowMinute } from "../hooks/useNowMinute";
+import { formatUpcomingTimestamp } from "../timestampFormat";
 import { usePanelAnimationSettings, usePanelPresence } from "../panelAnimations";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
@@ -498,6 +500,9 @@ export default function ChatView(props: ChatViewProps) {
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const snoozeThread = useOrchestrationCommand(threadEnvironment.snooze, {
+    reportFailure: false,
+  });
   const resumeAutoRetry = useAtomCommand(threadEnvironment.resumeAutoRetry, "resume auto retry");
   const canResumeAutoRetry = useAtomValue(
     threadEnvironment.resumeAutoRetry.permissionAtom(environmentId),
@@ -595,6 +600,7 @@ export default function ChatView(props: ChatViewProps) {
       return undefined;
     }
     return {
+      cursor: serverThreadHistory.historyCursor,
       hasMoreHistory: serverThreadHistory.hasMoreHistory,
       loading: serverThreadHistory.loading,
       error: serverThreadHistory.error,
@@ -867,6 +873,10 @@ export default function ChatView(props: ChatViewProps) {
     }
   }
   const nowMinute = useNowMinute();
+  const retryPresets = resolveSnoozePresets(new Date(Date.parse(`${nowMinute}:00Z`)), {
+    presets: settings.snoozePresets,
+    formatTime: (date) => formatUpcomingTimestamp(date.toISOString(), timestampFormat),
+  });
   const draftDefaultModelSelection = draftThread
     ? resolveProjectSettings(
         settings,
@@ -2735,6 +2745,24 @@ export default function ChatView(props: ChatViewProps) {
             const result = await updateThreadMetadata({
               environmentId,
               input: { threadId: activeThreadShell.id, limitRecovery },
+            });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+          },
+          retryPresets,
+          onScheduleRetry: async (snoozedUntil) => {
+            const resetAt = serverRuntime?.usageLimitResetAt;
+            if (resetAt === null || resetAt === undefined)
+              throw new Error("Reset time unavailable.");
+            await updateThreadMetadata({
+              environmentId,
+              input: {
+                threadId: activeThreadShell.id,
+                limitRecovery: { runId: limitRecoveryRun.runId, resetAt, autoResume: true },
+              },
+            });
+            const result = await snoozeThread({
+              environmentId,
+              input: { threadId: activeThreadShell.id, snoozedUntil },
             });
             if (result._tag === "Failure") throw squashAtomCommandFailure(result);
           },

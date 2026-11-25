@@ -11,13 +11,13 @@ launch T3 Code and configure providers afterwards.
 ## Command line
 
 ```bash
-curl -fsSL https://t3.codes/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Type-Delta/t3code/main/scripts/install.sh | sh
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-irm https://t3.codes/install.ps1 | iex
+irm https://raw.githubusercontent.com/Type-Delta/t3code/main/scripts/install.ps1 | iex
 ```
 
 This installs the `t3` command to `~/.local/bin`. If that folder is not on your
@@ -28,13 +28,17 @@ installer or the desktop app did not create is already there, it leaves that
 one alone and stops. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
 `T3CODE_VERSION` to pin an exact version.
 
+These are this fork's installers. They install macOS on Apple silicon, Linux x64 and
+Windows x64. Run as an administrator, they also offer a machine-wide install for all
+local users; see [the multi-user gateway guide](./multi-user-gateway.md).
+
 | Task                                  | Command                                                                 |
 | ------------------------------------- | ----------------------------------------------------------------------- |
 | Start the server and open the web app | `t3`                                                                    |
 | Start the server without a browser    | `t3 serve`                                                              |
 | Use it from your other devices        | `t3 up` ([details](./remote-access.md))                                 |
 | Keep it running in the background     | `t3 service install` ([details](./background-service.md))               |
-| Move to the newest release            | `t3 update`                                                             |
+| Move to the newest release            | Run the installer again                                                 |
 | Reclaim database space                | `t3 doctor` ([details](./background-service.md#reclaim-database-space)) |
 | Remove it again                       | `t3 uninstall`                                                          |
 
@@ -71,7 +75,7 @@ update it with `git pull` and a rebuild.
 
 ## Desktop app
 
-Download a release from [GitHub Releases](https://github.com/pingdotgg/t3code/releases),
+Download a release from [GitHub Releases](https://github.com/Type-Delta/t3code/releases),
 or use a package manager:
 
 | Platform           | Install                                                      |

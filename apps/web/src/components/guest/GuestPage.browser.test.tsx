@@ -1,6 +1,7 @@
 import {
   EventId,
   GUEST_COMMAND_OUTPUT_ROUTE,
+  GUEST_HISTORY_ROUTE,
   GUEST_RENDER_ROUTE,
   GuestMessageId,
   GuestShareId,
@@ -11,6 +12,7 @@ import {
   TurnItemId,
   type GuestShareView,
   type OrchestrationV2Run,
+  OrchestrationV2ThreadHistoryPage,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -26,6 +28,7 @@ import { GuestPage } from "./GuestPage";
 
 const SHARE_ID = "share-1";
 const encodeEvent = Schema.encodeSync(Schema.fromJsonString(Schema.toCodecJson(GuestStreamEvent)));
+const encodeHistoryPage = Schema.encodeSync(Schema.toCodecJson(OrchestrationV2ThreadHistoryPage));
 
 const fixture = makeThreadProjectionFixture();
 const threadId = fixture.thread.id;
@@ -216,6 +219,55 @@ function visit(path: string): Disposable {
 }
 
 describe("GuestPage", () => {
+  it("can reload the same history page after a reconnect restores the bounded window", async () => {
+    using _page = visit(`/guest?share=${SHARE_ID}`);
+    const oldReply = reply("older", 0, "Earlier reply", "run-old");
+    const historyPage = encodeHistoryPage({
+      snapshotSequence: 1,
+      hasMoreHistory: false,
+      nextCursor: null,
+      items: [
+        {
+          position: 0,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: oldReply.id,
+          item: oldReply,
+        },
+      ],
+    });
+    const historyUrl = `${GUEST_HISTORY_ROUTE}?share=${SHARE_ID}&cursor=earlier`;
+    using fetchSpy = vi
+      .spyOn(window, "fetch")
+      .mockImplementation(async (url) =>
+        url === historyUrl ? Response.json(historyPage) : new Response(null, { status: 204 }),
+      );
+    const sources: Array<EventTarget> = [];
+    const [share, thread] = opening(
+      [run("run-old", 1, "completed"), run("run-1", 2, "completed")],
+      [reply("recent", 1, "Recent reply")],
+    );
+    if (!share || thread?.type !== "thread" || thread.item.kind !== "snapshot")
+      throw new Error("Missing guest fixture snapshot.");
+    const bounded = {
+      ...thread,
+      item: { ...thread.item, hasMoreHistory: true, historyCursor: "earlier" },
+    } satisfies GuestStreamEvent;
+    using _stream = vi
+      .spyOn(window, "EventSource")
+      .mockImplementation(fakeEventSource([share, bounded], sources) as never);
+    const container = document.createElement("div");
+    container.style.cssText = "height: 600px; width: 900px; display: flex; flex-direction: column;";
+    await using screen = await render(<GuestPage />, { container });
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(historyUrl));
+    await expect.element(screen.getByText("Earlier reply")).toBeVisible();
+    sources[0]!.dispatchEvent(new MessageEvent("message", { data: encodeEvent(bounded) }));
+    await vi.waitFor(() =>
+      expect(fetchSpy.mock.calls.filter(([url]) => url === historyUrl)).toHaveLength(2),
+    );
+    await expect.element(screen.getByText("Earlier reply")).toBeVisible();
+  });
+
   it("shows the shared thread in the real timeline without opening an environment connection", async () => {
     using _page = visit(`/guest?share=${SHARE_ID}`);
     using _session = vi

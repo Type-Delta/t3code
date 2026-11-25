@@ -279,15 +279,24 @@ function GuestSession({ shareId }: { readonly shareId: string }) {
   const historyError = currentLoad?.error ?? null;
   const loadEarlier = async () => {
     if (historyCursor === null || loadingHistory) return;
-    setHistoryLoad({ cursor: historyCursor, error: null });
+    const request = { cursor: historyCursor, error: null };
+    setHistoryLoad(request);
     const result = await fetchGuestHistoryPage(shareId, historyCursor);
-    if (typeof result === "string") setHistoryLoad({ cursor: historyCursor, error: result });
-    else dispatch({ type: "history-page", cursor: historyCursor, page: result });
+    setHistoryLoad((current) =>
+      current !== request
+        ? current
+        : typeof result === "string"
+          ? { ...request, error: result }
+          : null,
+    );
+    if (typeof result !== "string")
+      dispatch({ type: "history-page", cursor: historyCursor, page: result });
   };
   const historyControls: MessagesTimelineHistoryControls | undefined =
     historyCursor === null
       ? undefined
       : {
+          cursor: historyCursor,
           hasMoreHistory: true,
           loading: loadingHistory,
           error: historyError,

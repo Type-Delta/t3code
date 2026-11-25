@@ -2025,6 +2025,7 @@ export function deriveMessagesTimelineRows(input: {
           nextEntry.entry.questionAnswer !== undefined ||
           isPendingApproval(nextEntry.entry) ||
           activeWorkEntryIds.has(nextEntry.id) ||
+          input.expandedWorkGroupIds?.has(workGroupId(nextEntry.id)) ||
           collapsedEntryIds.has(nextEntry.id) ||
           collapsedSupersededEntryIds.has(nextEntry.id) ||
           foldsByAnchorEntryId.has(nextEntry.id) ||

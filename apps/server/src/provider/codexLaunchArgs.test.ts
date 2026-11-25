@@ -184,18 +184,21 @@ describe("Codex API gateway launch configuration", () => {
   });
 
   it("lets Codex fetch a gateway catalog with command-backed bearer auth", () => {
-    const args = codexGatewayLaunchArgv({
-      apiGateway: {
-        enabled: true,
-        baseUrl: "https://proxy.example/v1",
-        catalogFormat: "codex",
-        apiKeyEnvironmentVariable: "PROXY_API_KEY",
-        authMode: "bearer",
-        useCodexCatalog: true,
-        codexImageGeneration: false,
-      },
-      codexCatalogPath: "/tmp/should-not-be-used.json",
-    });
+    const launch = (selfExecutable: boolean) =>
+      codexGatewayLaunchArgv({
+        apiGateway: {
+          enabled: true,
+          baseUrl: "https://proxy.example/v1",
+          catalogFormat: "codex",
+          apiKeyEnvironmentVariable: "PROXY_API_KEY",
+          authMode: "bearer",
+          useCodexCatalog: true,
+          codexImageGeneration: false,
+        },
+        codexCatalogPath: "/tmp/should-not-be-used.json",
+        selfExecutable,
+      });
+    const args = launch(false);
 
     NodeAssert.ok(
       args.includes(
@@ -203,9 +206,12 @@ describe("Codex API gateway launch configuration", () => {
       ),
     );
     NodeAssert.ok(args.join(" ").includes("model_providers.t3_api_gateway.auth={command="));
+    NodeAssert.ok(args.join(" ").includes('args=["-e", '));
     NodeAssert.ok(args.join(" ").includes('"PROXY_API_KEY"]}'));
     NodeAssert.ok(!args.join(" ").includes("model_catalog_json"));
     NodeAssert.ok(!args.join(" ").includes("secret-value"));
+    // A single-executable t3 rejects -e, so it prints the key through its own fast path.
+    NodeAssert.ok(launch(true).join(" ").includes('args=["__env-value", "PROXY_API_KEY"]}'));
   });
 
   it.each([false, true])(
