@@ -42,6 +42,7 @@ import { makeDeviceHubOperations } from "./DeviceHubOperations.ts";
 import { NodeRuntimeUnavailableError } from "@t3tools/shared/nodeRuntime";
 
 import * as DeviceService from "./DeviceService.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as SshDeviceHost from "./SshDeviceHost.ts";
 import { agentDeviceSession, releaseAgentDeviceSession } from "./AgentDeviceTarget.ts";
 import { ensureDeviceHub } from "./DeviceToolchain.ts";
@@ -748,6 +749,9 @@ describe("device setup consent", () => {
   );
 });
 
+// These hosts never reach a linked environment.
+const layerPeerLinks = Layer.mock(PeerLinks.PeerLinks)({});
+
 const layerSecretResolver = Layer.succeed(SecretResolver.SecretResolver, {
   label: (provider) => Effect.succeed(provider),
   read: (references) => Effect.succeed(references.map(() => undefined)),
@@ -848,6 +852,7 @@ it.effect.each([
       Layer.mergeAll(
         ServerSettings.layerTest(),
         layerSecretResolver,
+        layerPeerLinks,
         ServerConfig.layerTest(process.cwd(), { prefix: "t3-device-probe-" }),
         NodeCrypto.layer,
         NetService.layer,
@@ -1941,6 +1946,7 @@ it.effect("reconciles SSH host settings without publishing no-op changes", () =>
       Layer.mergeAll(
         ServerSettings.layerTest(),
         layerSecretResolver,
+        layerPeerLinks,
         NodeServices.layer,
         NodeCrypto.layer,
       ),
@@ -2020,6 +2026,7 @@ it.effect.each(["exit", "missing"] as const)(
         Layer.mergeAll(
           ServerSettings.layerTest({ enableDeviceSupport: true }),
           layerSecretResolver,
+          layerPeerLinks,
           ServerConfig.layerTest(process.cwd(), { prefix: "t3-device-update-" }),
           NodeCrypto.layer,
           NetService.layer,

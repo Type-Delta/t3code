@@ -25,6 +25,7 @@ import {
   type DeviceSimlockIdentityInput,
   type DeviceHostConfig,
   type EasDeviceHostConfig,
+  type LinkedDeviceHostConfig,
   type SimlockDeviceHostConfig,
   type SshDeviceHostConfig,
   type DeviceHostSummary,
@@ -80,6 +81,7 @@ import * as DeviceHost from "./DeviceHost.ts";
 import * as SshDeviceHost from "./SshDeviceHost.ts";
 import * as EasDeviceHost from "./EasDeviceHost.ts";
 import * as SimlockDeviceHost from "./SimlockDeviceHost.ts";
+import * as LinkedDeviceHost from "./LinkedDeviceHost.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { makeExpoApi } from "./ExpoApi.ts";
 import * as Exit from "effect/Exit";
@@ -116,8 +118,17 @@ const sshProbeFailureMessage = (error: DeviceHost.DeviceHostError): string => {
 
 const isToolchainInstallError = Schema.is(DeviceToolchainInstallError);
 
+/** What a host's failed listing shows; a linked environment's own words say more than ours. */
+const failureDetail = (error: DeviceError) =>
+  error._tag === "DeviceHostUnavailableError"
+    ? error.reason
+    : error._tag === "DeviceOperationError" && LinkedDeviceHost.isLinkedDeviceHostFailure(error.cause)
+      ? error.cause.message
+      : error.message;
+
 const actionableHostFailure = (error: DeviceHost.DeviceHostError): string | undefined => {
   if (error.step === "probe") return sshProbeFailureMessage(error);
+  if (LinkedDeviceHost.isLinkedDeviceHostFailure(error.cause)) return error.cause.message;
   if (isToolchainInstallError(error.cause) && error.cause.reason === "npm_not_found")
     return error.cause.message;
   return undefined;
@@ -318,6 +329,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       supportsToolInspection: true,
       supportsEasHosts: true,
       supportsSimlockHosts: true,
+      supportsLinkedHosts: true,
       hosts: initialHosts,
       hostStatus: initialSettings.enabled ? "idle" : "disabled",
       hostStatuses: {},
@@ -636,7 +648,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           Effect.catch((error) =>
             setHostStatus(host.id, {
               status: "failed",
-              detail: error._tag === "DeviceHostUnavailableError" ? error.reason : error.message,
+              detail: failureDetail(error),
             }),
           ),
         ),
@@ -689,7 +701,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         Effect.catch((error) =>
           setHostStatus(hostId, {
             status: "failed",
-            detail: error._tag === "DeviceHostUnavailableError" ? error.reason : error.message,
+            detail: failureDetail(error),
           }),
         ),
       );
@@ -1450,6 +1462,8 @@ export const make = Effect.gen(function* () {
     yield* Effect.context<Effect.Services<ReturnType<typeof EasDeviceHost.make>>>();
   const simlockContext =
     yield* Effect.context<Effect.Services<ReturnType<typeof SimlockDeviceHost.make>>>();
+  const linkedContext =
+    yield* Effect.context<Effect.Services<ReturnType<typeof LinkedDeviceHost.make>>>();
   const simlockAgentCli = Effect.fn("DeviceService.simlockAgentCli")(
     function* (hostId: string) {
       const nodePath = yield* resolveNodeExecutable("Device automation");
@@ -1527,6 +1541,15 @@ export const make = Effect.gen(function* () {
                 );
             continue;
           }
+          if (host.kind === "linked") {
+            const instance = yield* LinkedDeviceHost.make(host).pipe(
+              Effect.provideService(Scope.Scope, hostScope),
+              Effect.provide(linkedContext),
+            );
+            hosts.set(host.id, instance);
+            configured.set(host.id, { config: host, scope: hostScope });
+            continue;
+          }
           if (host.kind === "eas") {
             // Closing this scope stops the host's running sessions, so a changed
             // limit or token never leaves a billed session behind.
@@ -1574,10 +1597,12 @@ export const make = Effect.gen(function* () {
     readonly easDeviceHosts: ReadonlyArray<EasDeviceHostConfig>;
     readonly simlockDeviceHosts: ReadonlyArray<SimlockDeviceHostConfig>;
     readonly simlockDeviceHostsEnabled: boolean;
+    readonly linkedDeviceHosts: ReadonlyArray<LinkedDeviceHostConfig>;
   }): ReadonlyArray<DeviceHostConfig> => {
     const hosts: Array<DeviceHostConfig> = [...value.deviceHosts];
     for (const host of [
       ...value.easDeviceHosts,
+      ...value.linkedDeviceHosts,
       ...(value.simlockDeviceHostsEnabled ? value.simlockDeviceHosts : []),
     ]) {
       if (!hosts.some((existing) => existing.id === host.id)) hosts.push(host);

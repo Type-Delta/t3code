@@ -895,6 +895,7 @@ function DeviceIntegrationSettings() {
       <DeviceSourcesSettings
         supportsEas={state.supportsEasHosts === true}
         supportsSimlock={state.supportsSimlockHosts === true}
+        supportsLinked={state.supportsLinkedHosts === true}
       />
     </>
   );

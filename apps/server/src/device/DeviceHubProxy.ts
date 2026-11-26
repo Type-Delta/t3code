@@ -191,13 +191,11 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   });
 });
 
-const handler = Effect.gen(function* () {
-  const request = yield* HttpServerRequest.HttpServerRequest;
-  const url = requestUrl(request);
-  if (Option.isNone(url)) {
-    return HttpServerResponse.text("Bad Request", { status: 400 });
-  }
-  const hubPath = url.value.pathname.slice(DeviceService.DEVICE_HUB_ROUTE_PREFIX.length) || "/";
+/**
+ * The scope a hub request needs, or the response refusing a path or method the hub must not
+ * be asked for. Streams take read scope; input and stream tuning take operate scope.
+ */
+export const hubRequestScope = (request: HttpServerRequest.HttpServerRequest, hubPath: string) => {
   const upgrade = isWebSocketUpgrade(request);
   const matches = (paths: ReadonlyArray<RegExp>) => paths.some((pattern) => pattern.test(hubPath));
   const allowed = upgrade
@@ -213,23 +211,20 @@ const handler = Effect.gen(function* () {
   const controlsDevice =
     (upgrade && hubPath !== "/api/devices/ws") ||
     (!readOnly && /\/api\/(stream-(mode|settings)|fold)$/.test(hubPath));
-  const session = yield* authenticateMediaRequest(
-    controlsDevice ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope,
-  );
-  const sessions = yield* SessionStore.SessionStore;
-  const invalidated = sessions.awaitInvalidation(session.sessionId).pipe(
-    Effect.catchTags({
-      SessionCredentialVerificationError: (error) =>
-        failEnvironmentInternal("internal_error", error).pipe(Effect.ignore),
-    }),
-  );
+  return controlsDevice ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope;
+};
+
+/** Sends an authenticated, allowed hub request to `ready`'s hub until `invalidated` completes. */
+export const forwardHubRequest = Effect.fn("DeviceHubProxy.forwardHubRequest")(function* (
+  request: HttpServerRequest.HttpServerRequest,
+  url: URL,
+  hubPath: string,
+  ready: DeviceService.DeviceReadiness,
+  invalidated: Effect.Effect<void>,
+) {
   const devices = yield* DeviceService.DeviceService;
-  const ready = yield* devices.currentReadiness(url.value.searchParams.get("hostId") ?? undefined);
-  if (!ready) {
-    return HttpServerResponse.text("Device hub is not running", { status: 503 });
-  }
   // Consume the auth ticket here; never forward it to the hub.
-  const upstreamSearch = new URLSearchParams(url.value.search);
+  const upstreamSearch = new URLSearchParams(url.search);
   upstreamSearch.delete("wsTicket");
   upstreamSearch.delete("hostId");
   const search = upstreamSearch.size > 0 ? `?${upstreamSearch.toString()}` : "";
@@ -253,7 +248,7 @@ const handler = Effect.gen(function* () {
   const upstreamHeaders =
     routed?.headers ??
     (ready.hub.token === undefined ? undefined : { authorization: `Bearer ${ready.hub.token}` });
-  if (upgrade) {
+  if (isWebSocketUpgrade(request)) {
     return yield* Effect.raceFirst(
       proxyWebSocket(
         request,
@@ -265,6 +260,31 @@ const handler = Effect.gen(function* () {
     );
   }
   return yield* proxyHttp(request, upstreamUrl, invalidated, upstreamHeaders);
+});
+
+const handler = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const url = requestUrl(request);
+  if (Option.isNone(url)) {
+    return HttpServerResponse.text("Bad Request", { status: 400 });
+  }
+  const hubPath = url.value.pathname.slice(DeviceService.DEVICE_HUB_ROUTE_PREFIX.length) || "/";
+  const scope = hubRequestScope(request, hubPath);
+  if (HttpServerResponse.isHttpServerResponse(scope)) return scope;
+  const session = yield* authenticateMediaRequest(scope);
+  const sessions = yield* SessionStore.SessionStore;
+  const invalidated = sessions.awaitInvalidation(session.sessionId).pipe(
+    Effect.catchTags({
+      SessionCredentialVerificationError: (error) =>
+        failEnvironmentInternal("internal_error", error).pipe(Effect.ignore),
+    }),
+  );
+  const devices = yield* DeviceService.DeviceService;
+  const ready = yield* devices.currentReadiness(url.value.searchParams.get("hostId") ?? undefined);
+  if (!ready) {
+    return HttpServerResponse.text("Device hub is not running", { status: 503 });
+  }
+  return yield* forwardHubRequest(request, url.value, hubPath, ready, invalidated);
 });
 
 export const layer = HttpRouter.add("*", `${DeviceService.DEVICE_HUB_ROUTE_PREFIX}/*`, handler);

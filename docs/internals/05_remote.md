@@ -41,6 +41,15 @@ side lists and revokes it in Sharing & access like any other session, and owns i
   [`TaskFolders`](../../apps/server/src/workspace/TaskFolders.ts) at every run.
 - **Namespace idempotency keys.** All callers on the linking side share one session on the receiving
   side, so idempotency keys must be hashed with the caller's namespace before forwarding.
+- **Device lending is full-access only, and the link's token stays on the server.** A linked device
+  host reaches the target's own simulators through
+  [`linkDevicesHttp`](../../apps/server/src/peer/linkDevicesHttp.ts), which admits only full-access
+  link sessions, since driving a simulator installs and runs apps as the target's OS user. Agents on
+  the linking side get a loopback agent-device address with a token of its own
+  ([`LinkedDeviceHost`](../../apps/server/src/device/LinkedDeviceHost.ts)); handing them the link's
+  self-renewing token would let any agent there use the link past its own mode. agent-device upload
+  tickets carry the daemon's address and token, so each hop rewrites them
+  ([`agentDaemonProxy`](../../apps/server/src/device/agentDaemonProxy.ts)).
 - **Clients read linked threads as standard thread streams.**
   [`PeerThreadRelay`](../../apps/server/src/peer/PeerThreadRelay.ts) proxies the same stream format
   read-only so there is no second transcript schema to maintain.
