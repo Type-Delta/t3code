@@ -61,6 +61,8 @@ const serveMac = Effect.gen(function* () {
   const daemonStatus = yield* Ref.make(200);
   const daemonCalls = yield* Ref.make<ReadonlyArray<unknown>>([]);
   const redirectTo = yield* Ref.make<string | undefined>(undefined);
+  const holdRpc = yield* Ref.make(false);
+  const rpcHeld = yield* Deferred.make<void>();
   const shutdownRequested = yield* Deferred.make<void>();
   const shutdownAnswered = yield* Deferred.make<void>();
   const server = yield* NodeHttpServer.make(() => NodeHttp.createServer(), {
@@ -95,6 +97,11 @@ const serveMac = Effect.gen(function* () {
       if (request.url === `${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon/rpc`) {
         const body = yield* request.json;
         yield* Ref.update(daemonCalls, (all) => [...all, body]);
+        if (yield* Ref.get(holdRpc))
+          return yield* Deferred.succeed(rpcHeld, undefined).pipe(
+            Effect.andThen(Deferred.await(shutdownAnswered)),
+            Effect.as(HttpServerResponse.empty()),
+          );
         return HttpServerResponse.jsonUnsafe(
           { jsonrpc: "2.0", id: 1, result: { ok: true } },
           { status: yield* Ref.get(daemonStatus), headers },
@@ -116,6 +123,8 @@ const serveMac = Effect.gen(function* () {
     daemonStatus,
     daemonCalls,
     redirectTo,
+    holdRpc,
+    rpcHeld,
     shutdownRequested,
   };
 });
@@ -426,6 +435,24 @@ it.effect("an open stream ends once its link is relinked lower, without another 
 
       yield* Fiber.join(watching);
       expect(yield* Ref.get(resolves)).toBe(1);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an agent call in flight ends once its link is relinked lower", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, mac, relink } = yield* makeLinkedHost;
+      yield* host.ensureAgentReady(noPhase);
+      const ready = (yield* host.current)!;
+      const endpoint = yield* ready.devices.agentEndpoint!("SIM-1");
+      yield* Ref.set(mac.holdRpc, true);
+      const pending = yield* Effect.forkChild(rpc(endpoint, endpoint.token));
+      yield* Deferred.await(mac.rpcHeld);
+      yield* relink({ access: "auto" }, "token-2");
+      yield* TestClock.adjust("11 seconds");
+
+      expect(yield* Fiber.join(pending)).toBe(503);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

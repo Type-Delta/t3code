@@ -259,10 +259,23 @@ const make = Effect.gen(function* () {
         (yield* devices.currentReadiness(LOCAL_DEVICE_HOST_ID)) ??
         (yield* devices.readiness(LOCAL_DEVICE_HOST_ID).pipe(Effect.option)).pipe(Option.getOrNull);
       if (!ready) return HttpServerResponse.text("Device hub is not running", { status: 503 });
-      return yield* forwardHubRequest(request, url, hubPath, ready, revoked).pipe(
-        forwarding,
-        Effect.catch(deviceFailure),
+      // Turning device support off through settings alone leaves the hub running.
+      const supportOff = services.settings.getSettings.pipe(
+        Effect.map((current) => current.enableDeviceSupport),
+        Effect.orElseSucceed(() => false),
+        Effect.repeat({
+          schedule: Schedule.spaced(ACCESS_RECHECK_INTERVAL),
+          until: (enabled) => !enabled,
+        }),
+        Effect.asVoid,
       );
+      return yield* forwardHubRequest(
+        request,
+        url,
+        hubPath,
+        ready,
+        Effect.raceFirst(revoked, supportOff),
+      ).pipe(forwarding, Effect.catch(deviceFailure));
     }
 
     if (path.startsWith("/daemon/")) {

@@ -380,6 +380,12 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     }
   });
 
+  /** Completes when traffic under this resolved link must stop: the host stopped or the link changed. */
+  const linkEnded = (resolved: {
+    readonly ended: Deferred.Deferred<void>;
+    readonly linkedAt: DateTime.Utc;
+  }) => Effect.raceFirst(Deferred.await(resolved.ended), linkReplaced(resolved.linkedAt));
+
   const upstream: NonNullable<DeviceHost.DeviceHostReady["upstream"]> = (hubPath, search) =>
     resolvePeer.pipe(
       Effect.map(({ url, token, ended, linkedAt }) => ({
@@ -387,7 +393,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
         headers: { authorization: `Bearer ${token}` },
         protocols: [],
         refuseRedirects: true,
-        ended: Effect.raceFirst(Deferred.await(ended), linkReplaced(linkedAt)),
+        ended: linkEnded({ ended, linkedAt }),
       })),
       Effect.orElseSucceed(() => null),
     );
@@ -491,16 +497,32 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
           },
           { status: 503 },
         );
+      const ended = linkEnded(target.success);
       return yield* forwardAgentDaemonRequest(request, {
         path: url.value.pathname,
         search: url.value.search,
         baseUrl: `${target.success.url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon`,
         headers: { authorization: `Bearer ${target.success.token}` },
+        invalidated: ended,
         uploadTicket: (uploadId) => ({
           url: `${origin}/upload/direct/${uploadId}`,
           headers: agentDaemonAuthHeaders(localToken),
         }),
       }).pipe(
+        Effect.raceFirst(
+          ended.pipe(
+            Effect.as(
+              HttpServerResponse.jsonUnsafe(
+                {
+                  ok: false,
+                  error: `The link to ${config.label} changed. Try again.`,
+                  code: "COMMAND_FAILED",
+                },
+                { status: 503 },
+              ),
+            ),
+          ),
+        ),
         Effect.tap(recordPeerAnswer),
         Effect.map((response) =>
           response.status >= 300 && response.status < 400

@@ -18,6 +18,7 @@ import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { Toolkit } from "effect/ai";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpBody from "effect/http/HttpBody";
@@ -90,7 +91,13 @@ const serveFake = (respond: (seen: Seen) => Effect.Effect<HttpServerResponse.Htt
 
 /** The Mac: its own device service, with a hub and an agent-device daemon on its loopback. */
 const serveMac = Effect.fnUntraced(function* (waitForReadiness: Effect.Effect<void> = Effect.void) {
-  const hub = yield* serveFake(() => Effect.succeed(HttpServerResponse.text("frame")));
+  const hub = yield* serveFake((seen) =>
+    Effect.succeed(
+      seen.url.endsWith("stream.avcc")
+        ? HttpServerResponse.stream(Stream.concat(Stream.make(Uint8Array.of(1)), Stream.never))
+        : HttpServerResponse.text("frame"),
+    ),
+  );
   const rpcStarted = yield* Deferred.make<void>();
   const rpcClosed = yield* Deferred.make<void>();
   const artifactClosed = yield* Deferred.make<void>();
@@ -350,6 +357,29 @@ it.effect("turning off device support refuses requests to the running hub", () =
       expect(refused.status).toBe(403);
       expect(decodeObject(refused.body).error).toBe("device_support_off");
       expect(yield* Ref.get(hub.seen)).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an open hub stream ends once device support is turned off in settings", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { peer } = yield* serveMac();
+      const { links } = yield* makeLaptop;
+      yield* linkTo(links, peer, "full-access");
+      const token = yield* linkToken(links);
+      const response = yield* HttpClient.execute(
+        HttpClientRequest.get(
+          `${peer.url}/api/links/devices/hub/vendor/serve-sim/helper/SIM-1/stream.avcc`,
+        ).pipe(HttpClientRequest.bearerToken(token)),
+      ).pipe(Effect.provide(FetchHttpClient.layer));
+      expect(response.status).toBe(200);
+      const draining = yield* Effect.forkChild(Stream.runDrain(response.stream));
+
+      yield* peer.settings.updateSettings({ enableDeviceSupport: false });
+      yield* TestClock.adjust("31 seconds");
+
+      yield* Fiber.await(draining);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
