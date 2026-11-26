@@ -165,7 +165,6 @@ const hostPlatforms = (state: DeviceServiceState | undefined, hostId: string) =>
 export function DeviceSourcesSettings(props: {
   readonly supportsEas: boolean;
   readonly supportsSimlock: boolean;
-  readonly supportsLinked: boolean;
 }) {
   const gt = useGT();
   const m = useMessages();
@@ -331,15 +330,13 @@ export function DeviceSourcesSettings(props: {
     );
 
   // A link is one environment's own, so each linked host is saved only where its link is.
-  const linkHolders = props.supportsLinked
-    ? members
-        .filter((member) => member.offersLinks)
-        .map((member) => ({
-          environmentId: member.environmentId,
-          label: member.label,
-          hosts: member.settings?.linkedDeviceHosts ?? [],
-        }))
-    : [];
+  const linkHolders = members
+    .filter((member) => member.offersLinks && member.state?.supportsLinkedHosts === true)
+    .map((member) => ({
+      environmentId: member.environmentId,
+      label: member.label,
+      hosts: member.settings?.linkedDeviceHosts ?? [],
+    }));
   const saveLinked = async (
     environmentId: EnvironmentId,
     host: LinkedDeviceHostConfig,
@@ -595,8 +592,9 @@ export function DeviceSourcesSettings(props: {
     }
   }
 
-  for (const holder of linkHolders) {
-    for (const host of holder.hosts) {
+  // Listed even with Linked environments off, so a source added before can still be removed.
+  for (const holder of members) {
+    for (const host of holder.settings?.linkedDeviceHosts ?? []) {
       rows.push({
         key: `linked:${holder.environmentId}:${host.id}`,
         shared: false,

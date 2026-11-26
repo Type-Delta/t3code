@@ -10,9 +10,13 @@ import {
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { Toolkit } from "effect/ai";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpBody from "effect/http/HttpBody";
@@ -26,6 +30,7 @@ import * as DeviceHost from "../device/DeviceHost.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as LinkedDeviceHost from "../device/LinkedDeviceHost.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpToolAccess from "../mcp/McpToolAccess.ts";
 import * as LinkDevicesHttp from "./linkDevicesHttp.ts";
 import * as PeerLinks from "./PeerLinks.ts";
@@ -41,6 +46,9 @@ const laptop = descriptorOf("environment-laptop", "Laptop");
 const mac = descriptorOf("environment-mac", "Mac", { linkDevices: true });
 const NoTools = Toolkit.make();
 const DAEMON_TOKEN = "daemon-secret";
+const decodeObject = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
 const simulator = {
   id: "SIM-1",
   platform: "ios" as const,
@@ -58,7 +66,7 @@ interface Seen {
 }
 
 /** A loopback HTTP server that records each request and answers with `respond`. */
-const serveFake = (respond: (seen: Seen) => HttpServerResponse.HttpServerResponse) =>
+const serveFake = (respond: (seen: Seen) => Effect.Effect<HttpServerResponse.HttpServerResponse>) =>
   Effect.gen(function* () {
     const seen = yield* Ref.make<ReadonlyArray<Seen>>([]);
     const server = yield* NodeHttpServer.make(() => NodeHttp.createServer(), {
@@ -71,8 +79,8 @@ const serveFake = (respond: (seen: Seen) => HttpServerResponse.HttpServerRespons
         const body = yield* request.text.pipe(Effect.orElseSucceed(() => ""));
         const entry = { method: request.method, url: request.url, headers: request.headers, body };
         yield* Ref.update(seen, (all) => [...all, entry]);
-        return respond(entry);
-      }),
+        return yield* respond(entry);
+      }).pipe(Effect.interruptible),
     );
     if (!NetAddress.isInetAddress(server.address)) return yield* Effect.die("no TCP address");
     return { origin: `http://127.0.0.1:${server.address.port}`, seen };
@@ -80,20 +88,48 @@ const serveFake = (respond: (seen: Seen) => HttpServerResponse.HttpServerRespons
 
 /** The Mac: its own device service, with a hub and an agent-device daemon on its loopback. */
 const serveMac = Effect.gen(function* () {
-  const hub = yield* serveFake(() => HttpServerResponse.text("frame"));
-  const daemon = yield* serveFake((request) =>
-    request.url.startsWith("/upload/preflight")
-      ? HttpServerResponse.jsonUnsafe({
+  const hub = yield* serveFake(() => Effect.succeed(HttpServerResponse.text("frame")));
+  const rpcStarted = yield* Deferred.make<void>();
+  const rpcClosed = yield* Deferred.make<void>();
+  const artifactClosed = yield* Deferred.make<void>();
+  const stopFake = yield* Deferred.make<void>();
+  const daemon = yield* serveFake(
+    Effect.fnUntraced(function* (request) {
+      if (request.url === "/rpc?pending") {
+        yield* Deferred.succeed(rpcStarted, undefined);
+        yield* Deferred.await(stopFake).pipe(
+          Effect.onInterrupt(() => Deferred.succeed(rpcClosed, undefined)),
+        );
+        return HttpServerResponse.empty();
+      }
+      if (request.url.startsWith("/artifacts/")) {
+        return HttpServerResponse.stream(
+          Stream.concat(
+            Stream.make(new TextEncoder().encode("first chunk")),
+            Stream.fromEffect(Deferred.await(stopFake)).pipe(Stream.drain),
+          ).pipe(Stream.ensuring(Deferred.succeed(artifactClosed, undefined))),
+        );
+      }
+      if (request.url.startsWith("/upload/preflight")) {
+        if (request.url.endsWith("?cache")) {
+          return HttpServerResponse.jsonUnsafe({ ok: true, uploadId: "up-1", cacheHit: true });
+        }
+        return HttpServerResponse.jsonUnsafe({
           ok: true,
-          uploadId: "up-1",
+          uploadId: request.url.endsWith("?malformed") ? null : "up-1",
           upload: {
-            url: `http://127.0.0.1:1/upload/direct/up-1`,
+            url: "http://127.0.0.1:1/upload/direct/up-1",
             headers: { authorization: `Bearer ${DAEMON_TOKEN}`, "content-type": "application/zip" },
           },
-        })
-      : HttpServerResponse.jsonUnsafe({ jsonrpc: "2.0", id: 1, result: { ok: true } }),
+        });
+      }
+      return HttpServerResponse.jsonUnsafe({ jsonrpc: "2.0", id: 1, result: { ok: true } });
+    }),
   );
+  yield* Effect.addFinalizer(() => Deferred.succeed(stopFake, undefined));
   const booted = yield* Ref.make<ReadonlyArray<string>>([]);
+  const readinessCalls = yield* Ref.make(0);
+  const daemonAvailable = yield* Ref.make(true);
   const ready: DeviceService.DeviceReadiness = {
     hostId: LOCAL_DEVICE_HOST_ID,
     nodePath: "node",
@@ -109,13 +145,19 @@ const serveMac = Effect.gen(function* () {
     helpers: { serveSimAxSettings: null, serveSimCli: null },
   };
   const devices = Layer.mock(DeviceService.DeviceService)({
-    readiness: () => Effect.succeed(ready),
+    readiness: () => Ref.update(readinessCalls, (count) => count + 1).pipe(Effect.as(ready)),
     currentReadiness: () => Effect.succeed(ready),
     agentReadinessIfSupported: () =>
-      Effect.succeed({
-        ...ready,
-        agentDevice: { baseUrl: daemon.origin, token: DAEMON_TOKEN, entryPath: "" },
-      }),
+      Ref.get(daemonAvailable).pipe(
+        Effect.map((available) =>
+          available
+            ? {
+                ...ready,
+                agentDevice: { baseUrl: daemon.origin, token: DAEMON_TOKEN, entryPath: "" },
+              }
+            : null,
+        ),
+      ),
     state: Effect.succeed({
       hosts: [
         {
@@ -142,7 +184,18 @@ const serveMac = Effect.gen(function* () {
     McpHttpServer.toolkitRegistration(NoTools, McpToolAccess.toLayer(NoTools, {})),
     LinkDevicesHttp.layer.pipe(Layer.provide(devices), Layer.provide(FetchHttpClient.layer)),
   );
-  return { peer, hub, daemon, booted };
+  yield* peer.settings.updateSettings({ enableDeviceSupport: true, enableAgentDeviceAccess: true });
+  return {
+    peer,
+    hub,
+    daemon,
+    booted,
+    readinessCalls,
+    daemonAvailable,
+    rpcStarted,
+    rpcClosed,
+    artifactClosed,
+  };
 });
 
 const makeLaptop = Effect.gen(function* () {
@@ -153,7 +206,7 @@ const makeLaptop = Effect.gen(function* () {
     id: "mac" as DeviceHostId,
     label: "Mac",
     environmentId: EnvironmentId.make(mac.environmentId),
-  }).pipe(Effect.provide(Layer.succeedContext(linking)), Effect.provide(FetchHttpClient.layer));
+  }).pipe(Effect.provide(Layer.merge(Layer.succeedContext(linking), FetchHttpClient.layer)));
   return { links, host };
 });
 
@@ -162,7 +215,9 @@ const noPhase = () => Effect.void;
 const fetch = (request: HttpClientRequest.HttpClientRequest) =>
   HttpClient.execute(request).pipe(
     Effect.flatMap((response) =>
-      response.text.pipe(Effect.map((body) => ({ status: response.status, body }))),
+      response.text.pipe(
+        Effect.map((body) => ({ status: response.status, headers: response.headers, body })),
+      ),
     ),
     Effect.scoped,
     Effect.provide(FetchHttpClient.layer),
@@ -174,9 +229,26 @@ const linkToken = (links: PeerLinks.PeerLinks["Service"]) =>
 it.effect("a full-access link lists, boots and streams the linked machine's devices", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { peer, hub, booted } = yield* serveMac;
+      const { peer, hub, booted, readinessCalls } = yield* serveMac;
       const laptopSide = yield* makeLaptop;
       yield* linkTo(laptopSide.links, peer, "full-access");
+
+      const token = yield* linkToken(laptopSide.links);
+      for (const path of ["/missing", "/agent"]) {
+        const missing = yield* fetch(
+          HttpClientRequest.post(`${peer.url}/api/links/devices${path}`).pipe(
+            HttpClientRequest.bearerToken(token),
+          ),
+        );
+        expect(missing.status).toBe(404);
+      }
+      const wrongMethod = yield* askMac(peer, token, {}, "/boot");
+      expect(wrongMethod.status).toBe(405);
+      expect(yield* Ref.get(readinessCalls)).toBe(0);
+      const operations = yield* askMac(peer, token);
+      expect(operations.headers[McpInvocationContext.LINK_EXPIRES_AT_HEADER]).toMatch(
+        /^\d{4}-\d\d-\d\dT.*Z$/,
+      );
 
       const ready = yield* laptopSide.host.ensureReady(noPhase);
       const listed = yield* ready.devices.list;
@@ -194,7 +266,7 @@ it.effect("a full-access link lists, boots and streams the linked machine's devi
       const frame = yield* fetch(
         HttpClientRequest.get(routed.url).pipe(HttpClientRequest.setHeaders(routed.headers)),
       );
-      expect(frame).toEqual({ status: 200, body: "frame" });
+      expect(frame).toMatchObject({ status: 200, body: "frame" });
       const [hubRequest] = yield* Ref.get(hub.seen);
       expect(hubRequest?.url).toBe("/vendor/serve-sim/helper/SIM-1/stream.mjpeg?device=SIM-1");
       // The link's token stops at the linked environment.
@@ -238,7 +310,7 @@ it.effect("agents reach the linked daemon only through a loopback token of their
       expect((yield* rpc(endpoint.token)).status).toBe(200);
       const [command] = yield* Ref.get(daemon.seen);
       expect(command?.headers.authorization).toBe(`Bearer ${DAEMON_TOKEN}`);
-      expect(JSON.parse(command!.body).params).toEqual({
+      expect(decodeObject(command!.body).params).toEqual({
         command: "snapshot",
         token: DAEMON_TOKEN,
       });
@@ -251,7 +323,7 @@ it.effect("agents reach the linked daemon only through a loopback token of their
         ),
       );
       expect(ticket.body).not.toContain(DAEMON_TOKEN);
-      expect(JSON.parse(ticket.body).upload).toEqual({
+      expect(decodeObject(ticket.body).upload).toEqual({
         url: `${endpoint.baseUrl}/upload/direct/up-1`,
         headers: {
           "content-type": "application/zip",
@@ -263,9 +335,14 @@ it.effect("agents reach the linked daemon only through a loopback token of their
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-const askMac = (peer: ServedPeer, bearer: string, headers: Record<string, string> = {}) =>
+const askMac = (
+  peer: ServedPeer,
+  bearer: string,
+  headers: Record<string, string> = {},
+  path = "",
+) =>
   fetch(
-    HttpClientRequest.get(`${peer.url}/api/links/devices`).pipe(
+    HttpClientRequest.get(`${peer.url}/api/links/devices${path}`).pipe(
       HttpClientRequest.setHeaders({ authorization: `Bearer ${bearer}`, ...headers }),
     ),
   );
@@ -280,7 +357,7 @@ it.effect("only a full-access link's session may use the linked machine's device
 
       const refused = yield* askMac(peer, token);
       expect(refused.status).toBe(403);
-      expect(JSON.parse(refused.body).error).toBe("not_a_full_access_link");
+      expect(decodeObject(refused.body).error).toBe("not_a_full_access_link");
       // This side says why before asking.
       const error = yield* laptopSide.host.ensureReady(noPhase).pipe(Effect.flip);
       expect(error).toBeInstanceOf(DeviceHost.DeviceHostError);
@@ -315,6 +392,128 @@ it.effect("a browser origin is refused and unlinking ends the host's access", ()
       expect((error.cause as LinkedDeviceHost.LinkedDeviceHostFailure).message).toContain(
         "no longer linked",
       );
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "the daemon route rejects malformed upload tickets and non-object or oversized RPCs",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { peer, daemon } = yield* serveMac;
+        const { links } = yield* makeLaptop;
+        yield* linkTo(links, peer, "full-access");
+        const token = yield* linkToken(links);
+        const post = (path: string, body: string) =>
+          fetch(
+            HttpClientRequest.post(`${peer.url}/api/links/devices/daemon${path}`).pipe(
+              HttpClientRequest.bearerToken(token),
+              HttpClientRequest.setBody(HttpBody.text(body, "application/json")),
+            ),
+          );
+        expect((yield* post("/rpc", "[]")).status).toBe(400);
+        expect(
+          (yield* post("/rpc", JSON.stringify({ value: "é".repeat(2 * 1024 * 1024) }))).status,
+        ).toBe(400);
+        expect(yield* Ref.get(daemon.seen)).toEqual([]);
+
+        const malformed = yield* post("/upload/preflight?malformed", "{}");
+        expect(malformed.body).not.toContain(DAEMON_TOKEN);
+        expect(malformed).toMatchObject({ status: 502 });
+        const cached = yield* post("/upload/preflight?cache", "{}");
+        expect(cached).toMatchObject({ status: 200 });
+        expect(decodeObject(cached.body)).toEqual({ ok: true, uploadId: "up-1", cacheHit: true });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("daemon RPC refusals report disabled settings and startup failure", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { peer, daemon, daemonAvailable } = yield* serveMac;
+      const { links } = yield* makeLaptop;
+      yield* linkTo(links, peer, "full-access");
+      const token = yield* linkToken(links);
+      const rpc = fetch(
+        HttpClientRequest.post(`${peer.url}/api/links/devices/daemon/rpc`).pipe(
+          HttpClientRequest.bearerToken(token),
+          HttpClientRequest.setBody(HttpBody.text('{"jsonrpc":"2.0","id":42}', "application/json")),
+        ),
+      );
+      expect((yield* rpc).status).toBe(200);
+      yield* peer.settings.updateSettings({ enableAgentDeviceAccess: false });
+      const refused = yield* rpc;
+      expect(refused.status).toBe(403);
+      expect(decodeObject(refused.body)).toMatchObject({
+        jsonrpc: "2.0",
+        id: 42,
+        error: { message: expect.stringContaining("Agent device access is off there") },
+      });
+      yield* peer.settings.updateSettings({
+        enableDeviceSupport: false,
+        enableAgentDeviceAccess: true,
+      });
+      const disabled = yield* rpc;
+      expect(disabled.status).toBe(403);
+      expect(decodeObject(disabled.body)).toMatchObject({
+        jsonrpc: "2.0",
+        id: 42,
+        error: { message: expect.stringContaining("Device support is off there") },
+      });
+      yield* Ref.set(daemonAvailable, false);
+      yield* peer.settings.updateSettings({ enableDeviceSupport: true });
+      const unavailable = yield* rpc;
+      expect(unavailable.status).toBe(503);
+      expect(decodeObject(unavailable.body)).toMatchObject({
+        jsonrpc: "2.0",
+        id: 42,
+        error: { message: expect.stringContaining("could not start") },
+      });
+      expect(yield* Ref.get(daemon.seen)).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("unlinking cancels pending RPCs and interrupts daemon artifact downloads", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { peer, rpcStarted, rpcClosed, artifactClosed } = yield* serveMac;
+      const { links } = yield* makeLaptop;
+      yield* linkTo(links, peer, "full-access");
+      const token = yield* linkToken(links);
+      const response = yield* HttpClient.execute(
+        HttpClientRequest.get(`${peer.url}/api/links/devices/daemon/artifacts/example`).pipe(
+          HttpClientRequest.bearerToken(token),
+        ),
+      ).pipe(Effect.provide(FetchHttpClient.layer));
+      expect(response.status).toBe(200);
+      const firstChunk = yield* Deferred.make<string>();
+      const download = yield* response.stream.pipe(
+        Stream.runForEach((bytes) => Deferred.succeed(firstChunk, new TextDecoder().decode(bytes))),
+        Effect.forkScoped,
+      );
+      expect(yield* Deferred.await(firstChunk)).toBe("first chunk");
+      const command = yield* fetch(
+        HttpClientRequest.post(`${peer.url}/api/links/devices/daemon/rpc?pending`).pipe(
+          HttpClientRequest.bearerToken(token),
+          HttpClientRequest.setBody(
+            HttpBody.text('{"jsonrpc":"2.0","id":"pending"}', "application/json"),
+          ),
+        ),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(rpcStarted);
+      yield* links.unlink(EnvironmentId.make(mac.environmentId));
+      const refused = yield* Fiber.join(command);
+      expect(refused.status).toBe(403);
+      expect(decodeObject(refused.body)).toMatchObject({
+        jsonrpc: "2.0",
+        id: "pending",
+        error: { message: expect.stringContaining("no longer allows device access") },
+      });
+      yield* Fiber.join(download);
+      yield* Deferred.await(rpcClosed);
+      yield* Deferred.await(artifactClosed);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

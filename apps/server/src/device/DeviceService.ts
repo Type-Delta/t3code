@@ -122,7 +122,8 @@ const isToolchainInstallError = Schema.is(DeviceToolchainInstallError);
 const failureDetail = (error: DeviceError) =>
   error._tag === "DeviceHostUnavailableError"
     ? error.reason
-    : error._tag === "DeviceOperationError" && LinkedDeviceHost.isLinkedDeviceHostFailure(error.cause)
+    : error._tag === "DeviceOperationError" &&
+        LinkedDeviceHost.isLinkedDeviceHostFailure(error.cause)
       ? error.cause.message
       : error.message;
 
@@ -1598,11 +1599,12 @@ export const make = Effect.gen(function* () {
     readonly simlockDeviceHosts: ReadonlyArray<SimlockDeviceHostConfig>;
     readonly simlockDeviceHostsEnabled: boolean;
     readonly linkedDeviceHosts: ReadonlyArray<LinkedDeviceHostConfig>;
+    readonly linkedEnvironmentsEnabled: boolean;
   }): ReadonlyArray<DeviceHostConfig> => {
     const hosts: Array<DeviceHostConfig> = [...value.deviceHosts];
     for (const host of [
       ...value.easDeviceHosts,
-      ...value.linkedDeviceHosts,
+      ...(value.linkedEnvironmentsEnabled ? value.linkedDeviceHosts : []),
       ...(value.simlockDeviceHostsEnabled ? value.simlockDeviceHosts : []),
     ]) {
       if (!hosts.some((existing) => existing.id === host.id)) hosts.push(host);

@@ -775,7 +775,7 @@ export function deviceToolInstallMessage(name: string, tool: DeviceToolVersion |
 
 /**
  * Where an environment serves its own simulators and emulators to a full-access peer link, signed
- * in with the link's session as on `/mcp`. `hub/…` is that machine's device hub, `agent/…` its
+ * in with the link's session as on `/mcp`. `hub/…` is that machine's device hub, `daemon/…` its
  * agent-device daemon; the rest are the device operations below.
  */
 export const PEER_LINK_DEVICES_ROUTE_PREFIX = "/api/links/devices";

@@ -15,7 +15,9 @@ import * as Option from "effect/Option";
 import * as DeviceService from "../../../device/DeviceService.ts";
 import { threadWorkspaceRoot } from "../../../project/threadWorkspaceRoot.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { assertFullAccessNamingLink } from "../../linkOrigin.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { loadCaller } from "../../threadAccess.ts";
 import { DeviceScreenshotToolkit, DeviceStandardToolkit, DeviceToolkit } from "./tools.ts";
 
 function agentDeviceTargetArgs(device: DeviceSummary): ReadonlyArray<string> {
@@ -262,6 +264,20 @@ const handlers = {
       }
       const hostId = yield* resolveHostId(state.hosts, input.hostId);
       const target = yield* pickDevice(state, { ...input, hostId });
+      // A linked host runs apps as the other machine's user, through this environment's
+      // full-access link, so a narrower thread must not reach it.
+      if (state.hosts.find((host) => host.id === target.hostId)?.kind === "linked") {
+        yield* loadCaller().pipe(
+          Effect.flatMap((caller) =>
+            assertFullAccessNamingLink(
+              caller,
+              "Devices on a linked environment run as that machine's user, so only a thread in full access can open them. Ask the user to switch this thread to full access, or open a device on this machine instead.",
+              "use a linked environment's devices",
+            ),
+          ),
+          Effect.mapError((failure) => new DeviceToolUnavailableError({ reason: failure.message })),
+        );
+      }
       // Resolve consent and agent connectivity before booting or registering a session.
       if (!(yield* devices.agentReadinessIfSupported(target.hostId))) {
         return yield* new DeviceToolUnavailableError({

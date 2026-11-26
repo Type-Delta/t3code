@@ -14,6 +14,7 @@ import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -719,5 +720,84 @@ describe("device targeting across hosts", () => {
         ]);
       }),
     ),
+  );
+});
+
+describe("devices on a linked environment", () => {
+  const linkedHost = {
+    id: "linked-mac",
+    kind: "linked" as const,
+    label: "Mac",
+    platforms: [{ platform: "ios" as const, available: true }],
+    hubInstalled: true,
+    agentDeviceInstalled: true,
+  };
+  const linkedIphone = { ...device, hostId: linkedHost.id, id: "LINKED-UDID" };
+  const linkedState = {
+    ...state,
+    hosts: [...state.hosts, linkedHost],
+    hostStatuses: { ...state.hostStatuses, [linkedHost.id]: { status: "ready" as const } },
+    devices: [device, linkedIphone],
+  };
+  const openOn = (runtimeMode: "full-access" | "auto-accept-edits", deviceId: string) => {
+    const opened: Array<string> = [];
+    const layerDevices = Layer.mock(DeviceService.DeviceService)({
+      state: Effect.succeed(linkedState),
+      list: Effect.succeed(linkedState),
+      agentReadinessIfSupported: () => Effect.succeed(readiness),
+      locateDevice: (input) =>
+        Effect.succeed(
+          Option.fromUndefinedOr(
+            linkedState.devices.find((candidate) => candidate.id === input.deviceId),
+          ),
+        ),
+      open: (input) =>
+        Effect.sync(() => {
+          opened.push(input.deviceId);
+          return { ...openSession, hostId: input.hostId ?? "local", deviceId: input.deviceId };
+        }),
+      agentTarget: () => Effect.succeed({ agentDeviceId: deviceId, session: "s", args: [] }),
+      agentLauncher: () => Effect.succeedSome("/state/device/agent-device"),
+    });
+    return McpServer.McpServer.pipe(
+      Effect.flatMap((server) => server.callTool({ name: "device_open", arguments: { deviceId } })),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(["device"])),
+      Effect.provideService(McpSchema.McpServerClient, client),
+      Effect.map((result) => ({ result, opened })),
+      Effect.scoped,
+      Effect.provide(
+        McpHttpServer.layerDeviceToolkit.pipe(
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provideMerge(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: (id) =>
+                Effect.succeed(McpToolAccessTestkit.liveThreadShell(id, { runtimeMode })),
+            }),
+          ),
+          Layer.provide(layerDevices),
+          Layer.provide(layerProjectsMock),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" }),
+          ),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    );
+  };
+
+  it.effect("only a full-access thread opens a linked environment's device", () =>
+    Effect.gen(function* () {
+      const narrow = yield* openOn("auto-accept-edits", linkedIphone.id);
+      expect(narrow.result.isError).toBe(true);
+      expect(JSON.stringify(narrow.result.content)).toContain("only a thread in full access");
+      expect(narrow.opened).toEqual([]);
+
+      const local = yield* openOn("auto-accept-edits", device.id);
+      expect(local.result.isError).toBe(false);
+
+      const full = yield* openOn("full-access", linkedIphone.id);
+      expect(full.result.isError).toBe(false);
+      expect(full.opened).toEqual([linkedIphone.id]);
+    }),
   );
 });

@@ -15,8 +15,10 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Hex from "effect/encoding/Hex";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -31,9 +33,14 @@ import {
 } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import { requestUrl } from "../requestUrl.ts";
-import { agentDaemonAuthHeaders, agentDaemonClientToken, forwardAgentDaemonRequest } from "./agentDaemonProxy.ts";
+import {
+  agentDaemonAuthHeaders,
+  agentDaemonClientToken,
+  forwardAgentDaemonRequest,
+} from "./agentDaemonProxy.ts";
 import { releaseAgentDeviceSession } from "./AgentDeviceTarget.ts";
 import * as DeviceHost from "./DeviceHost.ts";
 
@@ -77,32 +84,48 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   const lock = yield* Semaphore.make(1);
   const fail = (message: string) => new LinkedDeviceHostFailure({ message });
 
-  let peer: { readonly url: string; readonly token: string; readonly at: number } | undefined;
-  let platforms: ReadonlyArray<DevicePlatformAvailability> = [
-    { platform: "ios", available: true },
-    { platform: "android", available: true },
-  ];
+  let peer:
+    | {
+        readonly url: string;
+        readonly token: string;
+        readonly linkedAt: DateTime.Utc;
+        readonly at: number;
+      }
+    | undefined;
+  // Unknown until the linked environment lists its devices.
+  let platforms: ReadonlyArray<DevicePlatformAvailability> | undefined;
   let ready: DeviceHost.DeviceHostReady | null = null;
-  let agent: DeviceHost.AgentDaemonEndpoint | null = null;
+  let agent: {
+    readonly endpoint: DeviceHost.AgentDaemonEndpoint;
+    readonly scope: Scope.Closeable;
+  } | null = null;
 
   const resolvePeer = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
-    // Reuse never outlives the stored link: unlinking here must stop use at once.
-    if (
-      peer &&
-      now - peer.at < Duration.toMillis(PEER_REUSE) &&
-      Option.isSome(yield* links.get(config.environmentId).pipe(Effect.orElseSucceed(Option.none)))
-    )
-      return peer;
-    const resolved = yield* links.resolve(config.environmentId).pipe(
-      Effect.mapError((error) =>
-        fail(
-          error.reason === "unknown_link"
-            ? `This environment is no longer linked to ${config.label}. Link it again with full access, or remove this device host.`
-            : error.message,
+    if (peer && now - peer.at < Duration.toMillis(PEER_REUSE)) {
+      const cached = peer;
+      // Reuse never outlives the stored link: unlinking, or linking again with another token or
+      // less access, must stop use at once. Linking again always sets a new `linkedAt`.
+      const stored = yield* links.get(config.environmentId).pipe(Effect.orElseSucceed(Option.none));
+      if (
+        Option.isSome(stored) &&
+        stored.value.access === "full-access" &&
+        DateTime.Equivalence(stored.value.linkedAt, cached.linkedAt)
+      )
+        return cached;
+      peer = undefined;
+    }
+    const resolved = yield* links
+      .resolve(config.environmentId)
+      .pipe(
+        Effect.mapError((error) =>
+          fail(
+            error.reason === "unknown_link"
+              ? `This environment is no longer linked to ${config.label}. Link it again with full access, or remove this device host.`
+              : error.message,
+          ),
         ),
-      ),
-    );
+      );
     if (resolved.link.access !== "full-access")
       return yield* fail(
         `The link to ${resolved.link.label} is below full access. Using its devices runs apps as its user, so link it again with full access.`,
@@ -111,7 +134,12 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       return yield* fail(
         `${resolved.link.label} runs a T3 Code version that cannot lend its devices. Update it.`,
       );
-    peer = { url: resolved.url, token: resolved.token, at: now };
+    peer = {
+      url: resolved.url,
+      token: resolved.token,
+      linkedAt: resolved.link.linkedAt,
+      at: now,
+    };
     return peer;
   });
 
@@ -119,6 +147,17 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   const forgetPeer = Effect.sync(() => {
     peer = undefined;
   });
+
+  /** The linked environment renews the link's session on each use and says when it now ends. */
+  const recordRenewal = (headers: Readonly<Record<string, string | undefined>>) => {
+    const renewed = Option.flatMap(
+      Option.fromNullishOr(headers[McpInvocationContext.LINK_EXPIRES_AT_HEADER]),
+      DateTime.make,
+    );
+    return Option.isSome(renewed)
+      ? links.recordExpiry(config.environmentId, renewed.value)
+      : Effect.void;
+  };
 
   const call = Effect.fn("LinkedDeviceHost.call")(function* <A, E>(
     path: string,
@@ -142,18 +181,23 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
         Effect.tapError(() => forgetPeer),
         Effect.mapError(() => fail(`${config.label} did not answer.`)),
       );
+    yield* recordRenewal(response.headers);
     if (response.status >= 400) {
       if (response.status === 401 || response.status === 403) yield* forgetPeer;
       const failure = yield* response.json.pipe(
         Effect.flatMap(decodeFailure),
-        Effect.orElseSucceed(() => ({ message: `${config.label} answered HTTP ${response.status}.` })),
+        Effect.orElseSucceed(() => ({
+          message: `${config.label} answered HTTP ${response.status}.`,
+        })),
       );
       return yield* fail(failure.message);
     }
     return yield* options
       .read(response)
       .pipe(
-        Effect.mapError(() => fail(`${config.label} answered in a shape this version cannot read.`)),
+        Effect.mapError(() =>
+          fail(`${config.label} answered in a shape this version cannot read.`),
+        ),
       );
   }, Effect.scoped);
 
@@ -170,7 +214,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   const listDevices = call("", { read: decodeList }).pipe(
     Effect.tap((listed) =>
       Effect.sync(() => {
-        if (listed.platforms.length > 0) platforms = listed.platforms;
+        platforms = listed.platforms;
       }),
     ),
   );
@@ -213,7 +257,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
               reason: "Agent tools for this host are not running. Call device_open again.",
             }),
           )
-        : Effect.succeed({ ...agent, agentDeviceId: deviceId }),
+        : Effect.succeed({ ...agent.endpoint, agentDeviceId: deviceId }),
   };
 
   // Streams go to the peer's hub as they do to a local one, with the link's session on each.
@@ -232,8 +276,9 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       Effect.gen(function* () {
         if (ready) return ready;
         yield* onPhase("starting", `Connecting to ${config.label}…`);
-        // The first listing proves the link reaches a machine that lends its devices.
-        yield* listDevices.pipe(
+        // Only the link is checked here: listing waits on the linked environment's own device
+        // lock, which a host there lending back to this one could hold while it waits on ours.
+        yield* resolvePeer.pipe(
           Effect.mapError(
             (cause) =>
               new DeviceHost.DeviceHostError({ hostId: config.id, step: "connecting", cause }),
@@ -244,8 +289,20 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
           hub: { origin: `linked:${config.environmentId}` },
           devices,
           upstream,
+          // Closing a device tab must not fail because the link is down or revoked.
           releaseAgentSession: (session) =>
-            agent === null ? Effect.void : releaseAgentDeviceSession(http, agent)(session),
+            agent === null
+              ? Effect.void
+              : releaseAgentDeviceSession(
+                  http,
+                  agent.endpoint,
+                )(session).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Could not release a linked agent-device session", {
+                      cause,
+                    }),
+                  ),
+                ),
           // Device settings run simctl on the simulator's own machine, which the link does not expose.
           run: () =>
             Effect.succeed({
@@ -262,12 +319,21 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   /** A loopback daemon address for agents here, forwarding to the peer's daemon over the link. */
   const startForwarder = Effect.gen(function* () {
     const localToken = Hex.encode(yield* random.randomBytes(32));
+    const scope = yield* Scope.fork(hostScope, "sequential");
+    // Closing cuts in-flight requests too, so a revoked token reaches nothing more.
     const server = yield* NodeHttpServer.make(() => NodeHttp.createServer(), {
       host: "127.0.0.1",
       port: 0,
-    }).pipe(Scope.provide(hostScope));
+      disablePreemptiveShutdown: true,
+    }).pipe(
+      Scope.provide(scope),
+      Effect.onError(() => Scope.close(scope, Exit.void)),
+    );
     const port = NetAddress.isInetAddress(server.address) ? server.address.port : undefined;
-    if (port === undefined) return yield* fail("The agent-device forwarder did not bind.");
+    if (port === undefined) {
+      yield* Scope.close(scope, Exit.void);
+      return yield* fail("The agent-device forwarder did not bind.");
+    }
     const origin = `http://127.0.0.1:${port}`;
     const handler = Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
@@ -293,6 +359,12 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
           headers: agentDaemonAuthHeaders(localToken),
         }),
       }).pipe(
+        Effect.tap((response) =>
+          Effect.andThen(
+            recordRenewal(response.headers),
+            response.status === 401 || response.status === 403 ? forgetPeer : Effect.void,
+          ),
+        ),
         Effect.catch(() =>
           forgetPeer.pipe(
             Effect.as(
@@ -306,18 +378,23 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       );
     });
     yield* server
-      .serve(handler.pipe(Effect.provideService(HttpClient.HttpClient, http)))
-      .pipe(Scope.provide(hostScope));
-    return { baseUrl: origin, token: localToken };
+      .serve(handler.pipe(Effect.provideService(HttpClient.HttpClient, http), Effect.interruptible))
+      .pipe(Scope.provide(scope));
+    return { endpoint: { baseUrl: origin, token: localToken }, scope };
   });
 
+  const stopForwarder = Effect.suspend(() => {
+    const running = agent;
+    agent = null;
+    return running === null ? Effect.void : Scope.close(running.scope, Exit.void);
+  });
+
+  // The linked environment starts its daemon on the first forwarded request.
   const ensureAgentReady: DeviceHost.DeviceHost["Service"]["ensureAgentReady"] = (onPhase) =>
     ensureReady(onPhase).pipe(
       Effect.tap(() =>
         lock.withPermit(
           Effect.gen(function* () {
-            // Starts the peer's daemon, or says why its agent access is off.
-            yield* call("/agent", { body: {}, timeout: BOOT_TIMEOUT, read: () => Effect.void });
             if (agent === null) agent = yield* startForwarder;
           }).pipe(
             Effect.mapError(
@@ -334,15 +411,22 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       Effect.map((value) => ({ ...value, agentDevice: null })),
     );
 
-  const platformAvailability = (platform: DevicePlatformAvailability["platform"]) =>
-    Effect.sync(
-      () =>
-        platforms.find((candidate) => candidate.platform === platform) ?? {
-          platform,
-          available: false,
-          reason: `${config.label} did not report this platform.`,
-        },
+  const platformAvailability = Effect.fn("LinkedDeviceHost.platformAvailability")(function* (
+    platform: DevicePlatformAvailability["platform"],
+  ) {
+    if (platforms === undefined) {
+      const listed = yield* listDevices.pipe(Effect.result);
+      if (listed._tag === "Failure")
+        return { platform, available: false, reason: listed.failure.message };
+    }
+    return (
+      platforms?.find((candidate) => candidate.platform === platform) ?? {
+        platform,
+        available: false,
+        reason: `${config.label} did not report this platform.`,
+      }
     );
+  });
 
   return DeviceHost.DeviceHost.of({
     id: config.id,
@@ -351,7 +435,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       id: config.id,
       label: config.label,
       kind: "linked" as const,
-      platforms,
+      platforms: platforms ?? [],
       // The linked machine installs its own tools.
       hubInstalled: true,
       agentDeviceInstalled: true,
@@ -360,11 +444,16 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     ensureReady,
     ensureAgentReady,
     current: Effect.sync(() => ready),
-    stopAgent: Effect.void,
+    stopAgent: lock.withPermit(stopForwarder),
     // Devices and the peer's tools keep running; the peer's owner stops them there.
-    stop: Effect.sync(() => {
-      ready = null;
-      peer = undefined;
-    }),
+    stop: lock.withPermit(
+      Effect.andThen(
+        stopForwarder,
+        Effect.sync(() => {
+          ready = null;
+          peer = undefined;
+        }),
+      ),
+    ),
   });
 });

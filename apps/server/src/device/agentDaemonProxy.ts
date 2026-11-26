@@ -1,3 +1,4 @@
+import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -5,14 +6,57 @@ import {
   HttpClient,
   HttpClientRequest,
   HttpMethod,
+  HttpIncomingMessage,
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/http";
 
-const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeRpc = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
+const decodeUploadTicket = Schema.decodeUnknownOption(
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    uploadId: Schema.String.check(Schema.isPattern(/^(?!\.{1,2}$)[\w.~_-]+$/)),
+    cacheHit: Schema.optionalKey(Schema.Boolean),
+    upload: Schema.optionalKey(
+      Schema.Struct({
+        url: Schema.NonEmptyString,
+        headers: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+      }),
+    ),
+  }),
+);
 
 /** An RPC body is a command and its flags; artifacts go through the upload routes. */
 const MAX_RPC_BODY_BYTES = 4 * 1024 * 1024;
+const rpcBodyLimit = ByteSize.bytes(MAX_RPC_BODY_BYTES);
+
+const readRpc = (request: HttpServerRequest.HttpServerRequest) =>
+  request.arrayBuffer.pipe(
+    Effect.provideService(HttpIncomingMessage.MaxBodySize, rpcBodyLimit),
+    Effect.map((body) =>
+      body.byteLength > MAX_RPC_BODY_BYTES ? undefined : decodeRpc(new TextDecoder().decode(body)),
+    ),
+    Effect.orElseSucceed(() => undefined),
+  );
+
+export const agentDaemonRpcRefusal = Effect.fn("agentDaemonProxy.rpcRefusal")(function* (
+  request: HttpServerRequest.HttpServerRequest,
+  status: number,
+  message: string,
+) {
+  const parsed = yield* readRpc(request);
+  const id = parsed?._tag === "Some" ? parsed.value.id : null;
+  return HttpServerResponse.jsonUnsafe(
+    {
+      jsonrpc: "2.0",
+      id: typeof id === "number" || typeof id === "string" ? id : null,
+      error: { code: -32000, message },
+    },
+    { status, headers: { "cache-control": "no-store" } },
+  );
+});
 
 // The routes agent-device's own proxy passes to a daemon, by method.
 const ROUTES: ReadonlyArray<readonly [string, RegExp]> = [
@@ -79,6 +123,7 @@ export const forwardAgentDaemonRequest = Effect.fn("agentDaemonProxy.forward")(f
     readonly baseUrl: string;
     readonly headers: Readonly<Record<string, string>>;
     readonly rpcToken?: string | undefined;
+    readonly invalidated?: Effect.Effect<void>;
     readonly uploadTicket: (uploadId: string) => {
       readonly url: string;
       readonly headers: Readonly<Record<string, string>>;
@@ -99,15 +144,22 @@ export const forwardAgentDaemonRequest = Effect.fn("agentDaemonProxy.forward")(f
     `${options.baseUrl}${options.path}${options.search}`,
   ).pipe(HttpClientRequest.setHeaders({ ...forwarded, ...options.headers }));
   if (options.path === "/rpc") {
-    const body = yield* request.text.pipe(Effect.option);
-    if (body._tag === "None" || body.value.length > MAX_RPC_BODY_BYTES) {
-      return json(400, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+    const parsed = yield* readRpc(request);
+    if (parsed === undefined) {
+      return json(400, {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32600, message: "Invalid Request" },
+      });
     }
-    const parsed = yield* decodeJson(body.value).pipe(Effect.option);
-    if (parsed._tag === "None" || typeof parsed.value !== "object" || parsed.value === null) {
-      return json(400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+    if (parsed._tag === "None") {
+      return json(400, {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32700, message: "Parse error" },
+      });
     }
-    const rpc = parsed.value as { params?: unknown };
+    const rpc = parsed.value;
     const { token: _clientToken, ...params } =
       typeof rpc.params === "object" && rpc.params !== null
         ? (rpc.params as Record<string, unknown>)
@@ -123,19 +175,26 @@ export const forwardAgentDaemonRequest = Effect.fn("agentDaemonProxy.forward")(f
   }
   const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
   const response = yield* httpClient.execute(upstream);
+  if (options.path === "/upload/preflight") {
+    if (response.status < 200 || response.status >= 300) {
+      return json(response.status, { ok: false, error: "Upload preflight failed" });
+    }
+    const ticket = yield* response.json.pipe(Effect.option);
+    const rewritten =
+      ticket._tag === "Some" ? rewriteUploadTicket(ticket.value, options.uploadTicket) : undefined;
+    return rewritten === undefined
+      ? json(502, { ok: false, error: "Invalid upload ticket" })
+      : json(response.status, rewritten);
+  }
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(response.headers)) {
     if (value !== undefined && !DROPPED_RESPONSE_HEADERS.has(name)) headers[name] = value;
   }
-  if (options.path === "/upload/preflight") {
-    const ticket = yield* response.json.pipe(Effect.option);
-    if (ticket._tag === "None") return json(502, { ok: false, error: "Invalid upload ticket" });
-    return json(response.status, rewriteUploadTicket(ticket.value, options.uploadTicket));
-  }
-  return HttpServerResponse.stream(response.stream.pipe(Stream.orDie), {
-    status: response.status,
-    headers,
-  });
+  const body = response.stream.pipe(Stream.orDie);
+  return HttpServerResponse.stream(
+    options.invalidated === undefined ? body : body.pipe(Stream.interruptWhen(options.invalidated)),
+    { status: response.status, headers },
+  );
 });
 
 // Keeps only the ticket's content type: its other headers carry the daemon's own token.
@@ -146,23 +205,23 @@ const rewriteUploadTicket = (
     readonly headers: Readonly<Record<string, string>>;
   },
 ) => {
-  if (typeof ticket !== "object" || ticket === null) return ticket;
-  const { uploadId, upload } = ticket as { uploadId?: unknown; upload?: unknown };
-  if (typeof uploadId !== "string" || /[/?#]/.test(uploadId)) return ticket;
-  if (typeof upload !== "object" || upload === null) return ticket;
-  const previous = (upload as { headers?: unknown }).headers;
-  const contentType =
-    typeof previous === "object" && previous !== null
-      ? Object.entries(previous).find(([name]) => name.toLowerCase() === "content-type")?.[1]
-      : undefined;
-  const next = uploadTicket(encodeURIComponent(uploadId));
+  const parsed = decodeUploadTicket(ticket);
+  if (parsed._tag === "None") return undefined;
+  const { uploadId, upload, cacheHit } = parsed.value;
+  if (cacheHit === true) return { ok: true, uploadId, cacheHit };
+  if (upload === undefined) return undefined;
+  const contentType = Object.entries(upload.headers ?? {}).find(
+    ([name]) => name.toLowerCase() === "content-type",
+  )?.[1];
+  const next = uploadTicket(uploadId);
   return {
-    ...ticket,
+    ok: true,
+    uploadId,
+    ...(cacheHit === undefined ? {} : { cacheHit }),
     upload: {
-      ...upload,
       url: next.url,
       headers: {
-        ...(typeof contentType === "string" ? { "content-type": contentType } : {}),
+        ...(contentType === undefined ? {} : { "content-type": contentType }),
         ...next.headers,
       },
     },

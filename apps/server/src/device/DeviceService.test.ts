@@ -5,10 +5,15 @@ import {
   DeviceError,
   DeviceId,
   DeviceOperationError,
+  EnvironmentId,
   LOCAL_DEVICE_HOST_ID,
   ThreadId,
+  type DeviceHostId,
+  type DeviceServiceState,
   type DeviceSummary,
+  type LinkedDeviceHostConfig,
   type ServerSettings as Settings,
+  type ServerSettingsPatch,
   type SshDeviceHostConfig,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -1837,7 +1842,7 @@ it.effect("failed manual installation leaves lifecycle state unchanged and can b
   }),
 );
 
-it.effect("reconciles SSH host settings without publishing no-op changes", () =>
+it.effect("reconciles SSH and linked host settings without publishing no-op changes", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-device-reconcile-" });
@@ -1914,13 +1919,15 @@ it.effect("reconciles SSH host settings without publishing no-op changes", () =>
       ),
       Effect.provide(Layer.mergeAll(ServerConfig.layerTest(baseDir, baseDir), NetService.layer)),
     );
-    const update = Effect.fnUntraced(function* (deviceHosts: ReadonlyArray<SshDeviceHostConfig>) {
-      const value = yield* settings.updateSettings({ deviceHosts: [...deviceHosts] });
+    const updateWith = Effect.fnUntraced(function* (patch: ServerSettingsPatch) {
+      const value = yield* settings.updateSettings(patch);
       const done = yield* Deferred.make<void>();
       yield* Queue.offer(changes, { value, done });
       yield* Deferred.await(done);
       return yield* service.state;
     });
+    const update = (deviceHosts: ReadonlyArray<SshDeviceHostConfig>) =>
+      updateWith({ deviceHosts: [...deviceHosts] });
 
     const initial = yield* service.state;
     expect(yield* update([])).toEqual(initial);
@@ -1940,6 +1947,25 @@ it.effect("reconciles SSH host settings without publishing no-op changes", () =>
     expect(removed.hosts.map((entry) => entry.id)).toEqual([LOCAL_DEVICE_HOST_ID]);
     expect(removed.hostStatuses[host.id]).toBeUndefined();
     expect(removedFiles).toHaveLength(1);
+
+    // Linked hosts follow the Linked environments beta: off stops them, on brings them back.
+    const linked: LinkedDeviceHostConfig = {
+      kind: "linked",
+      id: "mac" as DeviceHostId,
+      label: "Mac",
+      environmentId: EnvironmentId.make("environment-mac"),
+    };
+    const hostIds = (state: DeviceServiceState) => state.hosts.map((entry) => entry.id);
+    expect(hostIds(yield* updateWith({ linkedDeviceHosts: [linked] }))).toEqual([
+      LOCAL_DEVICE_HOST_ID,
+    ]);
+    expect(hostIds(yield* updateWith({ linkedEnvironmentsEnabled: true }))).toEqual([
+      LOCAL_DEVICE_HOST_ID,
+      linked.id,
+    ]);
+    expect(hostIds(yield* updateWith({ linkedEnvironmentsEnabled: false }))).toEqual([
+      LOCAL_DEVICE_HOST_ID,
+    ]);
   }).pipe(
     Effect.scoped,
     Effect.provide(
