@@ -75,9 +75,9 @@ const serveMac = Effect.gen(function* () {
       yield* Ref.update(bearers, (all) => [...all, request.headers.authorization ?? ""]);
       yield* Ref.update(paths, (all) => [...all, request.url]);
       const location = yield* Ref.get(redirectTo);
-      if (location !== undefined)
-        return HttpServerResponse.empty({ status: 302, headers: { location } });
       const headers = { [McpInvocationContext.LINK_EXPIRES_AT_HEADER]: RENEWED };
+      if (location !== undefined)
+        return HttpServerResponse.empty({ status: 302, headers: { ...headers, location } });
       if (request.url.endsWith("/shutdown"))
         return yield* Deferred.succeed(shutdownRequested, undefined).pipe(
           Effect.andThen(Deferred.await(shutdownAnswered)),
@@ -161,8 +161,14 @@ const makeLinkedHost = Effect.gen(function* () {
     ),
   );
   const expiries = yield* Ref.make<ReadonlyArray<string>>([]);
+  const storeFails = yield* Ref.make(false);
   const links = Layer.mock(PeerLinks.PeerLinks)({
-    get: () => Ref.get(stored).pipe(Effect.map((value) => Option.fromNullishOr(value?.link))),
+    get: () =>
+      Effect.gen(function* () {
+        if (yield* Ref.get(storeFails))
+          return yield* new PeerLinkError({ reason: "unknown_link", message: "busy" });
+        return Option.fromNullishOr((yield* Ref.get(stored))?.link);
+      }),
     resolve: () =>
       Effect.gen(function* () {
         yield* Ref.update(resolves, (count) => count + 1);
@@ -229,6 +235,7 @@ const makeLinkedHost = Effect.gen(function* () {
       );
     });
   return {
+    storeFails,
     host,
     hostScope,
     mac,
@@ -291,7 +298,8 @@ const hasEnded = (routed: { readonly ended?: Effect.Effect<void> } | null) =>
     Effect.map((fiber) => fiber.pollUnsafe() !== undefined),
   );
 
-const rpc = (endpoint: { readonly baseUrl: string }, token: string) =>
+/** The status and body an agent's RPC gets back through the forwarder. */
+const rpcAnswer = (endpoint: { readonly baseUrl: string }, token: string) =>
   HttpClient.execute(
     HttpClientRequest.post(`${endpoint.baseUrl}/rpc`).pipe(
       HttpClientRequest.bearerToken(token),
@@ -303,10 +311,15 @@ const rpc = (endpoint: { readonly baseUrl: string }, token: string) =>
       ),
     ),
   ).pipe(
-    Effect.map((response) => response.status),
+    Effect.flatMap((response) =>
+      response.json.pipe(Effect.map((body) => ({ status: response.status, body }))),
+    ),
     Effect.scoped,
     Effect.provide(FetchHttpClient.layer),
   );
+
+const rpc = (endpoint: { readonly baseUrl: string }, token: string) =>
+  rpcAnswer(endpoint, token).pipe(Effect.map((answer) => answer.status));
 
 it.effect("stopping agent tools closes the forwarder, and starting again issues a new token", () =>
   Effect.scoped(
@@ -344,9 +357,10 @@ it.effect("stopping agent tools closes the forwarder, and starting again issues 
 it.effect("linked device requests refuse redirects to another server", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { host, mac } = yield* makeLinkedHost;
+      const { host, mac, expiries } = yield* makeLinkedHost;
       const ready = yield* host.ensureAgentReady(noPhase);
       const destination = yield* serveMac;
+      const recorded = (yield* Ref.get(expiries)).length;
       const hub = yield* serveHubProxy({ ...ready, hostId: host.id });
       const endpoint = yield* ready.devices.agentEndpoint!("SIM-1");
       yield* Ref.set(mac.redirectTo, destination.url);
@@ -372,6 +386,8 @@ it.effect("linked device requests refuse redirects to another server", () =>
       });
       expect(hubStatus).toBe(502);
       expect(daemonStatus).toBe(502);
+      // Whatever redirected does not get to extend the link.
+      expect(yield* Ref.get(expiries)).toHaveLength(recorded);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
@@ -423,12 +439,17 @@ it.effect("a probe that finishes after the host stops cannot open a hub stream",
 it.effect("an open stream ends once its link is relinked lower, without another call", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { host, relink, resolves } = yield* makeLinkedHost;
+      const { host, relink, resolves, storeFails } = yield* makeLinkedHost;
       const ready = yield* host.ensureReady(noPhase);
       const routed = yield* ready.upstream!(HUB_STREAM, new URLSearchParams());
       const watching = yield* Effect.forkChild(routed!.ended!);
       yield* TestClock.adjust("11 seconds");
       expect(watching.pollUnsafe()).toBeUndefined();
+      // A link store that fails to read is not an unlink.
+      yield* Ref.set(storeFails, true);
+      yield* TestClock.adjust("11 seconds");
+      expect(watching.pollUnsafe()).toBeUndefined();
+      yield* Ref.set(storeFails, false);
 
       yield* relink({ access: "auto" }, "token-2");
       yield* TestClock.adjust("11 seconds");
@@ -447,12 +468,20 @@ it.effect("an agent call in flight ends once its link is relinked lower", () =>
       const ready = (yield* host.current)!;
       const endpoint = yield* ready.devices.agentEndpoint!("SIM-1");
       yield* Ref.set(mac.holdRpc, true);
-      const pending = yield* Effect.forkChild(rpc(endpoint, endpoint.token));
+      const pending = yield* Effect.forkChild(rpcAnswer(endpoint, endpoint.token));
       yield* Deferred.await(mac.rpcHeld);
       yield* relink({ access: "auto" }, "token-2");
       yield* TestClock.adjust("11 seconds");
 
-      expect(yield* Fiber.join(pending)).toBe(503);
+      // A JSON-RPC error, so agent-device shows the reason instead of "Invalid daemon RPC response".
+      expect(yield* Fiber.join(pending)).toEqual({
+        status: 503,
+        body: {
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32000, message: "The link to Mac changed. Try again." },
+        },
+      });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

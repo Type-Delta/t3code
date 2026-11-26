@@ -142,10 +142,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   const storedSince = (linkedAt: DateTime.Utc) =>
     links
       .get(config.environmentId)
-      .pipe(
-        Effect.map(Option.filter((stored) => DateTime.Equivalence(stored.linkedAt, linkedAt))),
-        Effect.orElseSucceed(Option.none),
-      );
+      .pipe(Effect.map(Option.filter((stored) => DateTime.Equivalence(stored.linkedAt, linkedAt))));
 
   const resolvePeer = Effect.gen(function* () {
     const since = stops;
@@ -159,7 +156,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       const cached = peer;
       // Reuse never outlives the stored link: unlinking, expiring, or linking again with another
       // token or less access must stop use at once.
-      const stored = yield* storedSince(cached.linkedAt);
+      const stored = yield* storedSince(cached.linkedAt).pipe(Effect.orElseSucceed(Option.none));
       const currentTime = yield* DateTime.now;
       if (halted()) return yield* halt;
       if (
@@ -190,7 +187,9 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       );
       // Linking again while `resolve` probed the peer leaves this token stale, and it must not end
       // the streams of the newer link.
-      const stored = yield* storedSince(resolved.link.linkedAt);
+      const stored = yield* storedSince(resolved.link.linkedAt).pipe(
+        Effect.orElseSucceed(Option.none),
+      );
       if (halted()) return yield* halt;
       if (
         Option.isNone(stored) ||
@@ -253,10 +252,13 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     readonly headers: Readonly<Record<string, string | undefined>>;
     readonly status: number;
   }) =>
-    Effect.andThen(
-      recordRenewal(response.headers),
-      response.status === 401 || response.status === 403 ? forgetPeer : Effect.void,
-    );
+    // A redirect may come from whatever answers the link's address, not the peer.
+    response.status >= 300 && response.status < 400
+      ? Effect.void
+      : Effect.andThen(
+          recordRenewal(response.headers),
+          response.status === 401 || response.status === 403 ? forgetPeer : Effect.void,
+        );
 
   const call = Effect.fn("LinkedDeviceHost.call")(function* <A, E>(
     path: string,
@@ -385,8 +387,10 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   ) {
     while (true) {
       yield* Effect.sleep(LINK_RECHECK);
-      const stored = yield* storedSince(linkedAt);
-      if (Option.isNone(stored) || stored.value.access !== "full-access") return;
+      // An unreadable store is not an unlink; open streams wait for the next check.
+      const stored = yield* storedSince(linkedAt).pipe(Effect.option);
+      if (Option.isNone(stored)) continue;
+      if (Option.isNone(stored.value) || stored.value.value.access !== "full-access") return;
     }
   });
 
@@ -479,33 +483,26 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
           { status: 401 },
         );
       const url = requestUrl(request);
+      // agent-device reads only a JSON-RPC error from /rpc; anything else becomes "Invalid daemon RPC response".
+      const refuse = (status: number, message: string, code = "COMMAND_FAILED") =>
+        request.method === "POST" && url._tag === "Some" && url.value.pathname === "/rpc"
+          ? agentDaemonRpcRefusal(request, status, message)
+          : Effect.succeed(
+              HttpServerResponse.jsonUnsafe({ ok: false, error: message, code }, { status }),
+            );
       const current = yield* settings.getSettings.pipe(Effect.option);
       const enabled = Option.isSome(current) && current.value.enableDeviceSupport;
-      if (!enabled || !current.value.enableAgentDeviceAccess) {
-        const message = `${enabled ? "Agent device access" : "Device support"} is off. Turn it on in Settings > Integrations > Devices.`;
-        return yield* request.method === "POST" &&
-        url._tag === "Some" &&
-        url.value.pathname === "/rpc"
-          ? agentDaemonRpcRefusal(request, 403, message)
-          : Effect.succeed(
-              HttpServerResponse.jsonUnsafe(
-                { ok: false, error: message, code: "UNAUTHORIZED" },
-                { status: 403 },
-              ),
-            );
-      }
+      if (!enabled || !current.value.enableAgentDeviceAccess)
+        return yield* refuse(
+          403,
+          `${enabled ? "Agent device access" : "Device support"} is off. Turn it on in Settings > Integrations > Devices.`,
+          "UNAUTHORIZED",
+        );
       const target = yield* resolvePeer.pipe(Effect.result);
       if (url._tag === "None" || target._tag === "Failure")
-        return HttpServerResponse.jsonUnsafe(
-          {
-            ok: false,
-            error:
-              target._tag === "Failure"
-                ? target.failure.message
-                : `${config.label} is not reachable.`,
-            code: "COMMAND_FAILED",
-          },
-          { status: 503 },
+        return yield* refuse(
+          503,
+          target._tag === "Failure" ? target.failure.message : `${config.label} is not reachable.`,
         );
       const ended = linkEnded(target.success);
       return yield* forwardAgentDaemonRequest(request, {
@@ -521,43 +518,22 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       }).pipe(
         Effect.raceFirst(
           ended.pipe(
-            Effect.as(
-              HttpServerResponse.jsonUnsafe(
-                {
-                  ok: false,
-                  error: `The link to ${config.label} changed. Try again.`,
-                  code: "COMMAND_FAILED",
-                },
-                { status: 503 },
-              ),
-            ),
+            Effect.andThen(refuse(503, `The link to ${config.label} changed. Try again.`)),
           ),
         ),
         Effect.tap(recordPeerAnswer),
-        Effect.map((response) =>
+        Effect.flatMap((response) =>
           response.status >= 300 && response.status < 400
-            ? HttpServerResponse.jsonUnsafe(
-                {
-                  ok: false,
-                  error: `${config.label} answered HTTP ${response.status}.`,
-                  code: "COMMAND_FAILED",
-                },
-                { status: 502 },
-              )
-            : HttpServerResponse.removeHeader(
-                response,
-                McpInvocationContext.LINK_EXPIRES_AT_HEADER,
+            ? refuse(502, `${config.label} answered HTTP ${response.status}.`)
+            : Effect.succeed(
+                HttpServerResponse.removeHeader(
+                  response,
+                  McpInvocationContext.LINK_EXPIRES_AT_HEADER,
+                ),
               ),
         ),
         Effect.catch(() =>
-          forgetPeer.pipe(
-            Effect.as(
-              HttpServerResponse.jsonUnsafe(
-                { ok: false, error: `${config.label} stopped answering.`, code: "COMMAND_FAILED" },
-                { status: 502 },
-              ),
-            ),
-          ),
+          forgetPeer.pipe(Effect.andThen(refuse(502, `${config.label} stopped answering.`))),
         ),
       );
     });

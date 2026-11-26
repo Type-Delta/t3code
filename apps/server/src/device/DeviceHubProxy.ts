@@ -21,6 +21,7 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 
 import { authenticateMediaRequest, failEnvironmentInternal } from "../auth/http.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
+import { LINK_EXPIRES_AT_HEADER } from "../mcp/McpInvocationContext.ts";
 import * as DeviceService from "./DeviceService.ts";
 import { repeatStillFrame } from "./mjpegStillFrame.ts";
 
@@ -181,13 +182,15 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(response.headers)) {
     // A cookie from an upstream such as an Expo Simulators session's preview host would land on T3's origin.
-    // Clear-Site-Data likewise applies to the origin that serves it.
+    // Clear-Site-Data likewise applies to the origin that serves it. A linked environment's
+    // link expiry is for this server, not its browsers.
     if (
       name === "content-encoding" ||
       name === "transfer-encoding" ||
       name === "connection" ||
       name === "set-cookie" ||
-      name === "clear-site-data"
+      name === "clear-site-data" ||
+      name === LINK_EXPIRES_AT_HEADER
     ) {
       continue;
     }

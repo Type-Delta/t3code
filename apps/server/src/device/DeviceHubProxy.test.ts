@@ -50,6 +50,7 @@ const fixture = (
           headers: {
             "set-cookie": "upstream=1",
             "clear-site-data": '"*"',
+            "t3-link-expires-at": "2026-12-01T00:00:00.000Z",
             "content-type": "text/html",
             "content-security-policy": "script-src *",
           },
@@ -133,6 +134,7 @@ describe("device hub proxy", () => {
     expect(await response.text()).toBe("frame");
     expect(response.headers.get("set-cookie")).toBeNull();
     expect(response.headers.get("clear-site-data")).toBeNull();
+    expect(response.headers.get("t3-link-expires-at")).toBeNull();
     // Opened as a page, a hub response gets an opaque origin and no script.
     expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");

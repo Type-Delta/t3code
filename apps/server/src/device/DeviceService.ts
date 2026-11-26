@@ -939,6 +939,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     );
     yield* ready.releaseAgentSession(name, session.deviceId);
   });
+  /** All at once, so a power-off's releases hold the lock for one timeout, not one per thread. */
   const releaseAgentSessions = (sessions: ReadonlyArray<DeviceSession>) =>
     Effect.forEach(
       sessions,
@@ -946,7 +947,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         resolveHost(session.hostId).pipe(
           Effect.flatMap((host) => releaseAgentSession(host, session)),
         ),
-      { discard: true },
+      { concurrency: "unbounded", discard: true },
     );
   /** Each session on its own, so one unreachable host neither stops nor serializes the rest. */
   const releaseAgentSessionsQuietly = (
@@ -1305,16 +1306,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     }),
     setHostStatus,
     withLifecycleLock: lifecycleLock.withPermit,
+    /** Returns the release of the dropped hosts' agent sessions, to run outside the lock before their scopes close. */
     refreshHosts: Effect.gen(function* () {
       const summaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
-      const unchanged = (id: DeviceHostId) =>
-        hosts.has(id) && hosts.get(id) === publishedHosts.get(id);
-      // A removed host's scope closes after this; a linked one leaves its machine's daemon running.
-      yield* releaseAgentSessionsQuietly(
-        (yield* SynchronizedRef.get(stateRef)).state.sessions.filter(
-          (session) => !unchanged(session.hostId),
-        ),
-        (id) => publishedHosts.get(id),
+      const previous = publishedHosts;
+      const unchanged = (id: DeviceHostId) => hosts.has(id) && hosts.get(id) === previous.get(id);
+      const dropped = (yield* SynchronizedRef.get(stateRef)).state.sessions.filter(
+        (session) => !unchanged(session.hostId),
       );
       yield* publish((state) => ({
         ...state,
@@ -1326,6 +1324,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         sessions: state.sessions.filter((session) => unchanged(session.hostId)),
       }));
       publishedHosts = new Map(hosts);
+      // A linked host's machine keeps its daemon running, so its claims outlive the scope.
+      return releaseAgentSessionsQuietly(dropped, (id) => previous.get(id));
     }),
   };
 });
@@ -1546,7 +1546,7 @@ export const make = Effect.gen(function* () {
     const next = yield* remoteSshDeviceHosts(configuredHosts).pipe(
       Effect.provide(localTargetContext),
     );
-    const removed = yield* service.withLifecycleLock(
+    const { removed, release } = yield* service.withLifecycleLock(
       Effect.gen(function* () {
         const removed: Array<{ id: string; scope: Scope.Closeable }> = [];
         for (const [id, previous] of configured) {
@@ -1555,10 +1555,10 @@ export const make = Effect.gen(function* () {
           configured.delete(id);
           removed.push({ id, scope: previous.scope });
         }
-        if (removed.length > 0) yield* service.refreshHosts;
-        return removed;
+        return { removed, release: removed.length > 0 ? yield* service.refreshHosts : Effect.void };
       }),
     );
+    yield* release;
     // Stop old writers before deleting config files or publishing replacements, without blocking healthy hosts.
     yield* Effect.forEach(
       removed,
@@ -1569,7 +1569,7 @@ export const make = Effect.gen(function* () {
         }),
       { concurrency: 4, discard: true },
     );
-    yield* service.withLifecycleLock(
+    const releaseReplaced = yield* service.withLifecycleLock(
       Effect.gen(function* () {
         let added = false;
         for (const host of next) {
@@ -1589,7 +1589,7 @@ export const make = Effect.gen(function* () {
               yield* instance
                 .platformAvailability("ios")
                 .pipe(
-                  Effect.andThen(service.withLifecycleLock(service.refreshHosts)),
+                  Effect.andThen(Effect.flatten(service.withLifecycleLock(service.refreshHosts))),
                   Effect.forkIn(hostScope),
                 );
             continue;
@@ -1639,9 +1639,10 @@ export const make = Effect.gen(function* () {
           configured.set(host.id, { config: host, scope: hostScope });
         }
         // Refresh again after removed scopes closed so a late status write from an old host cannot linger.
-        if (added || removed.length > 0) yield* service.refreshHosts;
+        return added || removed.length > 0 ? yield* service.refreshHosts : Effect.void;
       }),
     );
+    yield* releaseReplaced;
   });
   const changes = yield* settings.subscribeChanges;
   // Each kind has its own settings list; an id two lists share stays the first one's.

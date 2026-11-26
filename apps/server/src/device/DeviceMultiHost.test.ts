@@ -132,13 +132,13 @@ it.effect("keeps hosts independent when serials collide and another host fails",
         Effect.gen(function* () {
           order.push("replace");
           hosts.set("b", host("b"));
-          yield* service.refreshHosts;
+          return yield* service.refreshHosts;
         }),
       )
       .pipe(Effect.forkChild);
     yield* Deferred.succeed(finishWrite, undefined);
     yield* Fiber.join(targeting);
-    yield* Fiber.join(replacing);
+    yield* Effect.flatten(Fiber.join(replacing));
     expect(order).toEqual(["write started", "write finished", "replace"]);
     const replaced = yield* service.state;
     expect(replaced.sessions).toEqual([]);
@@ -148,8 +148,10 @@ it.effect("keeps hosts independent when serials collide and another host fails",
     const releasedOnB = () => rpcs.filter((url) => url === "http://b/rpc").length;
     const beforeRemoval = releasedOnB();
     hosts.delete("b");
-    yield* service.refreshHosts;
-    // A removed host's agent sessions are released before its scope closes.
+    const release = yield* service.withLifecycleLock(service.refreshHosts);
+    // A removed host's agent sessions are released outside the lock, before its scope closes.
+    expect(releasedOnB()).toBe(beforeRemoval);
+    yield* release;
     expect(releasedOnB()).toBe(beforeRemoval + 1);
     yield* service.setHostStatus("b", { status: "ready" });
     expect((yield* service.state).hostStatuses.b).toBeUndefined();
@@ -157,7 +159,7 @@ it.effect("keeps hosts independent when serials collide and another host fails",
     yield* service.agentReadinessIfSupported("a");
     expect((yield* service.state).hostStatuses.a?.status).toBe("ready");
     hosts.set("b", host("b"));
-    yield* service.refreshHosts;
+    yield* Effect.flatten(service.refreshHosts);
     for (const hostId of ["a", "b"])
       yield* service.open({ threadId, hostId, deviceId: "emulator-5554", platform: "android" });
     // One host failing to release does not keep the others' sessions claimed.

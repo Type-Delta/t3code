@@ -1393,7 +1393,7 @@ it.effect.each(["shutdown", "close"] as const)(
         operation === "shutdown" ? service.shutdown(input) : service.close({ threadId }),
       );
       expect((yield* PubSub.take(updates)).sessions).toEqual([]);
-      yield* service.refreshHosts;
+      yield* Effect.flatten(service.refreshHosts);
       expect((yield* service.state).sessions).toEqual([]);
       yield* Effect.sync(() => retiring.interruptUnsafe());
       yield* Deferred.succeed(pauseBind.proceed, undefined);
@@ -2261,6 +2261,33 @@ describe("agent session release on close", () => {
       expect(
         closedSessions.map((body) => (body as { params: { session: string } }).params.session),
       ).toEqual(names);
+    }),
+  );
+
+  it.effect("releases every thread's claim at once when a close powers the device off", () =>
+    Effect.gen(function* () {
+      let started = 0;
+      const bothStarted = yield* Deferred.make<void>();
+      const { service, closedSessions } = yield* fixture(
+        Effect.void,
+        undefined,
+        false,
+        undefined,
+        false,
+        undefined,
+        {
+          onClose: Effect.suspend(() =>
+            ++started === 2 ? Deferred.succeed(bothStarted, undefined) : Effect.void,
+          ).pipe(Effect.andThen(Deferred.await(bothStarted)), Effect.as("ok" as const)),
+        },
+      );
+      yield* service.configure({ enabled: true, agentAccessEnabled: true });
+      const threadId = ThreadId.make("powering-off");
+      const session = yield* openClaim(service, threadId);
+      yield* openClaim(service, ThreadId.make("sharing"), session.deviceId);
+      yield* service.close({ threadId, shutdown: true });
+      expect(closedSessions).toHaveLength(2);
+      expect((yield* service.state).sessions).toHaveLength(0);
     }),
   );
 
