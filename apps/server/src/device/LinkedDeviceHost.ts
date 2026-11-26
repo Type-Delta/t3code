@@ -58,6 +58,8 @@ export const isLinkedDeviceHostFailure = Schema.is(LinkedDeviceHostFailure);
 const PEER_REUSE = Duration.seconds(60);
 const BOOT_TIMEOUT = Duration.minutes(4);
 const REQUEST_TIMEOUT = Duration.seconds(60);
+// Closing a device runs under the device service's lock, so an unreachable peer must not hold it long.
+const SHUTDOWN_TIMEOUT = Duration.seconds(15);
 
 const decodeFailure = Schema.decodeUnknownEffect(PeerLinkDeviceFailure);
 const decodeList = HttpClientResponse.schemaBodyJson(PeerLinkDeviceList);
@@ -116,57 +118,85 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   });
   yield* Scope.addFinalizer(hostScope, endGeneration);
 
+  /** The stored link if it is still the one linked at `linkedAt`; linking again sets a new one. */
+  const storedSince = (linkedAt: DateTime.Utc) =>
+    links
+      .get(config.environmentId)
+      .pipe(
+        Effect.map(Option.filter((stored) => DateTime.Equivalence(stored.linkedAt, linkedAt))),
+        Effect.orElseSucceed(Option.none),
+      );
+
   const resolvePeer = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     if (peer && now - peer.at < Duration.toMillis(PEER_REUSE)) {
       const cached = peer;
-      // Reuse never outlives the stored link: unlinking, or linking again with another token or
-      // less access, must stop use at once. Linking again always sets a new `linkedAt`.
-      const stored = yield* links.get(config.environmentId).pipe(Effect.orElseSucceed(Option.none));
+      // Reuse never outlives the stored link: unlinking, expiring, or linking again with another
+      // token or less access must stop use at once.
+      const stored = yield* storedSince(cached.linkedAt);
       if (
         Option.isSome(stored) &&
         stored.value.access === "full-access" &&
-        DateTime.Equivalence(stored.value.linkedAt, cached.linkedAt)
+        DateTime.isGreaterThan(stored.value.expiresAt, yield* DateTime.now)
       )
         return cached;
       peer = undefined;
     }
-    const resolved = yield* links.resolve(config.environmentId).pipe(
-      Effect.tapError((error) => (error.reason === "unknown_link" ? endGeneration : Effect.void)),
-      Effect.mapError((error) =>
-        fail(
-          error.reason === "unknown_link"
-            ? `This environment is no longer linked to ${config.label}. Link it again with full access, or remove this device host.`
-            : error.message,
+    for (let attempt = 1; ; attempt++) {
+      const resolved = yield* links.resolve(config.environmentId).pipe(
+        Effect.tapError((error) =>
+          error.reason === "unknown_link" || error.reason === "expired"
+            ? endGeneration
+            : Effect.void,
         ),
-      ),
-    );
-    if (resolved.link.access !== "full-access") {
-      yield* endGeneration;
-      return yield* fail(
-        `The link to ${resolved.link.label} is below full access. Using its devices runs apps as its user, so link it again with full access.`,
+        Effect.mapError((error) =>
+          fail(
+            error.reason === "unknown_link"
+              ? `This environment is no longer linked to ${config.label}. Link it again with full access, or remove this device host.`
+              : error.message,
+          ),
+        ),
       );
+      // Linking again while `resolve` probed the peer leaves this token stale, and it must not end
+      // the streams of the newer link.
+      const stored = yield* storedSince(resolved.link.linkedAt);
+      if (
+        Option.isNone(stored) ||
+        (generation !== undefined &&
+          DateTime.isGreaterThan(generation.linkedAt, resolved.link.linkedAt))
+      ) {
+        if (attempt < 2) continue;
+        return yield* fail(
+          `The link to ${resolved.link.label} changed while connecting. Try again.`,
+        );
+      }
+      if (stored.value.access !== "full-access") {
+        yield* endGeneration;
+        return yield* fail(
+          `The link to ${resolved.link.label} is below full access. Using its devices runs apps as its user, so link it again with full access.`,
+        );
+      }
+      if (resolved.capabilities.linkDevices !== true)
+        return yield* fail(
+          `${resolved.link.label} runs a T3 Code version that cannot lend its devices. Update it.`,
+        );
+      const previous = generation;
+      const current =
+        previous !== undefined && DateTime.Equivalence(previous.linkedAt, resolved.link.linkedAt)
+          ? previous
+          : { linkedAt: resolved.link.linkedAt, ended: Deferred.makeUnsafe<void>() };
+      generation = current;
+      if (previous !== undefined && previous !== current)
+        yield* Deferred.succeed(previous.ended, undefined);
+      peer = {
+        url: resolved.url,
+        token: resolved.token,
+        linkedAt: resolved.link.linkedAt,
+        at: now,
+        ended: current.ended,
+      };
+      return peer;
     }
-    if (resolved.capabilities.linkDevices !== true)
-      return yield* fail(
-        `${resolved.link.label} runs a T3 Code version that cannot lend its devices. Update it.`,
-      );
-    const previous = generation;
-    const current =
-      previous !== undefined && DateTime.Equivalence(previous.linkedAt, resolved.link.linkedAt)
-        ? previous
-        : { linkedAt: resolved.link.linkedAt, ended: Deferred.makeUnsafe<void>() };
-    generation = current;
-    if (previous !== undefined && previous !== current)
-      yield* Deferred.succeed(previous.ended, undefined);
-    peer = {
-      url: resolved.url,
-      token: resolved.token,
-      linkedAt: resolved.link.linkedAt,
-      at: now,
-      ended: current.ended,
-    };
-    return peer;
   });
 
   /** Forgets the address and token after a failure, so the next call resolves the link again. */
@@ -199,32 +229,38 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       options.body === undefined
         ? HttpClientRequest.get(target)
         : HttpClientRequest.bodyJsonUnsafe(HttpClientRequest.post(target), options.body);
-    const response = yield* http
-      .pipe(HttpClient.withScope)
-      .execute(HttpClientRequest.bearerToken(request, token))
-      .pipe(
-        Effect.timeout(options.timeout ?? REQUEST_TIMEOUT),
-        Effect.tapError(() => forgetPeer),
-        Effect.mapError(() => fail(`${config.label} did not answer.`)),
-      );
-    yield* recordRenewal(response.headers);
-    if (response.status >= 400) {
-      if (response.status === 401 || response.status === 403) yield* forgetPeer;
-      const failure = yield* response.json.pipe(
-        Effect.flatMap(decodeFailure),
-        Effect.orElseSucceed(() => ({
-          message: `${config.label} answered HTTP ${response.status}.`,
-        })),
-      );
-      return yield* fail(failure.message);
-    }
-    return yield* options
-      .read(response)
-      .pipe(
-        Effect.mapError(() =>
-          fail(`${config.label} answered in a shape this version cannot read.`),
-        ),
-      );
+    const notAnswered = forgetPeer.pipe(
+      Effect.andThen(Effect.fail(fail(`${config.label} did not answer.`))),
+    );
+    return yield* Effect.gen(function* () {
+      const response = yield* http
+        .pipe(HttpClient.withScope)
+        .execute(HttpClientRequest.bearerToken(request, token))
+        .pipe(Effect.catch(() => notAnswered));
+      yield* recordRenewal(response.headers);
+      if (response.status >= 400) {
+        if (response.status === 401 || response.status === 403) yield* forgetPeer;
+        const failure = yield* response.json.pipe(
+          Effect.flatMap(decodeFailure),
+          Effect.orElseSucceed(() => ({
+            message: `${config.label} answered HTTP ${response.status}.`,
+          })),
+        );
+        return yield* fail(failure.message);
+      }
+      return yield* options
+        .read(response)
+        .pipe(
+          Effect.mapError(() =>
+            fail(`${config.label} answered in a shape this version cannot read.`),
+          ),
+        );
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: options.timeout ?? REQUEST_TIMEOUT,
+        orElse: () => notAnswered,
+      }),
+    );
   }, Effect.scoped);
 
   const operationError = (operation: string) => (cause: LinkedDeviceHostFailure) =>
@@ -267,6 +303,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     shutdown: (device) =>
       call("/shutdown", {
         body: { device: { id: device.id, platform: device.platform } },
+        timeout: SHUTDOWN_TIMEOUT,
         read: () => Effect.void,
       }).pipe(Effect.mapError(operationError("shutdown"))),
     screenshot: (device) =>
@@ -344,23 +381,16 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     );
 
   /** A loopback daemon address for agents here, forwarding to the peer's daemon over the link. */
-  const startForwarder = Effect.gen(function* () {
+  const serveForwarder = Effect.fnUntraced(function* (scope: Scope.Closeable) {
     const localToken = Hex.encode(yield* random.randomBytes(32));
-    const scope = yield* Scope.fork(hostScope, "sequential");
     // Closing cuts in-flight requests too, so a revoked token reaches nothing more.
     const server = yield* NodeHttpServer.make(() => NodeHttp.createServer(), {
       host: "127.0.0.1",
       port: 0,
       disablePreemptiveShutdown: true,
-    }).pipe(
-      Scope.provide(scope),
-      Effect.onError(() => Scope.close(scope, Exit.void)),
-    );
+    }).pipe(Scope.provide(scope));
     const port = NetAddress.isInetAddress(server.address) ? server.address.port : undefined;
-    if (port === undefined) {
-      yield* Scope.close(scope, Exit.void);
-      return yield* fail("The agent-device forwarder did not bind.");
-    }
+    if (port === undefined) return yield* fail("The agent-device forwarder did not bind.");
     const origin = `http://127.0.0.1:${port}`;
     const handler = Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
@@ -425,6 +455,9 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       .pipe(Scope.provide(scope));
     return { endpoint: { baseUrl: origin, token: localToken }, scope };
   });
+  const startForwarder = Effect.flatMap(Scope.fork(hostScope, "sequential"), (scope) =>
+    serveForwarder(scope).pipe(Effect.onError(() => Scope.close(scope, Exit.void))),
+  );
 
   const stopForwarder = Effect.suspend(() => {
     const running = agent;

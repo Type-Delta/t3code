@@ -226,7 +226,7 @@ const requireLinkedHostCaller = loadCaller().pipe(
   Effect.flatMap((caller) =>
     assertFullAccessNamingLink(
       caller,
-      "Devices on a linked environment run as that machine's user, so only a thread in full access can open or power them off. Ask the user to switch this thread to full access, or use a device on this machine instead.",
+      "Devices on a linked environment run as that machine's user, so only a full-access thread outside plan mode can open or power them off. Ask the user to switch this thread to full access and leave plan mode, or use a device on this machine instead.",
       "use a linked environment's devices",
     ),
   ),
@@ -399,20 +399,39 @@ const handlers = {
               .pipe(mapLocateErrors);
       const hostId = Option.isSome(open) ? open.value.hostId : inputHostId;
       if (input.shutdown === true) {
-        const closing = Option.isSome(open)
-          ? [open.value]
-          : deviceId === undefined
-            ? (yield* devices.sessionsForThread(scope.thread.threadId)).filter(
-                (session) => hostId === undefined || session.hostId === hostId,
-              )
-            : [];
-        const hosts = (yield* devices.state).hosts;
-        if (
-          closing.some(
-            (session) => hosts.find((host) => host.id === session.hostId)?.kind === "linked",
+        const mayUseLinked = yield* requireLinkedHostCaller.pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+        if (!mayUseLinked) {
+          const hosts = (yield* devices.state).hosts;
+          const closing = Option.isSome(open)
+            ? [open.value]
+            : deviceId === undefined
+              ? (yield* devices.sessionsForThread(scope.thread.threadId)).filter(
+                  (session) => hostId === undefined || session.hostId === hostId,
+                )
+              : [];
+          if (
+            closing.some(
+              (session) => hosts.find((host) => host.id === session.hostId)?.kind === "linked",
+            )
           )
-        )
-          yield* requireLinkedHostCaller;
+            yield* requireLinkedHostCaller;
+          // Exact targets, so a linked device opened meanwhile is not powered off too.
+          yield* Effect.forEach(
+            closing,
+            (session) =>
+              devices.close({
+                threadId: scope.thread.threadId,
+                hostId: session.hostId,
+                deviceId: session.deviceId,
+                shutdown: true,
+              }),
+            { discard: true },
+          );
+          return {};
+        }
       }
       yield* devices.close({
         threadId: scope.thread.threadId,

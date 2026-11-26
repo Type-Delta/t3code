@@ -40,6 +40,8 @@ import * as ServerSettings from "../serverSettings.ts";
 /** How soon an open stream ends after the Linked environments beta is turned off. */
 const ACCESS_RECHECK_INTERVAL = Duration.seconds(30);
 const NO_STORE = { "cache-control": "no-store" };
+const DEVICE_SUPPORT_OFF_MESSAGE =
+  "Device support is off there. Turn it on in its Settings > Integrations > Devices.";
 
 const refusal = (status: number, error: string, message: string) =>
   HttpServerResponse.jsonUnsafe({ error, message }, { status, headers: NO_STORE });
@@ -247,6 +249,9 @@ const make = Effect.gen(function* () {
       // A full-access link holds both scopes; only the path and method checks apply.
       const refused = hubRequestScope(request, hubPath);
       if (HttpServerResponse.isHttpServerResponse(refused)) return refused;
+      const settings = yield* services.settings.getSettings.pipe(Effect.option);
+      if (Option.isNone(settings) || !settings.value.enableDeviceSupport)
+        return yield* refuse(403, "device_support_off", DEVICE_SUPPORT_OFF_MESSAGE);
       const ready =
         (yield* devices.currentReadiness(LOCAL_DEVICE_HOST_ID)) ??
         (yield* devices.readiness(LOCAL_DEVICE_HOST_ID).pipe(Effect.option)).pipe(Option.getOrNull);
@@ -269,11 +274,7 @@ const make = Effect.gen(function* () {
               "agent_access_off",
               "Agent device access is off there. Turn it on in its Settings > Integrations > Devices.",
             )
-          : refuse(
-              403,
-              "device_support_off",
-              "Device support is off there. Turn it on in its Settings > Integrations > Devices.",
-            );
+          : refuse(403, "device_support_off", DEVICE_SUPPORT_OFF_MESSAGE);
       }
       const cached = yield* Ref.get(daemon);
       const started = Option.isSome(cached)
@@ -345,10 +346,10 @@ const make = Effect.gen(function* () {
     );
     if (HttpServerResponse.isHttpServerResponse(admitted)) return admitted;
 
-    const handle = handleAdmitted(request, url.value, path, admitted.revoked, refuse);
-    const response = yield* path.startsWith("/daemon/")
-      ? Effect.raceFirst(handle, admitted.revoked.pipe(Effect.as(null)))
-      : handle;
+    const response = yield* Effect.raceFirst(
+      handleAdmitted(request, url.value, path, admitted.revoked, refuse),
+      admitted.revoked.pipe(Effect.as(null)),
+    );
     return withLinkExpiry(
       response ?? (yield* refuse(403, "link_revoked", "Its link no longer allows device access.")),
       admitted.linkExpiresAt,

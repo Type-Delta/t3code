@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Toolkit } from "effect/ai";
@@ -88,7 +89,7 @@ const serveFake = (respond: (seen: Seen) => Effect.Effect<HttpServerResponse.Htt
   });
 
 /** The Mac: its own device service, with a hub and an agent-device daemon on its loopback. */
-const serveMac = Effect.gen(function* () {
+const serveMac = Effect.fnUntraced(function* (waitForReadiness: Effect.Effect<void> = Effect.void) {
   const hub = yield* serveFake(() => Effect.succeed(HttpServerResponse.text("frame")));
   const rpcStarted = yield* Deferred.make<void>();
   const rpcClosed = yield* Deferred.make<void>();
@@ -149,7 +150,11 @@ const serveMac = Effect.gen(function* () {
     helpers: { serveSimAxSettings: null, serveSimCli: null },
   };
   const devices = Layer.mock(DeviceService.DeviceService)({
-    readiness: () => Ref.update(readinessCalls, (count) => count + 1).pipe(Effect.as(ready)),
+    readiness: () =>
+      Ref.update(readinessCalls, (count) => count + 1).pipe(
+        Effect.andThen(waitForReadiness),
+        Effect.as(ready),
+      ),
     currentReadiness: () => Effect.succeed(ready),
     agentReadinessIfSupported: () =>
       Effect.gen(function* () {
@@ -233,7 +238,7 @@ const linkToken = (links: PeerLinks.PeerLinks["Service"]) =>
 it.effect("a full-access link lists, boots and streams the linked machine's devices", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { peer, hub, booted, readinessCalls } = yield* serveMac;
+      const { peer, hub, booted, readinessCalls } = yield* serveMac();
       const laptopSide = yield* makeLaptop;
       yield* linkTo(laptopSide.links, peer, "full-access");
 
@@ -279,10 +284,58 @@ it.effect("a full-access link lists, boots and streams the linked machine's devi
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("unlinking refuses a boot waiting for readiness", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const readinessStarted = yield* Deferred.make<void>();
+      const releaseReadiness = yield* Deferred.make<void>();
+      const { peer, booted } = yield* serveMac(
+        Deferred.succeed(readinessStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseReadiness)),
+        ),
+      );
+      const { links } = yield* makeLaptop;
+      yield* linkTo(links, peer, "full-access");
+      const token = yield* linkToken(links);
+      const boot = yield* fetch(
+        HttpClientRequest.post(`${peer.url}/api/links/devices/boot`).pipe(
+          HttpClientRequest.bearerToken(token),
+          HttpClientRequest.bodyJsonUnsafe({ device: simulator }),
+        ),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(readinessStarted);
+      expect((yield* links.unlink(EnvironmentId.make(mac.environmentId))).endedThere).toBe(true);
+      yield* Deferred.succeed(releaseReadiness, undefined);
+      const refused = yield* Fiber.join(boot);
+      expect(yield* Ref.get(booted)).toEqual([]);
+      expect(refused.status).toBe(403);
+      expect(decodeObject(refused.body).error).toBe("link_revoked");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("turning off device support refuses requests to the running hub", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { peer, hub } = yield* serveMac();
+      const { links } = yield* makeLaptop;
+      yield* linkTo(links, peer, "full-access");
+      const token = yield* linkToken(links);
+      const path = "/hub/vendor/serve-sim/helper/SIM-1/stream.mjpeg";
+      expect((yield* askMac(peer, token, {}, path)).status).toBe(200);
+      yield* peer.settings.updateSettings({ enableDeviceSupport: false });
+      const refused = yield* askMac(peer, token, {}, path);
+      expect(refused.status).toBe(403);
+      expect(decodeObject(refused.body).error).toBe("device_support_off");
+      expect(yield* Ref.get(hub.seen)).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("agents reach the linked daemon only through a loopback token of their own", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { peer, daemon } = yield* serveMac;
+      const { peer, daemon } = yield* serveMac();
       const laptopSide = yield* makeLaptop;
       yield* linkTo(laptopSide.links, peer, "full-access");
       const token = yield* linkToken(laptopSide.links);
@@ -354,7 +407,7 @@ const askMac = (
 it.effect("only a full-access link's session may use the linked machine's devices", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { peer } = yield* serveMac;
+      const { peer } = yield* serveMac();
       const laptopSide = yield* makeLaptop;
       yield* linkTo(laptopSide.links, peer, "auto");
       const token = yield* linkToken(laptopSide.links);
@@ -381,7 +434,7 @@ it.effect("only a full-access link's session may use the linked machine's device
 it.effect("a browser origin is refused and unlinking ends the host's access", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { peer } = yield* serveMac;
+      const { peer } = yield* serveMac();
       const laptopSide = yield* makeLaptop;
       yield* linkTo(laptopSide.links, peer, "full-access");
       const token = yield* linkToken(laptopSide.links);
@@ -405,7 +458,7 @@ it.effect(
   () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { peer, daemon } = yield* serveMac;
+        const { peer, daemon } = yield* serveMac();
         const { links } = yield* makeLaptop;
         yield* linkTo(links, peer, "full-access");
         const token = yield* linkToken(links);
@@ -435,7 +488,7 @@ it.effect(
 it.effect("daemon RPC refusals report disabled settings and startup failure", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { peer, daemon, daemonAvailable } = yield* serveMac;
+      const { peer, daemon, daemonAvailable } = yield* serveMac();
       const { links } = yield* makeLaptop;
       yield* linkTo(links, peer, "full-access");
       const token = yield* linkToken(links);
@@ -482,7 +535,7 @@ it.effect("daemon RPC refusals report disabled settings and startup failure", ()
 it.effect("a restarted daemon is found again, and a refused caller's body stays unread", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { peer, daemonToken } = yield* serveMac;
+      const { peer, daemonToken } = yield* serveMac();
       const { links } = yield* makeLaptop;
       yield* linkTo(links, peer, "full-access");
       const rpc = (bearer: string) =>
@@ -510,7 +563,7 @@ it.effect("a restarted daemon is found again, and a refused caller's body stays 
 it.effect("unlinking cancels pending RPCs and interrupts daemon artifact downloads", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { peer, rpcStarted, rpcClosed, artifactClosed } = yield* serveMac;
+      const { peer, rpcStarted, rpcClosed, artifactClosed } = yield* serveMac();
       const { links } = yield* makeLaptop;
       yield* linkTo(links, peer, "full-access");
       const token = yield* linkToken(links);
@@ -523,6 +576,7 @@ it.effect("unlinking cancels pending RPCs and interrupts daemon artifact downloa
       const firstChunk = yield* Deferred.make<string>();
       const download = yield* response.stream.pipe(
         Stream.runForEach((bytes) => Deferred.succeed(firstChunk, new TextDecoder().decode(bytes))),
+        Effect.result,
         Effect.forkScoped,
       );
       expect(yield* Deferred.await(firstChunk)).toBe("first chunk");
@@ -543,7 +597,7 @@ it.effect("unlinking cancels pending RPCs and interrupts daemon artifact downloa
         id: "pending",
         error: { message: expect.stringContaining("no longer allows device access") },
       });
-      yield* Fiber.join(download);
+      expect(Result.isFailure(yield* Fiber.join(download))).toBe(true);
       yield* Deferred.await(rpcClosed);
       yield* Deferred.await(artifactClosed);
     }),

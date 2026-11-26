@@ -26,6 +26,7 @@ import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as NetAddress from "effect/net/NetAddress";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
@@ -36,15 +37,28 @@ import * as DeviceService from "./DeviceService.ts";
 import * as LinkedDeviceHost from "./LinkedDeviceHost.ts";
 
 const environmentId = EnvironmentId.make("environment-mac");
+const SIM = {
+  id: "SIM-1",
+  name: "iPhone",
+  version: "iOS 27.0",
+  platform: "ios",
+  booted: true,
+  physical: false,
+} as const;
 const RENEWED = "2030-01-01T00:00:00.000Z";
 const noPhase = () => Effect.void;
 const HUB_STREAM = "/vendor/serve-sim/helper/SIM-1/stream.avcc";
 
-/** The Mac's `/api/links/devices` routes: records each bearer and answers the daemon with `daemonStatus`. */
+/**
+ * The Mac's `/api/links/devices` routes: records each bearer and answers the daemon with
+ * `daemonStatus`. `/shutdown` answers only as the test ends and `/screenshot` never finishes its body.
+ */
 const serveMac = Effect.gen(function* () {
   const bearers = yield* Ref.make<ReadonlyArray<string>>([]);
   const paths = yield* Ref.make<ReadonlyArray<string>>([]);
   const daemonStatus = yield* Ref.make(200);
+  const shutdownRequested = yield* Deferred.make<void>();
+  const shutdownAnswered = yield* Deferred.make<void>();
   const server = yield* NodeHttpServer.make(() => NodeHttp.createServer(), {
     host: "127.0.0.1",
     port: 0,
@@ -55,6 +69,15 @@ const serveMac = Effect.gen(function* () {
       yield* Ref.update(bearers, (all) => [...all, request.headers.authorization ?? ""]);
       yield* Ref.update(paths, (all) => [...all, request.url]);
       const headers = { [McpInvocationContext.LINK_EXPIRES_AT_HEADER]: RENEWED };
+      if (request.url.endsWith("/shutdown"))
+        return yield* Deferred.succeed(shutdownRequested, undefined).pipe(
+          Effect.andThen(Deferred.await(shutdownAnswered)),
+          Effect.as(HttpServerResponse.empty()),
+        );
+      if (request.url.endsWith("/screenshot"))
+        return HttpServerResponse.stream(
+          Stream.concat(Stream.make(Uint8Array.of(1)), Stream.never),
+        );
       if (request.url === `${PEER_LINK_DEVICES_ROUTE_PREFIX}/hub${HUB_STREAM}`)
         return HttpServerResponse.stream(
           Stream.concat(Stream.make(Uint8Array.of(1)), Stream.never),
@@ -73,8 +96,16 @@ const serveMac = Effect.gen(function* () {
       );
     }),
   );
+  // Runs before the server closes, which waits on the held answer.
+  yield* Effect.addFinalizer(() => Deferred.succeed(shutdownAnswered, undefined));
   if (!NetAddress.isInetAddress(server.address)) return yield* Effect.die("no TCP address");
-  return { url: `http://127.0.0.1:${server.address.port}`, bearers, paths, daemonStatus };
+  return {
+    url: `http://127.0.0.1:${server.address.port}`,
+    bearers,
+    paths,
+    daemonStatus,
+    shutdownRequested,
+  };
 });
 
 /** A link to the Mac whose stored row and token the test changes, as linking and unlinking would. */
@@ -95,6 +126,11 @@ const makeLinkedHost = Effect.gen(function* () {
     token: "token-1",
   });
   const resolves = yield* Ref.make(0);
+  const held = yield* Ref.make<
+    | { readonly probing: Deferred.Deferred<void>; readonly answer: Deferred.Deferred<void> }
+    | undefined
+  >(undefined);
+  const screenshotAnswered = yield* Deferred.make<void>();
   const settings = yield* ServerSettings.ServerSettingsService.pipe(
     Effect.provide(
       ServerSettings.ServerSettingsService.layerTest({
@@ -112,6 +148,14 @@ const makeLinkedHost = Effect.gen(function* () {
         const value = yield* Ref.get(stored);
         if (value === undefined)
           return yield* new PeerLinkError({ reason: "unknown_link", message: "gone" });
+        if (DateTime.isLessThanOrEqualTo(value.link.expiresAt, yield* DateTime.now))
+          return yield* new PeerLinkError({ reason: "expired", message: "The link expired." });
+        // Probing the peer, after the row and token were read.
+        const probe = yield* Ref.getAndSet(held, undefined);
+        if (probe !== undefined) {
+          yield* Deferred.succeed(probe.probing, undefined);
+          yield* Deferred.await(probe.answer);
+        }
         return {
           link: value.link,
           url: mac.url,
@@ -129,8 +173,31 @@ const makeLinkedHost = Effect.gen(function* () {
     environmentId,
   }).pipe(
     Effect.provideService(ServerSettings.ServerSettingsService, settings),
-    Effect.provide(Layer.mergeAll(links, FetchHttpClient.layer, NodeCrypto.layer)),
+    Effect.provide(
+      Layer.mergeAll(
+        links,
+        Layer.effect(
+          HttpClient.HttpClient,
+          HttpClient.HttpClient.pipe(
+            Effect.map(
+              HttpClient.tap((response) =>
+                response.request.url.endsWith("/screenshot")
+                  ? Deferred.succeed(screenshotAnswered, undefined)
+                  : Effect.void,
+              ),
+            ),
+          ),
+        ).pipe(Layer.provide(FetchHttpClient.layer)),
+        NodeCrypto.layer,
+      ),
+    ),
   );
+  /** Holds the next resolve in its probe of the peer until `answer` completes. */
+  const holdNextResolve = Effect.gen(function* () {
+    const probe = { probing: yield* Deferred.make<void>(), answer: yield* Deferred.make<void>() };
+    yield* Ref.set(held, probe);
+    return probe;
+  });
   const relink = (patch: Partial<PeerLink>, token: string) =>
     Effect.gen(function* () {
       const now = DateTime.add(yield* DateTime.now, { seconds: 1 });
@@ -138,7 +205,17 @@ const makeLinkedHost = Effect.gen(function* () {
         value === undefined ? value : { link: { ...value.link, ...patch, linkedAt: now }, token },
       );
     });
-  return { host, mac, stored, resolves, expiries, relink, settings };
+  return {
+    host,
+    mac,
+    stored,
+    resolves,
+    expiries,
+    relink,
+    settings,
+    holdNextResolve,
+    screenshotAnswered,
+  };
 });
 
 /** This environment's hub route for the linked host's readiness, as the Device panel reaches it. */
@@ -183,6 +260,12 @@ const openStream = (origin: string) =>
 
 const awaitEnded = (stream: Fiber.Fiber<void>) =>
   Fiber.await(stream).pipe(Effect.timeoutOption("3 seconds"), Effect.map(Option.isSome));
+
+/** Whether a stream routed through the link has been told to end. */
+const hasEnded = (routed: { readonly ended?: Effect.Effect<void> } | null) =>
+  Effect.forkChild(routed!.ended!, { startImmediately: true }).pipe(
+    Effect.map((fiber) => fiber.pollUnsafe() !== undefined),
+  );
 
 const rpc = (endpoint: { readonly baseUrl: string }, token: string) =>
   HttpClient.execute(
@@ -266,6 +349,80 @@ it.effect("a relinked, downgraded or removed link is resolved again instead of r
       expect(unlinked.cause).toMatchObject({
         message: expect.stringContaining("no longer linked to Mac"),
       });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a link replaced while it resolves is resolved again, not used or cached", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, mac, resolves, relink, holdNextResolve } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      yield* TestClock.adjust("61 seconds");
+      const probe = yield* holdNextResolve;
+      const slow = yield* Effect.forkChild(ready.devices.list);
+      yield* Deferred.await(probe.probing);
+
+      yield* relink({}, "token-2");
+      yield* ready.devices.list;
+      const routed = yield* ready.upstream!("/stream", new URLSearchParams());
+      yield* Deferred.succeed(probe.answer, undefined);
+      yield* Fiber.join(slow);
+
+      expect(yield* Ref.get(resolves)).toBe(4);
+      expect(yield* Ref.get(mac.bearers)).toEqual(["Bearer token-2", "Bearer token-2"]);
+      expect((yield* ready.upstream!("/stream", new URLSearchParams()))?.headers).toEqual({
+        authorization: "Bearer token-2",
+      });
+      expect(yield* hasEnded(routed)).toBe(false);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an expired link is not reused and its streams end", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, stored, resolves } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const routed = yield* ready.upstream!("/stream", new URLSearchParams());
+      const now = yield* DateTime.now;
+      yield* Ref.update(
+        stored,
+        (value) => value && { ...value, link: { ...value.link, expiresAt: now } },
+      );
+
+      const expired = yield* ready.devices.list.pipe(Effect.flip);
+      expect(expired.cause).toMatchObject({ message: "The link expired." });
+      expect(yield* Ref.get(resolves)).toBe(2);
+      expect(yield* hasEnded(routed)).toBe(true);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a linked environment that stalls its answer's body does not hang the call", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, screenshotAnswered } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const screenshot = yield* Effect.forkChild(ready.devices.screenshot(SIM));
+      yield* Deferred.await(screenshotAnswered);
+      yield* TestClock.adjust("61 seconds");
+      const failed = yield* Fiber.join(screenshot).pipe(Effect.flip);
+      expect(failed.cause).toMatchObject({ message: "Mac did not answer." });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("shutting a device down gives up on a silent linked environment within 15 seconds", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, mac } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const shutdown = yield* Effect.forkChild(ready.devices.shutdown(SIM));
+      yield* Deferred.await(mac.shutdownRequested);
+      yield* TestClock.adjust("16 seconds");
+      const failed = yield* Fiber.join(shutdown).pipe(Effect.flip);
+      expect(failed.cause).toMatchObject({ message: "Mac did not answer." });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

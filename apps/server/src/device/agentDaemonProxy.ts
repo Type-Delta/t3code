@@ -11,6 +11,11 @@ import {
   HttpServerResponse,
 } from "effect/http";
 
+class AgentDaemonAccessEndedError extends Schema.TaggedError<
+  AgentDaemonAccessEndedError,
+  { readonly brand: unique symbol }
+>()("AgentDaemonAccessEndedError", {}) {}
+
 const decodeRpc = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
@@ -190,9 +195,12 @@ export const forwardAgentDaemonRequest = Effect.fn("agentDaemonProxy.forward")(f
   for (const [name, value] of Object.entries(response.headers)) {
     if (value !== undefined && !DROPPED_RESPONSE_HEADERS.has(name)) headers[name] = value;
   }
-  const body = response.stream.pipe(Stream.orDie);
+  const body = response.stream;
+  const invalidated = options.invalidated?.pipe(
+    Effect.andThen(Effect.fail(new AgentDaemonAccessEndedError({}))),
+  );
   return HttpServerResponse.stream(
-    options.invalidated === undefined ? body : body.pipe(Stream.interruptWhen(options.invalidated)),
+    invalidated === undefined ? body : body.pipe(Stream.interruptWhen(invalidated)),
     { status: response.status, headers },
   );
 });
