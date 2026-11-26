@@ -61,6 +61,8 @@ const BOOT_TIMEOUT = Duration.minutes(4);
 const REQUEST_TIMEOUT = Duration.seconds(60);
 // Closing a device runs under the device service's lock, so an unreachable peer must not hold it long.
 const CLOSE_TIMEOUT = Duration.seconds(15);
+// An open stream makes no further calls, so it rechecks its link on its own.
+const LINK_RECHECK = Duration.seconds(10);
 
 const decodeFailure = Schema.decodeUnknownEffect(PeerLinkDeviceFailure);
 const decodeList = HttpClientResponse.schemaBodyJson(PeerLinkDeviceList);
@@ -117,6 +119,10 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     readonly endpoint: DeviceHost.AgentDaemonEndpoint;
     readonly scope: Scope.Closeable;
   } | null = null;
+  // Only agents claim sessions on the linked environment, so a host they never used has none to release.
+  let agentUsed = false;
+  // Counts stops, so a resolve that a stop overtook cannot open a stream afterwards.
+  let stops = 0;
 
   const endGeneration = Effect.suspend(() => {
     const ending = generation;
@@ -142,15 +148,20 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       );
 
   const resolvePeer = Effect.gen(function* () {
+    const since = stops;
+    const halted = () => closed() || stops !== since;
+    const halt = Effect.failSync(() =>
+      closed() ? removed : fail(`${config.label} was turned off. Try again.`),
+    );
     const now = yield* Clock.currentTimeMillis;
-    if (closed()) return yield* removed;
+    if (halted()) return yield* halt;
     if (peer && now - peer.at < Duration.toMillis(PEER_REUSE)) {
       const cached = peer;
       // Reuse never outlives the stored link: unlinking, expiring, or linking again with another
       // token or less access must stop use at once.
       const stored = yield* storedSince(cached.linkedAt);
       const currentTime = yield* DateTime.now;
-      if (closed()) return yield* removed;
+      if (halted()) return yield* halt;
       if (
         Option.isSome(stored) &&
         stored.value.access === "full-access" &&
@@ -160,7 +171,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       peer = undefined;
     }
     for (let attempt = 1; ; attempt++) {
-      if (closed()) return yield* removed;
+      if (halted()) return yield* halt;
       const resolved = yield* links.resolve(config.environmentId).pipe(
         Effect.tapError((error) =>
           error.reason === "unknown_link" || error.reason === "expired"
@@ -180,7 +191,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       // Linking again while `resolve` probed the peer leaves this token stale, and it must not end
       // the streams of the newer link.
       const stored = yield* storedSince(resolved.link.linkedAt);
-      if (closed()) return yield* removed;
+      if (halted()) return yield* halt;
       if (
         Option.isNone(stored) ||
         (generation !== undefined &&
@@ -217,7 +228,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       peer = connected;
       if (previous !== undefined && previous !== current)
         yield* Deferred.succeed(previous.ended, undefined);
-      if (closed()) return yield* removed;
+      if (halted()) return yield* halt;
       return connected;
     }
   });
@@ -255,16 +266,17 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       readonly read: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, E>;
     },
   ) {
-    const { url, token } = yield* resolvePeer;
-    const target = `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}${path}`;
-    const request =
-      options.body === undefined
-        ? HttpClientRequest.get(target)
-        : HttpClientRequest.bodyJsonUnsafe(HttpClientRequest.post(target), options.body);
     const notAnswered = forgetPeer.pipe(
       Effect.andThen(Effect.fail(fail(`${config.label} did not answer.`))),
     );
+    // The timeout covers resolving the link too, so a power-off under the device lock stays bounded.
     return yield* Effect.gen(function* () {
+      const { url, token } = yield* resolvePeer;
+      const target = `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}${path}`;
+      const request =
+        options.body === undefined
+          ? HttpClientRequest.get(target)
+          : HttpClientRequest.bodyJsonUnsafe(HttpClientRequest.post(target), options.body);
       const response = yield* http
         .pipe(HttpClient.withScope)
         .execute(HttpClientRequest.bearerToken(request, token))
@@ -357,32 +369,45 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   };
 
   // Streams go to the peer's hub as they do to a local one, with the link's session on each.
+  /** Completes once the link at `linkedAt` is gone or below full access, such as after relinking lower. */
+  const linkReplaced = Effect.fn("LinkedDeviceHost.linkReplaced")(function* (
+    linkedAt: DateTime.Utc,
+  ) {
+    while (true) {
+      yield* Effect.sleep(LINK_RECHECK);
+      const stored = yield* storedSince(linkedAt);
+      if (Option.isNone(stored) || stored.value.access !== "full-access") return;
+    }
+  });
+
   const upstream: NonNullable<DeviceHost.DeviceHostReady["upstream"]> = (hubPath, search) =>
     resolvePeer.pipe(
-      Effect.map(({ url, token, ended }) => ({
+      Effect.map(({ url, token, ended, linkedAt }) => ({
         url: `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/hub${hubPath}${search.size > 0 ? `?${search}` : ""}`,
         headers: { authorization: `Bearer ${token}` },
         protocols: [],
         refuseRedirects: true,
-        ended: Deferred.await(ended),
+        ended: Effect.raceFirst(Deferred.await(ended), linkReplaced(linkedAt)),
       })),
       Effect.orElseSucceed(() => null),
     );
 
   const releaseHttp = http.pipe(HttpClient.tap(recordPeerAnswer));
   const releaseAgentSession = (session: string) =>
-    resolvePeer.pipe(
-      Effect.flatMap(({ url, token }) =>
-        releaseAgentDeviceSession(releaseHttp, {
-          baseUrl: `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon`,
-          token,
-        })(session),
-      ),
-      Effect.timeout(CLOSE_TIMEOUT),
-      Effect.catch((cause) =>
-        Effect.logWarning("Could not release a linked agent-device session", { cause }),
-      ),
-    );
+    !agentUsed
+      ? Effect.void
+      : resolvePeer.pipe(
+          Effect.flatMap(({ url, token }) =>
+            releaseAgentDeviceSession(releaseHttp, {
+              baseUrl: `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon`,
+              token,
+            })(session),
+          ),
+          Effect.timeout(CLOSE_TIMEOUT),
+          Effect.catch((cause) =>
+            Effect.logWarning("Could not release a linked agent-device session", { cause }),
+          ),
+        );
 
   const ensureReady: DeviceHost.DeviceHost["Service"]["ensureReady"] = (onPhase) =>
     lock.withPermit(
@@ -527,6 +552,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
           Effect.gen(function* () {
             if (closed()) return yield* removed;
             if (agent === null) agent = yield* startForwarder;
+            agentUsed = true;
           }).pipe(
             Effect.mapError(
               (cause) =>
@@ -581,6 +607,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       Effect.andThen(
         stopForwarder,
         Effect.sync(() => {
+          stops++;
           ready = null;
           peer = undefined;
         }).pipe(Effect.andThen(endGeneration)),

@@ -169,7 +169,12 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
           contentType: request.headers["content-type"],
         }),
   );
-  const response = yield* httpClient.execute(upstreamRequest);
+  const response = yield* Effect.raceFirst(
+    httpClient.execute(upstreamRequest),
+    invalidated.pipe(Effect.as(null)),
+  );
+  if (response === null)
+    return HttpServerResponse.text("Device host is no longer available.", { status: 503 });
   if (refuseRedirects && response.status >= 300 && response.status < 400) {
     return HttpServerResponse.text(`Device hub answered HTTP ${response.status}.`, { status: 502 });
   }

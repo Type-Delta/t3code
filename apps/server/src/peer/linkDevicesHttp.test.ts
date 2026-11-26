@@ -284,6 +284,28 @@ it.effect("a full-access link lists, boots and streams the linked machine's devi
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("an emulator is refused when the linked machine's ffmpeg cannot encode its video", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { peer, booted } = yield* serveMac();
+      const laptopSide = yield* makeLaptop;
+      yield* linkTo(laptopSide.links, peer, "full-access");
+      const ready = yield* laptopSide.host.ensureReady(noPhase);
+      const emulator = {
+        ...simulator,
+        id: "Pixel_API_35",
+        platform: "android" as const,
+        booted: false,
+      };
+
+      const refused = yield* ready.devices.boot(emulator).pipe(Effect.flip);
+
+      expect(refused.cause).toMatchObject({ message: expect.stringContaining("libx264") });
+      expect(yield* Ref.get(booted)).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("unlinking refuses a boot waiting for readiness", () =>
   Effect.scoped(
     Effect.gen(function* () {

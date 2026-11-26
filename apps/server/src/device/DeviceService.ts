@@ -149,6 +149,37 @@ export interface DeviceAgentReadiness extends DeviceReadiness {
   readonly agentDevice: DeviceHost.AgentDeviceEndpoint | null;
 }
 
+/** Fails unless the host's ffmpeg can encode Android emulator video the way its hub needs. */
+export const checkEmulatorVideo = Effect.fn("DeviceService.checkEmulatorVideo")(function* (
+  ready: DeviceReadiness,
+) {
+  // Resolve the override on the device host the way its hub does.
+  const encoders = yield* ready.run(ready.nodePath, [
+    "-e",
+    `const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.env.SERVE_EMU_FFMPEG?.trim() || "ffmpeg", ["-hide_banner", "-encoders"], {
+  stdio: "inherit", timeout: 10000, killSignal: "SIGKILL",
+});
+process.exitCode = result.error ? 1 : (result.status ?? 1);`,
+  ]);
+  if (encoders.code !== 0) {
+    return yield* new DevicePlatformUnavailableError({
+      hostId: ready.hostId,
+      platform: "android",
+      reason:
+        "Android emulator video needs working ffmpeg with the libx264 encoder. Install it on the device host's PATH or set SERVE_EMU_FFMPEG there, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
+    });
+  }
+  if (!/^\s*V\S*[ \t]+libx264(?:[ \t]|$)/m.test(`${encoders.stdout}\n${encoders.stderr}`)) {
+    return yield* new DevicePlatformUnavailableError({
+      hostId: ready.hostId,
+      platform: "android",
+      reason:
+        "Android emulator video needs the libx264 encoder. Install an ffmpeg build that includes libx264 on the device host, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
+    });
+  }
+});
+
 const DeviceHostName = Schema.Struct({ id: DeviceHostId, label: Schema.optional(Schema.String) });
 const hostName = (host: typeof DeviceHostName.Type) => host.label ?? `host ${host.id}`;
 
@@ -738,6 +769,9 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
               ),
             );
           if (!nextEnabled) {
+            yield* releaseAgentSessionsQuietly(
+              (yield* SynchronizedRef.get(stateRef)).state.sessions,
+            );
             yield* Effect.forEach(hosts.values(), (host) => host.stop, { discard: true });
           } else if (input.agentAccessEnabled === false) {
             yield* Effect.forEach(hosts.values(), (host) => host.stopAgent, { discard: true });
@@ -794,33 +828,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         return yield* new DeviceNotFoundError({ hostId: host.id, deviceId: input.deviceId });
       }
       // Hosts that route their own streams never encode emulator video with serve-emu's ffmpeg.
-      if (device.platform === "android" && !device.physical && !ready.upstream) {
-        // Resolve the override on the device host the way its hub does.
-        const encoders = yield* ready.run(ready.nodePath, [
-          "-e",
-          `const { spawnSync } = require("node:child_process");
-  const result = spawnSync(process.env.SERVE_EMU_FFMPEG?.trim() || "ffmpeg", ["-hide_banner", "-encoders"], {
-    stdio: "inherit", timeout: 10000, killSignal: "SIGKILL",
-  });
-  process.exitCode = result.error ? 1 : (result.status ?? 1);`,
-        ]);
-        if (encoders.code !== 0) {
-          return yield* new DevicePlatformUnavailableError({
-            hostId: host.id,
-            platform: "android",
-            reason:
-              "Android emulator video needs working ffmpeg with the libx264 encoder. Install it on the device host's PATH or set SERVE_EMU_FFMPEG there, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
-          });
-        }
-        if (!/^\s*V\S*[ \t]+libx264(?:[ \t]|$)/m.test(`${encoders.stdout}\n${encoders.stderr}`)) {
-          return yield* new DevicePlatformUnavailableError({
-            hostId: host.id,
-            platform: "android",
-            reason:
-              "Android emulator video needs the libx264 encoder. Install an ffmpeg build that includes libx264 on the device host, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
-          });
-        }
-      }
+      if (device.platform === "android" && !device.physical && !ready.upstream)
+        yield* checkEmulatorVideo(ready);
       if (!device.booted && input.boot !== false) {
         const booting = { ...device, threadId: input.threadId };
         yield* publish((current) => ({
@@ -918,6 +927,30 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     }));
   });
 
+  /** Ends retiring sessions' agent-device sessions on their hosts, which a launcher cannot once agent tools stop. */
+  const releaseAgentSessions = (sessions: ReadonlyArray<DeviceSession>) =>
+    Effect.forEach(
+      sessions,
+      (session) =>
+        Effect.gen(function* () {
+          const ready = yield* (yield* resolveHost(session.hostId)).current;
+          if (!ready?.releaseAgentSession) return;
+          const name = yield* agentDeviceSession(
+            session.threadId,
+            session.hostId,
+            session.deviceId,
+          ).pipe(Effect.provideService(Digest.Digest, digest));
+          yield* ready.releaseAgentSession(name, session.deviceId);
+        }),
+      { discard: true },
+    );
+  const releaseAgentSessionsQuietly = (sessions: ReadonlyArray<DeviceSession>) =>
+    releaseAgentSessions(sessions).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not release agent-device sessions", { cause }),
+      ),
+    );
+
   const close: DeviceService["Service"]["close"] = Effect.fn("DeviceService.close")(
     function* (input) {
       // Open publishes under the same lock; an old close must not release a reopened claim.
@@ -940,23 +973,15 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             : closing;
           for (const session of ending) {
             const host = yield* resolveHost(session.hostId);
-            const ready = yield* host.current;
             // A lost SSH tunnel does not establish that the remote daemon stopped.
-            if (!ready && (yield* host.summary).kind === "ssh")
+            if (!(yield* host.current) && (yield* host.summary).kind === "ssh")
               return yield* new DeviceHostUnavailableError({
                 hostId: session.hostId,
                 hostLabel: host.label,
                 reason: "Device host is reconnecting. Retry close after it reconnects.",
               });
-            if (ready?.releaseAgentSession) {
-              const name = yield* agentDeviceSession(
-                session.threadId,
-                session.hostId,
-                session.deviceId,
-              ).pipe(Effect.provideService(Digest.Digest, digest));
-              yield* ready.releaseAgentSession(name, session.deviceId);
-            }
           }
+          yield* releaseAgentSessions(ending);
           if (input.shutdown) yield* releaseLaunchers(ending);
           if (input.shutdown) {
             for (const session of closing) {
@@ -993,11 +1018,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   const shutdown: DeviceService["Service"]["shutdown"] = Effect.fn("DeviceService.shutdown")(
     function* (input) {
       const host = yield* resolveHost(input.hostId);
+      const onDevice = (session: DeviceSession) =>
+        session.hostId === host.id && session.deviceId === input.deviceId;
+      const { state } = yield* SynchronizedRef.get(stateRef);
+      yield* releaseAgentSessionsQuietly(state.sessions.filter(onDevice));
       yield* publish((current) => ({
         ...current,
-        sessions: current.sessions.filter(
-          (session) => !(session.hostId === host.id && session.deviceId === input.deviceId),
-        ),
+        sessions: current.sessions.filter((session) => !onDevice(session)),
       }));
       const ready = yield* readiness(host.id);
       yield* shutdownDevice(ready, input.deviceId, input.platform);

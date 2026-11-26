@@ -392,6 +392,57 @@ it.effect("a probe that finishes after the host scope closes cannot open a hub s
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("a probe that finishes after the host stops cannot open a hub stream", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, holdNextResolve } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const search = new URLSearchParams();
+      yield* TestClock.adjust("61 seconds");
+      const probe = yield* holdNextResolve;
+      const opening = yield* Effect.forkChild(ready.upstream!(HUB_STREAM, search));
+      yield* Deferred.await(probe.probing);
+
+      yield* host.stop;
+      yield* Deferred.succeed(probe.answer, undefined);
+
+      expect(yield* Fiber.join(opening)).toBeNull();
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an open stream ends once its link is relinked lower, without another call", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, relink, resolves } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const routed = yield* ready.upstream!(HUB_STREAM, new URLSearchParams());
+      const watching = yield* Effect.forkChild(routed!.ended!);
+      yield* TestClock.adjust("11 seconds");
+      expect(watching.pollUnsafe()).toBeUndefined();
+
+      yield* relink({ access: "auto" }, "token-2");
+      yield* TestClock.adjust("11 seconds");
+
+      yield* Fiber.join(watching);
+      expect(yield* Ref.get(resolves)).toBe(1);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("closing a device no agent used here sends nothing to the peer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, mac } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+
+      yield* ready.releaseAgentSession!("session-1", "SIM-1");
+
+      expect(yield* Ref.get(mac.paths)).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect(
   "releasing a linked agent session still reaches the peer after stopping agent tools",
   () =>
@@ -517,13 +568,21 @@ it.effect("a linked environment that stalls its answer's body does not hang the 
 it.effect("shutting a device down gives up on a silent linked environment within 15 seconds", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const { host, mac } = yield* makeLinkedHost;
+      const { host, mac, holdNextResolve } = yield* makeLinkedHost;
       const ready = yield* host.ensureReady(noPhase);
       const shutdown = yield* Effect.forkChild(ready.devices.shutdown(SIM));
       yield* Deferred.await(mac.shutdownRequested);
       yield* TestClock.adjust("16 seconds");
       const failed = yield* Fiber.join(shutdown).pipe(Effect.flip);
       expect(failed.cause).toMatchObject({ message: "Mac did not answer." });
+
+      // The bound also covers finding the link again, which the failure above made necessary.
+      const probe = yield* holdNextResolve;
+      const stalled = yield* Effect.forkChild(ready.devices.shutdown(SIM));
+      yield* Deferred.await(probe.probing);
+      yield* TestClock.adjust("16 seconds");
+      const unresolved = yield* Fiber.join(stalled).pipe(Effect.flip);
+      expect(unresolved.cause).toMatchObject({ message: "Mac did not answer." });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

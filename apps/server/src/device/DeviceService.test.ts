@@ -2220,6 +2220,29 @@ describe("agent session release on close", () => {
       expect(closedSessions).toHaveLength(1);
     }),
   );
+  it.effect("releases agent sessions on power-off and when device support turns off", () =>
+    Effect.gen(function* () {
+      const { service, closedSessions } = yield* fixture();
+      yield* service.configure({ enabled: true, agentAccessEnabled: true });
+      const poweredOff = ThreadId.make("powered-off");
+      const disabled = ThreadId.make("disabled");
+      const session = yield* openClaim(service, poweredOff);
+      yield* service.shutdown({
+        hostId: session.hostId,
+        deviceId: session.deviceId,
+        platform: "android",
+      });
+      yield* openClaim(service, disabled);
+      yield* service.configure({ enabled: false });
+      const names = yield* Effect.forEach([poweredOff, disabled], (thread) =>
+        agentDeviceSession(thread, session.hostId, session.deviceId),
+      ).pipe(Effect.provide(NodeCrypto.layer));
+      expect(
+        closedSessions.map((body) => (body as { params: { session: string } }).params.session),
+      ).toEqual(names);
+      expect((yield* service.state).sessions).toHaveLength(0);
+    }),
+  );
   it.effect("releases peer claims before a close shuts down", () =>
     Effect.gen(function* () {
       const { service, closedSessions } = yield* fixture();

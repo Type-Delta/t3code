@@ -213,6 +213,9 @@ const make = Effect.gen(function* () {
     const body = yield* Effect.option(decodeDeviceRequest(Option.getOrUndefined(json)));
     if (Option.isNone(body)) return refusal(400, "invalid_request", "Name a device.");
     const { device } = body.value;
+    // This environment's panel checks this on open; a linking environment boots through here instead.
+    if (path !== "/screenshot" && device.platform === "android" && !device.physical)
+      yield* DeviceService.checkEmulatorVideo(ready);
     switch (path) {
       case "/boot":
         return HttpServerResponse.jsonUnsafe(
