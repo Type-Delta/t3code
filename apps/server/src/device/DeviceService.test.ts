@@ -2264,6 +2264,23 @@ describe("agent session release on close", () => {
     }),
   );
 
+  it.effect("releases agent sessions when only agent access turns off", () =>
+    Effect.gen(function* () {
+      const { service, closedSessions } = yield* fixture();
+      yield* service.configure({ enabled: true, agentAccessEnabled: true });
+      const threadId = ThreadId.make("agent-off");
+      const session = yield* openClaim(service, threadId);
+      yield* service.configure({ agentAccessEnabled: false });
+      const name = yield* agentDeviceSession(threadId, session.hostId, session.deviceId).pipe(
+        Effect.provide(NodeCrypto.layer),
+      );
+      expect(
+        closedSessions.map((body) => (body as { params: { session: string } }).params.session),
+      ).toEqual([name]);
+      expect((yield* service.state).sessions).toHaveLength(1);
+    }),
+  );
+
   it.effect("releases every thread's claim at once when a close powers the device off", () =>
     Effect.gen(function* () {
       let started = 0;

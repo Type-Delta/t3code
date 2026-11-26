@@ -40,6 +40,8 @@ import * as ServerSettings from "../serverSettings.ts";
 /** How soon an open stream ends after the Linked environments beta is turned off. */
 const ACCESS_RECHECK_INTERVAL = Duration.seconds(30);
 const NO_STORE = { "cache-control": "no-store" };
+const AGENT_ACCESS_OFF_MESSAGE =
+  "Agent device access is off there. Turn it on in its Settings > Integrations > Devices.";
 const DEVICE_SUPPORT_OFF_MESSAGE =
   "Device support is off there. Turn it on in its Settings > Integrations > Devices.";
 
@@ -291,11 +293,7 @@ const make = Effect.gen(function* () {
       if (!agentEnabled) {
         yield* Ref.set(daemon, Option.none());
         return yield* enabled
-          ? refuse(
-              403,
-              "agent_access_off",
-              "Agent device access is off there. Turn it on in its Settings > Integrations > Devices.",
-            )
+          ? refuse(403, "agent_access_off", AGENT_ACCESS_OFF_MESSAGE)
           : refuse(403, "device_support_off", DEVICE_SUPPORT_OFF_MESSAGE);
       }
       const cached = yield* Ref.get(daemon);
@@ -334,6 +332,12 @@ const make = Effect.gen(function* () {
         Effect.catch(() =>
           Ref.set(daemon, Option.none()).pipe(
             Effect.andThen(refuse(503, "agent_unreachable", "Its agent tools stopped. Try again.")),
+          ),
+        ),
+        // A command still waiting for its answer ends too, not only its body.
+        Effect.raceFirst(
+          lendingStops(true).pipe(
+            Effect.andThen(refuse(403, "agent_access_off", AGENT_ACCESS_OFF_MESSAGE)),
           ),
         ),
       );

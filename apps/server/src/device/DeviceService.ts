@@ -768,14 +768,15 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
                   }),
               ),
             );
-          if (!nextEnabled) {
+          // A linked host's daemon outlives its stop here, so its agent claims are released first.
+          if (!nextEnabled || input.agentAccessEnabled === false)
             yield* releaseAgentSessionsQuietly(
               (yield* SynchronizedRef.get(stateRef)).state.sessions,
             );
+          if (!nextEnabled)
             yield* Effect.forEach(hosts.values(), (host) => host.stop, { discard: true });
-          } else if (input.agentAccessEnabled === false) {
+          else if (input.agentAccessEnabled === false)
             yield* Effect.forEach(hosts.values(), (host) => host.stopAgent, { discard: true });
-          }
           yield* publish((state) => ({
             ...state,
             hostStatus: nextEnabled ? "idle" : "disabled",

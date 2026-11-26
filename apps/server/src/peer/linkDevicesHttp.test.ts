@@ -640,6 +640,38 @@ it.effect("turning agent access off in settings interrupts a daemon artifact dow
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("turning agent access off in settings ends a pending daemon RPC", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { peer, rpcStarted, rpcClosed } = yield* serveMac();
+      const { links } = yield* makeLaptop;
+      yield* linkTo(links, peer, "full-access");
+      const token = yield* linkToken(links);
+      const command = yield* fetch(
+        HttpClientRequest.post(`${peer.url}/api/links/devices/daemon/rpc?pending`).pipe(
+          HttpClientRequest.bearerToken(token),
+          HttpClientRequest.setBody(
+            HttpBody.text('{"jsonrpc":"2.0","id":"pending"}', "application/json"),
+          ),
+        ),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(rpcStarted);
+
+      yield* peer.settings.updateSettings({ enableAgentDeviceAccess: false });
+      yield* TestClock.adjust("31 seconds");
+
+      const refused = yield* Fiber.join(command);
+      expect(refused.status).toBe(403);
+      expect(decodeObject(refused.body)).toMatchObject({
+        jsonrpc: "2.0",
+        id: "pending",
+        error: { message: expect.stringContaining("Agent device access is off there") },
+      });
+      yield* Deferred.await(rpcClosed);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("unlinking cancels pending RPCs and interrupts daemon artifact downloads", () =>
   Effect.scoped(
     Effect.gen(function* () {
