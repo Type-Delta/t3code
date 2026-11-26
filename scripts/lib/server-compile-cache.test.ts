@@ -117,6 +117,49 @@ it.each([
   }
 });
 
+it.each([
+  { hostArch: "arm64", code: "ETIMEDOUT", recovers: true },
+  { hostArch: "arm64", code: "ENOENT", recovers: false },
+  { hostArch: "x64", code: "ETIMEDOUT", recovers: false },
+])("handles $code in a macOS x64 build on $hostArch", async ({ hostArch, code, recovers }) => {
+  const { spawnSync } = await import("node:child_process");
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-hook-cache-failure-"));
+  try {
+    const prepared = NodePath.join(root, "Fixture.app/Contents/Resources/server-compile-cache");
+    const hook = NodeURL.fileURLToPath(
+      new URL("../prepare-server-compile-cache.cjs", import.meta.url),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        `
+        require("node:child_process").spawnSync = () => {
+          require("node:fs").mkdirSync(${JSON.stringify(prepared)}, { recursive: true });
+          return { status: null, error: Object.assign(new Error(${JSON.stringify(code)}), { code: ${JSON.stringify(code)} }) };
+        };
+        Object.defineProperty(process, "platform", { value: "darwin" });
+        Object.defineProperty(process, "arch", { value: ${JSON.stringify(hostArch)} });
+        require(${JSON.stringify(hook)})({
+          appOutDir: ${JSON.stringify(root)}, electronPlatformName: "darwin", arch: 1,
+          packager: { appInfo: { productFilename: "Fixture" } }
+        }).catch(error => { console.error(error.message); process.exitCode = 1; });
+        `,
+      ],
+      { encoding: "utf8", env: { ...process.env, T3CODE_DESKTOP_UNTRUSTED_BUNDLE: "" } },
+    );
+    expect(result.status, result.stderr).toBe(recovers ? 0 : 1);
+    if (recovers) {
+      expect(result.stderr).toContain("timed out under Rosetta");
+      expect(NodeFS.existsSync(prepared)).toBe(false);
+    } else {
+      expect(result.stderr).toContain(`Server compile cache generation failed: Error: ${code}`);
+    }
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("rejects ambiguous bundled server entries before importing them", async () => {
   const { spawnSync } = await import("node:child_process");
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-cache-ambiguous-"));

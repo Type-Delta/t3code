@@ -66,6 +66,13 @@ module.exports = async ({ appOutDir, electronPlatformName, arch, packager }) => 
   } finally {
     fs.rmSync(state, { recursive: true, force: true });
   }
+  if (runsWithRosetta && result.error?.code === "ETIMEDOUT") {
+    fs.rmSync(path.join(resources, "server-compile-cache"), { recursive: true, force: true });
+    console.warn(
+      "[server-compile-cache] Generation timed out under Rosetta. The app will compile on startup.",
+    );
+    return;
+  }
   if (result.status !== 0)
     throw new Error(`Server compile cache generation failed: ${result.error || result.stderr}`);
   console.log("[server-compile-cache] Prepared server bytecode with packaged Electron");
