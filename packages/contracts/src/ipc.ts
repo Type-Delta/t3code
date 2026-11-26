@@ -1,14 +1,4 @@
 import * as Schema from "effect/Schema";
-import {
-  PreviewAutomationClickInput,
-  PreviewAutomationEvaluateInput,
-  PreviewAutomationPressInput,
-  PreviewAutomationScrollInput,
-  PreviewAutomationSnapshot,
-  PreviewAutomationStatus,
-  PreviewAutomationTypeInput,
-  PreviewAutomationWaitForInput,
-} from "./previewAutomation.ts";
 import type { DatabaseMigrationProgress } from "./server.ts";
 import type { PreviewCaptureFailureEncoded } from "./previewCapture.ts";
 
@@ -632,19 +622,6 @@ export interface DesktopPreviewFavicon {
   capturedAt: number;
 }
 
-export const DesktopPreviewFaviconSchema: Schema.Codec<DesktopPreviewFavicon> = Schema.Struct({
-  dataUrl: Schema.String.check(
-    Schema.isMaxLength(FAVICON_DATA_URL_MAX_LENGTH),
-    Schema.isPattern(/^data:image\/png;base64,[a-z0-9+/]+={0,2}$/i),
-  ),
-  pageUrl: Schema.String.check(Schema.isMaxLength(2_048)),
-  capturedAt: Schema.Number.check(
-    Schema.isFinite(),
-    Schema.isGreaterThanOrEqualTo(0),
-    Schema.isLessThanOrEqualTo(FAVICON_CAPTURED_AT_MAX),
-  ),
-});
-
 export interface DesktopPreviewTabState {
   tabId: string;
   webContentsId: number | null;
@@ -667,33 +644,6 @@ export interface DesktopPreviewTabState {
 export const DesktopPreviewTabIdSchema = Schema.String.check(Schema.isTrimmed()).check(
   Schema.isNonEmpty(),
 );
-
-export const DesktopPreviewAutomationStatusSchema = Schema.Struct({
-  ...PreviewAutomationStatus.fields,
-  tabId: Schema.NullOr(DesktopPreviewTabIdSchema),
-});
-export type DesktopPreviewAutomationStatus = typeof DesktopPreviewAutomationStatusSchema.Type;
-
-export const DesktopPreviewNavStatusSchema = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("Idle") }),
-  Schema.Struct({
-    kind: Schema.Literal("Loading"),
-    url: Schema.String,
-    title: Schema.String,
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("Success"),
-    url: Schema.String,
-    title: Schema.String,
-  }),
-  Schema.Struct({
-    kind: Schema.Literal("LoadFailed"),
-    url: Schema.String,
-    title: Schema.String,
-    code: Schema.Number,
-    description: Schema.String,
-  }),
-]);
 
 export interface DesktopPreviewPointerEvent {
   tabId: string;
@@ -1050,8 +1000,6 @@ export const DesktopPreviewRegisterWebviewInputSchema = Schema.Struct({
 export const DesktopPreviewNavigateInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
   url: Schema.String,
-  /** Automation waits for its own readiness milestone and response deadline. */
-  waitForLoad: Schema.optional(Schema.Boolean),
 });
 
 export const DesktopPreviewConfigInputSchema = Schema.Struct({
@@ -1146,35 +1094,6 @@ export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
   data: Schema.Uint8Array,
 });
 
-export const DesktopPreviewAutomationClickInputSchema = Schema.Struct({
-  tabId: DesktopPreviewTabIdSchema,
-  input: PreviewAutomationClickInput,
-});
-
-export const DesktopPreviewAutomationTypeInputSchema = Schema.Struct({
-  tabId: DesktopPreviewTabIdSchema,
-  input: PreviewAutomationTypeInput,
-});
-
-export const DesktopPreviewAutomationPressInputSchema = Schema.Struct({
-  tabId: DesktopPreviewTabIdSchema,
-  input: PreviewAutomationPressInput,
-});
-
-export const DesktopPreviewAutomationScrollInputSchema = Schema.Struct({
-  tabId: DesktopPreviewTabIdSchema,
-  input: PreviewAutomationScrollInput,
-});
-
-export const DesktopPreviewAutomationEvaluateInputSchema = Schema.Struct({
-  tabId: DesktopPreviewTabIdSchema,
-  input: PreviewAutomationEvaluateInput,
-});
-
-export const DesktopPreviewAutomationWaitForInputSchema = Schema.Struct({
-  tabId: DesktopPreviewTabIdSchema,
-  input: PreviewAutomationWaitForInput,
-});
 export const DesktopMediaReadSchema = Schema.Struct({
   status: Schema.Number,
   mimeType: Schema.String,
@@ -1433,11 +1352,7 @@ export interface DesktopPreviewBridge {
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   registerWebview: (tabId: string, webContentsId: number) => Promise<void>;
-  navigate: (
-    tabId: string,
-    url: string,
-    options?: { readonly waitForLoad?: boolean },
-  ) => Promise<void>;
+  navigate: (tabId: string, url: string) => Promise<void>;
   goBack: (tabId: string) => Promise<void>;
   goForward: (tabId: string) => Promise<void>;
   refresh: (tabId: string) => Promise<void>;
@@ -1518,16 +1433,6 @@ export interface DesktopPreviewBridge {
       mimeType: string,
       data: Uint8Array,
     ) => Promise<DesktopPreviewRecordingArtifact>;
-  };
-  automation: {
-    status: (tabId: string) => Promise<DesktopPreviewAutomationStatus>;
-    snapshot: (tabId: string) => Promise<PreviewAutomationSnapshot>;
-    click: (tabId: string, input: PreviewAutomationClickInput) => Promise<void>;
-    type: (tabId: string, input: PreviewAutomationTypeInput) => Promise<void>;
-    press: (tabId: string, input: PreviewAutomationPressInput) => Promise<void>;
-    scroll: (tabId: string, input: PreviewAutomationScrollInput) => Promise<void>;
-    evaluate: (tabId: string, input: PreviewAutomationEvaluateInput) => Promise<unknown>;
-    waitFor: (tabId: string, input: PreviewAutomationWaitForInput) => Promise<void>;
   };
   onStateChange: (listener: (tabId: string, state: DesktopPreviewTabState) => void) => () => void;
   onPointerEvent: (listener: (event: DesktopPreviewPointerEvent) => void) => () => void;

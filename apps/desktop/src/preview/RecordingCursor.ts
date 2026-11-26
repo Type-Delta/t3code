@@ -8,7 +8,6 @@ import {
   recordingKeyLabel,
   recordingKeysAreSensitive,
   type RecordingInputOptions,
-  type RecordingKeyPress,
 } from "./RecordingInput.ts";
 
 // Modal dialogs, popovers and fullscreen elements paint above any z-index, so the cursors live in
@@ -96,14 +95,6 @@ export function installRecordingCursor(
     pointerFrame = undefined;
     pendingPointer = undefined;
   };
-  const keyPress = (input: RecordingKeyPress, held = false) => {
-    if (!options.showKeyPresses) return;
-    const label = recordingKeysAreSensitive(document)
-      ? null
-      : recordingKeyLabel(input, /Mac/.test(window.navigator.platform));
-    lastKeyLabel = label;
-    emit({ type: "key", label, held, width: window.innerWidth });
-  };
   const pointer = (
     point: { readonly x: number; readonly y: number },
     phase: "move" | "down" | "up" | "click",
@@ -167,8 +158,11 @@ export function installRecordingCursor(
     if (event.pointerType !== "touch") press({ x: event.clientX, y: event.clientY }, "up");
   };
   const keyDown = (event: KeyboardEvent) => {
-    if (event.isComposing || event.repeat) return;
-    keyPress(event, true);
+    if (!options.showKeyPresses || event.isComposing || event.repeat) return;
+    lastKeyLabel = recordingKeysAreSensitive(document)
+      ? null
+      : recordingKeyLabel(event, /Mac/.test(window.navigator.platform));
+    emit({ type: "key", label: lastKeyLabel, held: true, width: window.innerWidth });
   };
   const keyUp = () => {
     if (!options.showKeyPresses) return;
@@ -199,7 +193,6 @@ export function installRecordingCursor(
   return {
     move,
     press,
-    keyPress,
     setController,
     setTheme,
     dispose: () => {

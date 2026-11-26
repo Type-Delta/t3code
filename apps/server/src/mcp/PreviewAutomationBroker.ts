@@ -28,7 +28,6 @@ import {
   type PreviewAutomationResponse,
   type PreviewAutomationStreamEvent,
 } from "@t3tools/contracts";
-import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import type * as Cause from "effect/Cause";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -44,7 +43,6 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
 const HOST_RESPONSE_GRACE_MS = 1_000;
-const HOST_TIMEOUT_QUARANTINE_MS = 30_000;
 
 export interface PreviewAutomationInvokeInput {
   readonly scope: McpInvocationContext.McpThreadInvocationScope;
@@ -87,8 +85,6 @@ interface ClientConnection {
   readonly preferred: boolean;
   readonly liveTabs: NonNullable<PreviewAutomationHostFocus["liveTabs"]>;
   readonly focusOrder: number;
-  /** A host that missed a request acknowledgement is skipped until this time or its next report. */
-  readonly unhealthyUntil: number;
   readonly queue: Queue.Queue<PreviewAutomationStreamEvent, Cause.Done>;
 }
 
@@ -96,8 +92,6 @@ interface PendingRequest {
   readonly queue: ClientConnection["queue"];
   readonly deferred: Deferred.Deferred<unknown, PreviewAutomationError>;
   readonly context: PreviewAutomationRequestErrorContext;
-  /** The host confirmed receipt, so a timeout means slow page work rather than a dead stream. */
-  readonly acknowledged: boolean;
 }
 
 /** A lease belongs to this exact connectionId/queue; replacing the host invalidates it. */
@@ -382,7 +376,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     queue: ClientConnection["queue"],
     disconnected: ReadonlyArray<PendingRequest>,
   ) {
-    // Replaced registrations must not reconnect and displace their successor.
     yield* Queue.shutdown(queue);
     yield* Effect.forEach(
       disconnected,
@@ -428,7 +421,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       preferred: options?.preferred ?? false,
       liveTabs: [],
       focusOrder: 0,
-      unhealthyUntil: 0,
       queue,
     };
     const registration = yield* SynchronizedRef.modify(state, (current) => {
@@ -484,7 +476,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       clients.set(host.clientId, {
         ...currentHost,
         focused: host.focused,
-        unhealthyUntil: 0,
         liveTabs: host.liveTabs ?? currentHost.liveTabs,
         focusOrder: host.focused ? focusSequence : currentHost.focusOrder,
       });
@@ -492,70 +483,22 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     });
   });
 
-  /**
-   * Called when a request that the host never acknowledged times out. The
-   * stream stays open so a late response or focus report can prove recovery,
-   * but new work fails over to another host until then.
-   */
-  const quarantineTimedOutConnection = Effect.fn(
-    "PreviewAutomationBroker.quarantineTimedOutConnection",
-  )(function* (connection: ClientConnection, requestId: string) {
-    const now = yield* Clock.currentTimeMillis;
-    yield* SynchronizedRef.update(state, (current) => {
-      const active = current.clients.get(connection.clientId);
-      if (active?.connectionId !== connection.connectionId || active.queue !== connection.queue) {
-        return current;
-      }
-      const pending = current.pending.get(requestId);
-      // A completion may win the race after the response deadline but before
-      // this timeout cleanup runs. There is no stale host to quarantine then.
-      if (!pending || pending.acknowledged) return current;
-      const clients = new Map(current.clients);
-      clients.set(connection.clientId, {
-        ...active,
-        focused: false,
-        unhealthyUntil: now + HOST_TIMEOUT_QUARANTINE_MS,
-      });
-      const assignments = new Map(
-        Array.from(current.assignments).filter(
-          ([, assignment]) => assignment.queue !== active.queue,
-        ),
-      );
-      return { ...current, clients, assignments };
-    });
-  });
-
   const respond: PreviewAutomationBroker["Service"]["respond"] = Effect.fn(
     "PreviewAutomationBroker.respond",
   )(function* (response) {
+    if (response.phase === "started") return;
     const pending = yield* SynchronizedRef.modify(state, (current) => {
-      const responseClient = current.clients.get(response.clientId);
-      const clients =
-        responseClient?.connectionId === response.connectionId &&
-        responseClient.unhealthyUntil !== 0
-          ? new Map(current.clients).set(response.clientId, {
-              ...responseClient,
-              unhealthyUntil: 0,
-            })
-          : current.clients;
       const entry = current.pending.get(response.requestId);
       if (
         !entry ||
         entry.context.clientId !== response.clientId ||
         entry.context.connectionId !== response.connectionId
       ) {
-        return [
-          undefined,
-          clients === current.clients ? current : { ...current, clients },
-        ] as const;
+        return [undefined, current] as const;
       }
       const next = new Map(current.pending);
-      if (response.phase === "started") {
-        if (response.ok) next.set(response.requestId, { ...entry, acknowledged: true });
-        return [undefined, { ...current, clients, pending: next }] as const;
-      }
       next.delete(response.requestId);
-      return [entry, { ...current, clients, pending: next }] as const;
+      return [entry, { ...current, pending: next }] as const;
     });
     if (!pending) return;
     if (response.ok) {
@@ -574,15 +517,13 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     input: Parameters<PreviewAutomationBroker["Service"]["invoke"]>[0],
   ): Effect.fn.Return<A, PreviewAutomationError> {
     const deferred = yield* Deferred.make<unknown, PreviewAutomationError>();
-    const now = yield* Clock.currentTimeMillis;
     const route = yield* SynchronizedRef.modify(state, (current) => {
       const assignments = new Map(
         Array.from(current.assignments).filter(([, assignment]) => {
           const connection = current.clients.get(assignment.clientId);
           return (
             connection?.connectionId === assignment.connectionId &&
-            connection.queue === assignment.queue &&
-            connection.unhealthyUntil <= now
+            connection.queue === assignment.queue
           );
         }),
       );
@@ -607,7 +548,6 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
                 .filter(
                   (host) =>
                     host.environmentId === input.scope.environmentId &&
-                    host.unhealthyUntil <= now &&
                     supportsOperation(host, input.operation),
                 )
                 .sort(
@@ -659,7 +599,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         ...selectorDiagnostics,
       };
       const pending = new Map(current.pending);
-      pending.set(requestId, { queue: connection.queue, deferred, context, acknowledged: false });
+      pending.set(requestId, { queue: connection.queue, deferred, context });
       return [
         { connection, requestId, requestContext: context, requestSequence },
         { ...current, assignments, pending, requestSequence: current.requestSequence + 1 },
@@ -720,18 +660,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         input.updateCurrentTab === false ? timeoutMs : timeoutMs + HOST_RESPONSE_GRACE_MS;
       const result = yield* Deferred.await(deferred).pipe(Effect.timeoutOption(responseTimeoutMs));
       return yield* Option.match(result, {
-        // The enclosing operation owns the span for this inline handler.
-        onNone: Effect.fnUntraced(function* () {
-          // Never replay possibly applied actions; slow metadata reads must not evict the host.
-          if (
-            input.updateCurrentTab !== false &&
-            connection.clientId !== SERVER_BROWSER_AUTOMATION_CLIENT_ID
-          ) {
-            yield* quarantineTimedOutConnection(connection, requestId);
-          }
-          return yield* new PreviewAutomationTimeoutError(requestContext);
-        }),
-
+        onNone: () => Effect.fail(new PreviewAutomationTimeoutError(requestContext)),
         onSome: (value) => Effect.succeed(value as A),
       });
     });

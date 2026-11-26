@@ -58,9 +58,9 @@ Browser development's single-origin Vite proxy behavior is upstream behavior and
 
 **Implementation evidence:** `apps/server/src/preview/ServerBrowser.ts` and `ServerBrowser.test.ts` ("agent tabs use headless Chromium on Windows…"), `apps/server/src/mcp/PreviewAutomationBroker.ts` and its test, `packages/contracts/src/previewAutomation.ts`, and `apps/desktop/src/preview/Manager.ts` (`timeoutControlWork`).
 
-**Recorded validation:** On the 2026-11-25 merge, the three platform cases of the headless test passed, as did the 38 broker tests and the 112 desktop `Manager.test.ts` cases. Earlier Windows passes covered 123 server browser and context tests, real Chromium automation through the broker with an available desktop channel, and streamed page input in an isolated web client.
+**Recorded validation:** On the 2026-11-25 merge, the three platform cases of the headless test, the preview broker suite, and the desktop preview manager suite passed. Earlier Windows passes covered 123 server browser and context tests, real Chromium automation through the broker with an available desktop channel, and streamed page input in an isolated web client.
 
-**Last updated:** 2026-11-25
+**Last updated:** 2026-11-26
 
 ### DL005 — Windows portability in CLI fixtures, Git, and tests
 

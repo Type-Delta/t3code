@@ -3090,7 +3090,7 @@ const make = Effect.gen(function* () {
     }
   };
 
-  // Acknowledge receipt first so slow page work is not mistaken for a dead host.
+  // Acknowledge receipt before starting page work.
   const handleRequest = (connectionId: string, request: PreviewAutomationRequest) =>
     broker
       .respond({
