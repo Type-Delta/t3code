@@ -102,6 +102,7 @@ export interface HubUpstream {
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly protocols: ReadonlyArray<string>;
+  readonly refuseRedirects?: boolean;
   /** Completes when the upstream is withdrawn; streams opened through it end then. */
   readonly ended?: Effect.Effect<void>;
 }

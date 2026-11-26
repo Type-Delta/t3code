@@ -26,6 +26,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import {
+  FetchHttpClient,
   HttpClient,
   HttpClientRequest,
   HttpClientResponse,
@@ -59,7 +60,7 @@ const PEER_REUSE = Duration.seconds(60);
 const BOOT_TIMEOUT = Duration.minutes(4);
 const REQUEST_TIMEOUT = Duration.seconds(60);
 // Closing a device runs under the device service's lock, so an unreachable peer must not hold it long.
-const SHUTDOWN_TIMEOUT = Duration.seconds(15);
+const CLOSE_TIMEOUT = Duration.seconds(15);
 
 const decodeFailure = Schema.decodeUnknownEffect(PeerLinkDeviceFailure);
 const decodeList = HttpClientResponse.schemaBodyJson(PeerLinkDeviceList);
@@ -82,13 +83,19 @@ const sameToken = (expected: string, actual: string) => {
  */
 export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: LinkedDeviceHostConfig) {
   const links = yield* PeerLinks.PeerLinks;
-  const http = yield* HttpClient.HttpClient;
+  const http = HttpClient.transform(yield* HttpClient.HttpClient, (response) =>
+    Effect.provideService(response, FetchHttpClient.RequestInit, { redirect: "manual" }),
+  );
   const random = yield* SecureRandom.SecureRandom;
   const settings = yield* ServerSettings.ServerSettingsService;
   const nodePath = yield* HostProcess.ExecutablePath;
   const hostScope = yield* Scope.Scope;
   const lock = yield* Semaphore.make(1);
   const fail = (message: string) => new LinkedDeviceHostFailure({ message });
+  const closed = () => hostScope.state._tag === "Closed";
+  const removed = fail(
+    `The device host ${config.label} was removed. Add it again in Settings > Integrations > Devices.`,
+  );
 
   let peer:
     | {
@@ -116,7 +123,14 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     generation = undefined;
     return ending === undefined ? Effect.void : Deferred.succeed(ending.ended, undefined);
   });
-  yield* Scope.addFinalizer(hostScope, endGeneration);
+  yield* Scope.addFinalizer(
+    hostScope,
+    Effect.suspend(() => {
+      ready = null;
+      peer = undefined;
+      return endGeneration;
+    }),
+  );
 
   /** The stored link if it is still the one linked at `linkedAt`; linking again sets a new one. */
   const storedSince = (linkedAt: DateTime.Utc) =>
@@ -129,20 +143,24 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
 
   const resolvePeer = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
+    if (closed()) return yield* removed;
     if (peer && now - peer.at < Duration.toMillis(PEER_REUSE)) {
       const cached = peer;
       // Reuse never outlives the stored link: unlinking, expiring, or linking again with another
       // token or less access must stop use at once.
       const stored = yield* storedSince(cached.linkedAt);
+      const currentTime = yield* DateTime.now;
+      if (closed()) return yield* removed;
       if (
         Option.isSome(stored) &&
         stored.value.access === "full-access" &&
-        DateTime.isGreaterThan(stored.value.expiresAt, yield* DateTime.now)
+        DateTime.isGreaterThan(stored.value.expiresAt, currentTime)
       )
         return cached;
       peer = undefined;
     }
     for (let attempt = 1; ; attempt++) {
+      if (closed()) return yield* removed;
       const resolved = yield* links.resolve(config.environmentId).pipe(
         Effect.tapError((error) =>
           error.reason === "unknown_link" || error.reason === "expired"
@@ -150,16 +168,19 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
             : Effect.void,
         ),
         Effect.mapError((error) =>
-          fail(
-            error.reason === "unknown_link"
-              ? `This environment is no longer linked to ${config.label}. Link it again with full access, or remove this device host.`
-              : error.message,
-          ),
+          closed()
+            ? removed
+            : fail(
+                error.reason === "unknown_link"
+                  ? `This environment is no longer linked to ${config.label}. Link it again with full access, or remove this device host.`
+                  : error.message,
+              ),
         ),
       );
       // Linking again while `resolve` probed the peer leaves this token stale, and it must not end
       // the streams of the newer link.
       const stored = yield* storedSince(resolved.link.linkedAt);
+      if (closed()) return yield* removed;
       if (
         Option.isNone(stored) ||
         (generation !== undefined &&
@@ -186,16 +207,18 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
           ? previous
           : { linkedAt: resolved.link.linkedAt, ended: Deferred.makeUnsafe<void>() };
       generation = current;
-      if (previous !== undefined && previous !== current)
-        yield* Deferred.succeed(previous.ended, undefined);
-      peer = {
+      const connected = {
         url: resolved.url,
         token: resolved.token,
         linkedAt: resolved.link.linkedAt,
         at: now,
         ended: current.ended,
       };
-      return peer;
+      peer = connected;
+      if (previous !== undefined && previous !== current)
+        yield* Deferred.succeed(previous.ended, undefined);
+      if (closed()) return yield* removed;
+      return connected;
     }
   });
 
@@ -214,6 +237,15 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       ? links.recordExpiry(config.environmentId, renewed.value)
       : Effect.void;
   };
+
+  const recordPeerAnswer = (response: {
+    readonly headers: Readonly<Record<string, string | undefined>>;
+    readonly status: number;
+  }) =>
+    Effect.andThen(
+      recordRenewal(response.headers),
+      response.status === 401 || response.status === 403 ? forgetPeer : Effect.void,
+    );
 
   const call = Effect.fn("LinkedDeviceHost.call")(function* <A, E>(
     path: string,
@@ -237,9 +269,10 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
         .pipe(HttpClient.withScope)
         .execute(HttpClientRequest.bearerToken(request, token))
         .pipe(Effect.catch(() => notAnswered));
-      yield* recordRenewal(response.headers);
+      if (response.status >= 300 && response.status < 400)
+        return yield* fail(`${config.label} answered HTTP ${response.status}.`);
+      yield* recordPeerAnswer(response);
       if (response.status >= 400) {
-        if (response.status === 401 || response.status === 403) yield* forgetPeer;
         const failure = yield* response.json.pipe(
           Effect.flatMap(decodeFailure),
           Effect.orElseSucceed(() => ({
@@ -303,7 +336,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     shutdown: (device) =>
       call("/shutdown", {
         body: { device: { id: device.id, platform: device.platform } },
-        timeout: SHUTDOWN_TIMEOUT,
+        timeout: CLOSE_TIMEOUT,
         read: () => Effect.void,
       }).pipe(Effect.mapError(operationError("shutdown"))),
     screenshot: (device) =>
@@ -330,43 +363,43 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
         url: `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/hub${hubPath}${search.size > 0 ? `?${search}` : ""}`,
         headers: { authorization: `Bearer ${token}` },
         protocols: [],
+        refuseRedirects: true,
         ended: Deferred.await(ended),
       })),
       Effect.orElseSucceed(() => null),
     );
 
+  const releaseHttp = http.pipe(HttpClient.tap(recordPeerAnswer));
+  const releaseAgentSession = (session: string) =>
+    resolvePeer.pipe(
+      Effect.flatMap(({ url, token }) =>
+        releaseAgentDeviceSession(releaseHttp, {
+          baseUrl: `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon`,
+          token,
+        })(session),
+      ),
+      Effect.timeout(CLOSE_TIMEOUT),
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not release a linked agent-device session", { cause }),
+      ),
+    );
+
   const ensureReady: DeviceHost.DeviceHost["Service"]["ensureReady"] = (onPhase) =>
     lock.withPermit(
       Effect.gen(function* () {
+        if (closed()) return yield* removed;
         if (ready) return ready;
         yield* onPhase("starting", `Connecting to ${config.label}…`);
         // Only the link is checked here: listing waits on the linked environment's own device
         // lock, which a host there lending back to this one could hold while it waits on ours.
-        yield* resolvePeer.pipe(
-          Effect.mapError(
-            (cause) =>
-              new DeviceHost.DeviceHostError({ hostId: config.id, step: "connecting", cause }),
-          ),
-        );
+        yield* resolvePeer;
+        if (closed()) return yield* removed;
         ready = {
           nodePath,
           hub: { origin: `linked:${config.environmentId}` },
           devices,
           upstream,
-          // Closing a device tab must not fail because the link is down or revoked.
-          releaseAgentSession: (session) =>
-            agent === null
-              ? Effect.void
-              : releaseAgentDeviceSession(
-                  http,
-                  agent.endpoint,
-                )(session).pipe(
-                  Effect.catch((cause) =>
-                    Effect.logWarning("Could not release a linked agent-device session", {
-                      cause,
-                    }),
-                  ),
-                ),
+          releaseAgentSession,
           // Device settings run simctl on the simulator's own machine, which the link does not expose.
           run: () =>
             Effect.succeed({
@@ -377,7 +410,12 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
           helpers: { serveSimAxSettings: null, serveSimCli: null },
         };
         return ready;
-      }),
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DeviceHost.DeviceHostError({ hostId: config.id, step: "connecting", cause }),
+        ),
+      ),
     );
 
   /** A loopback daemon address for agents here, forwarding to the peer's daemon over the link. */
@@ -415,29 +453,45 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
               ),
             );
       }
-      const target = yield* resolvePeer.pipe(Effect.option);
-      if (url._tag === "None" || target._tag === "None")
+      const target = yield* resolvePeer.pipe(Effect.result);
+      if (url._tag === "None" || target._tag === "Failure")
         return HttpServerResponse.jsonUnsafe(
-          { ok: false, error: `${config.label} is not reachable.`, code: "COMMAND_FAILED" },
+          {
+            ok: false,
+            error:
+              target._tag === "Failure"
+                ? target.failure.message
+                : `${config.label} is not reachable.`,
+            code: "COMMAND_FAILED",
+          },
           { status: 503 },
         );
       return yield* forwardAgentDaemonRequest(request, {
         path: url.value.pathname,
         search: url.value.search,
-        baseUrl: `${target.value.url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon`,
-        headers: { authorization: `Bearer ${target.value.token}` },
+        baseUrl: `${target.success.url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon`,
+        headers: { authorization: `Bearer ${target.success.token}` },
         uploadTicket: (uploadId) => ({
           url: `${origin}/upload/direct/${uploadId}`,
           headers: agentDaemonAuthHeaders(localToken),
         }),
       }).pipe(
-        Effect.tap((response) =>
-          Effect.andThen(
-            recordRenewal(response.headers),
-            response.status === 401 || response.status === 403 ? forgetPeer : Effect.void,
-          ),
+        Effect.tap(recordPeerAnswer),
+        Effect.map((response) =>
+          response.status >= 300 && response.status < 400
+            ? HttpServerResponse.jsonUnsafe(
+                {
+                  ok: false,
+                  error: `${config.label} answered HTTP ${response.status}.`,
+                  code: "COMMAND_FAILED",
+                },
+                { status: 502 },
+              )
+            : HttpServerResponse.removeHeader(
+                response,
+                McpInvocationContext.LINK_EXPIRES_AT_HEADER,
+              ),
         ),
-        Effect.map(HttpServerResponse.removeHeader(McpInvocationContext.LINK_EXPIRES_AT_HEADER)),
         Effect.catch(() =>
           forgetPeer.pipe(
             Effect.as(
@@ -471,6 +525,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
       Effect.tap(() =>
         lock.withPermit(
           Effect.gen(function* () {
+            if (closed()) return yield* removed;
             if (agent === null) agent = yield* startForwarder;
           }).pipe(
             Effect.mapError(

@@ -7,6 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import {
+  FetchHttpClient,
   HttpClient,
   HttpClientRequest,
   HttpMethod,
@@ -141,8 +142,16 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   upstreamUrl: string,
   invalidated: Effect.Effect<void>,
   extraHeaders: Readonly<Record<string, string>> = {},
+  refuseRedirects = false,
 ) {
-  const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
+  const http = yield* HttpClient.HttpClient;
+  const httpClient = HttpClient.withScope(
+    refuseRedirects
+      ? HttpClient.transform(http, (response) =>
+          Effect.provideService(response, FetchHttpClient.RequestInit, { redirect: "manual" }),
+        )
+      : http,
+  );
   const method = request.method;
   if (!HttpMethod.isHttpMethod(method)) {
     return HttpServerResponse.text("Method Not Allowed", { status: 405 });
@@ -161,6 +170,9 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
         }),
   );
   const response = yield* httpClient.execute(upstreamRequest);
+  if (refuseRedirects && response.status >= 300 && response.status < 400) {
+    return HttpServerResponse.text(`Device hub answered HTTP ${response.status}.`, { status: 502 });
+  }
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(response.headers)) {
     // A cookie from an upstream such as an Expo Simulators session's preview host would land on T3's origin.
@@ -264,7 +276,7 @@ export const forwardHubRequest = Effect.fn("DeviceHubProxy.forwardHubRequest")(f
       ended.pipe(Effect.as(HttpServerResponse.empty())),
     );
   }
-  return yield* proxyHttp(request, upstreamUrl, ended, upstreamHeaders);
+  return yield* proxyHttp(request, upstreamUrl, ended, upstreamHeaders, routed?.refuseRedirects);
 });
 
 const handler = Effect.gen(function* () {

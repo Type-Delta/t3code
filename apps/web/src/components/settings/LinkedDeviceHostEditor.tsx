@@ -47,6 +47,7 @@ export function LinkedDeviceHostEditor(props: {
     peerLinkListsAtom(environmentIdsKey(props.holders.map((holder) => holder.environmentId))),
   );
   const loading = lists.some((result) => AsyncResult.isInitial(result));
+  const failed = lists.some((result) => AsyncResult.isFailure(result));
   const several = props.holders.length > 1;
   const choices: ReadonlyArray<Choice> = props.holders.flatMap((holder, index) => {
     const result = lists[index];
@@ -109,6 +110,10 @@ export function LinkedDeviceHostEditor(props: {
               <p className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Spinner size="xs" />
                 <T>Loading linked environments…</T>
+              </p>
+            ) : choices.length === 0 && failed ? (
+              <p className="text-sm text-destructive-foreground">
+                {gt("Could not load linked environments")}
               </p>
             ) : choices.length === 0 ? (
               <p className="text-sm text-muted-foreground">

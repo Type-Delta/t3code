@@ -14,10 +14,12 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Scope from "effect/Scope";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpBody from "effect/http/HttpBody";
 import * as HttpClient from "effect/http/HttpClient";
@@ -57,6 +59,8 @@ const serveMac = Effect.gen(function* () {
   const bearers = yield* Ref.make<ReadonlyArray<string>>([]);
   const paths = yield* Ref.make<ReadonlyArray<string>>([]);
   const daemonStatus = yield* Ref.make(200);
+  const daemonCalls = yield* Ref.make<ReadonlyArray<unknown>>([]);
+  const redirectTo = yield* Ref.make<string | undefined>(undefined);
   const shutdownRequested = yield* Deferred.make<void>();
   const shutdownAnswered = yield* Deferred.make<void>();
   const server = yield* NodeHttpServer.make(() => NodeHttp.createServer(), {
@@ -68,6 +72,9 @@ const serveMac = Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
       yield* Ref.update(bearers, (all) => [...all, request.headers.authorization ?? ""]);
       yield* Ref.update(paths, (all) => [...all, request.url]);
+      const location = yield* Ref.get(redirectTo);
+      if (location !== undefined)
+        return HttpServerResponse.empty({ status: 302, headers: { location } });
       const headers = { [McpInvocationContext.LINK_EXPIRES_AT_HEADER]: RENEWED };
       if (request.url.endsWith("/shutdown"))
         return yield* Deferred.succeed(shutdownRequested, undefined).pipe(
@@ -85,11 +92,14 @@ const serveMac = Effect.gen(function* () {
             contentType: "application/octet-stream",
           },
         );
-      if (request.url.startsWith(`${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon/`))
+      if (request.url === `${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon/rpc`) {
+        const body = yield* request.json;
+        yield* Ref.update(daemonCalls, (all) => [...all, body]);
         return HttpServerResponse.jsonUnsafe(
           { jsonrpc: "2.0", id: 1, result: { ok: true } },
           { status: yield* Ref.get(daemonStatus), headers },
         );
+      }
       return HttpServerResponse.jsonUnsafe(
         { platforms: [{ platform: "ios", available: true }], devices: [] },
         { headers },
@@ -104,6 +114,8 @@ const serveMac = Effect.gen(function* () {
     bearers,
     paths,
     daemonStatus,
+    daemonCalls,
+    redirectTo,
     shutdownRequested,
   };
 });
@@ -166,12 +178,14 @@ const makeLinkedHost = Effect.gen(function* () {
     recordExpiry: (_, expiresAt) =>
       Ref.update(expiries, (all) => [...all, DateTime.formatIso(expiresAt)]),
   });
+  const hostScope = yield* Scope.fork(yield* Scope.Scope, "sequential");
   const host = yield* LinkedDeviceHost.make({
     kind: "linked",
     id: "mac" as DeviceHostId,
     label: "Mac",
     environmentId,
   }).pipe(
+    Scope.provide(hostScope),
     Effect.provideService(ServerSettings.ServerSettingsService, settings),
     Effect.provide(
       Layer.mergeAll(
@@ -207,6 +221,7 @@ const makeLinkedHost = Effect.gen(function* () {
     });
   return {
     host,
+    hostScope,
     mac,
     stored,
     resolves,
@@ -315,6 +330,92 @@ it.effect("stopping agent tools closes the forwarder, and starting again issues 
       });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("linked device requests refuse redirects to another server", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, mac } = yield* makeLinkedHost;
+      const ready = yield* host.ensureAgentReady(noPhase);
+      const destination = yield* serveMac;
+      const hub = yield* serveHubProxy({ ...ready, hostId: host.id });
+      const endpoint = yield* ready.devices.agentEndpoint!("SIM-1");
+      yield* Ref.set(mac.redirectTo, destination.url);
+
+      const listed = yield* ready.devices.list.pipe(Effect.result);
+      const hubStatus = yield* HttpClient.get(`${hub}/api/devices`).pipe(
+        Effect.map((response) => response.status),
+        Effect.provide(FetchHttpClient.layer),
+      );
+      const daemonStatus = yield* rpc(endpoint, endpoint.token);
+      yield* ready.releaseAgentSession!("session-1", "SIM-1");
+
+      expect(yield* Ref.get(destination.paths)).toEqual([]);
+      expect(yield* Ref.get(mac.paths)).toEqual([
+        PEER_LINK_DEVICES_ROUTE_PREFIX,
+        `${PEER_LINK_DEVICES_ROUTE_PREFIX}/hub/api/devices`,
+        `${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon/rpc`,
+        `${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon/rpc`,
+      ]);
+      expect(listed).toMatchObject({
+        _tag: "Failure",
+        failure: { cause: { message: "Mac answered HTTP 302." } },
+      });
+      expect(hubStatus).toBe(502);
+      expect(daemonStatus).toBe(502);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a probe that finishes after the host scope closes cannot open a hub stream", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, hostScope, holdNextResolve, resolves } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const search = new URLSearchParams();
+      const original = yield* ready.upstream!(HUB_STREAM, search);
+      yield* TestClock.adjust("61 seconds");
+      const probe = yield* holdNextResolve;
+      const opening = yield* Effect.forkChild(ready.upstream!(HUB_STREAM, search));
+      yield* Deferred.await(probe.probing);
+
+      yield* Scope.close(hostScope, Exit.void);
+      yield* Deferred.succeed(probe.answer, undefined);
+
+      expect(yield* hasEnded(original)).toBe(true);
+      expect(yield* Fiber.join(opening)).toBeNull();
+      expect(yield* ready.upstream!(HUB_STREAM, search)).toBeNull();
+      const listed = yield* ready.devices.list.pipe(Effect.flip);
+      expect(listed.cause).toMatchObject({ message: expect.stringContaining("Add it again") });
+      expect(yield* Ref.get(resolves)).toBe(2);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "releasing a linked agent session still reaches the peer after stopping agent tools",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { host, mac, settings } = yield* makeLinkedHost;
+        const ready = yield* host.ensureAgentReady(noPhase);
+        yield* settings.updateSettings({ enableAgentDeviceAccess: false });
+        yield* host.stopAgent;
+
+        yield* ready.releaseAgentSession!("session-1", "SIM-1");
+
+        expect(yield* Ref.get(mac.paths)).toEqual([`${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon/rpc`]);
+        expect(yield* Ref.get(mac.bearers)).toEqual(["Bearer token-1"]);
+        expect(yield* Ref.get(mac.daemonCalls)).toEqual([
+          {
+            jsonrpc: "2.0",
+            id: "session-1",
+            method: "agent_device.command",
+            params: { command: "close", session: "session-1", positionals: [], flags: {} },
+          },
+        ]);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
 it.effect("a relinked, downgraded or removed link is resolved again instead of reused", () =>
