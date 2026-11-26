@@ -247,6 +247,22 @@ const make = Effect.gen(function* () {
       message: string,
     ) => Effect.Effect<HttpServerResponse.HttpServerResponse>,
   ) {
+    /**
+     * Completes once device support, or agent access too for `agent`, is off. Turning either off
+     * through settings alone leaves the hub and daemon running, so open streams watch for it.
+     */
+    const lendingStops = (agent: boolean) =>
+      services.settings.getSettings.pipe(
+        Effect.map(
+          (current) => current.enableDeviceSupport && (!agent || current.enableAgentDeviceAccess),
+        ),
+        Effect.orElseSucceed(() => false),
+        Effect.repeat({
+          schedule: Schedule.spaced(ACCESS_RECHECK_INTERVAL),
+          until: (lending) => !lending,
+        }),
+        Effect.asVoid,
+      );
     if (path.startsWith("/hub/")) {
       const hubPath = path.slice("/hub".length);
       // A full-access link holds both scopes; only the path and method checks apply.
@@ -259,22 +275,12 @@ const make = Effect.gen(function* () {
         (yield* devices.currentReadiness(LOCAL_DEVICE_HOST_ID)) ??
         (yield* devices.readiness(LOCAL_DEVICE_HOST_ID).pipe(Effect.option)).pipe(Option.getOrNull);
       if (!ready) return HttpServerResponse.text("Device hub is not running", { status: 503 });
-      // Turning device support off through settings alone leaves the hub running.
-      const supportOff = services.settings.getSettings.pipe(
-        Effect.map((current) => current.enableDeviceSupport),
-        Effect.orElseSucceed(() => false),
-        Effect.repeat({
-          schedule: Schedule.spaced(ACCESS_RECHECK_INTERVAL),
-          until: (enabled) => !enabled,
-        }),
-        Effect.asVoid,
-      );
       return yield* forwardHubRequest(
         request,
         url,
         hubPath,
         ready,
-        Effect.raceFirst(revoked, supportOff),
+        Effect.raceFirst(revoked, lendingStops(false)),
       ).pipe(forwarding, Effect.catch(deviceFailure));
     }
 
@@ -310,7 +316,7 @@ const make = Effect.gen(function* () {
         baseUrl,
         headers: agentDaemonAuthHeaders(token),
         rpcToken: token,
-        invalidated: revoked,
+        invalidated: Effect.raceFirst(revoked, lendingStops(true)),
         // The linking environment's own forwarder rewrites the address again for its client.
         uploadTicket: (uploadId) => ({
           url: `${url.origin}${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon/upload/direct/${uploadId}`,

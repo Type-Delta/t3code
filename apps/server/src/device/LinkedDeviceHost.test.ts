@@ -457,6 +457,23 @@ it.effect("an agent call in flight ends once its link is relinked lower", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("a device operation in flight fails once its link is relinked lower", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, mac, relink } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const shutdown = yield* Effect.forkChild(ready.devices.shutdown(SIM));
+      yield* Deferred.await(mac.shutdownRequested);
+
+      yield* relink({ access: "auto" }, "token-2");
+      yield* TestClock.adjust("11 seconds");
+
+      const failed = yield* Fiber.join(shutdown).pipe(Effect.flip);
+      expect(failed.cause).toMatchObject({ message: "The link to Mac changed. Try again." });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("closing a device no agent used here sends nothing to the peer", () =>
   Effect.scoped(
     Effect.gen(function* () {

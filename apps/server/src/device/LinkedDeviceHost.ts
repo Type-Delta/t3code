@@ -271,35 +271,45 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     );
     // The timeout covers resolving the link too, so a power-off under the device lock stays bounded.
     return yield* Effect.gen(function* () {
-      const { url, token } = yield* resolvePeer;
+      const resolved = yield* resolvePeer;
+      const { url, token } = resolved;
       const target = `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}${path}`;
       const request =
         options.body === undefined
           ? HttpClientRequest.get(target)
           : HttpClientRequest.bodyJsonUnsafe(HttpClientRequest.post(target), options.body);
-      const response = yield* http
-        .pipe(HttpClient.withScope)
-        .execute(HttpClientRequest.bearerToken(request, token))
-        .pipe(Effect.catch(() => notAnswered));
-      if (response.status >= 300 && response.status < 400)
-        return yield* fail(`${config.label} answered HTTP ${response.status}.`);
-      yield* recordPeerAnswer(response);
-      if (response.status >= 400) {
-        const failure = yield* response.json.pipe(
-          Effect.flatMap(decodeFailure),
-          Effect.orElseSucceed(() => ({
-            message: `${config.label} answered HTTP ${response.status}.`,
-          })),
-        );
-        return yield* fail(failure.message);
-      }
-      return yield* options
-        .read(response)
-        .pipe(
-          Effect.mapError(() =>
-            fail(`${config.label} answered in a shape this version cannot read.`),
-          ),
-        );
+      // An operation in flight stops with its link, as a stream does.
+      const changed = linkEnded(resolved).pipe(
+        Effect.andThen(Effect.fail(fail(`The link to ${config.label} changed. Try again.`))),
+      );
+      return yield* Effect.raceFirst(
+        Effect.gen(function* () {
+          const response = yield* http
+            .pipe(HttpClient.withScope)
+            .execute(HttpClientRequest.bearerToken(request, token))
+            .pipe(Effect.catch(() => notAnswered));
+          if (response.status >= 300 && response.status < 400)
+            return yield* fail(`${config.label} answered HTTP ${response.status}.`);
+          yield* recordPeerAnswer(response);
+          if (response.status >= 400) {
+            const failure = yield* response.json.pipe(
+              Effect.flatMap(decodeFailure),
+              Effect.orElseSucceed(() => ({
+                message: `${config.label} answered HTTP ${response.status}.`,
+              })),
+            );
+            return yield* fail(failure.message);
+          }
+          return yield* options
+            .read(response)
+            .pipe(
+              Effect.mapError(() =>
+                fail(`${config.label} answered in a shape this version cannot read.`),
+              ),
+            );
+        }),
+        changed,
+      );
     }).pipe(
       Effect.timeoutOrElse({
         duration: options.timeout ?? REQUEST_TIMEOUT,
