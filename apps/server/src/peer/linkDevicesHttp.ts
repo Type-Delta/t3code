@@ -301,6 +301,12 @@ const make = Effect.gen(function* () {
         }),
       }).pipe(
         forwarding,
+        // A daemon that restarted answers the old token with 401; start it again on the next call.
+        Effect.tap((response) =>
+          response.status === 401 || response.status === 403
+            ? Ref.set(daemon, Option.none())
+            : Effect.void,
+        ),
         // A daemon that stopped is started again on the next call.
         Effect.catch(() =>
           Ref.set(daemon, Option.none()).pipe(
@@ -318,11 +324,25 @@ const make = Effect.gen(function* () {
     const url = requestUrl(request);
     if (Option.isNone(url)) return refusal(400, "invalid_request", "Bad request.");
     const path = url.value.pathname.slice(PEER_LINK_DEVICES_ROUTE_PREFIX.length);
+    const isRpc = path === "/daemon/rpc" && request.method === "POST";
     const refuse = (status: number, error: string, message: string) =>
-      path === "/daemon/rpc" && request.method === "POST"
+      isRpc
         ? agentDaemonRpcRefusal(request, status, message)
         : Effect.succeed(refusal(status, error, message));
-    const admitted = yield* admitLink(url.value, refuse, services);
+    // Before admission the body stays unread, so a refusal cannot echo the request's id.
+    const admitted = yield* admitLink(
+      url.value,
+      (status, error, message) =>
+        isRpc
+          ? Effect.succeed(
+              HttpServerResponse.jsonUnsafe(
+                { jsonrpc: "2.0", id: null, error: { code: -32000, message } },
+                { status, headers: NO_STORE },
+              ),
+            )
+          : Effect.succeed(refusal(status, error, message)),
+      services,
+    );
     if (HttpServerResponse.isHttpServerResponse(admitted)) return admitted;
 
     const handle = handleAdmitted(request, url.value, path, admitted.revoked, refuse);

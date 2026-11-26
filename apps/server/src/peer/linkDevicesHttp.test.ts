@@ -33,6 +33,7 @@ import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpToolAccess from "../mcp/McpToolAccess.ts";
 import * as LinkDevicesHttp from "./linkDevicesHttp.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import {
   descriptorOf,
@@ -93,6 +94,7 @@ const serveMac = Effect.gen(function* () {
   const rpcClosed = yield* Deferred.make<void>();
   const artifactClosed = yield* Deferred.make<void>();
   const stopFake = yield* Deferred.make<void>();
+  const daemonToken = yield* Ref.make(DAEMON_TOKEN);
   const daemon = yield* serveFake(
     Effect.fnUntraced(function* (request) {
       if (request.url === "/rpc?pending") {
@@ -123,6 +125,8 @@ const serveMac = Effect.gen(function* () {
           },
         });
       }
+      if (request.headers.authorization !== `Bearer ${yield* Ref.get(daemonToken)}`)
+        return HttpServerResponse.jsonUnsafe({ error: "unauthorized" }, { status: 401 });
       return HttpServerResponse.jsonUnsafe({ jsonrpc: "2.0", id: 1, result: { ok: true } });
     }),
   );
@@ -148,16 +152,11 @@ const serveMac = Effect.gen(function* () {
     readiness: () => Ref.update(readinessCalls, (count) => count + 1).pipe(Effect.as(ready)),
     currentReadiness: () => Effect.succeed(ready),
     agentReadinessIfSupported: () =>
-      Ref.get(daemonAvailable).pipe(
-        Effect.map((available) =>
-          available
-            ? {
-                ...ready,
-                agentDevice: { baseUrl: daemon.origin, token: DAEMON_TOKEN, entryPath: "" },
-              }
-            : null,
-        ),
-      ),
+      Effect.gen(function* () {
+        if (!(yield* Ref.get(daemonAvailable))) return null;
+        const token = yield* Ref.get(daemonToken);
+        return { ...ready, agentDevice: { baseUrl: daemon.origin, token, entryPath: "" } };
+      }),
     state: Effect.succeed({
       hosts: [
         {
@@ -192,6 +191,7 @@ const serveMac = Effect.gen(function* () {
     booted,
     readinessCalls,
     daemonAvailable,
+    daemonToken,
     rpcStarted,
     rpcClosed,
     artifactClosed,
@@ -201,6 +201,10 @@ const serveMac = Effect.gen(function* () {
 const makeLaptop = Effect.gen(function* () {
   const linking = yield* Layer.build(layerLinkingEnvironment(laptop));
   const links = Context.get(linking, PeerLinks.PeerLinks);
+  yield* Context.get(linking, ServerSettings.ServerSettingsService).updateSettings({
+    enableDeviceSupport: true,
+    enableAgentDeviceAccess: true,
+  });
   const host = yield* LinkedDeviceHost.make({
     kind: "linked",
     id: "mac" as DeviceHostId,
@@ -471,6 +475,34 @@ it.effect("daemon RPC refusals report disabled settings and startup failure", ()
         error: { message: expect.stringContaining("could not start") },
       });
       expect(yield* Ref.get(daemon.seen)).toHaveLength(1);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a restarted daemon is found again, and a refused caller's body stays unread", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { peer, daemonToken } = yield* serveMac;
+      const { links } = yield* makeLaptop;
+      yield* linkTo(links, peer, "full-access");
+      const rpc = (bearer: string) =>
+        fetch(
+          HttpClientRequest.post(`${peer.url}/api/links/devices/daemon/rpc`).pipe(
+            HttpClientRequest.bearerToken(bearer),
+            HttpClientRequest.setBody(
+              HttpBody.text('{"jsonrpc":"2.0","id":7}', "application/json"),
+            ),
+          ),
+        );
+      const token = yield* linkToken(links);
+      expect((yield* rpc(token)).status).toBe(200);
+      yield* Ref.set(daemonToken, "rotated-secret");
+      expect((yield* rpc(token)).status).toBe(401);
+      expect((yield* rpc(token)).status).toBe(200);
+
+      const stranger = yield* rpc("not-a-link");
+      expect(stranger.status).toBe(401);
+      expect(decodeObject(stranger.body)).toMatchObject({ jsonrpc: "2.0", id: null });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

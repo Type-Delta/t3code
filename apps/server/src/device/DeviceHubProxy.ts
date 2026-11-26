@@ -214,7 +214,10 @@ export const hubRequestScope = (request: HttpServerRequest.HttpServerRequest, hu
   return controlsDevice ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope;
 };
 
-/** Sends an authenticated, allowed hub request to `ready`'s hub until `invalidated` completes. */
+/**
+ * Sends an authenticated, allowed hub request to `ready`'s hub until `invalidated` or the routed
+ * upstream's `ended` completes.
+ */
 export const forwardHubRequest = Effect.fn("DeviceHubProxy.forwardHubRequest")(function* (
   request: HttpServerRequest.HttpServerRequest,
   url: URL,
@@ -248,6 +251,8 @@ export const forwardHubRequest = Effect.fn("DeviceHubProxy.forwardHubRequest")(f
   const upstreamHeaders =
     routed?.headers ??
     (ready.hub.token === undefined ? undefined : { authorization: `Bearer ${ready.hub.token}` });
+  const ended =
+    routed?.ended === undefined ? invalidated : Effect.raceFirst(invalidated, routed.ended);
   if (isWebSocketUpgrade(request)) {
     return yield* Effect.raceFirst(
       proxyWebSocket(
@@ -256,10 +261,10 @@ export const forwardHubRequest = Effect.fn("DeviceHubProxy.forwardHubRequest")(f
         routed?.protocols,
         upstreamHeaders,
       ),
-      invalidated.pipe(Effect.as(HttpServerResponse.empty())),
+      ended.pipe(Effect.as(HttpServerResponse.empty())),
     );
   }
-  return yield* proxyHttp(request, upstreamUrl, invalidated, upstreamHeaders);
+  return yield* proxyHttp(request, upstreamUrl, ended, upstreamHeaders);
 });
 
 const handler = Effect.gen(function* () {

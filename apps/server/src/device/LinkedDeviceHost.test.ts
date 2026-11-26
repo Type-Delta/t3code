@@ -12,7 +12,9 @@ import {
   PeerLinkError,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -23,15 +25,20 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as NetAddress from "effect/net/NetAddress";
+import * as Stream from "effect/Stream";
 
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import { descriptorOf } from "../peer/PeerLinks.testkit.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import { forwardHubRequest } from "./DeviceHubProxy.ts";
+import * as DeviceService from "./DeviceService.ts";
 import * as LinkedDeviceHost from "./LinkedDeviceHost.ts";
 
 const environmentId = EnvironmentId.make("environment-mac");
 const RENEWED = "2030-01-01T00:00:00.000Z";
 const noPhase = () => Effect.void;
+const HUB_STREAM = "/vendor/serve-sim/helper/SIM-1/stream.avcc";
 
 /** The Mac's `/api/links/devices` routes: records each bearer and answers the daemon with `daemonStatus`. */
 const serveMac = Effect.gen(function* () {
@@ -48,6 +55,13 @@ const serveMac = Effect.gen(function* () {
       yield* Ref.update(bearers, (all) => [...all, request.headers.authorization ?? ""]);
       yield* Ref.update(paths, (all) => [...all, request.url]);
       const headers = { [McpInvocationContext.LINK_EXPIRES_AT_HEADER]: RENEWED };
+      if (request.url === `${PEER_LINK_DEVICES_ROUTE_PREFIX}/hub${HUB_STREAM}`)
+        return HttpServerResponse.stream(
+          Stream.concat(Stream.make(Uint8Array.of(1)), Stream.never),
+          {
+            contentType: "application/octet-stream",
+          },
+        );
       if (request.url.startsWith(`${PEER_LINK_DEVICES_ROUTE_PREFIX}/daemon/`))
         return HttpServerResponse.jsonUnsafe(
           { jsonrpc: "2.0", id: 1, result: { ok: true } },
@@ -81,6 +95,14 @@ const makeLinkedHost = Effect.gen(function* () {
     token: "token-1",
   });
   const resolves = yield* Ref.make(0);
+  const settings = yield* ServerSettings.ServerSettingsService.pipe(
+    Effect.provide(
+      ServerSettings.ServerSettingsService.layerTest({
+        enableDeviceSupport: true,
+        enableAgentDeviceAccess: true,
+      }),
+    ),
+  );
   const expiries = yield* Ref.make<ReadonlyArray<string>>([]);
   const links = Layer.mock(PeerLinks.PeerLinks)({
     get: () => Ref.get(stored).pipe(Effect.map((value) => Option.fromNullishOr(value?.link))),
@@ -105,7 +127,10 @@ const makeLinkedHost = Effect.gen(function* () {
     id: "mac" as DeviceHostId,
     label: "Mac",
     environmentId,
-  }).pipe(Effect.provide(Layer.mergeAll(links, FetchHttpClient.layer, NodeCrypto.layer)));
+  }).pipe(
+    Effect.provideService(ServerSettings.ServerSettingsService, settings),
+    Effect.provide(Layer.mergeAll(links, FetchHttpClient.layer, NodeCrypto.layer)),
+  );
   const relink = (patch: Partial<PeerLink>, token: string) =>
     Effect.gen(function* () {
       const now = DateTime.add(yield* DateTime.now, { seconds: 1 });
@@ -113,8 +138,51 @@ const makeLinkedHost = Effect.gen(function* () {
         value === undefined ? value : { link: { ...value.link, ...patch, linkedAt: now }, token },
       );
     });
-  return { host, mac, stored, resolves, expiries, relink };
+  return { host, mac, stored, resolves, expiries, relink, settings };
 });
+
+/** This environment's hub route for the linked host's readiness, as the Device panel reaches it. */
+const serveHubProxy = (ready: DeviceService.DeviceReadiness) =>
+  Effect.gen(function* () {
+    const server = yield* NodeHttpServer.make(() => NodeHttp.createServer(), {
+      host: "127.0.0.1",
+      port: 0,
+      disablePreemptiveShutdown: true,
+    });
+    yield* server.serve(
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const url = new URL(request.url, "http://localhost");
+        return yield* forwardHubRequest(request, url, url.pathname, ready, Effect.never);
+      }).pipe(
+        Effect.orDie,
+        Effect.provideService(
+          DeviceService.DeviceService,
+          {} as DeviceService.DeviceService["Service"],
+        ),
+        Effect.provide(FetchHttpClient.layer),
+      ),
+    );
+    if (!NetAddress.isInetAddress(server.address)) return yield* Effect.die("no TCP address");
+    return `http://127.0.0.1:${server.address.port}`;
+  });
+
+/** Opens a hub stream and waits for its first bytes; the returned fiber ends with the stream. */
+const openStream = (origin: string) =>
+  Effect.gen(function* () {
+    const response = yield* HttpClient.get(`${origin}${HUB_STREAM}`);
+    const first = yield* Deferred.make<void>();
+    const reading = yield* response.stream.pipe(
+      Stream.runForEach(() => Deferred.succeed(first, undefined)),
+      Effect.ignore,
+      Effect.forkScoped,
+    );
+    yield* Deferred.await(first);
+    return reading;
+  }).pipe(Effect.provide(FetchHttpClient.layer));
+
+const awaitEnded = (stream: Fiber.Fiber<void>) =>
+  Fiber.await(stream).pipe(Effect.timeoutOption("3 seconds"), Effect.map(Option.isSome));
 
 const rpc = (endpoint: { readonly baseUrl: string }, token: string) =>
   HttpClient.execute(
@@ -231,6 +299,88 @@ it.effect("records the link's renewed expiry from each answer", () =>
       const endpoint = yield* ready.devices.agentEndpoint!("SIM-1");
       expect(yield* rpc(endpoint, endpoint.token)).toBe(200);
       expect(yield* Ref.get(expiries)).toEqual([RENEWED, RENEWED]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.live("hub streams through the link end when the host stops", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const origin = yield* serveHubProxy({ ...ready, hostId: host.id });
+      const stream = yield* openStream(origin);
+      yield* host.stop;
+      expect(yield* awaitEnded(stream)).toBe(true);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.live("hub streams end when the link is linked again or removed", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, stored, relink } = yield* makeLinkedHost;
+      const ready = yield* host.ensureReady(noPhase);
+      const origin = yield* serveHubProxy({ ...ready, hostId: host.id });
+      const first = yield* openStream(origin);
+      yield* relink({}, "token-2");
+      yield* ready.devices.list;
+      expect(yield* awaitEnded(first)).toBe(true);
+
+      const second = yield* openStream(origin);
+      yield* Ref.set(stored, undefined);
+      yield* ready.devices.list.pipe(Effect.ignore);
+      expect(yield* awaitEnded(second)).toBe(true);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("the forwarder refuses agents once this environment turns agent access off", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, mac, settings } = yield* makeLinkedHost;
+      yield* host.ensureAgentReady(noPhase);
+      const endpoint = yield* (yield* host.current)!.devices.agentEndpoint!("SIM-1");
+      yield* settings.updateSettings({ enableAgentDeviceAccess: false });
+      const refused = yield* HttpClient.execute(
+        HttpClientRequest.post(`${endpoint.baseUrl}/rpc`).pipe(
+          HttpClientRequest.bearerToken(endpoint.token),
+          HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 7, method: "x", params: {} }),
+        ),
+      ).pipe(
+        Effect.flatMap((response) =>
+          response.json.pipe(Effect.map((body) => ({ status: response.status, body }))),
+        ),
+        Effect.scoped,
+        Effect.provide(FetchHttpClient.layer),
+      );
+      expect(refused).toMatchObject({
+        status: 403,
+        body: { jsonrpc: "2.0", id: 7, error: { code: -32000 } },
+      });
+      expect(yield* Ref.get(mac.paths)).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("the forwarder keeps the link's expiry to itself", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { host, expiries } = yield* makeLinkedHost;
+      yield* host.ensureAgentReady(noPhase);
+      const endpoint = yield* (yield* host.current)!.devices.agentEndpoint!("SIM-1");
+      const headers = yield* HttpClient.execute(
+        HttpClientRequest.post(`${endpoint.baseUrl}/rpc`).pipe(
+          HttpClientRequest.bearerToken(endpoint.token),
+          HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 1, method: "x", params: {} }),
+        ),
+      ).pipe(
+        Effect.map((response) => response.headers),
+        Effect.scoped,
+        Effect.provide(FetchHttpClient.layer),
+      );
+      expect(yield* Ref.get(expiries)).toEqual([RENEWED]);
+      expect(headers[McpInvocationContext.LINK_EXPIRES_AT_HEADER]).toBeUndefined();
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

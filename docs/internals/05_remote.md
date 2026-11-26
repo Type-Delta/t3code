@@ -50,7 +50,7 @@ side lists and revokes it in Sharing & access like any other session, and owns i
   self-renewing token would let any agent there use the link past its own mode. agent-device upload
   tickets carry the daemon's address and token, so each hop rewrites them
   ([`agentDaemonProxy`](../../apps/server/src/device/agentDaemonProxy.ts)). For the same reason
-  `device_open` lets only an unfenced thread in full access open a linked host's device: the
+  only an unfenced thread in full access may open or power off a linked host's device: the
   linking side's full-access link must not lift a narrower thread, or work a narrower link started,
   to full access on the target.
 - **Clients read linked threads as standard thread streams.**

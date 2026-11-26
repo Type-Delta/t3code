@@ -102,6 +102,8 @@ export interface HubUpstream {
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly protocols: ReadonlyArray<string>;
+  /** Completes when the upstream is withdrawn; streams opened through it end then. */
+  readonly ended?: Effect.Effect<void>;
 }
 
 /** Discovery and lifecycle for the devices a ready host can run. */

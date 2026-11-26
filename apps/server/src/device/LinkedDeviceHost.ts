@@ -16,6 +16,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -36,9 +37,11 @@ import * as NetAddress from "effect/net/NetAddress";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import { requestUrl } from "../requestUrl.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   agentDaemonAuthHeaders,
   agentDaemonClientToken,
+  agentDaemonRpcRefusal,
   forwardAgentDaemonRequest,
 } from "./agentDaemonProxy.ts";
 import { releaseAgentDeviceSession } from "./AgentDeviceTarget.ts";
@@ -79,6 +82,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   const links = yield* PeerLinks.PeerLinks;
   const http = yield* HttpClient.HttpClient;
   const random = yield* SecureRandom.SecureRandom;
+  const settings = yield* ServerSettings.ServerSettingsService;
   const nodePath = yield* HostProcess.ExecutablePath;
   const hostScope = yield* Scope.Scope;
   const lock = yield* Semaphore.make(1);
@@ -90,7 +94,12 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
         readonly token: string;
         readonly linkedAt: DateTime.Utc;
         readonly at: number;
+        readonly ended: Deferred.Deferred<void>;
       }
+    | undefined;
+  // Streams opened under one link end when it is unlinked, linked again or downgraded.
+  let generation:
+    | { readonly linkedAt: DateTime.Utc; readonly ended: Deferred.Deferred<void> }
     | undefined;
   // Unknown until the linked environment lists its devices.
   let platforms: ReadonlyArray<DevicePlatformAvailability> | undefined;
@@ -99,6 +108,13 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     readonly endpoint: DeviceHost.AgentDaemonEndpoint;
     readonly scope: Scope.Closeable;
   } | null = null;
+
+  const endGeneration = Effect.suspend(() => {
+    const ending = generation;
+    generation = undefined;
+    return ending === undefined ? Effect.void : Deferred.succeed(ending.ended, undefined);
+  });
+  yield* Scope.addFinalizer(hostScope, endGeneration);
 
   const resolvePeer = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
@@ -115,30 +131,40 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
         return cached;
       peer = undefined;
     }
-    const resolved = yield* links
-      .resolve(config.environmentId)
-      .pipe(
-        Effect.mapError((error) =>
-          fail(
-            error.reason === "unknown_link"
-              ? `This environment is no longer linked to ${config.label}. Link it again with full access, or remove this device host.`
-              : error.message,
-          ),
+    const resolved = yield* links.resolve(config.environmentId).pipe(
+      Effect.tapError((error) => (error.reason === "unknown_link" ? endGeneration : Effect.void)),
+      Effect.mapError((error) =>
+        fail(
+          error.reason === "unknown_link"
+            ? `This environment is no longer linked to ${config.label}. Link it again with full access, or remove this device host.`
+            : error.message,
         ),
-      );
-    if (resolved.link.access !== "full-access")
+      ),
+    );
+    if (resolved.link.access !== "full-access") {
+      yield* endGeneration;
       return yield* fail(
         `The link to ${resolved.link.label} is below full access. Using its devices runs apps as its user, so link it again with full access.`,
       );
+    }
     if (resolved.capabilities.linkDevices !== true)
       return yield* fail(
         `${resolved.link.label} runs a T3 Code version that cannot lend its devices. Update it.`,
       );
+    const previous = generation;
+    const current =
+      previous !== undefined && DateTime.Equivalence(previous.linkedAt, resolved.link.linkedAt)
+        ? previous
+        : { linkedAt: resolved.link.linkedAt, ended: Deferred.makeUnsafe<void>() };
+    generation = current;
+    if (previous !== undefined && previous !== current)
+      yield* Deferred.succeed(previous.ended, undefined);
     peer = {
       url: resolved.url,
       token: resolved.token,
       linkedAt: resolved.link.linkedAt,
       at: now,
+      ended: current.ended,
     };
     return peer;
   });
@@ -263,10 +289,11 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
   // Streams go to the peer's hub as they do to a local one, with the link's session on each.
   const upstream: NonNullable<DeviceHost.DeviceHostReady["upstream"]> = (hubPath, search) =>
     resolvePeer.pipe(
-      Effect.map(({ url, token }) => ({
+      Effect.map(({ url, token, ended }) => ({
         url: `${url}${PEER_LINK_DEVICES_ROUTE_PREFIX}/hub${hubPath}${search.size > 0 ? `?${search}` : ""}`,
         headers: { authorization: `Bearer ${token}` },
         protocols: [],
+        ended: Deferred.await(ended),
       })),
       Effect.orElseSucceed(() => null),
     );
@@ -343,6 +370,21 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
           { status: 401 },
         );
       const url = requestUrl(request);
+      const current = yield* settings.getSettings.pipe(Effect.option);
+      const enabled = Option.isSome(current) && current.value.enableDeviceSupport;
+      if (!enabled || !current.value.enableAgentDeviceAccess) {
+        const message = `${enabled ? "Agent device access" : "Device support"} is off. Turn it on in Settings > Integrations > Devices.`;
+        return yield* request.method === "POST" &&
+        url._tag === "Some" &&
+        url.value.pathname === "/rpc"
+          ? agentDaemonRpcRefusal(request, 403, message)
+          : Effect.succeed(
+              HttpServerResponse.jsonUnsafe(
+                { ok: false, error: message, code: "UNAUTHORIZED" },
+                { status: 403 },
+              ),
+            );
+      }
       const target = yield* resolvePeer.pipe(Effect.option);
       if (url._tag === "None" || target._tag === "None")
         return HttpServerResponse.jsonUnsafe(
@@ -365,6 +407,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
             response.status === 401 || response.status === 403 ? forgetPeer : Effect.void,
           ),
         ),
+        Effect.map(HttpServerResponse.removeHeader(McpInvocationContext.LINK_EXPIRES_AT_HEADER)),
         Effect.catch(() =>
           forgetPeer.pipe(
             Effect.as(
@@ -452,7 +495,7 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
         Effect.sync(() => {
           ready = null;
           peer = undefined;
-        }),
+        }).pipe(Effect.andThen(endGeneration)),
       ),
     ),
   });

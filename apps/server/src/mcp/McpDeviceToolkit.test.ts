@@ -739,8 +739,19 @@ describe("devices on a linked environment", () => {
     hostStatuses: { ...state.hostStatuses, [linkedHost.id]: { status: "ready" as const } },
     devices: [device, linkedIphone],
   };
-  const openOn = (runtimeMode: "full-access" | "auto-accept-edits", deviceId: string) => {
+  const linkedSession = {
+    ...openSession,
+    hostId: linkedHost.id,
+    deviceId: DeviceId.make(linkedIphone.id),
+  };
+  const autoLink = { sessionId: "link-session", label: "Laptop", access: "auto" as const };
+  const call = (
+    thread: { runtimeMode: "full-access" | "auto-accept-edits"; linkOrigin?: typeof autoLink },
+    name: string,
+    args: Record<string, unknown>,
+  ) => {
     const opened: Array<string> = [];
+    const closed: Array<{ deviceId?: string | undefined; shutdown?: boolean | undefined }> = [];
     const layerDevices = Layer.mock(DeviceService.DeviceService)({
       state: Effect.succeed(linkedState),
       list: Effect.succeed(linkedState),
@@ -751,19 +762,28 @@ describe("devices on a linked environment", () => {
             linkedState.devices.find((candidate) => candidate.id === input.deviceId),
           ),
         ),
+      locateSession: (input) =>
+        Effect.succeed(
+          input.deviceId === linkedSession.deviceId ? Option.some(linkedSession) : Option.none(),
+        ),
+      sessionsForThread: () => Effect.succeed([openSession, linkedSession]),
       open: (input) =>
         Effect.sync(() => {
           opened.push(input.deviceId);
           return { ...openSession, hostId: input.hostId ?? "local", deviceId: input.deviceId };
         }),
-      agentTarget: () => Effect.succeed({ agentDeviceId: deviceId, session: "s", args: [] }),
+      close: (input) =>
+        Effect.sync(() => {
+          closed.push({ deviceId: input.deviceId, shutdown: input.shutdown });
+        }),
+      agentTarget: () => Effect.succeed({ agentDeviceId: linkedIphone.id, session: "s", args: [] }),
       agentLauncher: () => Effect.succeedSome("/state/device/agent-device"),
     });
     return McpServer.McpServer.pipe(
-      Effect.flatMap((server) => server.callTool({ name: "device_open", arguments: { deviceId } })),
+      Effect.flatMap((server) => server.callTool({ name, arguments: args })),
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(["device"])),
       Effect.provideService(McpSchema.McpServerClient, client),
-      Effect.map((result) => ({ result, opened })),
+      Effect.map((result) => ({ result, opened, closed, text: JSON.stringify(result.content) })),
       Effect.scoped,
       Effect.provide(
         McpHttpServer.layerDeviceToolkit.pipe(
@@ -771,7 +791,10 @@ describe("devices on a linked environment", () => {
           Layer.provideMerge(
             Layer.mock(ThreadManagement.ThreadManagementService)({
               getThreadShell: (id) =>
-                Effect.succeed(McpToolAccessTestkit.liveThreadShell(id, { runtimeMode })),
+                Effect.succeed({
+                  ...McpToolAccessTestkit.liveThreadShell(id, { runtimeMode: thread.runtimeMode }),
+                  ...(thread.linkOrigin ? { linkOrigin: thread.linkOrigin } : {}),
+                }),
             }),
           ),
           Layer.provide(layerDevices),
@@ -784,20 +807,55 @@ describe("devices on a linked environment", () => {
       ),
     );
   };
+  const full = { runtimeMode: "full-access" as const };
+  const narrow = { runtimeMode: "auto-accept-edits" as const };
+  // A user may raise a link-started thread to full access; it still acts for that link.
+  const fenced = { runtimeMode: "full-access" as const, linkOrigin: autoLink };
 
-  it.effect("only a full-access thread opens a linked environment's device", () =>
+  it.effect("only an unfenced full-access thread opens a linked environment's device", () =>
     Effect.gen(function* () {
-      const narrow = yield* openOn("auto-accept-edits", linkedIphone.id);
-      expect(narrow.result.isError).toBe(true);
-      expect(JSON.stringify(narrow.result.content)).toContain("only a thread in full access");
-      expect(narrow.opened).toEqual([]);
+      const below = yield* call(narrow, "device_open", { deviceId: linkedIphone.id });
+      expect(below.result.isError).toBe(true);
+      expect(below.text).toContain("only a thread in full access");
+      expect(below.opened).toEqual([]);
 
-      const local = yield* openOn("auto-accept-edits", device.id);
+      const viaLink = yield* call(fenced, "device_open", { deviceId: linkedIphone.id });
+      expect(viaLink.result.isError).toBe(true);
+      expect(viaLink.text).toContain("started from Laptop through a linked environment");
+      expect(viaLink.opened).toEqual([]);
+
+      const local = yield* call(narrow, "device_open", { deviceId: device.id });
       expect(local.result.isError).toBe(false);
 
-      const full = yield* openOn("full-access", linkedIphone.id);
-      expect(full.result.isError).toBe(false);
-      expect(full.opened).toEqual([linkedIphone.id]);
+      const allowed = yield* call(full, "device_open", { deviceId: linkedIphone.id });
+      expect(allowed.result.isError).toBe(false);
+      expect(allowed.opened).toEqual([linkedIphone.id]);
+    }),
+  );
+
+  it.effect("only an unfenced full-access thread powers off a linked environment's device", () =>
+    Effect.gen(function* () {
+      const byId = yield* call(narrow, "device_close", {
+        deviceId: linkedIphone.id,
+        shutdown: true,
+      });
+      expect(byId.result.isError).toBe(true);
+      expect(byId.closed).toEqual([]);
+
+      const all = yield* call(fenced, "device_close", { shutdown: true });
+      expect(all.result.isError).toBe(true);
+      expect(all.closed).toEqual([]);
+
+      const dismissed = yield* call(narrow, "device_close", { deviceId: linkedIphone.id });
+      expect(dismissed.result.isError).toBe(false);
+      expect(dismissed.closed).toEqual([{ deviceId: linkedIphone.id, shutdown: undefined }]);
+
+      const powered = yield* call(full, "device_close", {
+        deviceId: linkedIphone.id,
+        shutdown: true,
+      });
+      expect(powered.result.isError).toBe(false);
+      expect(powered.closed).toEqual([{ deviceId: linkedIphone.id, shutdown: true }]);
     }),
   );
 });
