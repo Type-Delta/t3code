@@ -928,27 +928,45 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   });
 
   /** Ends retiring sessions' agent-device sessions on their hosts, which a launcher cannot once agent tools stop. */
+  const releaseAgentSession = Effect.fn("DeviceService.releaseAgentSession")(function* (
+    host: DeviceHost.DeviceHost["Service"],
+    session: DeviceSession,
+  ) {
+    const ready = yield* host.current;
+    if (!ready?.releaseAgentSession) return;
+    const name = yield* agentDeviceSession(session.threadId, session.hostId, session.deviceId).pipe(
+      Effect.provideService(Digest.Digest, digest),
+    );
+    yield* ready.releaseAgentSession(name, session.deviceId);
+  });
   const releaseAgentSessions = (sessions: ReadonlyArray<DeviceSession>) =>
     Effect.forEach(
       sessions,
       (session) =>
-        Effect.gen(function* () {
-          const ready = yield* (yield* resolveHost(session.hostId)).current;
-          if (!ready?.releaseAgentSession) return;
-          const name = yield* agentDeviceSession(
-            session.threadId,
-            session.hostId,
-            session.deviceId,
-          ).pipe(Effect.provideService(Digest.Digest, digest));
-          yield* ready.releaseAgentSession(name, session.deviceId);
-        }),
+        resolveHost(session.hostId).pipe(
+          Effect.flatMap((host) => releaseAgentSession(host, session)),
+        ),
       { discard: true },
     );
-  const releaseAgentSessionsQuietly = (sessions: ReadonlyArray<DeviceSession>) =>
-    releaseAgentSessions(sessions).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("Could not release agent-device sessions", { cause }),
-      ),
+  /** Each session on its own, so one unreachable host neither stops nor serializes the rest. */
+  const releaseAgentSessionsQuietly = (
+    sessions: ReadonlyArray<DeviceSession>,
+    hostOf: (id: DeviceHostId) => DeviceHost.DeviceHost["Service"] | undefined = (id) =>
+      hosts.get(id),
+  ) =>
+    Effect.forEach(
+      sessions,
+      (session) => {
+        const host = hostOf(session.hostId);
+        return host === undefined
+          ? Effect.void
+          : releaseAgentSession(host, session).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not release an agent-device session", { cause }),
+              ),
+            );
+      },
+      { concurrency: "unbounded", discard: true },
     );
 
   const close: DeviceService["Service"]["close"] = Effect.fn("DeviceService.close")(
@@ -1291,6 +1309,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       const summaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
       const unchanged = (id: DeviceHostId) =>
         hosts.has(id) && hosts.get(id) === publishedHosts.get(id);
+      // A removed host's scope closes after this; a linked one leaves its machine's daemon running.
+      yield* releaseAgentSessionsQuietly(
+        (yield* SynchronizedRef.get(stateRef)).state.sessions.filter(
+          (session) => !unchanged(session.hostId),
+        ),
+        (id) => publishedHosts.get(id),
+      );
       yield* publish((state) => ({
         ...state,
         hosts: summaries,

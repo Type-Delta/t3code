@@ -13,26 +13,33 @@ import * as DeviceService from "./DeviceService.ts";
 
 it.effect("keeps hosts independent when serials collide and another host fails", () =>
   Effect.gen(function* () {
+    const rpcs: string[] = [];
+    let failingRpc: string | undefined;
     const http = HttpClient.make((request) =>
-      Effect.succeed(
-        HttpClientResponse.fromWeb(
-          request,
-          Response.json(
-            request.url.endsWith("/rpc")
-              ? { result: { ok: true } }
-              : {
-                  simulators: [],
-                  emulators: [
-                    {
-                      id: "emulator-5554",
-                      name: "Pixel",
-                      version: "36",
-                      platform: "android",
-                      booted: true,
-                      physical: false,
-                    },
-                  ],
-                },
+      Effect.sync(() => {
+        if (request.url.endsWith("/rpc")) rpcs.push(request.url);
+      }).pipe(
+        Effect.as(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json(
+              request.url.endsWith("/rpc")
+                ? { result: { ok: true } }
+                : {
+                    simulators: [],
+                    emulators: [
+                      {
+                        id: "emulator-5554",
+                        name: "Pixel",
+                        version: "36",
+                        platform: "android",
+                        booted: true,
+                        physical: false,
+                      },
+                    ],
+                  },
+              { status: request.url === failingRpc ? 500 : 200 },
+            ),
           ),
         ),
       ),
@@ -138,14 +145,26 @@ it.effect("keeps hosts independent when serials collide and another host fails",
     expect(replaced.devices.map((device) => device.hostId)).toEqual(["a"]);
     expect(replaced.hostStatuses.b).toBeUndefined();
     yield* service.open({ threadId, hostId: "b", deviceId: "emulator-5554", platform: "android" });
+    const releasedOnB = () => rpcs.filter((url) => url === "http://b/rpc").length;
+    const beforeRemoval = releasedOnB();
     hosts.delete("b");
     yield* service.refreshHosts;
+    // A removed host's agent sessions are released before its scope closes.
+    expect(releasedOnB()).toBe(beforeRemoval + 1);
     yield* service.setHostStatus("b", { status: "ready" });
     expect((yield* service.state).hostStatuses.b).toBeUndefined();
     expect((yield* service.state).sessions).toEqual([]);
     yield* service.agentReadinessIfSupported("a");
     expect((yield* service.state).hostStatuses.a?.status).toBe("ready");
+    hosts.set("b", host("b"));
+    yield* service.refreshHosts;
+    for (const hostId of ["a", "b"])
+      yield* service.open({ threadId, hostId, deviceId: "emulator-5554", platform: "android" });
+    // One host failing to release does not keep the others' sessions claimed.
+    failingRpc = "http://a/rpc";
+    const beforeDisabling = releasedOnB();
     yield* service.configure({ enabled: false });
+    expect(releasedOnB()).toBe(beforeDisabling + 1);
     expect((yield* service.state).hostStatuses).toEqual({});
   }).pipe(
     Effect.provide(
