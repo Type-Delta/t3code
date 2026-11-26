@@ -35,6 +35,7 @@ const layerVcs = VcsDriverRegistry.layer.pipe(
   Layer.provideMerge(VcsProcess.layer),
   Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
+import { layerNoTaskFolders } from "./ProviderTurnStartService.testkit.ts";
 
 it.effect.each([
   "nested",
@@ -107,6 +108,7 @@ it.effect.each([
         worktreePath: cwd,
         activeProviderThreadId: providerThreadId,
         modelSelection: { instanceId, model: "test" },
+        deletedAt: null,
       },
       providerThread,
       providerSession: undefined,
@@ -127,6 +129,7 @@ it.effect.each([
           ServerSettings.layerTest(),
           ThreadCommandExecutor.layer,
           IdAllocator.layer,
+          layerNoTaskFolders,
           Layer.mock(GitWorkflowService.GitWorkflowService)({}),
           Layer.mock(ProjectStore.ProjectStoreV2)({
             get: () => Effect.succeedSome({ workspaceRoot: parent } as never),
@@ -170,6 +173,7 @@ it.effect.each([
           }),
           Layer.mock(CheckpointServiceV2)({
             prepareRestore: () => Effect.void,
+            repositoryScopesIfReadable: () => Effect.succeed([]),
             restore: () =>
               Effect.gen(function* () {
                 calls.push("files");
@@ -233,6 +237,7 @@ interface Case {
     readonly state?: "settled" | "archived";
     readonly running?: boolean;
     readonly background?: boolean;
+    readonly nativeBackground?: boolean;
     readonly session?: {
       readonly cwd: (scene: Scene) => string;
       readonly status: "ready" | "running";
@@ -242,6 +247,7 @@ interface Case {
     readonly scopes?: (scene: Scene) => ReadonlyArray<string>;
   };
   readonly nestedRepo?: boolean;
+  readonly restoreSibling?: boolean;
   readonly undetected?: (scene: Scene) => string;
   readonly blocked?: RegExp;
   readonly notified?: boolean;
@@ -282,6 +288,12 @@ it.effect.each<Case>([
     other: { worktreePath: () => null, projectRoot: (s) => s.parent },
   },
   { name: "an active thread in another checkout", other: { worktreePath: (s) => s.sibling } },
+  {
+    name: "an active thread in a task folder's other restored repository",
+    restoreSibling: true,
+    other: { worktreePath: (s) => s.sibling },
+    blocked: /is active/,
+  },
   {
     name: "a project-root restore beside an active thread",
     restoring: "project-root",
@@ -346,6 +358,11 @@ it.effect.each<Case>([
     other: { worktreePath: (s) => s.repo, hidden: "subagent", scopes: (s) => [s.repo] },
   },
   {
+    name: "a native child with an unprojected command",
+    other: { worktreePath: (s) => s.repo, hidden: "subagent", nativeBackground: true },
+    blocked: /a subagent of "Parent work" is still running/,
+  },
+  {
     name: "a running subagent",
     other: { worktreePath: (s) => s.repo, hidden: "subagent", running: true },
     blocked: /a subagent of "Parent work" is still running/,
@@ -369,7 +386,15 @@ it.effect.each<Case>([
   },
 ])(
   "checks file restore against $name",
-  ({ restoring = "worktree", other, nestedRepo, undetected, blocked, notified = false }) =>
+  ({
+    restoring = "worktree",
+    other,
+    nestedRepo,
+    restoreSibling,
+    undetected,
+    blocked,
+    notified = false,
+  }) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -416,6 +441,7 @@ it.effect.each<Case>([
               settledAt: other.state === undefined ? null : "2026-01-01",
               archivedAt: other.state === "archived" ? "2026-01-01" : null,
               activeRunId: other.running ? "run" : null,
+              creationSource: other.nativeBackground ? "provider" : "user",
               pendingBackgroundTasks: other.background ? [{}] : [],
             };
       const result = yield* assessCheckpointRestore(
@@ -428,6 +454,7 @@ it.effect.each<Case>([
         {
           fileSystem,
           path,
+          ...(restoreSibling ? { repositoryPaths: [scene.sibling] } : {}),
           vcs: {
             ...registry,
             detect: (input) =>
@@ -447,13 +474,18 @@ it.effect.each<Case>([
             getThreadRecords: (
               _id: ThreadId,
               _fields: unknown,
-              options: { turnItemTypes: string[] },
+              options: { turnItemTypes: string[]; turnItemStatuses?: string[] },
             ) =>
               Effect.succeed({
+                providerThreads: [],
                 turnItems:
-                  options.turnItemTypes.includes("file_change") && !other?.qaOnly
-                    ? [{ type: "file_change" }]
-                    : [],
+                  options.turnItemStatuses !== undefined
+                    ? other?.nativeBackground
+                      ? [{ type: "command_execution" }]
+                      : []
+                    : options.turnItemTypes.includes("file_change") && !other?.qaOnly
+                      ? [{ type: "file_change" }]
+                      : [],
               }),
             getShellSnapshot: () =>
               Effect.succeed({
@@ -495,4 +527,167 @@ it.effect.each<Case>([
         Layer.mergeAll(layerVcs, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       ),
     ),
+);
+
+it.effect.each([
+  { name: "completed child", isolated: true },
+  { name: "completed native child", isolated: true },
+  { name: "native child with running tool", isolated: false },
+  { name: "native child with provider background task", isolated: false },
+  { name: "native child with parent background task", isolated: false },
+  { name: "native child with another provider parent task", isolated: true },
+  { name: "native child grandchild with root background task", isolated: false },
+  { name: "missing task record", isolated: true },
+  { name: "task belongs to another child", isolated: true },
+  { name: "completed child with pending task", isolated: false },
+  { name: "grandchild through fork", isolated: false },
+  { name: "completed grandchild", isolated: true },
+  { name: "unrelated child", isolated: true },
+  { name: "running child", isolated: false },
+  { name: "held queue", isolated: false },
+  { name: "failed child", isolated: true },
+  { name: "cyclic ancestry", isolated: true },
+] as const)("parent file restore with $name: $isolated", ({ name, isolated }) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const worktreePath = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-restore-child-" });
+    const vcs = yield* VcsDriverRegistry.VcsDriverRegistry;
+    yield* (yield* VcsProcess.VcsProcess).run({
+      operation: "test.init",
+      command: "git",
+      args: ["init", "--quiet"],
+      cwd: worktreePath,
+    });
+    const parentId = ThreadId.make("restore-parent");
+    const childId = ThreadId.make("restore-child");
+    const ancestorId = ThreadId.make("restore-ancestor");
+    const child = {
+      id: childId,
+      projectId: ProjectId.make("restore-project"),
+      deletedAt: null,
+      worktreePath,
+      activeRunId: name === "running child" ? "child-run" : null,
+      activityRunStatus: name === "held queue" ? "queued" : null,
+      archivedAt: null,
+      settledAt: null,
+      latestRunId: name.includes("native child") ? null : "child-run",
+      creationSource: name.includes("native child") ? "provider" : "user",
+      forkedFrom: { type: "node", nodeId: "child-task" },
+      status: name.includes("native child")
+        ? "idle"
+        : name === "running child"
+          ? "running"
+          : name === "failed child"
+            ? "failed"
+            : "completed",
+      pendingRuntimeRequest: null,
+      pendingBackgroundTasks: [],
+      lineage: {
+        parentThreadId:
+          name === "completed grandchild" ||
+          name === "native child grandchild with root background task" ||
+          name === "grandchild through fork" ||
+          name === "cyclic ancestry"
+            ? ancestorId
+            : name === "unrelated child"
+              ? ThreadId.make("another-parent")
+              : parentId,
+        relationshipToParent: "subagent",
+        rootThreadId: parentId,
+      },
+    };
+    const ancestor = {
+      ...child,
+      id: ancestorId,
+      forkedFrom: { type: "node", nodeId: "ancestor-task" },
+      lineage: {
+        ...child.lineage,
+        relationshipToParent: name === "grandchild through fork" ? "fork" : "subagent",
+        parentThreadId: name === "cyclic ancestry" ? childId : parentId,
+      },
+    };
+    const children =
+      name === "completed grandchild" ||
+      name === "native child grandchild with root background task" ||
+      name === "grandchild through fork" ||
+      name === "cyclic ancestry"
+        ? [child, ancestor]
+        : [child];
+    const projections = {
+      getShellSnapshot: () =>
+        Effect.succeed({
+          threads: children,
+          archivedThreads: [],
+        }),
+      getCheckpointContext: () =>
+        Effect.succeed({
+          checkpointScopes: [],
+          runs: name === "held queue" ? [{ status: "queued" }] : [],
+        }),
+      getThreadProviderContext: () => Effect.succeed({ providerSessions: [] }),
+      getThreadRecords: (
+        _threadId: unknown,
+        _fields: readonly string[],
+        filter: { subagentIds?: string[]; turnItemStatuses?: string[] } = {},
+      ) =>
+        Effect.succeed({
+          providerThreads:
+            _threadId === parentId &&
+            (name.includes("parent") ||
+              name === "native child grandchild with root background task") &&
+            name.includes("native child")
+              ? [
+                  {
+                    providerInstanceId:
+                      name === "native child with another provider parent task"
+                        ? "other-provider"
+                        : "claude",
+                    status: "idle",
+                    pendingBackgroundTasks: [{ taskId: "background", kind: "command" }],
+                  },
+                ]
+              : name === "native child with provider background task"
+                ? [{ status: "idle", pendingBackgroundTasks: [{ taskId: "background" }] }]
+                : [],
+          turnItems:
+            filter.turnItemStatuses !== undefined && name === "native child with running tool"
+              ? [{ type: "command_execution", status: "running" }]
+              : [],
+          subagents:
+            name === "missing task record"
+              ? []
+              : [
+                  {
+                    id: filter.subagentIds?.[0],
+                    providerInstanceId: "claude",
+                    nativeTaskRef: { nativeId: "native-task" },
+                    childThreadId:
+                      name === "task belongs to another child"
+                        ? "another-child"
+                        : filter.subagentIds?.[0] === "ancestor-task"
+                          ? ancestorId
+                          : childId,
+                    origin: name.includes("native child") ? "provider_native" : "app_owned",
+                    status: name === "completed child with pending task" ? "running" : "completed",
+                  },
+                ],
+        }),
+    };
+    const result = yield* assessCheckpointRestore(
+      { id: parentId, projectId: child.projectId, worktreePath },
+      { cwd: worktreePath },
+      {
+        fileSystem,
+        path,
+        vcs,
+        projections: {
+          ...projections,
+          getThread: () => Effect.succeed({ title: "Parent" }),
+        } as never,
+        projects: {} as never,
+      },
+    );
+    assert.equal(result.blockedMessage === null, isolated);
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(layerVcs, NodeServices.layer))),
 );

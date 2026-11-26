@@ -1,9 +1,15 @@
 import {
   isListedThreadLineage,
+  isLiveSubagentShell,
+  isProviderNativeSubagentThread,
+  repositoryRewindCheckpoint,
+  type OrchestrationV2Checkpoint,
+  type OrchestrationV2Run,
   type OrchestrationV2AppThread,
   type OrchestrationV2CheckpointScope,
   type OrchestrationV2ThreadShell,
   type ThreadId,
+  type TaskFolderError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
@@ -23,9 +29,30 @@ interface CheckpointRestoreDependencies {
   readonly path: Path.Path;
   readonly vcs: VcsDriverRegistry.VcsDriverRegistry["Service"];
   readonly recreatingWorktreePath?: string;
+  readonly repositoryPaths?: ReadonlyArray<string>;
+  readonly otherWorkspacePaths?: (
+    thread: Pick<OrchestrationV2AppThread, "projectId" | "worktreePath">,
+  ) => Effect.Effect<ReadonlyArray<string>, TaskFolderError>;
 }
 
 type RestoringThread = Pick<OrchestrationV2AppThread, "id" | "projectId" | "worktreePath">;
+
+export const resolveCheckpointRestorePath = Effect.fn(
+  "orchestrationV2.resolveCheckpointRestorePath",
+)(function* (
+  cwd: string,
+  { fileSystem, path }: Pick<CheckpointRestoreDependencies, "fileSystem" | "path">,
+) {
+  const resolved = path.resolve(cwd);
+  let existing = resolved;
+  while (!(yield* fileSystem.exists(existing))) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  const root = yield* fileSystem.realPath(existing).pipe(Effect.orElseSucceed(() => existing));
+  return { resolved, existing, canonical: path.join(root, path.relative(existing, resolved)) };
+});
 
 const makeCheckoutResolver = (
   thread: RestoringThread,
@@ -42,19 +69,18 @@ const makeCheckoutResolver = (
     const key = `${own}\0${cwd}`;
     const cached = cache.get(key);
     if (cached !== undefined) return cached;
-    const resolved = path.resolve(cwd);
-    let existing = resolved;
-    while (!(yield* fileSystem.exists(existing))) {
-      const parent = path.dirname(existing);
-      if (parent === existing) break;
-      existing = parent;
-    }
-    const canonical = path.join(yield* realPath(existing), path.relative(existing, resolved));
+    const { resolved, existing, canonical } = yield* resolveCheckpointRestorePath(
+      cwd,
+      dependencies,
+    );
     const recreated =
       own &&
-      thread.worktreePath !== null &&
-      resolved === path.resolve(thread.worktreePath) &&
-      (existing !== resolved || dependencies.recreatingWorktreePath === resolved);
+      ((thread.worktreePath !== null &&
+        resolved === path.resolve(thread.worktreePath) &&
+        (existing !== resolved || dependencies.recreatingWorktreePath === resolved)) ||
+        (existing !== resolved &&
+          dependencies.repositoryPaths?.some((folder) => path.resolve(folder) === resolved) ===
+            true));
     const detected = recreated ? null : yield* vcs.detect({ cwd: existing, requestedKind: "git" });
     const location =
       detected !== null
@@ -79,12 +105,68 @@ const makeCheckoutResolver = (
   return { locate, workspaceOf, checkoutRoot };
 };
 
-/** The Git checkout a file restore rewrites, or null when the thread has none. */
-export const checkpointRestoreCheckoutRoot = Effect.fn(
-  "orchestrationV2.checkpointRestoreCheckoutRoot",
+export const checkpointRestoreCheckoutRoots = Effect.fn(
+  "orchestrationV2.checkpointRestoreCheckoutRoots",
 )(function* (thread: RestoringThread, dependencies: CheckpointRestoreDependencies) {
-  return yield* makeCheckoutResolver(thread, dependencies).checkoutRoot();
+  const resolver = makeCheckoutResolver(thread, dependencies);
+  const root = yield* resolver.checkoutRoot();
+  const repositories = yield* Effect.forEach(dependencies.repositoryPaths ?? [], (cwd) =>
+    resolver.locate(cwd, true),
+  );
+  return [
+    ...new Set([
+      ...(root === null ? [] : [root]),
+      ...repositories.filter((location) => location.git).map((location) => location.path),
+    ]),
+  ];
 });
+
+export function repositoryCheckpointsForRestore<
+  Checkpoint extends Pick<OrchestrationV2Checkpoint, "runId" | "ordinalWithinScope">,
+>(
+  checkpoints: ReadonlyArray<Checkpoint>,
+  runs: ReadonlyArray<Pick<OrchestrationV2Run, "id" | "ordinal" | "checkpointAbandoned">>,
+) {
+  const abandoned = runs.filter((run) => run.checkpointAbandoned === true);
+  const ids = new Set(abandoned.map((run) => run.id));
+  const ordinals = new Set(abandoned.map((run) => run.ordinal));
+  return checkpoints.filter((checkpoint) =>
+    checkpoint.runId === null
+      ? !ordinals.has(checkpoint.ordinalWithinScope + 1)
+      : !ids.has(checkpoint.runId),
+  );
+}
+
+export function repositoryRestoreTargets<
+  Repository extends Pick<OrchestrationV2CheckpointScope, "id">,
+  Checkpoint extends Pick<
+    OrchestrationV2Checkpoint,
+    "scopeId" | "runId" | "ordinalWithinScope" | "status"
+  >,
+>(
+  repositories: ReadonlyArray<Repository>,
+  checkpoints: ReadonlyArray<Checkpoint>,
+  targetOrdinal: number,
+  currentOrdinal: number,
+) {
+  return repositories.flatMap((scope) => {
+    const history = checkpoints.filter((checkpoint) => checkpoint.scopeId === scope.id);
+    const checkpoint =
+      repositoryRewindCheckpoint(history, targetOrdinal) ??
+      (targetOrdinal > currentOrdinal
+        ? (history
+            .filter(
+              (candidate) =>
+                candidate.status === "ready" &&
+                candidate.ordinalWithinScope <= targetOrdinal &&
+                candidate.ordinalWithinScope > currentOrdinal,
+            )
+            .toSorted((left, right) => right.ordinalWithinScope - left.ordinalWithinScope)[0] ??
+          null)
+        : null);
+    return checkpoint === null ? [] : [{ scope, checkpoint }];
+  });
+}
 
 const blockMessage = (
   thread: OrchestrationV2ThreadShell,
@@ -121,17 +203,34 @@ export const assessCheckpointRestore = Effect.fn("orchestrationV2.assessCheckpoi
     const resolver = makeCheckoutResolver(thread, dependencies);
     const root = yield* resolver.checkoutRoot();
     const scopeLocation = yield* resolver.locate(scope.cwd, true);
-    if (root === null || !scopeLocation.git || scopeLocation.path !== root)
+    const repositories = yield* Effect.forEach(dependencies.repositoryPaths ?? [], (cwd) =>
+      resolver.locate(cwd, true),
+    );
+    const roots = [
+      ...new Set([
+        ...(root === null ? [] : [root]),
+        ...repositories.filter((location) => location.git).map((location) => location.path),
+      ]),
+    ];
+    if (
+      roots.length === 0 ||
+      (root !== null && (!scopeLocation.git || scopeLocation.path !== root))
+    ) {
       return { blockedMessage: RESTORE_OUTSIDE_CHECKOUT_MESSAGE, noticeThreadIds: [] };
+    }
     const overlaps = Effect.fnUntraced(function* (cwd: string) {
       const location = yield* resolver.locate(cwd, false);
       // A plain folder only counts inside the checkout; a home-rooted project never does.
-      return contains(root, location.path) || (location.git && contains(location.path, root));
+      return roots.some(
+        (root) => contains(root, location.path) || (location.git && contains(location.path, root)),
+      );
     });
 
     const shell = yield* projections.getShellSnapshot();
+    const threads = [...shell.threads, ...shell.archivedThreads];
+    const threadsById = new Map(threads.map((other) => [other.id, other]));
     const noticeThreadIds: ThreadId[] = [];
-    for (const other of [...shell.threads, ...shell.archivedThreads]) {
+    for (const other of threads) {
       if (other.id === thread.id || other.deletedAt !== null) continue;
       const listed = isListedThreadLineage(other.lineage);
       const { providerSessions } = yield* projections.getThreadProviderContext(other.id);
@@ -141,10 +240,78 @@ export const assessCheckpointRestore = Effect.fn("orchestrationV2.assessCheckpoi
           session.status !== "stopped" &&
           !session.capabilities.sessions.supportsMultipleProviderThreadsPerSession,
       );
-      const working =
+      let working =
         other.activeRunId !== null ||
         (other.pendingBackgroundTasks?.length ?? 0) > 0 ||
+        (other.lineage.relationshipToParent === "subagent" &&
+          isLiveSubagentShell({
+            ...other,
+            pendingRuntimeRequest: other.pendingRuntimeRequest ?? null,
+          })) ||
         sessions.some((session) => session.status === "running" || session.status === "waiting");
+      if (!working && isProviderNativeSubagentThread(other)) {
+        // Runless native children can leave work on their raw records or an ancestor's provider.
+        const { providerThreads, turnItems } = yield* projections.getThreadRecords(
+          other.id,
+          ["providerThreads", "turnItems"],
+          {
+            turnItemTypes: ["command_execution", "file_change", "dynamic_tool", "subagent"],
+            turnItemStatuses: ["pending", "running", "waiting"],
+          },
+        );
+        working =
+          turnItems.length > 0 ||
+          providerThreads.some(
+            (provider) =>
+              provider.status === "active" || (provider.pendingBackgroundTasks?.length ?? 0) > 0,
+          );
+      }
+      if (
+        !working &&
+        other.lineage.relationshipToParent === "subagent" &&
+        other.lineage.parentThreadId !== null &&
+        other.forkedFrom?.type === "node"
+      ) {
+        const taskId = other.forkedFrom.nodeId;
+        const { subagents } = yield* projections.getThreadRecords(
+          other.lineage.parentThreadId,
+          ["subagents"],
+          { subagentIds: [taskId] },
+        );
+        const task = subagents.find(
+          (candidate) =>
+            candidate.id === taskId &&
+            candidate.childThreadId === other.id &&
+            candidate.origin ===
+              (isProviderNativeSubagentThread(other) ? "provider_native" : "app_owned"),
+        );
+        working = task?.status === "pending" || task?.status === "running";
+        if (task?.origin === "provider_native") {
+          const seen = new Set<ThreadId>();
+          let parentId: ThreadId | null = other.lineage.parentThreadId;
+          while (!working && parentId !== null && !seen.has(parentId)) {
+            seen.add(parentId);
+            const { providerThreads: providers } = yield* projections.getThreadRecords(parentId, [
+              "providerThreads",
+            ]);
+            if (
+              providers.some(
+                (provider) =>
+                  provider.providerInstanceId === task.providerInstanceId &&
+                  (provider.pendingBackgroundTasks?.length ?? 0) > 0,
+              )
+            ) {
+              working = true;
+              break;
+            }
+            const parent = threadsById.get(parentId);
+            parentId =
+              parent?.lineage.relationshipToParent === "subagent"
+                ? parent.lineage.parentThreadId
+                : null;
+          }
+        }
+      }
       if (!listed && !working) continue;
       const { checkpointScopes } = yield* projections.getCheckpointContext(other.id);
       if (working || (other.archivedAt === null && other.settledAt === null)) {
@@ -152,6 +319,7 @@ export const assessCheckpointRestore = Effect.fn("orchestrationV2.assessCheckpoi
         for (const cwd of new Set([
           ...(workspace === null ? [] : [workspace]),
           ...checkpointScopes.map((candidate) => candidate.cwd),
+          ...(yield* dependencies.otherWorkspacePaths?.(other) ?? Effect.succeed([])),
           ...sessions.map((session) => session.cwd),
         ])) {
           if (!(yield* overlaps(cwd))) continue;

@@ -72,8 +72,10 @@ import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
+import { msg } from "gt-i18n";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import { m } from "../i18n/messages.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import {
   MENU_ACTION_CHANNEL,
@@ -149,7 +151,6 @@ const DEFAULT_ZOOM_FACTOR = 1.0;
 const ZOOM_EPSILON = 0.001;
 const MAX_EVALUATION_BYTES = 64_000;
 const MAX_VISIBLE_TEXT_LENGTH = 20_000;
-const MAX_INTERACTIVE_ELEMENTS = 200;
 /**
  * A `[role]` container's innerText is its whole subtree, which turned one
  * snapshot's element list into 60 KB of repeated page text. Names are labels,
@@ -569,7 +570,7 @@ const IN_PLACE_DENIED_PROTOCOLS = new Set([
   "view-source:",
 ]);
 
-/** Popups bypass will-attach-webview hardening and would inherit the picker's contextIsolation:false. */
+/** Popups bypass will-attach-webview hardening, so they are isolated and sandboxed here. */
 const POPUP_WINDOW_OPTIONS = {
   webPreferences: {
     contextIsolation: true,
@@ -2443,9 +2444,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             );
             return { action: "deny" };
           }
+          const { postBody } = details;
           runFork(
             attemptPromise({ operation: "openPreviewWindow", tabId, webContentsId: wc.id }, () =>
-              wc.loadURL(details.url),
+              postBody
+                ? wc.loadURL(details.url, {
+                    postData: postBody.data,
+                    extraHeaders: postBody.boundary
+                      ? `content-type: ${postBody.contentType}; boundary=${postBody.boundary}`
+                      : `content-type: ${postBody.contentType}`,
+                  })
+                : wc.loadURL(details.url),
             ).pipe(Effect.ignore),
           );
           return { action: "deny" };
@@ -2787,6 +2796,51 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     );
   });
 
+  // Clears a tab's dead guest so callers see "no webview" until the renderer registers a new one.
+  const detachDestroyedWebContents = Effect.fn("PreviewManager.detachDestroyedWebContents")(
+    function* (tabId: string, webContentsId: number) {
+      const expectedAttachment = (yield* Ref.get(attachedRef)).get(webContentsId);
+      yield* withTabLifecycleLock(
+        tabId,
+        Effect.gen(function* () {
+          const currentTab = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
+          const currentAttachment = (yield* Ref.get(attachedRef)).get(webContentsId);
+          const currentWebContents = webContents.fromId(webContentsId);
+          if (
+            currentTab?.webContentsId !== webContentsId ||
+            currentAttachment !== expectedAttachment ||
+            (currentWebContents && !currentWebContents.isDestroyed())
+          ) {
+            return;
+          }
+          yield* Effect.all(
+            [
+              detachControlSession(webContentsId),
+              detachListeners(webContentsId),
+              cancelPickElement(tabId),
+            ],
+            { concurrency: 3, discard: true },
+          );
+          const detached = yield* SynchronizedRef.modify(tabsRef, (tabs) => {
+            const current = tabs.get(tabId);
+            if (current?.webContentsId !== webContentsId) {
+              return [Option.none<PreviewTabState>(), tabs] as const;
+            }
+            const { favicon: _favicon, ...currentWithoutFavicon } = current;
+            const next: PreviewTabState = { ...currentWithoutFavicon, webContentsId: null };
+            return [
+              Option.some(next),
+              replaceMap(tabs, (copy) => {
+                copy.set(tabId, next);
+              }),
+            ] as const;
+          });
+          if (Option.isSome(detached)) yield* emitIfCurrent(tabId, detached.value);
+        }),
+      );
+    },
+  );
+
   // URL tabs can paint before registerWebview; set the background at attach time.
   const prepareWebview = Effect.fn("PreviewManager.prepareWebview")(function* (
     wc: Electron.WebContents,
@@ -2806,7 +2860,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     });
     wc.once("destroyed", () => {
       guestLoadFailures.delete(webContentsId);
-      runFork(hideDestroyedGuest(webContentsId));
+      runFork(
+        Effect.gen(function* () {
+          yield* hideDestroyedGuest(webContentsId);
+          const tabId = yield* tabIdForWebContents(webContentsId);
+          if (tabId) yield* detachDestroyedWebContents(tabId, webContentsId);
+        }),
+      );
       runFork(detachControlSession(webContentsId));
     });
     yield* ensureControlSession(wc).pipe(
@@ -2886,45 +2946,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const webContentsId = pending.webContentsId;
     const wc = webContents.fromId(webContentsId);
     if (!wc || wc.isDestroyed()) {
-      const expectedAttachment = (yield* Ref.get(attachedRef)).get(webContentsId);
-      yield* withTabLifecycleLock(
-        tabId,
-        Effect.gen(function* () {
-          const currentTab = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
-          const currentAttachment = (yield* Ref.get(attachedRef)).get(webContentsId);
-          const currentWebContents = webContents.fromId(webContentsId);
-          if (
-            currentTab?.webContentsId !== webContentsId ||
-            currentAttachment !== expectedAttachment ||
-            (currentWebContents && !currentWebContents.isDestroyed())
-          ) {
-            return;
-          }
-          yield* Effect.all(
-            [
-              detachControlSession(webContentsId),
-              detachListeners(webContentsId),
-              cancelPickElement(tabId),
-            ],
-            { concurrency: 3, discard: true },
-          );
-          const detached = yield* SynchronizedRef.modify(tabsRef, (tabs) => {
-            const current = tabs.get(tabId);
-            if (current?.webContentsId !== webContentsId) {
-              return [Option.none<PreviewTabState>(), tabs] as const;
-            }
-            const { favicon: _favicon, ...currentWithoutFavicon } = current;
-            const next: PreviewTabState = { ...currentWithoutFavicon, webContentsId: null };
-            return [
-              Option.some(next),
-              replaceMap(tabs, (copy) => {
-                copy.set(tabId, next);
-              }),
-            ] as const;
-          });
-          if (Option.isSome(detached)) yield* emitIfCurrent(tabId, detached.value);
-        }),
-      );
+      yield* detachDestroyedWebContents(tabId, webContentsId);
       return;
     }
     // URL-bar navigation hands the page back to the human. The agent's own
@@ -3013,6 +3035,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       Effect.catchTags({
         PreviewTabNotFoundError: () => Effect.void,
         PreviewWebContentsNotFoundError: () => Effect.void,
+        PreviewWebviewNotInitializedError: () => Effect.void,
       }),
     );
 
@@ -3339,6 +3362,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           webContents: wc,
           debugger: control.debugger,
           cookiesCleared: () => runPromise(browserSession.cookiesCleared(wc.session)),
+          annotating: () => Ref.getUnsafe(pickSessionsRef).has(tabId),
         });
         // CDP cannot recover a failure that happened before it attached.
         const { navStatus } = afterAttach;
@@ -3911,7 +3935,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               height: PICTURE_IN_PICTURE_INITIAL_HEIGHT,
               minWidth: PICTURE_IN_PICTURE_MIN_WIDTH,
               minHeight: PICTURE_IN_PICTURE_MIN_HEIGHT,
-              title: title.length > 0 ? `Preview · ${title}` : "Browser preview",
+              title:
+                title.length > 0
+                  ? m(msg("Preview · {title}"), { title })
+                  : m(msg("Browser preview")),
               show: false,
               alwaysOnTop: true,
               autoHideMenuBar: true,
@@ -4359,10 +4386,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         concurrency: 2,
         discard: true,
       });
-      type PageState = Pick<
-        PreviewAutomationSnapshot,
-        "url" | "title" | "loading" | "visibleText" | "interactiveElements"
-      >;
+      type PageState = Pick<PreviewAutomationSnapshot, "url" | "title" | "loading" | "visibleText">;
       type SnapshotAttempt = {
         readonly page: PageState;
         readonly accessibility: unknown;
@@ -4391,91 +4415,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
               subtree: true
             });
           }
-          const selectorFor = (element) => {
-            if (element.id) return "#" + CSS.escape(element.id);
-            for (const attribute of ["data-testid", "name"]) {
-              const value = element.getAttribute(attribute);
-              if (value) return element.tagName.toLowerCase() + "[" + attribute + "=" + JSON.stringify(value) + "]";
-            }
-            const buildParts = (current, parts = []) => {
-              if (!current || current.nodeType !== Node.ELEMENT_NODE || parts.length >= 8) {
-                return parts;
-              }
-              const parent = current.parentElement;
-              const siblings = parent
-                ? Array.from(parent.children).filter((child) => child.tagName === current.tagName)
-                : [];
-              const base = current.tagName.toLowerCase();
-              const part = siblings.length > 1
-                ? base + ":nth-of-type(" + (siblings.indexOf(current) + 1) + ")"
-                : base;
-              return buildParts(parent, [part, ...parts]);
-            };
-            return buildParts(element).join(" > ");
-          };
-          const visible = (element) => {
-            const style = getComputedStyle(element);
-            const rect = element.getBoundingClientRect();
-            return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
-          };
-          const roleFor = (element) => {
-            const explicit = element.getAttribute("role");
-            if (explicit) return explicit;
-            if (element instanceof HTMLButtonElement) return "button";
-            if (element instanceof HTMLAnchorElement && element.hasAttribute("href")) return "link";
-            if (element instanceof HTMLTextAreaElement) return "textbox";
-            if (element instanceof HTMLSelectElement) return "combobox";
-            if (element instanceof HTMLInputElement) {
-              if (element.type === "checkbox") return "checkbox";
-              if (element.type === "radio") return "radio";
-              if (new Set(["button", "image", "reset", "submit"]).has(element.type)) return "button";
-              return "textbox";
-            }
-            return null;
-          };
-          const candidates = Array.from(document.querySelectorAll(
-            "a[href],button,input,textarea,select,[role],[tabindex]"
-          )).filter(visible).slice(0, ${MAX_INTERACTIVE_ELEMENTS});
-          const descriptors = candidates.map((element) => {
-            const rect = element.getBoundingClientRect();
-            const role = roleFor(element);
-            const name = (element.getAttribute("aria-label") || element.innerText || element.getAttribute("name") || "").trim();
-            const selector = selectorFor(element);
-            return {
-              tag: element.tagName.toLowerCase(),
-              role,
-              name,
-              selector,
-              x: rect.x,
-              y: rect.y,
-              width: rect.width,
-              height: rect.height
-            };
-          });
-          const semanticLocatorCounts = new Map();
-          for (const descriptor of descriptors) {
-            if (!descriptor.role || !descriptor.name) continue;
-            const key = descriptor.role + "\u0000" + descriptor.name;
-            semanticLocatorCounts.set(key, (semanticLocatorCounts.get(key) ?? 0) + 1);
-          }
-          const elements = descriptors.map((descriptor) => {
-            const semanticLocatorIsUnique = descriptor.role && descriptor.name &&
-              semanticLocatorCounts.get(descriptor.role + "\u0000" + descriptor.name) === 1;
-            return {
-              ...descriptor,
-              locator: semanticLocatorIsUnique
-                ? "role=" + descriptor.role + "[name=" + JSON.stringify(descriptor.name) + "]"
-                : "css=" + descriptor.selector
-            };
-          });
           return {
             revision: state.revision,
             page: {
               url: location.href,
               title: document.title,
               loading: document.readyState !== "complete",
-              visibleText: (document.body?.innerText || "").slice(0, ${MAX_VISIBLE_TEXT_LENGTH}),
-              interactiveElements: elements
+              visibleText: (document.body?.innerText || "").slice(0, ${MAX_VISIBLE_TEXT_LENGTH})
             }
           };
         })()`,
@@ -5433,6 +5379,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       { discard: true },
     );
   });
+  // A hidden or locked window draws no frames, so a guest it hid stays unpainted until unthrottled.
+  const serverCaptureLeases = new Map<string, { readonly tabId: string; readonly lease: symbol }>();
   const updateServerTabCapturing = Effect.fn("PreviewManager.updateServerTabCapturing")(
     function* (painting: {
       readonly key: { readonly threadId: string; readonly tabId: string };
@@ -5443,6 +5391,25 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           candidate.serverTab?.threadId === painting.key.threadId &&
           candidate.serverTab.tabId === painting.key.tabId,
       );
+      const key = `${painting.key.threadId}\u0000${painting.key.tabId}`;
+      const held = serverCaptureLeases.get(key);
+      if (!painting.active && held) {
+        serverCaptureLeases.delete(key);
+        yield* stopFrameCapture(held.tabId, held.lease);
+      } else if (painting.active && !held && tab) {
+        const lease = Symbol("server-capture");
+        yield* startFrameCapture(tab.tabId, lease).pipe(
+          Effect.andThen(
+            Effect.sync(() => serverCaptureLeases.set(key, { tabId: tab.tabId, lease })),
+          ),
+          Effect.catch((error) =>
+            Effect.logWarning("Failed to unthrottle a server tab for its capture.", {
+              tabId: tab.tabId,
+              error,
+            }),
+          ),
+        );
+      }
       if (tab && tab.capturing !== painting.active) {
         yield* update(tab.tabId, { capturing: painting.active });
       }

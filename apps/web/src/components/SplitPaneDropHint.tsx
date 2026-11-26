@@ -1,3 +1,4 @@
+import { T } from "gt-react";
 import type { CSSProperties } from "react";
 
 import { cn } from "~/lib/utils";
@@ -54,8 +55,15 @@ export function SplitPaneDropHint(props: {
         )}
       >
         <span className="rounded-md bg-primary px-3 py-1.5 text-center text-xs font-medium text-primary-foreground shadow-sm">
-          Drop to place{" "}
-          {isAbove ? "above" : isBelow ? "below" : `on the ${isLeft ? "left" : "right"}`}
+          {isAbove ? (
+            <T>Drop to place above</T>
+          ) : isBelow ? (
+            <T>Drop to place below</T>
+          ) : isLeft ? (
+            <T>Drop to place on the left</T>
+          ) : (
+            <T>Drop to place on the right</T>
+          )}
         </span>
       </div>
     </div>

@@ -17,7 +17,7 @@ export interface AutoRetrySettings {
   readonly triggers: readonly AutoRetryTrigger[];
 }
 
-export const AUTO_RETRY_PREDICATE_LABELS = {
+const AUTO_RETRY_PREDICATE_LABELS = {
   error_message: "Error message contains",
   backend: "Backend is",
   model: "Model contains",

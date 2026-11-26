@@ -352,6 +352,8 @@ describe("Online Snapshots", () => {
         yield* Deferred.succeed(resumePack, undefined);
         yield* Fiber.join(pass);
         expect(yield* project.sidecarHas(project.sharedBlob)).toBe(true);
+        yield* sidecars.retain({ live: [], protectedSince: Infinity });
+        expect(yield* sidecars.has({ cwd: project.project, checkpointRef })).toBe(true);
 
         yield* Scope.close(pinScope, Exit.void);
         yield* sidecars.maintain({ cwd: project.project, force: true });

@@ -12,8 +12,8 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import type * as Scope from "effect/Scope";
 
-import type { CheckpointStoreError } from "./Errors.ts";
-import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
+import { CheckpointSnapshotUnavailableError, type CheckpointStoreError } from "./Errors.ts";
+import type { VcsCheckpointOps, VcsCheckpointRange } from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as SidecarCheckpointRepository from "./SidecarCheckpointRepository.ts";
 
@@ -21,6 +21,22 @@ export interface CaptureCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
   /** The checkpoint this one follows, so a turn that switched branches starts where it landed. */
+  readonly previousCheckpointRef?: CheckpointRef;
+  /** Folders below `cwd` (relative, `/`-separated) that have their own checkpoints. */
+  readonly excludePaths?: ReadonlyArray<string>;
+}
+
+export interface CaptureHeadCheckpointInput {
+  readonly cwd: string;
+  readonly checkpointRef: CheckpointRef;
+  /** A commit `resolveCleanHead` returned for this folder. */
+  readonly head: string;
+  /**
+   * When the folder was seen clean, in epoch seconds, if that was earlier than now. Commits made
+   * after a checkpoint count as the turn's own work, so a late snapshot must not postdate them.
+   */
+  readonly seenAt?: number;
+  readonly excludePaths?: ReadonlyArray<string>;
   readonly previousCheckpointRef?: CheckpointRef;
 }
 
@@ -40,6 +56,8 @@ export interface RestoreCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
   readonly fallbackToHead?: boolean;
+  /** Folders below `cwd` the restore leaves as they are, as in a capture. */
+  readonly excludePaths?: ReadonlyArray<string>;
 }
 
 export interface DiffCheckpointsInput {
@@ -55,12 +73,18 @@ export interface DiffCheckpointsInput {
   readonly filePaths?: ReadonlyArray<string>;
   /** False never downloads evicted file versions; see `SidecarDiffInput.allowNetwork`. */
   readonly allowNetwork?: boolean;
+  /** Folders below `cwd` left out of the diff, as in a capture. */
+  readonly excludePaths?: ReadonlyArray<string>;
+  /** The refs' range as their capture returned it; the refs are then not read. */
+  readonly range?: VcsCheckpointRange;
 }
 
 export interface ListAuthoredPathsInput {
   readonly cwd: string;
   readonly fromCheckpointRef: CheckpointRef;
   readonly toCheckpointRef: CheckpointRef;
+  /** The refs' range as their capture returned it; the refs are then not read. */
+  readonly range?: VcsCheckpointRange;
 }
 
 export interface DeleteCheckpointRefsInput {
@@ -80,6 +104,17 @@ export class CheckpointStore extends Context.Service<
 
     readonly captureCheckpoint: (
       input: CaptureCheckpointInput,
+    ) => Effect.Effect<VcsCheckpointRange | null, CheckpointStoreError>;
+
+    /**
+     * HEAD's commit when the folder matches it exactly: nothing staged, modified or untracked.
+     * Null otherwise. One status, where a capture stages the whole worktree.
+     */
+    readonly resolveCleanHead: (cwd: string) => Effect.Effect<string | null, CheckpointStoreError>;
+
+    /** Snapshots a folder that was clean at `head` from that commit, without reading its files. */
+    readonly captureHeadCheckpoint: (
+      input: CaptureHeadCheckpointInput,
     ) => Effect.Effect<void, CheckpointStoreError>;
 
     /** Capture a sidecar and return verified object/ownership metadata. */
@@ -178,7 +213,8 @@ export const make = Effect.gen(function* () {
     "captureCheckpoint",
   )(function* (input) {
     if (SidecarCheckpointRepository.isSidecarCheckpointRef(input.checkpointRef)) {
-      return yield* normalizeSidecarError(input.cwd, sidecars.capture(input));
+      yield* normalizeSidecarError(input.cwd, sidecars.capture(input));
+      return null;
     }
     const checkpoints = yield* resolveCheckpoints(input.cwd);
     return yield* checkpoints.captureCheckpoint(input);
@@ -195,6 +231,22 @@ export const make = Effect.gen(function* () {
       }
       return yield* normalizeSidecarError(input.cwd, sidecars.captureWithMetadata(input));
     });
+  const resolveCleanHead: CheckpointStore["Service"]["resolveCleanHead"] = Effect.fn(
+    "CheckpointStore.resolveCleanHead",
+  )(function* (cwd) {
+    const checkpoints = yield* resolveCheckpoints(cwd);
+    return yield* checkpoints.resolveCleanHead(cwd);
+  });
+
+  const captureHeadCheckpoint: CheckpointStore["Service"]["captureHeadCheckpoint"] = Effect.fn(
+    "CheckpointStore.captureHeadCheckpoint",
+  )(function* (input) {
+    if (SidecarCheckpointRepository.isSidecarCheckpointRef(input.checkpointRef)) {
+      return yield* normalizeSidecarError(input.cwd, sidecars.capture(input));
+    }
+    const checkpoints = yield* resolveCheckpoints(input.cwd);
+    return yield* checkpoints.captureHeadCheckpoint(input);
+  });
 
   const hasCheckpointRef: CheckpointStore["Service"]["hasCheckpointRef"] = Effect.fn(
     "hasCheckpointRef",
@@ -218,7 +270,13 @@ export const make = Effect.gen(function* () {
 
   const prepareRestoreCheckpoint: CheckpointStore["Service"]["prepareRestoreCheckpoint"] =
     Effect.fn("prepareRestoreCheckpoint")(function* (input) {
-      if (!SidecarCheckpointRepository.isSidecarCheckpointRef(input.checkpointRef)) return;
+      if (!SidecarCheckpointRepository.isSidecarCheckpointRef(input.checkpointRef)) {
+        const checkpoints = yield* resolveCheckpoints(input.cwd);
+        if (!(yield* checkpoints.hasCheckpointRef(input))) {
+          return yield* new CheckpointSnapshotUnavailableError();
+        }
+        return;
+      }
       return yield* normalizeSidecarError(input.cwd, sidecars.prepareRestore(input));
     });
 
@@ -272,6 +330,8 @@ export const make = Effect.gen(function* () {
     allocateCheckpointRef,
     captureCheckpoint,
     captureCheckpointWithMetadata,
+    resolveCleanHead,
+    captureHeadCheckpoint,
     hasCheckpointRef,
     restoreCheckpoint,
     prepareRestoreCheckpoint,

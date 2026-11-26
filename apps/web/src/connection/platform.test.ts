@@ -403,7 +403,10 @@ describe("desktop-local bearer registration", () => {
       expect(getLocalEnvironmentBearerToken).toHaveBeenCalledOnce();
       expect(getLocalEnvironmentBearerToken).toHaveBeenCalledWith("wsl:Ubuntu");
       expect(authorizationHeaders).toEqual(["Bearer shared-secondary-token"]);
-      expect(result.registration.credential.token).toBe("shared-secondary-token");
+      expect(result.registration.credential).toMatchObject({
+        _tag: "BearerConnectionCredential",
+        token: "shared-secondary-token",
+      });
       expect(result.expiresAtEpochMs).toBe(Date.parse("2026-09-05T00:00:00.000Z"));
     }),
   );

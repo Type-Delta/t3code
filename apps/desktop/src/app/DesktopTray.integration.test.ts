@@ -13,7 +13,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientError from "effect/http/HttpClientError";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
-import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
+import { PRIMARY_LOCAL_ENVIRONMENT_ID, type DatabaseMigrationProgress } from "@t3tools/contracts";
 
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
@@ -91,7 +91,7 @@ const makeInstance = (
     currentConfig: Ref.get(configRef),
     start: Effect.void,
     stop: () => Effect.void,
-    snapshot: Ref.get(readyRef).pipe(Effect.map((ready) => ({ ready }))),
+    snapshot: Ref.get(readyRef).pipe(Effect.map((ready) => ({ ready, activePid: Option.none() }))),
     waitForReady: () => Effect.succeed(true),
   }) as unknown as DesktopBackendPool.DesktopBackendInstance;
 
@@ -205,6 +205,7 @@ describe("DesktopTray authentication integration", () => {
           backendReady: yield* Ref.make(false),
           quitting: yield* Ref.make(false),
           canInstallUpdates: yield* Ref.make(false),
+          databaseMigrationProgress: yield* Ref.make<DatabaseMigrationProgress | null>(null),
         });
         const baseLayer = Layer.mergeAll(
           assetsLayer,

@@ -5,6 +5,7 @@ import { useComposerDraftStore } from "../composerDraftStore";
 import { selectSplitPaneRefs, useSplitViewStore } from "../splitViewStore";
 import { resolveVisibleSplitPanes, SplitThreadWorkspace } from "../components/SplitThreadWorkspace";
 import { ThreadRouteView } from "../components/ThreadRouteView";
+import { GlobalVoiceInputIndicator } from "../components/chat/GlobalVoiceInputIndicator";
 import { isAppModalPage } from "../components/sidebar/mainAppLocation";
 import { SidebarInset } from "../components/ui/sidebar";
 import { buildThreadRouteParams, resolveThreadRouteTarget } from "../threadRoutes";
@@ -61,6 +62,7 @@ function ChatRouteLayout() {
         />
       ) : null}
       {modalOpen ? <Outlet /> : null}
+      <GlobalVoiceInputIndicator hidden={modalOpen} />
     </>
   );
 }

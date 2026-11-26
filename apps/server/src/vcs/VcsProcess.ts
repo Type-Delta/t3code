@@ -69,6 +69,11 @@ const VCS_PROCESS_CONCURRENCY = 8;
 // Forge CLIs can take seconds per call; cap them together so git, checkpoints included, keeps slots.
 const NON_GIT_PROCESS_CONCURRENCY = VCS_PROCESS_CONCURRENCY / 2;
 
+/** Background non-git calls, such as the pull request sync sweep's, leave one slot for the rest. */
+export const Background = Context.Reference<boolean>("t3/vcs/VcsProcess/Background", {
+  defaultValue: () => false,
+});
+
 /** Shown to users when a Git command fails because another process holds the index lock. */
 export const GIT_INDEX_LOCKED_DETAIL =
   "Git's index is locked. Wait for other Git operations to finish, then try again.";
@@ -135,6 +140,22 @@ export const gitConfigEnv = (
 export const explicitBareRepositoryEnv = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform) =>
   gitConfigEnv(env, "safe.bareRepository", "explicit", platform);
 
+// A failing `gc --auto` (say, missing objects) reruns after every fetch and strands a full-size
+// `tmp_pack_*` each time, so T3's frequent background Git calls could fill the disk.
+const SERVER_GIT_CONFIG = [
+  ["safe.bareRepository", "explicit"],
+  ["maintenance.auto", "false"],
+  ["gc.auto", "0"],
+] as const;
+
+export const serverGitConfigEnv = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform) => {
+  const added: NodeJS.ProcessEnv = {};
+  for (const [key, value] of SERVER_GIT_CONFIG) {
+    Object.assign(added, gitConfigEnv({ ...env, ...added }, key, value, platform));
+  }
+  return added;
+};
+
 const REPOSITORY_SELECTORS = new Set([
   "GIT_DIR",
   "GIT_WORK_TREE",
@@ -194,34 +215,6 @@ const isTransientGitExit = (stderr: string) =>
   /unable to create [^\n]*\.lock['"]?: file exists/i.test(stderr) ||
   /(?:unable to stat|lstat\(|error: open\()[^\n]+: no such file or directory/i.test(stderr);
 
-// Variables that bind Git to a repository instead of the command's cwd.
-const GIT_REPOSITORY_BINDINGS = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-] as const;
-
-/**
- * Drops repository bindings the server inherited, e.g. when started from a Git
- * hook, so every Git command resolves its own cwd. A binding an operation sets
- * to its own value, such as a private `GIT_INDEX_FILE`, is kept.
- */
-const gitCommandEnvironment = (
-  env: NodeJS.ProcessEnv | undefined,
-): NodeJS.ProcessEnv | undefined => {
-  const inherited = GIT_REPOSITORY_BINDINGS.filter((key) => process.env[key] !== undefined);
-  if (inherited.length === 0) return env;
-  const sanitized: NodeJS.ProcessEnv = { ...env };
-  for (const key of inherited) {
-    if (sanitized[key] === undefined || sanitized[key] === process.env[key]) {
-      sanitized[key] = undefined;
-    }
-  }
-  return sanitized;
-};
 // On macOS, Git's fsync uses F_FULLFSYNC; writeout-only still uses fsync(2).
 // Network mounts can reject F_FULLFSYNC. Ref writes omit errno, so retry their
 // bare write error too; explicit unrelated errors remain failures.
@@ -238,6 +231,7 @@ export const make = Effect.gen(function* () {
   const hostPlatform = yield* HostProcess.Platform;
   const vcsProcesses = yield* Semaphore.make(VCS_PROCESS_CONCURRENCY);
   const nonGitProcesses = yield* Semaphore.make(NON_GIT_PROCESS_CONCURRENCY);
+  const backgroundProcesses = yield* Semaphore.make(NON_GIT_PROCESS_CONCURRENCY - 1);
   const keyedProcesses = new Map<string, Semaphore.Semaphore>();
   const keyedPermit = (concurrency: NonNullable<VcsProcessInput["concurrency"]>) => {
     let semaphore = keyedProcesses.get(concurrency.key);
@@ -252,7 +246,6 @@ export const make = Effect.gen(function* () {
     input: VcsProcessInput,
     baseError: VcsProcessErrorContext,
   ) {
-    const env = input.command === "git" ? gitCommandEnvironment(input.env) : input.env;
     let failedExit = false;
     const execution = processRunner
       .run({
@@ -270,8 +263,10 @@ export const make = Effect.gen(function* () {
           // Failures are read by English patterns; without LANG, macOS Git follows the system language.
           // LANGUAGE leaves LC_CTYPE, which hooks inherit, alone.
           ...(input.command === "git" ? { LANGUAGE: "C" } : {}),
-          ...env,
-          ...explicitBareRepositoryEnv({ ...process.env, ...env }, hostPlatform),
+          ...input.env,
+          ...(input.command === "git"
+            ? serverGitConfigEnv({ ...process.env, ...input.env }, hostPlatform)
+            : {}),
         },
         timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         maxOutputBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
@@ -429,7 +424,11 @@ export const make = Effect.gen(function* () {
       );
     }
     const shared = input.command === "git" ? bounded : nonGitProcesses.withPermits(1)(bounded);
-    return yield* input.concurrency === undefined ? shared : keyedPermit(input.concurrency)(shared);
+    const keyed = input.concurrency === undefined ? shared : keyedPermit(input.concurrency)(shared);
+    // Taken first, so a background call still waiting holds no permit another call needs.
+    return yield* input.command !== "git" && (yield* Background)
+      ? backgroundProcesses.withPermits(1)(keyed)
+      : keyed;
   });
 
   return VcsProcess.of({ run });

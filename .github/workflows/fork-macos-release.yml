@@ -15,7 +15,7 @@ jobs:
     name: Build macOS ${{ matrix.arch }}
     # Both arches build on the Apple Silicon runner; electron-builder and the
     # Rust toolchain cross-target x64 the same way upstream's release does.
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     strategy:
       fail-fast: false

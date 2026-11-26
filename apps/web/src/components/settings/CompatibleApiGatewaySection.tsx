@@ -1,5 +1,6 @@
 "use client";
 
+import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { useEffect, useRef, useState } from "react";
 import type {
   ApiGatewayAuthMode,
@@ -7,6 +8,7 @@ import type {
   ProviderInstanceEnvironmentVariable,
 } from "@t3tools/contracts";
 
+import { m, type MessageResolver } from "../../i18n/messages";
 import { DraftInput } from "../ui/draft-input";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -44,15 +46,15 @@ const DEFAULT_GATEWAY: ApiGatewayDraft = {
 };
 
 const CATALOG_FORMAT_LABELS: Record<ApiGatewayCatalogFormat, string> = {
-  auto: "Auto-detect",
-  codex: "Codex",
-  anthropic: "Anthropic",
-  openai: "OpenAI",
+  auto: msg("Auto-detect"),
+  codex: msg("{provider}", { provider: "Codex" }),
+  anthropic: msg("{provider}", { provider: "Anthropic" }),
+  openai: msg("{provider}", { provider: "OpenAI" }),
 };
 
 const AUTH_MODE_LABELS: Record<ApiGatewayAuthMode, string> = {
-  bearer: "Bearer token",
-  "x-api-key": "x-api-key header",
+  bearer: msg("{scheme} token", { scheme: "Bearer" }),
+  "x-api-key": msg("{header} header", { header: "x-api-key" }),
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -171,33 +173,42 @@ export function configAndEnvironmentWithoutStoredApiGatewayApiKey(
   };
 }
 
-function validateHttpUrl(value: string, label: string): string | undefined {
+function validateHttpUrl(
+  value: string,
+  label: string,
+  resolve: MessageResolver = m,
+): string | undefined {
   let url: URL;
   try {
     url = new URL(value.trim());
   } catch {
-    return `${label} must be a valid URL.`;
+    return resolve(msg("{label} must be a valid URL.", { label }));
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    return `${label} must use http or https.`;
+    return resolve(msg("{label} must use http or https.", { label }));
   }
   if (url.username.length > 0 || url.password.length > 0) {
-    return `${label} must not include a username or password.`;
+    return resolve(msg("{label} must not include a username or password.", { label }));
   }
   return undefined;
 }
 
-export function validateApiGatewayDraft(gateway: ApiGatewayDraft): ApiGatewayValidationErrors {
+export function validateApiGatewayDraft(
+  gateway: ApiGatewayDraft,
+  resolve: MessageResolver = m,
+): ApiGatewayValidationErrors {
   if (!gateway.enabled) return {};
 
   const baseUrl = gateway.baseUrl.trim();
   const catalogUrl = gateway.catalogUrl.trim();
+  const baseUrlLabel = resolve(msg("Gateway base URL"));
+  const catalogUrlLabel = resolve(msg("Model catalog URL"));
   const baseUrlError =
     baseUrl.length === 0
-      ? "Gateway base URL is required."
-      : validateHttpUrl(baseUrl, "Gateway base URL");
+      ? resolve(msg("Gateway base URL is required."))
+      : validateHttpUrl(baseUrl, baseUrlLabel, resolve);
   const catalogUrlError =
-    catalogUrl.length > 0 ? validateHttpUrl(catalogUrl, "Model catalog URL") : undefined;
+    catalogUrl.length > 0 ? validateHttpUrl(catalogUrl, catalogUrlLabel, resolve) : undefined;
   return {
     ...(baseUrlError ? { baseUrl: baseUrlError } : {}),
     ...(catalogUrlError ? { catalogUrl: catalogUrlError } : {}),
@@ -280,6 +291,8 @@ export function CompatibleApiGatewaySection({
   protocol = "openai-anthropic",
   onChange,
 }: CompatibleApiGatewaySectionProps) {
+  const gt = useGT();
+  const m = useMessages();
   const [gateway, setGateway] = useState(() => readApiGatewayDraft(value));
   const [apiKey, setApiKey] = useState("");
   const gatewayMigrationFingerprint = useRef<string | undefined>(undefined);
@@ -304,11 +317,11 @@ export function CompatibleApiGatewaySection({
     onChange(migrated.config, migrated.environment);
   }, [environment, idPrefix, onChange, showApiKey, value]);
 
-  const validationErrors = validateApiGatewayDraft(gateway);
+  const validationErrors = validateApiGatewayDraft(gateway, m);
   const publish = (patch: Partial<ApiGatewayDraft>) => {
     const next = { ...gateway, ...patch };
     setGateway(next);
-    if (variant === "dialog" || !hasApiGatewayValidationErrors(validateApiGatewayDraft(next))) {
+    if (variant === "dialog" || !hasApiGatewayValidationErrors(validateApiGatewayDraft(next, m))) {
       onChange(configWithApiGateway(value, next), environment);
     }
   };
@@ -343,17 +356,26 @@ export function CompatibleApiGatewaySection({
     <section className="grid gap-3 rounded-lg border border-border/70 bg-muted/15 p-3">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-xs font-medium text-foreground">Compatible API gateway</div>
+          <div className="text-xs font-medium text-foreground">
+            <T>Compatible API gateway</T>
+          </div>
           <p className="mt-0.5 text-2xs leading-snug text-muted-foreground">
-            {protocol === "gemini"
-              ? "Send Antigravity's Gemini API requests through a compatible endpoint."
-              : "Let T3 discover models and relay their metadata to this provider."}
+            {protocol === "gemini" ? (
+              <T>
+                Send <Var>Antigravity</Var>'s <Var>Gemini API</Var> requests through a compatible
+                endpoint.
+              </T>
+            ) : (
+              <T>
+                Let <Var>T3</Var> discover models and relay their metadata to this provider.
+              </T>
+            )}
           </p>
         </div>
         <Switch
           checked={gateway.enabled}
           onCheckedChange={(checked) => publish({ enabled: Boolean(checked) })}
-          aria-label="Use compatible API gateway"
+          aria-label={gt("Use compatible API gateway")}
         />
       </div>
 
@@ -361,11 +383,21 @@ export function CompatibleApiGatewaySection({
         <div className="grid gap-3 border-t border-border/60 pt-3">
           <GatewayTextField
             id={`${idPrefix}-gateway-base-url`}
-            label={protocol === "gemini" ? "Gemini gateway URL" : "Gateway base URL"}
+            label={
+              protocol === "gemini"
+                ? gt("{model} gateway URL", { model: "Gemini" })
+                : gt("Gateway base URL")
+            }
             description={
               protocol === "gemini"
-                ? "Used when Antigravity uses the Gemini API key sign-in method."
-                : "The OpenAI or Anthropic-compatible inference endpoint."
+                ? gt("Used when {provider} uses the {api} key sign-in method.", {
+                    provider: "Antigravity",
+                    api: "Gemini API",
+                  })
+                : gt("The {openai} or {anthropic}-compatible inference endpoint.", {
+                    openai: "OpenAI",
+                    anthropic: "Anthropic",
+                  })
             }
             placeholder="https://gateway.example.com"
             value={gateway.baseUrl}
@@ -377,8 +409,10 @@ export function CompatibleApiGatewaySection({
           {protocol === "gemini" ? null : (
             <GatewayTextField
               id={`${idPrefix}-gateway-catalog-url`}
-              label="Model catalog URL"
-              description="Optional. Leave empty to derive /v1/models from the base URL."
+              label={gt("Model catalog URL")}
+              description={gt("Optional. Leave empty to derive {path} from the base URL.", {
+                path: "/v1/models",
+              })}
               placeholder="https://gateway.example.com/v1/models"
               value={gateway.catalogUrl}
               error={validationErrors.catalogUrl}
@@ -391,17 +425,21 @@ export function CompatibleApiGatewaySection({
             <label className="flex items-start justify-between gap-3 rounded-md border border-border/60 p-2.5">
               <span className="grid gap-0.5">
                 <span className="text-xs font-medium text-foreground">
-                  Let Codex request the model catalog
+                  <T>
+                    Let <Var>Codex</Var> request the model catalog
+                  </T>
                 </span>
                 <span className="text-2xs leading-snug text-muted-foreground">
-                  Codex fetches the gateway catalog directly, including metadata its bundled catalog
-                  does not know.
+                  <T>
+                    <Var>Codex</Var> fetches the gateway catalog directly, including metadata its
+                    bundled catalog does not know.
+                  </T>
                 </span>
               </span>
               <Switch
                 checked={gateway.useCodexCatalog}
                 onCheckedChange={(checked) => publish({ useCodexCatalog: Boolean(checked) })}
-                aria-label="Let Codex request the model catalog"
+                aria-label={gt("Let {provider} request the model catalog", { provider: "Codex" })}
               />
             </label>
           ) : null}
@@ -409,18 +447,23 @@ export function CompatibleApiGatewaySection({
           {showCodexOptions ? (
             <label className="flex items-start justify-between gap-3 rounded-md border border-border/60 p-2.5">
               <span className="grid gap-0.5">
-                <span className="text-xs font-medium text-foreground">Image generation</span>
+                <span className="text-xs font-medium text-foreground">
+                  <T>Image generation</T>
+                </span>
                 <span
                   id={`${idPrefix}-gateway-image-generation-description`}
                   className="text-2xs leading-snug text-muted-foreground"
                 >
-                  Let Codex generate images through this gateway. Requires a compatible Images API.
+                  <T>
+                    Let <Var>Codex</Var> generate images through this gateway. Requires a compatible
+                    <Var>Images API</Var>.
+                  </T>
                 </span>
               </span>
               <Switch
                 checked={gateway.codexImageGeneration}
                 onCheckedChange={(checked) => publish({ codexImageGeneration: Boolean(checked) })}
-                aria-label="Image generation"
+                aria-label={gt("Image generation")}
                 aria-describedby={`${idPrefix}-gateway-image-generation-description`}
               />
             </label>
@@ -429,7 +472,9 @@ export function CompatibleApiGatewaySection({
           {protocol === "gemini" ? null : (
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="grid gap-1.5">
-                <span className="text-xs font-medium text-foreground">Catalog format</span>
+                <span className="text-xs font-medium text-foreground">
+                  <T>Catalog format</T>
+                </span>
                 <Select
                   value={gateway.catalogFormat}
                   onValueChange={(catalogFormat) =>
@@ -442,7 +487,7 @@ export function CompatibleApiGatewaySection({
                   <SelectPopup>
                     {Object.entries(CATALOG_FORMAT_LABELS).map(([value, label]) => (
                       <SelectItem key={value} value={value}>
-                        {label}
+                        {m(label)}
                       </SelectItem>
                     ))}
                   </SelectPopup>
@@ -450,7 +495,9 @@ export function CompatibleApiGatewaySection({
               </label>
 
               <label className="grid gap-1.5">
-                <span className="text-xs font-medium text-foreground">Authentication</span>
+                <span className="text-xs font-medium text-foreground">
+                  <T>Authentication</T>
+                </span>
                 <Select
                   value={gateway.authMode}
                   onValueChange={(authMode) =>
@@ -463,7 +510,7 @@ export function CompatibleApiGatewaySection({
                   <SelectPopup>
                     {Object.entries(AUTH_MODE_LABELS).map(([value, label]) => (
                       <SelectItem key={value} value={value}>
-                        {label}
+                        {m(label)}
                       </SelectItem>
                     ))}
                   </SelectPopup>
@@ -478,7 +525,7 @@ export function CompatibleApiGatewaySection({
                 htmlFor={`${idPrefix}-gateway-api-key`}
                 className="text-xs font-medium text-foreground"
               >
-                API key
+                <T>API key</T>
               </label>
               <div className="flex items-center gap-2">
                 {variant === "card" ? (
@@ -490,7 +537,9 @@ export function CompatibleApiGatewaySection({
                     type="password"
                     autoComplete="off"
                     placeholder={
-                      hasStoredApiKey ? "Stored secret - enter a new key to replace" : "API key"
+                      hasStoredApiKey
+                        ? gt("Stored secret - enter a new key to replace")
+                        : gt("API key")
                     }
                     spellCheck={false}
                   />
@@ -502,7 +551,7 @@ export function CompatibleApiGatewaySection({
                     onChange={(event) => commitApiKey(event.target.value)}
                     type="password"
                     autoComplete="off"
-                    placeholder="API key"
+                    placeholder={gt("API key")}
                     spellCheck={false}
                   />
                 )}
@@ -513,16 +562,21 @@ export function CompatibleApiGatewaySection({
                     size="compact"
                     className="h-8 shrink-0"
                     onClick={removeApiKey}
-                    aria-label="Remove stored API key"
+                    aria-label={gt("Remove stored API key")}
                   >
-                    Remove
+                    <T>Remove</T>
                   </Button>
                 ) : null}
               </div>
               <span className="text-2xs text-muted-foreground">
-                {hasStoredApiKey
-                  ? "Stored as a sensitive value. Enter a new key to replace it."
-                  : "Stored as a sensitive value for this provider instance. Leave empty for no authentication."}
+                {hasStoredApiKey ? (
+                  <T>Stored as a sensitive value. Enter a new key to replace it.</T>
+                ) : (
+                  <T>
+                    Stored as a sensitive value for this provider instance. Leave empty for no
+                    authentication.
+                  </T>
+                )}
               </span>
             </div>
           ) : null}

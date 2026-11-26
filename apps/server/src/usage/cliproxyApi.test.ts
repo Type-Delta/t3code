@@ -61,6 +61,7 @@ function fixture(
     accounts?: Array<unknown>;
     upstream?: (request: RequestBody) => { status: number; body?: unknown; rawBody?: string };
     managementStatus?: (key: string, path: string) => number;
+    models?: (name: string) => Response;
   } = {},
 ) {
   const requests: Array<{ path: string; body?: RequestBody }> = [];
@@ -74,6 +75,12 @@ function fixture(
       requests.push({ path, ...(body ? { body } : {}) });
       const status = options.managementStatus?.(request.headers.authorization ?? "", path) ?? 200;
       if (status !== 200) return HttpClientResponse.fromWeb(request, Response.json({}, { status }));
+      if (path.endsWith("/auth-files/models"))
+        return HttpClientResponse.fromWeb(
+          request,
+          options.models?.(new URL(request.url).searchParams.get("name")!) ??
+            Response.json({}, { status: 404 }),
+        );
       if (path.endsWith("/auth-files"))
         return HttpClientResponse.fromWeb(
           request,
@@ -264,6 +271,24 @@ describe("CLIProxyAPI built-in management API", () => {
       }),
   );
 
+  it.effect("names the models the hub routes to each account, when the hub lists them", () =>
+    Effect.gen(function* () {
+      const test = fixture({
+        accounts: [...accounts, { ...accounts[1]!, id: "third.json", auth_index: "c" }],
+        models: (name) =>
+          name === "first.json"
+            ? Response.json({ models: [{ id: "gpt-5.6-sol" }, { id: " " }] })
+            : name === "third.json"
+              ? Response.json({ models: [] })
+              : Response.json({}, { status: 404 }),
+      });
+      const api = yield* test.api;
+      const result = yield* api.readAccounts(config);
+      expect(result.map((account) => account.models)).toEqual([["gpt-5.6-sol"], undefined, []]);
+      expect(result[1]?.usageLimits.windows).toHaveLength(1);
+    }),
+  );
+
   it.effect("resolves a missing usage plan from current, then legacy, token plans", () =>
     Effect.gen(function* () {
       const test = fixture({
@@ -370,7 +395,10 @@ describe("CLIProxyAPI built-in management API", () => {
       });
       const api = yield* test.api;
       const result = yield* api.readAccounts(config);
-      expect(result[0]?.usageLimits.unavailable?.reason).toBe("probeFailed");
+      expect(result[0]?.usageLimits.unavailable).toEqual({
+        reason: "probeFailed",
+        message: "The provider refused the hub request (HTTP 401).",
+      });
       expect(result[1]?.usageLimits.windows[0]?.usedPercent).toBe(12);
       expect(encodeJson(result)).not.toContain("do-not-publish");
     }),
@@ -656,7 +684,9 @@ describe("CLIProxyAPI built-in management API", () => {
         });
         const [account] = yield* (yield* test.api).readAccounts(config);
         expect(account?.usageLimits.unavailable?.reason).toBe("probeFailed");
-        expect(test.requests.map((request) => request.path)).toEqual(["/v0/management/auth-files"]);
+        expect(test.requests.map((request) => request.path)).not.toContain(
+          "/v0/management/api-call",
+        );
       }),
   );
 
@@ -822,7 +852,12 @@ describe("CLIProxyAPI built-in management API", () => {
         expect((yield* api.readAccounts(config))[0]?.usageLimits.unavailable?.reason).toBe(
           "probeFailed",
         );
-        expect(test.requests).toHaveLength(8);
+        expect(
+          test.requests.filter((request) => !request.path.endsWith("/auth-files/models")),
+        ).toHaveLength(8);
+        expect(
+          test.requests.filter((request) => request.path.endsWith("/auth-files/models")),
+        ).toHaveLength(4);
       }),
   );
 
@@ -841,6 +876,23 @@ describe("CLIProxyAPI built-in management API", () => {
         { concurrency: "unbounded" },
       );
       expect(test.requests).toHaveLength(2);
+    }),
+  );
+
+  it.effect("pauses quota reads after the optional model endpoint denies the key", () =>
+    Effect.gen(function* () {
+      const test = fixture({
+        managementStatus: (_, path) => (path.endsWith("/auth-files/models") ? 403 : 200),
+      });
+      const api = yield* test.api;
+      const error = yield* api.readAccounts(config).pipe(Effect.flip);
+      expect(error.detail).toContain("HTTP 403");
+      const requestCount = test.requests.length;
+      expect(
+        test.requests.filter((request) => request.path.endsWith("/auth-files/models")),
+      ).toHaveLength(1);
+      yield* api.readAccounts(config).pipe(Effect.flip);
+      expect(test.requests).toHaveLength(requestCount);
     }),
   );
 

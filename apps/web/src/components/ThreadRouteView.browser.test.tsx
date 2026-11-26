@@ -58,7 +58,10 @@ vi.mock("../state/entities", () => ({
   useThreadStatus: () => null,
 }));
 vi.mock("../state/query", () => ({ useEnvironmentQuery: () => ({ data: null }) }));
-vi.mock("../state/shell", () => ({ useEnvironmentShellStatus: () => null }));
+vi.mock("../state/shell", () => ({
+  expectsPrimaryEnvironment: () => false,
+  useEnvironmentShellStatus: () => null,
+}));
 vi.mock("../threadRoutes", () => ({
   buildThreadRouteParams: () => ({}),
   isThreadRouteSnapshotAuthoritative: () => false,

@@ -86,7 +86,10 @@ describe("terminatePosixOwnedProcessTree", () => {
       let taskkillCalls = 0;
       let failNextTaskkill = false;
       const spawner = ChildProcessSpawner.make((command) => {
-        if (ChildProcess.isStandardCommand(command) && command.command === "taskkill") {
+        if (
+          ChildProcess.isStandardCommand(command) &&
+          command.command === String.raw`C:\TestWindows\System32\taskkill.exe`
+        ) {
           taskkillCalls += 1;
           const exitCode = failNextTaskkill ? 1 : 0;
           failNextTaskkill = false;
@@ -123,6 +126,7 @@ describe("terminatePosixOwnedProcessTree", () => {
     }).pipe(
       Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.provideService(HostProcess.Environment, { SystemRoot: String.raw`C:\TestWindows` }),
     ),
   );
 

@@ -21,7 +21,7 @@ export function assertThreadRollbackAfterRestartOutput(
   assert.isAbove(fork, 0, "rollback must fork the preserved native history");
   assert.equal(methods.filter((method) => method === "initialize").length, 2);
   assert.equal(
-    methods[fork - 1],
+    methods[fork - 2],
     "initialized",
     "the fresh app-server must initialize before forking the saved native source",
   );

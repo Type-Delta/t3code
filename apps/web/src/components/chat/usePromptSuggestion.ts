@@ -56,6 +56,14 @@ export function offeredPromptSuggestion<Suggestion extends { readonly runId: Run
 }
 
 /**
+ * The suggestion to insert when Tab or the hint accepts it. The hint unmounts a render after
+ * typing starts, so a late accept must not prepend the suggestion to a draft that has text.
+ */
+export function promptSuggestionToAccept(suggestion: string | null, draft: string): string | null {
+  return draft.length === 0 ? suggestion : null;
+}
+
+/**
  * The agent's predicted next prompt while the run that produced it is the thread's latest
  * completed run and Escape has not dismissed it. Claude's native prediction arrives over an
  * unpersisted subscription; the reply's tagged suggestion is the durable fallback, so older
@@ -76,7 +84,7 @@ export function usePromptSuggestion(input: {
   }));
   const nativeSupported =
     useServerConfigs().get(environmentId)?.environment.capabilities.promptSuggestions === true;
-  // Tab is the only way to accept one, so skip devices with no mouse or trackpad at all.
+  // Suggestions target keyboard and mouse setups, so skip devices with no mouse or trackpad at all.
   const hasFinePointer = useMediaQuery("(any-pointer: fine)");
   const enabled =
     settings.enabled &&

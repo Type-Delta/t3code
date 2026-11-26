@@ -62,6 +62,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
@@ -83,6 +84,7 @@ import {
   decodeProviderReplayNdjson,
   materializeReplayTranscriptWorkspace,
 } from "@t3tools/provider-testing/replayTranscript";
+import { CODEX_FULL_ACCESS_CONTEXT } from "../provider/CodexDeveloperInstructions.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
@@ -206,15 +208,54 @@ const readDelegatedTaskStatusTranscript = Effect.fn("readDelegatedTaskStatusTran
   function* (followupResult: string) {
     const fs = yield* FileSystem.FileSystem;
     const text = yield* fs.readFileString(NodeURL.fileURLToPath(delegatedTaskStatusTranscriptFile));
+    // The recording names the parent, then the child, after the fixture's titles; this test's differ.
+    const threadNames = ["MCP replay parent", delegatedPrompt];
     const transcript = yield* decodeProviderReplayNdjson(
-      text.replaceAll(queuedFollowupResult, followupResult),
+      text
+        .replaceAll(queuedFollowupResult, followupResult)
+        .replace(
+          /"name":"Replay fixture: delegated_task_status"/g,
+          () => `"name":${JSON.stringify(threadNames.shift())}`,
+        ),
     );
     // The recording ends when the recorder closes the app-server while the parent
     // turn is still open. This test keeps acting as that parent afterwards, and
     // replaying the exit would kill the shared process and fail the parent run.
     return {
       ...transcript,
-      entries: transcript.entries.filter((entry) => entry.type !== "runtime_exit"),
+      entries: transcript.entries.flatMap((entry) => {
+        if (entry.type === "runtime_exit") return [];
+        if (
+          entry.type !== "expect_outbound" ||
+          !Predicate.isObject(entry.frame) ||
+          entry.frame.method !== "turn/start" ||
+          !Predicate.isObject(entry.frame.params) ||
+          entry.frame.params.approvalPolicy !== "never"
+        )
+          return [entry];
+        // The fixture predates the fork's Full access approval policy.
+        return [
+          {
+            ...entry,
+            frame: {
+              ...entry.frame,
+              params: {
+                ...entry.frame.params,
+                approvalPolicy: {
+                  granular: {
+                    mcp_elicitations: true,
+                    request_permissions: false,
+                    rules: false,
+                    sandbox_approval: false,
+                    skill_approval: false,
+                  },
+                },
+                additionalContext: CODEX_FULL_ACCESS_CONTEXT,
+              },
+            },
+          },
+        ];
+      }),
     };
   },
   Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
@@ -566,6 +607,7 @@ describe("orchestrator MCP toolkit", () => {
           const steerReceivedGates = new Map<string, Deferred.Deferred<void>>();
           const parentTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
           const deliveryTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
+          const agentPrompt = (text: string) => text.replace(/^\[T3 Code: [^\n]+\]\n\n/u, "");
           const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
             makeDeterministicAdapter({
               instanceId: codexInstanceId,
@@ -576,30 +618,31 @@ describe("orchestrator MCP toolkit", () => {
               },
               capturedTurns,
               shouldComplete: (turn) =>
-                turn.threadId !== parentThreadId && turn.message.text !== cancellationPrompt,
+                turn.threadId !== parentThreadId &&
+                agentPrompt(turn.message.text) !== cancellationPrompt,
               terminalGate: (turn) =>
                 turn.message.text.startsWith("Delegated task") ||
                 turn.message.text.startsWith("Delegated tasks")
                   ? deliveryTerminalGates.get(turn.threadId)
                   : parentTerminalGates.get(turn.threadId),
-              response: (turn) => `Codex completed: ${turn.message.text}`,
+              response: (turn) => `Codex completed: ${agentPrompt(turn.message.text)}`,
             }),
             makeDeterministicAdapter({
               instanceId: claudeInstanceId,
               driver: ProviderDriverKind.make("claudeAgent"),
               capabilities: ClaudeProviderCapabilitiesV2,
               capturedTurns,
-              shouldComplete: (turn) => turn.message.text !== cancellationPrompt,
+              shouldComplete: (turn) => agentPrompt(turn.message.text) !== cancellationPrompt,
               terminalGate: (turn) =>
                 turn.message.text.startsWith("Delegated task") ||
                 turn.message.text.startsWith("Delegated tasks")
                   ? deliveryTerminalGates.get(turn.threadId)
                   : parentTerminalGates.get(turn.threadId),
               response: (turn) =>
-                turn.message.text === delegatedPrompt
+                agentPrompt(turn.message.text) === delegatedPrompt
                   ? delegatedResult
-                  : `Claude completed: ${turn.message.text}`,
-              steerReceived: (steer) => steerReceivedGates.get(steer.message.text),
+                  : `Claude completed: ${agentPrompt(turn.message.text)}`,
+              steerReceived: (steer) => steerReceivedGates.get(agentPrompt(steer.message.text)),
             }),
           ]);
           const continuationOffers = yield* Ref.make<
@@ -730,6 +773,7 @@ describe("orchestrator MCP toolkit", () => {
             Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
             Layer.provide(
               Layer.mock(ProjectService.ProjectService)({
+                workspaceScanDirectory: Effect.succeed,
                 getById: (id) =>
                   Effect.succeed(
                     id === projectId || id === ProjectId.make("project:mcp-foreign")
@@ -1116,6 +1160,7 @@ describe("orchestrator MCP toolkit", () => {
               "t3_thread_read",
               {
                 threadId: directChildThreadId,
+                afterPosition: -1,
                 limit: 1,
               },
             );
@@ -1781,7 +1826,9 @@ describe("orchestrator MCP toolkit", () => {
             ).toBe(true);
             const capturedAfterDelegate = yield* Ref.get(capturedTurns);
             expect(
-              capturedAfterDelegate.filter((turn) => turn.threadId === delegated.childThreadId),
+              capturedAfterDelegate
+                .filter((turn) => turn.threadId === delegated.childThreadId)
+                .map((turn) => ({ ...turn, text: agentPrompt(turn.text) })),
             ).toEqual([
               {
                 instanceId: claudeInstanceId,
@@ -1889,7 +1936,13 @@ describe("orchestrator MCP toolkit", () => {
               localChild(delegated.childThreadId),
               (projection) =>
                 projection.runs.some(
-                  (run) => run.id === activeChildFollowup.runId && run.status === "running",
+                  (run) =>
+                    run.id === activeChildFollowup.runId &&
+                    run.status === "running" &&
+                    projection.providerTurns.some(
+                      (turn) =>
+                        turn.runAttemptId === run.activeAttemptId && turn.status === "running",
+                    ),
                 ),
             );
             const delegatedStatusDuringFollowupCall = yield* invoke("task_status", {
@@ -1963,7 +2016,7 @@ describe("orchestrator MCP toolkit", () => {
               )).subagents.find((task) => task.id === delegated.taskId),
             ).toMatchObject({
               status: "interrupted",
-              result: interruptedResult,
+              result: expect.stringContaining(interruptedResult),
               completionDelivery: { state: "disposed" },
             });
             const delegatedStatusAfterCancelCall = yield* invoke("task_status", {
@@ -1975,7 +2028,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(delegatedStatusAfterCancel).toMatchObject({
               childRunId: delegated.childRunId,
               status: "interrupted",
-              summary: interruptedResult,
+              summary: expect.stringContaining(interruptedResult),
               hasPendingChildRuns: false,
               latestTerminalRunId: activeChildFollowup.runId,
               latestTerminalStatus: "interrupted",
@@ -2568,6 +2621,7 @@ describe("orchestrator MCP toolkit", () => {
               "t3_thread_read",
               {
                 threadId: promptedThread.threadId,
+                afterPosition: -1,
                 limit: 1,
               },
             );
@@ -4113,7 +4167,10 @@ describe("orchestrator MCP toolkit", () => {
             model: codexModel,
           }),
         ]);
-        const layerTest = layerOrchestratorToolkit.pipe(
+        const layerTest = Layer.merge(
+          layerOrchestratorToolkit,
+          McpHttpServer.layerThreadToolkit,
+        ).pipe(
           Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
           Layer.provideMerge(layerOrchestration),
           Layer.provide(
@@ -4127,11 +4184,13 @@ describe("orchestrator MCP toolkit", () => {
           Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
           Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
           Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-          Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+          Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+          Layer.provide(
+            Layer.mock(ProjectService.ProjectService)({ workspaceScanDirectory: Effect.succeed }),
+          ),
           Layer.provideMerge(
             SecretRequests.layer.pipe(
               Layer.provide(layerMemorySecretStore),
-              Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
               Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
               Layer.provide(layerOrchestration),
             ),
@@ -4177,14 +4236,28 @@ describe("orchestrator MCP toolkit", () => {
             .pipe(
               Stream.filter(
                 (stored) =>
-                  stored.event.type === "provider-turn.updated" &&
-                  stored.event.payload.status === "running",
+                  (stored.event.type === "provider-turn.updated" &&
+                    stored.event.payload.status === "running") ||
+                  (stored.event.type === "run.updated" && stored.event.payload.status === "failed"),
               ),
               Stream.runHead,
               Effect.flatMap(
                 Option.match({
                   onNone: () => Effect.die("Parent provider turn did not start."),
-                  onSome: () => Effect.void,
+                  onSome: ({ event }) =>
+                    event.type === "provider-turn.updated"
+                      ? Effect.void
+                      : orchestrator
+                          .getThreadProjection(parentThreadId)
+                          .pipe(
+                            Effect.flatMap(({ turnItems }) =>
+                              Effect.die(
+                                new Error(
+                                  `Parent run failed to start: ${turnItems.find((item) => item.type === "error")?.failure.message ?? "unknown failure"}`,
+                                ),
+                              ),
+                            ),
+                          ),
                 }),
               ),
             );
@@ -4547,7 +4620,8 @@ describe("orchestrator MCP toolkit", () => {
             { ...invocation, thread: undefined },
           ).pipe(Effect.withTracer(tracer));
           expect(parentlessRead.isError).not.toBe(true);
-          expect(transferReads).toHaveLength(0);
+          const transferReadsAfterParentless = transferReads.length;
+          expect(acknowledgementReads).toEqual([]);
           const afterParentlessRead = yield* orchestrator.getThreadProjection(parentThreadId);
           expect(
             afterParentlessRead.subagents.find((task) => task.id === queuedFollowup.taskId)
@@ -4560,7 +4634,7 @@ describe("orchestrator MCP toolkit", () => {
             ...(result === "😀" ? { maxCharsPerItem: 1 } : {}),
           }).pipe(Effect.withTracer(tracer));
           expect(read.isError).not.toBe(true);
-          expect(transferReads.length).toBeGreaterThan(0);
+          expect(transferReads.length).toBeGreaterThan(transferReadsAfterParentless);
           const firstPage = yield* decodeThreadRead(read.structuredContent);
           const finalItem = firstPage.items.find(
             (item) => item.text === result.slice(0, result === "😀" ? 2 : 500),

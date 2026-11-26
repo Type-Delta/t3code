@@ -22,6 +22,7 @@ import { ChildProcessSpawner } from "effect/process";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "../orchestration-v2/CheckpointService.ts";
+import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
@@ -56,6 +57,12 @@ const layerTest = CheckpointService.layer.pipe(
     ),
   ),
   Layer.provide(IdAllocator.layer),
+  Layer.provide(
+    Layer.mock(WorkspaceFolders.WorkspaceFolders)({
+      forThread: () => Effect.succeed({ folders: [], extraRoots: [] }),
+      submodules: () => Effect.succeed([]),
+    }),
+  ),
   Layer.provide(NodeCrypto.layer),
   Layer.provide(
     ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-non-git-workspace-" }),

@@ -6,9 +6,9 @@ import type { OrchestrationV2ThreadProjection, ScopedThreadRef } from "@t3tools/
 
 import { useThreadCheckpointSummaries } from "../state/entities";
 
-/** Only a captured checkpoint has a snapshot to compare, so only ready rows can load a diff. */
+/** A diff needs a captured snapshot: a ready row, or tracked repositories under a plain folder. */
 const loadableTurnDiffSummaries = (summaries: ReadonlyArray<ThreadCheckpointSummary>) =>
-  summaries.filter((summary) => summary.status === "ready");
+  summaries.filter((summary) => summary.status === "ready" || summary.repositories !== undefined);
 
 export function selectLoadableTurnDiffSummaries(
   projection: Pick<OrchestrationV2ThreadProjection, "checkpoints" | "messages"> | null,

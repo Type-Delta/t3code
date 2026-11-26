@@ -125,7 +125,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: native/resource-monitor/target/x86_64-pc-windows-msvc/release/t3-resource-monitor.exe
-          key: resource-monitor-x86_64-pc-windows-msvc-${{ hashFiles('native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
+          key: resource-monitor-x86_64-pc-windows-msvc-${{ hashFiles('.cargo/config.toml', 'native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
 
       - name: Setup Rust
         if: steps.resource_monitor_cache.outputs.cache-hit != 'true'

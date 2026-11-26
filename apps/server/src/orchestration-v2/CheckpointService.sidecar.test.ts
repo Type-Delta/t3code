@@ -26,6 +26,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as CheckpointService from "./CheckpointService.ts";
+import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 
 const layerVcsProcess = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
 const layerTest = CheckpointService.layer.pipe(
@@ -36,6 +37,12 @@ const layerTest = CheckpointService.layer.pipe(
     ),
   ),
   Layer.provide(IdAllocator.layer),
+  Layer.provide(
+    Layer.mock(WorkspaceFolders.WorkspaceFolders)({
+      forThread: () => Effect.succeed({ folders: [], extraRoots: [] }),
+      submodules: () => Effect.succeed([]),
+    }),
+  ),
   Layer.provideMerge(NodeCrypto.layer),
   Layer.provide(ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-sidecar-v2-" })),
   Layer.provide(ServerSettings.layerTest()),
@@ -120,7 +127,10 @@ it.layer(layerTest)("V2 sidecar checkpoints", (it) => {
         2,
         fileSystem.writeFileString(file, "# start\nselected\ndiscarded one\ndiscarded two\n"),
       );
-      yield* checkpoints.restore({ scope, checkpoint: first.checkpoint });
+      yield* checkpoints.restore({
+        targets: [{ scope, checkpoint: first.checkpoint }],
+        scopes: [scope],
+      });
       yield* fileSystem.writeFileString(file, "# start\nselected\nnew branch\n");
       const branched = yield* checkpoints.capture({
         scope,
@@ -161,9 +171,9 @@ it.layer(layerTest)("V2 sidecar checkpoints", (it) => {
       assert.equal(yield* git(cwd, ["for-each-ref", "refs/t3"]), "");
       assert.equal(yield* git(cwd, ["count-objects", "-v"]), objectsBefore);
 
-      yield* checkpoints.restore({ scope, checkpoint: baseline });
+      yield* checkpoints.restore({ targets: [{ scope, checkpoint: baseline }], scopes: [scope] });
       assert.equal(yield* fileSystem.readFileString(NodePath.join(cwd, "README.md")), "# start\n");
-      yield* checkpoints.restore({ scope, checkpoint });
+      yield* checkpoints.restore({ targets: [{ scope, checkpoint }], scopes: [scope] });
       assert.equal(
         yield* fileSystem.readFileString(NodePath.join(cwd, "README.md")),
         "# start\nturn one\n",
@@ -225,7 +235,7 @@ it.layer(layerTest)("V2 sidecar checkpoints", (it) => {
         1,
       );
 
-      yield* checkpoints.restore({ scope, checkpoint: baseline });
+      yield* checkpoints.restore({ targets: [{ scope, checkpoint: baseline }], scopes: [scope] });
       assert.isFalse(yield* fileSystem.exists(NodePath.join(cwd, "notes.txt")));
       assert.equal(
         yield* fileSystem.readFileString(NodePath.join(cwd, "README.md")),

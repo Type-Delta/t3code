@@ -8,6 +8,7 @@ import {
   RotateCwIcon,
   Trash2Icon,
 } from "lucide-react";
+import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useStableCallback } from "../../hooks/useStableCallback";
@@ -28,6 +29,7 @@ import {
   type ManagementApiKeyCreateResult,
   type ManagementApiKeyRecord,
 } from "~/environments/managementApiKeys";
+import { m, type MessageResolver } from "~/i18n/messages";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { usePreparedConnection } from "~/state/session";
 import { cn } from "~/lib/utils";
@@ -101,10 +103,10 @@ const EXPIRATION_OPTIONS: ReadonlyArray<{
   readonly value: ManagementApiKeyExpiration;
   readonly label: string;
 }> = [
-  { value: "30-days", label: "30 days" },
-  { value: "90-days", label: "90 days" },
-  { value: "1-year", label: "1 year" },
-  { value: "never", label: "Never" },
+  { value: "30-days", label: msg("30 days") },
+  { value: "90-days", label: msg("90 days") },
+  { value: "1-year", label: msg("1 year") },
+  { value: "never", label: msg("Never", { $context: "API key expiration choice" }) },
 ];
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
@@ -116,10 +118,12 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : dateFormatter.format(date);
 }
 
-function formatLastUsed(value: string | null, nowMs: number): string {
-  if (value === null) return "Not used yet";
-  const elapsed = formatElapsedDurationLabel(value, nowMs);
-  return `Used ${elapsed}${elapsed === "just now" ? "" : " ago"}`;
+function formatLastUsed(value: string | null, nowMs: number, resolve: MessageResolver = m): string {
+  if (value === null) return resolve(msg("Not used yet"));
+  const elapsed = formatElapsedDurationLabel(value, nowMs, resolve);
+  return elapsed === resolve(msg("just now"))
+    ? resolve(msg("Used {elapsed}", { elapsed }))
+    : resolve(msg("Used {elapsed} ago", { elapsed }));
 }
 
 const isManagementApiKeyRequestError = Schema.is(ManagementApiKeyRequestError);
@@ -127,24 +131,27 @@ const isManagementApiKeyRequestError = Schema.is(ManagementApiKeyRequestError);
 function readErrorMessage(error: unknown): string {
   if (isManagementApiKeyRequestError(error)) {
     if (error.status === 401 || error.status === 403) {
-      return "You need access-management permission to manage API keys.";
+      return m(msg("You need access-management permission to manage API keys."));
     }
     return error.message;
   }
-  return error instanceof Error ? error.message : "Could not update management API keys.";
+  return error instanceof Error ? error.message : m(msg("Could not update management API keys."));
 }
 
 function keyExpiryState(
   key: ManagementApiKeyRecord,
   nowMs: number,
+  resolve: MessageResolver = m,
 ): {
   readonly label: string;
   readonly tone: "default" | "warning" | "error";
 } {
-  if (key.expiresAt === null) return { label: "Never expires", tone: "default" };
-  const label = formatExpiresInLabel(key.expiresAt, nowMs);
-  if (label === "Expired") return { label, tone: "error" };
+  if (key.expiresAt === null) {
+    return { label: resolve(msg("Never expires")), tone: "default" };
+  }
+  const label = formatExpiresInLabel(key.expiresAt, nowMs, resolve);
   const expiresAt = new Date(key.expiresAt).getTime();
+  if (expiresAt <= nowMs) return { label, tone: "error" };
   return {
     label,
     tone: expiresAt - nowMs <= 7 * 24 * 60 * 60 * 1_000 ? "warning" : "default",
@@ -166,7 +173,9 @@ function KeyRow({
   readonly onRotate: () => void;
   readonly onRevoke: () => void;
 }) {
-  const expiry = keyExpiryState(keyRecord, nowMs);
+  const gt = useGT();
+  const m = useMessages();
+  const expiry = keyExpiryState(keyRecord, nowMs, m);
   const isBusy = busyAction !== null;
   const canRotate = canRotateManagementApiKey(keyRecord.expiresAt, nowMs);
   return (
@@ -193,10 +202,10 @@ function KeyRow({
               variant="outline"
               disabled={isBusy || !canMutate}
               onClick={onRotate}
-              aria-label={`Rotate ${keyRecord.name}`}
+              aria-label={gt("Rotate {name}", { name: keyRecord.name })}
             >
               <RotateCwIcon aria-hidden />
-              {busyAction === "rotate" ? "Rotating…" : "Rotate"}
+              {busyAction === "rotate" ? <T>Rotating…</T> : <T>Rotate</T>}
             </Button>
           ) : null}
           <Button
@@ -204,29 +213,31 @@ function KeyRow({
             variant="destructive-outline"
             disabled={isBusy || !canMutate}
             onClick={onRevoke}
-            aria-label={`Revoke ${keyRecord.name}`}
+            aria-label={gt("Revoke {name}", { name: keyRecord.name })}
           >
             <Trash2Icon aria-hidden />
-            {busyAction === "revoke" ? "Revoking…" : "Revoke"}
+            {busyAction === "revoke" ? <T>Revoking…</T> : <T>Revoke</T>}
           </Button>
         </div>
       </div>
       <div className="mt-3 grid min-w-0 gap-2 text-xs text-muted-foreground sm:grid-cols-2">
         <div className="min-w-0">
           <span className="block text-2xs uppercase tracking-wide text-muted-foreground/70">
-            Access
+            <T>Access</T>
           </span>
           <span className="break-words text-foreground/85">
-            {managementApiKeyScopeSummary(keyRecord.scopes)}
+            {managementApiKeyScopeSummary(keyRecord.scopes, m)}
           </span>
         </div>
         <div className="min-w-0">
           <span className="block text-2xs uppercase tracking-wide text-muted-foreground/70">
-            Activity
+            <T>Activity</T>
           </span>
           <span className="break-words text-foreground/85">
-            Created {formatDate(keyRecord.createdAt)}
-            {` · ${formatLastUsed(keyRecord.lastUsedAt, nowMs)}`}
+            <T>
+              Created <Var>{formatDate(keyRecord.createdAt)}</Var>
+            </T>
+            {` · ${formatLastUsed(keyRecord.lastUsedAt, nowMs, m)}`}
           </span>
         </div>
       </div>
@@ -253,6 +264,8 @@ function CreateManagementApiKeyDialog({
     readonly expiresAt: string | null;
   }) => void;
 }) {
+  const gt = useGT();
+  const m = useMessages();
   const [name, setName] = useState("");
   const [expiration, setExpiration] = useState<ManagementApiKeyExpiration>(DEFAULT_EXPIRATION);
   const [preset, setPreset] = useState<ManagementApiKeyPreset>(DEFAULT_PRESET);
@@ -274,6 +287,8 @@ function CreateManagementApiKeyDialog({
   }
 
   const selectedScopes = scopesForManagementApiKeyPreset(preset, customScopes);
+  const selectedExpiration = EXPIRATION_OPTIONS.find((option) => option.value === expiration);
+  const selectedPreset = MANAGEMENT_API_KEY_PRESETS.find((option) => option.value === preset);
   const toggleScope = (scope: ManagementApiKeyScope, checked: boolean) => {
     setCustomScopes((current) => {
       const next = checked
@@ -300,21 +315,33 @@ function CreateManagementApiKeyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Create management API key for {environmentLabel}</DialogTitle>
+          <DialogTitle>
+            <T>
+              Create management API key for <Var>{environmentLabel}</Var>
+            </T>
+          </DialogTitle>
           <DialogDescription>
-            Create a durable credential for {environmentLabel}. The full secret is shown once.
+            <T>
+              Create a durable credential for <Var>{environmentLabel}</Var>. The full secret is
+              shown once.
+            </T>
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <form id={formId} onSubmit={handleSubmit}>
             <div className="space-y-5">
               <div className="space-y-2">
-                <Label htmlFor="management-api-key-name">Name</Label>
+                <Label htmlFor="management-api-key-name">
+                  <T>Name</T>
+                </Label>
                 <Input
                   id="management-api-key-name"
                   value={name}
                   onValueChange={setName}
-                  placeholder="My MCP client"
+                  placeholder={gt("My {protocol} client", {
+                    protocol: "MCP",
+                    $context: "API key name example",
+                  })}
                   autoFocus
                   required
                 />
@@ -322,7 +349,9 @@ function CreateManagementApiKeyDialog({
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="min-w-0 space-y-2">
-                  <Label htmlFor="management-api-key-expiration">Expiration</Label>
+                  <Label htmlFor="management-api-key-expiration">
+                    <T>Expiration</T>
+                  </Label>
                   <Select
                     value={expiration}
                     onValueChange={(value) => {
@@ -333,20 +362,22 @@ function CreateManagementApiKeyDialog({
                   >
                     <SelectTrigger id="management-api-key-expiration" className="w-full">
                       <SelectValue>
-                        {EXPIRATION_OPTIONS.find((option) => option.value === expiration)?.label}
+                        {selectedExpiration ? m(selectedExpiration.label) : null}
                       </SelectValue>
                     </SelectTrigger>
                     <SelectPopup>
                       {EXPIRATION_OPTIONS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
-                          {option.label}
+                          {m(option.label)}
                         </SelectItem>
                       ))}
                     </SelectPopup>
                   </Select>
                 </div>
                 <div className="min-w-0 space-y-2">
-                  <Label htmlFor="management-api-key-preset">Access preset</Label>
+                  <Label htmlFor="management-api-key-preset">
+                    <T>Access preset</T>
+                  </Label>
                   <Select
                     value={preset}
                     onValueChange={(value) => {
@@ -363,20 +394,15 @@ function CreateManagementApiKeyDialog({
                     }}
                   >
                     <SelectTrigger id="management-api-key-preset" className="w-full">
-                      <SelectValue>
-                        {
-                          MANAGEMENT_API_KEY_PRESETS.find((option) => option.value === preset)
-                            ?.label
-                        }
-                      </SelectValue>
+                      <SelectValue>{selectedPreset ? m(selectedPreset.label) : null}</SelectValue>
                     </SelectTrigger>
                     <SelectPopup>
                       {MANAGEMENT_API_KEY_PRESETS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
                           <span className="flex flex-col gap-0.5">
-                            <span>{option.label}</span>
+                            <span>{m(option.label)}</span>
                             <span className="text-xs text-muted-foreground">
-                              {option.description}
+                              {m(option.description)}
                             </span>
                           </span>
                         </SelectItem>
@@ -388,7 +414,9 @@ function CreateManagementApiKeyDialog({
 
               {preset === "custom" ? (
                 <fieldset className="space-y-2">
-                  <legend className="text-sm font-medium text-foreground">Custom scopes</legend>
+                  <legend className="text-sm font-medium text-foreground">
+                    <T>Custom scopes</T>
+                  </legend>
                   <div className="grid gap-1 rounded-lg border border-border/60 p-2 sm:grid-cols-2">
                     {MANAGEMENT_API_KEY_SCOPE_DETAILS.map((detail) => (
                       <label
@@ -398,19 +426,21 @@ function CreateManagementApiKeyDialog({
                         <Checkbox
                           checked={customScopes.includes(detail.scope)}
                           onCheckedChange={(checked) => toggleScope(detail.scope, Boolean(checked))}
-                          aria-label={detail.label}
+                          aria-label={m(detail.label)}
                         />
                         <span className="min-w-0">
-                          <span className="block text-sm text-foreground">{detail.label}</span>
+                          <span className="block text-sm text-foreground">{m(detail.label)}</span>
                           <span className="block text-xs leading-relaxed text-muted-foreground">
-                            {detail.description}
+                            {m(detail.description)}
                           </span>
                         </span>
                       </label>
                     ))}
                   </div>
                   {selectedScopes.length === 0 ? (
-                    <p className="text-xs text-destructive">Choose at least one scope.</p>
+                    <p className="text-xs text-destructive">
+                      <T>Choose at least one scope.</T>
+                    </p>
                   ) : null}
                 </fieldset>
               ) : null}
@@ -425,7 +455,7 @@ function CreateManagementApiKeyDialog({
         </DialogPanel>
         <DialogFooter variant="bare">
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            <T>Cancel</T>
           </Button>
           <Button
             form={formId}
@@ -433,7 +463,7 @@ function CreateManagementApiKeyDialog({
             disabled={isSubmitting || !name.trim() || selectedScopes.length === 0}
           >
             {isSubmitting ? <Spinner /> : <PlusIcon aria-hidden />}
-            {isSubmitting ? "Creating…" : "Create key"}
+            {isSubmitting ? <T>Creating…</T> : <T>Create key</T>}
           </Button>
         </DialogFooter>
       </DialogPopup>
@@ -449,7 +479,11 @@ function SecretRevealDialog({
   readonly onClose: () => void;
 }) {
   const { copyToClipboard, isCopied } = useCopyToClipboard<{ readonly value: string }>({
-    target: "management API key",
+    target: {
+      target: "management API key",
+      unavailableMessage: msg("Clipboard API is unavailable while copying the management API key."),
+      failureMessage: msg("Failed to copy the management API key to the clipboard."),
+    },
   });
   const jsonExample = buildManagementApiKeyJsonExample(result.mcpEndpoint);
   const codexExample = buildManagementApiKeyCodexExample(result.mcpEndpoint);
@@ -467,32 +501,45 @@ function SecretRevealDialog({
       <DialogPopup className="max-w-2xl" showCloseButton={false}>
         <DialogHeader>
           <DialogTitle>
-            {result.operation === "created"
-              ? "Management API key created"
-              : "Management API key rotated"}
+            {result.operation === "created" ? (
+              <T>Management API key created</T>
+            ) : (
+              <T>Management API key rotated</T>
+            )}
           </DialogTitle>
           <DialogDescription>
-            Copy this secret now. It will not be shown again, and closing this dialog clears it from
-            the page.
+            <T>
+              Copy this secret now. It will not be shown again, and closing this dialog clears it
+              from the page.
+            </T>
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <div className="space-y-5">
             <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm">
-              Environment:{" "}
-              <span className="font-medium text-foreground">{result.environmentLabel}</span>
+              <T>
+                Environment:{" "}
+                <span className="font-medium text-foreground">
+                  <Var>{result.environmentLabel}</Var>
+                </span>
+              </T>
             </div>
             <div className="rounded-lg border border-warning/40 bg-warning/8 p-3 text-sm text-warning-foreground">
               <div className="flex items-start gap-2">
                 <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
                 <p>
-                  Anyone with this secret can use the scopes granted to “{result.key.name}”. Store
-                  it in a password manager or environment variable.
+                  <T>
+                    Anyone with this secret can use the scopes granted to “
+                    <Var>{result.key.name}</Var>”. Store it in a password manager or environment
+                    variable.
+                  </T>
                 </p>
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="management-api-key-secret">One-time secret</Label>
+              <Label htmlFor="management-api-key-secret">
+                <T>One-time secret</T>
+              </Label>
               <Textarea
                 id="management-api-key-secret"
                 readOnly
@@ -509,17 +556,25 @@ function SecretRevealDialog({
                 onClick={() => copyToClipboard(result.secret, { value: result.secret })}
               >
                 {isCopied ? <CheckIcon aria-hidden /> : <ClipboardIcon aria-hidden />}
-                {isCopied ? "Copied" : "Copy secret"}
+                {isCopied ? <T>Copied</T> : <T>Copy secret</T>}
               </Button>
             </div>
             <div className="space-y-2">
-              <Label>MCP endpoint</Label>
+              <Label>
+                <T>
+                  <Var>MCP</Var> endpoint
+                </T>
+              </Label>
               <code className="block max-w-full break-all rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-foreground">
                 {result.mcpEndpoint}
               </code>
             </div>
             <div className="space-y-2">
-              <Label>Generic JSON HTTP MCP</Label>
+              <Label>
+                <T>
+                  Generic <Var>JSON HTTP MCP</Var>
+                </T>
+              </Label>
               <Textarea
                 readOnly
                 value={jsonExample}
@@ -529,7 +584,11 @@ function SecretRevealDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label>Codex</Label>
+              <Label>
+                <T>
+                  <Var>Codex</Var>
+                </T>
+              </Label>
               <Textarea
                 readOnly
                 value={codexExample}
@@ -538,19 +597,24 @@ function SecretRevealDialog({
                 onFocus={(event) => event.currentTarget.select()}
               />
               <p className="text-xs leading-relaxed text-muted-foreground">
-                Set <code>T3_MANAGEMENT_API_KEY</code> in the environment where Codex runs before
-                starting it.
+                <T>
+                  Set{" "}
+                  <code>
+                    <Var>T3_MANAGEMENT_API_KEY</Var>
+                  </code>{" "}
+                  in the environment where <Var>Codex</Var> runs before starting it.
+                </T>
               </p>
             </div>
           </div>
         </DialogPanel>
         <DialogFooter variant="bare">
           <Button variant="outline" onClick={onClose}>
-            Done and clear secret
+            <T>Done and clear secret</T>
           </Button>
           <Button onClick={() => copyToClipboard(result.secret, { value: result.secret })}>
             {isCopied ? <CheckIcon aria-hidden /> : <ClipboardIcon aria-hidden />}
-            {isCopied ? "Copied" : "Copy secret"}
+            {isCopied ? <T>Copied</T> : <T>Copy secret</T>}
           </Button>
         </DialogFooter>
       </DialogPopup>
@@ -590,6 +654,7 @@ const EMPTY_ENVIRONMENT_STATE: ManagementApiKeyEnvironmentState = {
 };
 
 export function ManagementApiKeysSettings() {
+  const gt = useGT();
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const environmentOptions = buildManagementApiKeyEnvironmentOptions(
@@ -825,7 +890,7 @@ export function ManagementApiKeysSettings() {
     <>
       <SettingsSection
         id="management-api-keys"
-        title="Management API keys"
+        title={gt("Management API keys")}
         icon={<KeyRoundIcon className="size-4 text-muted-foreground" aria-hidden />}
         headerAction={
           <Button
@@ -834,7 +899,7 @@ export function ManagementApiKeysSettings() {
             disabled={!canMutateSelectedEnvironment || mutationInFlight}
           >
             <PlusIcon aria-hidden />
-            Create key
+            <T>Create key</T>
           </Button>
         }
       >
@@ -845,8 +910,11 @@ export function ManagementApiKeysSettings() {
           disabled={mutationInFlight}
         />
         <SettingsRow
-          title="External MCP access"
-          description="Create a separate credential for a third-party MCP client that cannot use a normal T3 connection. Each key belongs to this machine and only exposes the thread tools selected below."
+          title={gt("External {protocol} access", { protocol: "MCP" })}
+          description={gt(
+            "Create a separate credential for a third-party {protocol} client that cannot use a normal {product} connection. Each key belongs to this machine and only exposes the thread tools selected below.",
+            { protocol: "MCP", product: "T3" },
+          )}
         />
         {selectedState.error && !isCreateDialogOpen ? (
           <div
@@ -859,21 +927,28 @@ export function ManagementApiKeysSettings() {
         <div className="space-y-2 px-3 sm:px-4">
           {selectedEnvironment === null ? (
             <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-              No environments are available. Connect a machine before managing its API keys.
+              <T>No environments are available. Connect a machine before managing its API keys.</T>
             </div>
           ) : Option.isNone(prepared) ? (
             <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-              {selectedEnvironment.label} is currently unavailable. Reconnect to this machine to
-              manage its API keys.
+              <T>
+                <Var>{selectedEnvironment.label}</Var> is currently unavailable. Reconnect to this
+                machine to manage its API keys.
+              </T>
             </div>
           ) : selectedState.isLoading ? (
             <div className="flex items-center gap-2 py-5 text-sm text-muted-foreground">
-              <Spinner /> Loading management API keys for {selectedEnvironment.label}…
+              <Spinner />
+              <T>
+                Loading management API keys for <Var>{selectedEnvironment.label}</Var>…
+              </T>
             </div>
           ) : selectedState.keys.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border/70 px-4 py-6 text-sm text-muted-foreground">
-              No management API keys yet. Create one when an external MCP client needs access to
-              this environment.
+              <T>
+                No management API keys yet. Create one when an external <Var>MCP</Var> client needs
+                access to this environment.
+              </T>
             </div>
           ) : (
             selectedState.keys.map((keyRecord) => (
@@ -909,7 +984,7 @@ export function ManagementApiKeysSettings() {
             disabled={!canListSelectedEnvironment || selectedState.isLoading || mutationInFlight}
           >
             <RefreshCwIcon className={cn(selectedState.isLoading && "animate-spin")} aria-hidden />
-            Refresh
+            <T>Refresh</T>
           </Button>
         </div>
       </SettingsSection>
@@ -917,7 +992,9 @@ export function ManagementApiKeysSettings() {
       <CreateManagementApiKeyDialog
         open={isCreateDialogOpen}
         environmentLabel={
-          createTarget?.environmentLabel ?? selectedEnvironment?.label ?? "the selected environment"
+          createTarget?.environmentLabel ??
+          selectedEnvironment?.label ??
+          gt("the selected environment")
         }
         isSubmitting={mutationInFlight}
         error={
@@ -959,24 +1036,42 @@ export function ManagementApiKeysSettings() {
         <AlertDialogPopup>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {pendingAction?.kind === "rotate"
-                ? `Rotate this management API key on ${pendingAction.target.environmentLabel}?`
-                : `Revoke this management API key on ${pendingAction?.target.environmentLabel ?? "this environment"}?`}
+              {pendingAction?.kind === "rotate" ? (
+                <T>
+                  Rotate this management API key on{" "}
+                  <Var>{pendingAction.target.environmentLabel}</Var>?
+                </T>
+              ) : (
+                <T>
+                  Revoke this management API key on{" "}
+                  <Var>{pendingAction?.target.environmentLabel ?? gt("this environment")}</Var>?
+                </T>
+              )}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              {pendingAction?.kind === "rotate"
-                ? `The current secret for “${pendingAction.key.name}” will stop working immediately. You will need to copy the replacement secret once.`
-                : `All clients using “${pendingAction?.key.name ?? "this key"}” will lose access immediately. This cannot be undone.`}
+              {pendingAction?.kind === "rotate" ? (
+                <T>
+                  The current secret for “<Var>{pendingAction.key.name}</Var>” will stop working
+                  immediately. You will need to copy the replacement secret once.
+                </T>
+              ) : (
+                <T>
+                  All clients using “<Var>{pendingAction?.key.name ?? gt("this key")}</Var>” will
+                  lose access immediately. This cannot be undone.
+                </T>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <AlertDialogClose render={<Button variant="outline" />}>
+              <T>Cancel</T>
+            </AlertDialogClose>
             <Button
               variant={pendingAction?.kind === "rotate" ? "default" : "destructive"}
               disabled={mutationInFlight}
               onClick={() => void handlePendingAction()}
             >
-              {pendingAction?.kind === "rotate" ? "Rotate key" : "Revoke key"}
+              {pendingAction?.kind === "rotate" ? <T>Rotate key</T> : <T>Revoke key</T>}
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>

@@ -59,7 +59,7 @@ const makeInstance = (
     currentConfig: Ref.get(configRef),
     start: Effect.void,
     stop: () => Effect.void,
-    snapshot: Effect.succeed({}),
+    snapshot: Effect.succeed({ activePid: Option.none() }),
     waitForReady: () => Effect.succeed(true),
   }) as unknown as DesktopBackendPool.DesktopBackendInstance;
 
@@ -125,7 +125,7 @@ describe("DesktopLocalEnvironmentAuth", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
-  it.effect("mints a fresh credential per session for a shared gateway backend", () =>
+  it.effect("mints fresh gateway credentials after a lost exchange response and expiry", () =>
     Effect.gen(function* () {
       const mints = yield* Ref.make(0);
       const exchanged = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -133,10 +133,16 @@ describe("DesktopLocalEnvironmentAuth", () => {
       const httpClientLayer = Layer.succeed(
         HttpClient.HttpClient,
         HttpClient.make((request) =>
-          Ref.update(exchanged, (all) => [
+          Ref.updateAndGet(exchanged, (all) => [
             ...all,
             request.body._tag === "Uint8Array" ? new TextDecoder().decode(request.body.body) : "",
-          ]).pipe(Effect.as(makeSessionResponse(request, "shared-bearer-token"))),
+          ]).pipe(
+            Effect.map((bodies) =>
+              bodies.length === 1
+                ? HttpClientResponse.fromWeb(request, new Response(null, { status: 503 }))
+                : makeSessionResponse(request, "shared-bearer-token"),
+            ),
+          ),
         ),
       );
       const poolLayer = DesktopBackendPool.layerTest([
@@ -156,19 +162,22 @@ describe("DesktopLocalEnvironmentAuth", () => {
 
       yield* Effect.gen(function* () {
         const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth;
+        const first = yield* Effect.forkChild(auth.getBearerToken());
+        yield* TestClock.adjust(Duration.seconds(1));
+        assert.strictEqual(yield* Fiber.join(first), "shared-bearer-token");
         assert.strictEqual(yield* auth.getBearerToken(), "shared-bearer-token");
-        assert.strictEqual(yield* auth.getBearerToken(), "shared-bearer-token");
-        assert.strictEqual(yield* Ref.get(mints), 1);
+        assert.strictEqual(yield* Ref.get(mints), 2);
         // The session expires after an hour; the next request needs a new one-time token.
         yield* TestClock.adjust(Duration.hours(1));
         yield* auth.getBearerToken();
       }).pipe(Effect.provide(testLayer));
 
-      assert.strictEqual(yield* Ref.get(mints), 2);
+      assert.strictEqual(yield* Ref.get(mints), 3);
       const bodies = yield* Ref.get(exchanged);
-      assert.strictEqual(bodies.length, 2);
+      assert.strictEqual(bodies.length, 3);
       assert.include(bodies[0], "one-time-1");
       assert.include(bodies[1], "one-time-2");
+      assert.include(bodies[2], "one-time-3");
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
@@ -405,6 +414,63 @@ describe("DesktopLocalEnvironmentAuth", () => {
 
       assert.strictEqual(yield* Fiber.join(fiber), "desktop-bearer-token");
       assert.strictEqual(yield* Ref.get(requestCount), 3);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("waits for the restarted backend and exchanges against its new config", () =>
+    Effect.gen(function* () {
+      const stopped = yield* Ref.make(false);
+      const readyAgain = yield* Deferred.make<void>();
+      const configRef = yield* Ref.make(Option.some(makeConfig(3773, "desktop-bootstrap-token")));
+      const requests = yield* Ref.make<ReadonlyArray<string>>([]);
+      const layerHttpClient = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.gen(function* () {
+            yield* Ref.update(requests, (all) => [...all, request.url]);
+            if (request.url.includes(":3773/")) {
+              yield* Ref.set(stopped, true);
+              return HttpClientResponse.fromWeb(request, new Response(null, { status: 503 }));
+            }
+            return makeSessionResponse(request, "desktop-bearer-token");
+          }),
+        ),
+      );
+      const layerRestartingPool = DesktopBackendPool.layerTest([
+        {
+          ...makeInstance(
+            DesktopBackendPool.BackendInstanceId(PRIMARY_LOCAL_ENVIRONMENT_ID),
+            configRef,
+          ),
+          waitForReady: () =>
+            Ref.get(stopped).pipe(
+              Effect.flatMap((isStopped) => (isStopped ? Deferred.await(readyAgain) : Effect.void)),
+              Effect.as(true),
+            ),
+        },
+      ]);
+      const auth = yield* DesktopLocalEnvironmentAuth.DesktopLocalEnvironmentAuth.pipe(
+        Effect.provide(
+          DesktopLocalEnvironmentAuth.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(layerRestartingPool, layerHttpClient, NodeCrypto.layerMac),
+            ),
+          ),
+        ),
+      );
+
+      const fiber = yield* Effect.forkChild(auth.getBearerToken());
+      yield* TestClock.adjust(Duration.seconds(5));
+      assert.deepEqual(yield* Ref.get(requests), ["http://127.0.0.1:3773/oauth/token"]);
+
+      yield* Ref.set(configRef, Option.some(makeConfig(3774, "new-desktop-bootstrap-token")));
+      yield* Ref.set(stopped, false);
+      yield* Deferred.succeed(readyAgain, undefined);
+      assert.strictEqual(yield* Fiber.join(fiber), "desktop-bearer-token");
+      assert.deepEqual(yield* Ref.get(requests), [
+        "http://127.0.0.1:3773/oauth/token",
+        "http://127.0.0.1:3774/oauth/token",
+      ]);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 

@@ -1,4 +1,5 @@
 import { PlusIcon, Trash2Icon } from "lucide-react";
+import { msg, T, useGT, useMessages } from "gt-react";
 import { useState } from "react";
 
 import { Button } from "../ui/button";
@@ -7,7 +8,6 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import {
-  AUTO_RETRY_PREDICATE_LABELS,
   conditionIsComplete,
   createAutoRetryTrigger,
   normalizeAutoRetrySettings,
@@ -25,10 +25,12 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 
 const NODE_LABELS = {
-  ...AUTO_RETRY_PREDICATE_LABELS,
-  and: "All of",
-  or: "Any of",
-  not: "Not",
+  error_message: msg("Error message contains"),
+  backend: msg("Backend is"),
+  model: msg("Model contains"),
+  and: msg("All of"),
+  or: msg("Any of"),
+  not: msg("Not"),
 } satisfies Record<AutoRetryCondition["kind"], string>;
 type NodeKind = keyof typeof NODE_LABELS;
 
@@ -45,6 +47,7 @@ export function AutoRetrySettings() {
   const saved = normalizeAutoRetrySettings(
     useScopedSettings((settings) => (settings as { readonly autoRetry?: unknown }).autoRetry),
   );
+  const gt = useGT();
   const updateSettings = useUpdateScopedSettings();
   const save = (next: AutoRetryValue) => updateSettings({ autoRetry: next });
   const saveTrigger = (id: string, update: (trigger: AutoRetryTrigger) => AutoRetryTrigger) =>
@@ -54,27 +57,27 @@ export function AutoRetrySettings() {
     });
 
   return (
-    <SettingsSection id="auto-retry" title="Auto retry">
+    <SettingsSection id="auto-retry" title={gt("Auto retry")}>
       <SettingsRow
         serverScoped
         settingKeys={["autoRetry"]}
         id="auto-retry-setting"
-        title="Auto retry"
-        description="Send a follow-up message when a failed turn matches a trigger."
+        title={gt("Auto retry")}
+        description={gt("Send a follow-up message when a failed turn matches a trigger.")}
         control={
           <ScopedSwitch
             settingKeys={["autoRetry"]}
             checked={saved.enabled}
             onCheckedChange={(enabled) => save({ ...saved, enabled })}
-            aria-label="Auto retry"
+            aria-label={gt("Auto retry")}
           />
         }
       />
       <SettingsRow
         serverScoped
         settingKeys={["autoRetry"]}
-        title="Triggers"
-        description="Triggers run in order. The first enabled match sends its message."
+        title={gt("Triggers")}
+        description={gt("Triggers run in order. The first enabled match sends its message.")}
         control={
           <Button
             size="sm"
@@ -87,7 +90,7 @@ export function AutoRetrySettings() {
             }
           >
             <PlusIcon />
-            Add trigger
+            <T>Add trigger</T>
           </Button>
         }
       >
@@ -122,28 +125,29 @@ function TriggerEditor({
   onChange: (update: (trigger: AutoRetryTrigger) => AutoRetryTrigger) => void;
   onRemove: () => void;
 }) {
-  const label = trigger.name.trim() || "Untitled trigger";
+  const gt = useGT();
+  const label = trigger.name.trim() || gt("Untitled trigger");
   return (
     <fieldset
-      aria-label={"Trigger " + label}
+      aria-label={gt("Trigger {name}", { name: label })}
       className="space-y-3 rounded-lg border border-border/60 p-3"
     >
       <div className="flex items-center gap-2">
         <Switch
           checked={trigger.enabled}
           onCheckedChange={(enabled) => onChange((current) => ({ ...current, enabled }))}
-          aria-label={"Enable " + label}
+          aria-label={gt("Enable {name}", { name: label })}
         />
         <CommitInput
           value={trigger.name}
-          aria-label="Trigger name"
-          placeholder="Trigger name"
+          aria-label={gt("Trigger name")}
+          placeholder={gt("Trigger name")}
           onCommit={(name) => onChange((current) => ({ ...current, name }))}
         />
         <Button
           size="icon-sm"
           variant="ghost-destructive"
-          aria-label={"Remove " + label}
+          aria-label={gt("Remove {name}", { name: label })}
           onClick={onRemove}
         >
           <Trash2Icon />
@@ -161,13 +165,13 @@ function TriggerEditor({
       />
       {!conditionIsComplete(trigger.condition) ? (
         <p className="text-xs text-warning">
-          Fill every condition value before this trigger can match.
+          <T>Fill every condition value before this trigger can match.</T>
         </p>
       ) : null}
       <CommitTextarea
         value={trigger.message}
-        aria-label={"Retry message for " + label}
-        placeholder="Message to send when this trigger matches"
+        aria-label={gt("Retry message for {name}", { name: label })}
+        placeholder={gt("Message to send when this trigger matches")}
         onCommit={(message) => onChange((current) => ({ ...current, message }))}
       />
     </fieldset>
@@ -186,6 +190,8 @@ function ConditionEditor({
     update: (node: AutoRetryCondition) => AutoRetryCondition | null,
   ) => void;
 }) {
+  const gt = useGT();
+  const m = useMessages();
   const depth = path.length;
   return (
     <div className="space-y-2" data-condition-depth={depth}>
@@ -200,14 +206,14 @@ function ConditionEditor({
           <SelectTrigger
             size="sm"
             className="w-44"
-            aria-label={"Condition type at level " + (depth + 1)}
+            aria-label={gt("Condition type at level {level}", { level: depth + 1 })}
           >
-            <SelectValue>{(kind: NodeKind) => NODE_LABELS[kind]}</SelectValue>
+            <SelectValue>{(kind: NodeKind) => m(NODE_LABELS[kind])}</SelectValue>
           </SelectTrigger>
           <SelectPopup>
             {Object.entries(NODE_LABELS).map(([kind, label]) => (
               <SelectItem key={kind} value={kind}>
-                {label}
+                {m(label)}
               </SelectItem>
             ))}
           </SelectPopup>
@@ -223,7 +229,7 @@ function ConditionEditor({
           <Button
             size="icon-sm"
             variant="ghost-destructive"
-            aria-label="Remove condition"
+            aria-label={gt("Remove condition")}
             onClick={() => onChange(path, () => null)}
           >
             <Trash2Icon />
@@ -257,7 +263,7 @@ function ConditionEditor({
             }
           >
             <PlusIcon />
-            Add condition
+            <T>Add condition</T>
           </Button>
         </div>
       ) : null}
@@ -274,12 +280,13 @@ function PredicateValue({
   value: string;
   onCommit: (value: string) => void;
 }) {
+  const gt = useGT();
   if (kind === "backend") {
     const known = providerClients.definitions.some((definition) => definition.driverKind === value);
     return (
       <Select value={value || null} onValueChange={(next) => next && onCommit(String(next))}>
-        <SelectTrigger size="sm" className="w-44" aria-label="Backend type">
-          <SelectValue placeholder="Choose backend" />
+        <SelectTrigger size="sm" className="w-44" aria-label={gt("Backend type")}>
+          <SelectValue placeholder={gt("Choose backend")} />
         </SelectTrigger>
         <SelectPopup>
           {!known && value ? <SelectItem value={value}>{value}</SelectItem> : null}
@@ -295,7 +302,7 @@ function PredicateValue({
   return (
     <CommitInput
       value={value}
-      aria-label={kind === "model" ? "Model substring" : "Error message substring"}
+      aria-label={kind === "model" ? gt("Model substring") : gt("Error message substring")}
       placeholder={kind === "model" ? "gpt-5" : "overloaded"}
       onCommit={onCommit}
     />

@@ -124,6 +124,9 @@ const fakeBackend = (
         response.end(
           JSON.stringify({
             name,
+            ...(request.url === "/.well-known/t3/environment"
+              ? { capabilities: { accessTokenRenewal: true, linkedEnvironments: true } }
+              : {}),
             cookie: request.headers.cookie ?? null,
             forwardedFor: request.headers["x-forwarded-for"],
             forwardedHost: request.headers["x-forwarded-host"] ?? null,
@@ -461,7 +464,10 @@ describe("serveGateway", () => {
         expect(maxAge).toBeLessThanOrEqual(60);
       };
       const descriptor = yield* get("/.well-known/t3/environment");
-      expect(JSON.parse(descriptor.body)).toMatchObject({ name: "alice" });
+      expect(JSON.parse(descriptor.body)).toMatchObject({
+        name: "alice",
+        capabilities: { accessTokenRenewal: false, linkedEnvironments: true },
+      });
       expectShortLived(
         descriptor.response.headers
           .getSetCookie()

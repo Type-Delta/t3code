@@ -4,7 +4,11 @@ import * as NodeSqlite from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import type { GatewayHelperStatus } from "@t3tools/contracts";
+import {
+  AuthRelayConfigureScope,
+  AuthStandardClientScopes,
+  type GatewayHelperStatus,
+} from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -18,7 +22,7 @@ import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
-import { ChildProcessSpawner } from "effect/process";
+import { type ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -44,18 +48,12 @@ const json = (request: HttpClientRequest.HttpClientRequest, code: number, body: 
     }),
   );
 
-interface SpawnedCommand {
-  readonly command: string;
-  readonly args: ReadonlyArray<string>;
-  readonly options: { readonly env?: Record<string, string>; readonly extendEnv?: boolean };
-}
-
 const layerGateway = (input: {
   readonly respond: (
     request: HttpClientRequest.HttpClientRequest,
   ) => Effect.Effect<HttpClientResponse.HttpClientResponse>;
-  readonly pairOutput?: string;
-  readonly spawned?: Array<SpawnedCommand>;
+  readonly pairOutput?: (args: ChildProcess.StandardCommand["args"]) => string;
+  readonly spawned?: Array<ChildProcess.StandardCommand>;
   readonly stateDir?: string;
   readonly hostTrusted?: boolean;
 }) =>
@@ -71,7 +69,8 @@ const layerGateway = (input: {
         Layer.succeed(
           ChildProcessSpawner.ChildProcessSpawner,
           ChildProcessSpawner.make((command) => {
-            input.spawned?.push(command as unknown as SpawnedCommand);
+            assert(command._tag === "StandardCommand");
+            input.spawned?.push(command);
             return Effect.succeed(
               ChildProcessSpawner.makeHandle({
                 pid: ChildProcessSpawner.ProcessId(1),
@@ -80,7 +79,9 @@ const layerGateway = (input: {
                 kill: () => Effect.void,
                 unref: Effect.succeed(Effect.void),
                 stdin: Sink.drain,
-                stdout: Stream.make(new TextEncoder().encode(input.pairOutput ?? "")),
+                stdout: Stream.make(
+                  new TextEncoder().encode(input.pairOutput?.(command.args) ?? ""),
+                ),
                 stderr: Stream.empty,
                 all: Stream.empty,
                 getInputFd: () => Sink.drain,
@@ -276,16 +277,18 @@ describe("DesktopGateway", () => {
         );
         const lock = new NodeSqlite.DatabaseSync(path.join(stateDir, "server-owner.sqlite"));
         yield* Effect.addFinalizer(() => Effect.sync(() => lock.close()));
-        const spawned: Array<SpawnedCommand> = [];
-        const mint = (port: number) =>
+        const spawned: Array<ChildProcess.StandardCommand> = [];
+        const mint = (port: number, supportsExplicitScopes = true) =>
           Effect.flatMap(DesktopGateway.DesktopGateway, (g) => g.mintPairingToken(port)).pipe(
             Effect.provide(
               layerGateway({
                 respond: () => Effect.never,
                 spawned,
                 stateDir,
-                pairOutput:
-                  "Pair with Alice's Mac\nToken: ABCD-1234\nExpires: 2026-11-23T10:00:00Z\n",
+                pairOutput: (args) =>
+                  !supportsExplicitScopes && args.includes("--scope")
+                    ? ""
+                    : "Pair with Alice's Mac\nToken: ABCD-1234\nExpires: 2026-11-23T10:00:00Z\n",
               }),
             ),
           );
@@ -303,17 +306,25 @@ describe("DesktopGateway", () => {
           refused.reason,
           "The server holding this T3 home is not on the shared port.",
         );
-        const [command] = spawned;
-        assert.isDefined(command);
-        // The shared runtime's own CLI, which matches the server whatever this app's version.
-        assert.strictEqual(command?.command, "/opt/t3code/current/t3");
-        assert.deepStrictEqual(command?.args.slice(0, 5), [
-          "pair",
-          "--base-dir",
-          "/home/alice/.t3",
-          "--label",
-          "T3 Code desktop",
-        ]);
+        const pairArgs = ["pair", "--base-dir", "/home/alice/.t3", "--label", "T3 Code desktop"];
+        const administrativeArgs = [
+          ...pairArgs,
+          ...[...AuthStandardClientScopes, AuthRelayConfigureScope].flatMap((scope) => [
+            "--scope",
+            scope,
+          ]),
+        ];
+        assert.deepStrictEqual(
+          spawned.map(({ args }) => args),
+          [administrativeArgs],
+        );
+
+        assert.strictEqual(yield* mint(41001, false), "ABCD-1234");
+        assert.deepStrictEqual(
+          spawned.map(({ args }) => args),
+          [administrativeArgs, administrativeArgs, pairArgs],
+        );
+        assert.isTrue(spawned.every(({ command }) => command === "/opt/t3code/current/t3"));
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
@@ -384,10 +395,6 @@ describe("shouldUpdateSharedRuntime", () => {
 });
 
 describe("pairing helpers", () => {
-  it("leaves scopes to the shared runtime, which may predate this app's", () => {
-    assert.notInclude(DesktopGateway.pairCommandArgs("/home"), "--scope");
-  });
-
   it("reads the token line from t3 pair output", () => {
     assert.deepStrictEqual(
       DesktopGateway.parsePairToken("Token: abc-123\nExpires: x"),

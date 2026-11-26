@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import {
+  AuthAdministrativeClientScopes,
   GATEWAY_HELPER_HEADER,
   GATEWAY_HELPER_PORT,
   GATEWAY_HELPER_STAGE_TIMEOUT_MS,
@@ -126,18 +127,6 @@ const sharedRuntimeUpdateProgress = (
       : compareSemverVersions(status.runtimeVersion, version) >= 0
         ? "done"
         : "running";
-
-/**
- * Arguments for the shared runtime's CLI that mint a one-time token on the backend serving `baseDir`.
- * Its default scopes are its server's standard ones; naming this app's could list one it lacks.
- */
-export const pairCommandArgs = (baseDir: string): ReadonlyArray<string> => [
-  "pair",
-  "--base-dir",
-  baseDir,
-  "--label",
-  PAIR_LABEL,
-];
 
 export const parsePairToken = (output: string): Option.Option<string> =>
   Option.fromNullishOr(/^Token: (\S+)$/m.exec(output)?.[1]);
@@ -327,18 +316,25 @@ const make = Effect.gen(function* () {
       return yield* fail("The server holding this T3 home is not on the shared port.");
     }
     // This app's own CLI could need a database migration that an older shared server blocks.
-    const output = yield* spawner
-      .string(
-        ChildProcess.make(host.runtimeExecutable, pairCommandArgs(environment.baseDir), {
-          stdin: "ignore",
-        }),
-      )
-      .pipe(
-        Effect.timeout(PAIR_TIMEOUT),
-        Effect.mapError((cause) => fail("Could not run t3 pair for the shared server.", cause)),
-      );
-    return yield* Effect.fromOption(parsePairToken(output)).pipe(
-      Effect.mapError(() => fail("t3 pair did not print a token for the shared server.")),
+    const args = ["pair", "--base-dir", environment.baseDir, "--label", PAIR_LABEL];
+    const runPair = (scopeArgs: ReadonlyArray<string>) =>
+      spawner
+        .string(
+          ChildProcess.make(host.runtimeExecutable, [...args, ...scopeArgs], { stdin: "ignore" }),
+        )
+        .pipe(Effect.map(parsePairToken));
+    return yield* runPair(
+      AuthAdministrativeClientScopes.flatMap((scope) => ["--scope", scope]),
+    ).pipe(
+      // Older runtimes can reject explicit scopes they do not know.
+      Effect.filterOrElse(Option.isSome, () => runPair([])),
+      Effect.timeout(PAIR_TIMEOUT),
+      Effect.mapError((cause) => fail("Could not run t3 pair for the shared server.", cause)),
+      Effect.flatMap((token) =>
+        Effect.fromOption(token).pipe(
+          Effect.mapError(() => fail("t3 pair did not print a token for the shared server.")),
+        ),
+      ),
     );
   });
 
