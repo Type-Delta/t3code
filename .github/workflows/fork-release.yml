@@ -23,10 +23,12 @@ on:
         default: ""
         type: string
 
-# Serialize each channel so preflight sees the previous release of that channel.
+# Serialize each channel so preflight sees the previous release of that channel. queue: max keeps
+# every pending run instead of the default single slot, so a burst of main pushes publishes each one.
 concurrency:
   group: fork-release-${{ github.event_name == 'schedule' && 'schedule' || inputs.channel || 'stable' }}
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
