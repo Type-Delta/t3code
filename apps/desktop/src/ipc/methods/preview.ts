@@ -4,13 +4,6 @@ import {
   DesktopPreviewAnnotationVoiceStateSchema,
   DesktopPreviewPickElementInputSchema,
   DesktopPreviewArtifactInputSchema,
-  DesktopPreviewAutomationClickInputSchema,
-  DesktopPreviewAutomationEvaluateInputSchema,
-  DesktopPreviewAutomationPressInputSchema,
-  DesktopPreviewAutomationScrollInputSchema,
-  DesktopPreviewAutomationStatusSchema,
-  DesktopPreviewAutomationTypeInputSchema,
-  DesktopPreviewAutomationWaitForInputSchema,
   DesktopPreviewConfigInputSchema,
   DesktopPreviewFindInPageInputSchema,
   DesktopPreviewNavigateInputSchema,
@@ -29,9 +22,12 @@ import {
   DesktopPreviewImportCookiesInputSchema,
   DesktopPreviewCreateTabInputSchema,
   DesktopPreviewTabInputSchema,
+  DesktopPreviewTunnelAccessResolutionInputSchema,
+  DesktopPortForwardInputSchema,
+  DesktopPortForwardSchema,
+  DesktopSharesLoopbackInputSchema,
   DesktopPreviewWebviewConfigSchema,
   PreviewAnnotationSubmissionResultSchema,
-  PreviewAutomationSnapshot,
   PreviewCaptureFailure,
   DEFAULT_BROWSER_PROFILE_ID,
   INCOGNITO_BROWSER_PROFILE_ID,
@@ -45,6 +41,7 @@ import * as NodeURL from "node:url";
 
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as BrowserImport from "../../preview/BrowserImport/BrowserImport.ts";
+import * as LoopbackTunnel from "../../preview/LoopbackTunnel.ts";
 import * as PreviewManager from "../../preview/Manager.ts";
 import { normalizeCaptureFailure } from "../../preview/captureErrors.ts";
 import * as DesktopClientSettings from "../../settings/DesktopClientSettings.ts";
@@ -71,6 +68,10 @@ export const installPreviewEventForwarding = Effect.fn(
   );
   yield* manager.subscribeFindResults((event) =>
     electronWindow.sendAll(IpcChannels.PREVIEW_FIND_RESULT_CHANNEL, event),
+  );
+  const tunnel = yield* LoopbackTunnel.LoopbackTunnel;
+  yield* tunnel.subscribeForwards((forwards) =>
+    electronWindow.sendAll(IpcChannels.PORT_FORWARD_CHANGE_CHANNEL, forwards),
   );
 });
 
@@ -123,9 +124,9 @@ const navigate = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_NAVIGATE_CHANNEL,
   payload: DesktopPreviewNavigateInputSchema,
   result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.navigate")(function* ({ tabId, url, waitForLoad }) {
+  handler: Effect.fn("desktop.ipc.preview.navigate")(function* ({ tabId, url }) {
     const manager = yield* PreviewManager.PreviewManager;
-    yield* manager.navigate(tabId, url, waitForLoad === undefined ? undefined : { waitForLoad });
+    yield* manager.navigate(tabId, url);
   }),
 });
 
@@ -355,16 +356,73 @@ const getPreviewConfig = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_GET_CONFIG_CHANNEL,
   payload: DesktopPreviewConfigInputSchema,
   result: DesktopPreviewWebviewConfigSchema,
-  handler: Effect.fn("desktop.ipc.preview.getConfig")(function* ({ environmentId, profileId }) {
+  handler: Effect.fn("desktop.ipc.preview.getConfig")(function* ({
+    environmentId,
+    profileId,
+    tunnelLoopback,
+  }) {
     const manager = yield* PreviewManager.PreviewManager;
+    const tunnel = yield* LoopbackTunnel.LoopbackTunnel;
     const { scope, persistent, namespace } = resolvePartitionScope(environmentId, profileId);
     // Session creation installs UA and permission handlers before a guest can attach.
-    yield* manager.getBrowserSession(scope, persistent, namespace);
+    const session = yield* manager.getBrowserSession(scope, persistent, namespace);
+    // Routed before the renderer learns the partition, so no guest loads loopback directly.
+    yield* tunnel.route({ environmentId, session, tunnelled: tunnelLoopback === true });
     return {
       partition: yield* manager.getBrowserPartition(scope, persistent, namespace),
       webPreferences: PREVIEW_WEBVIEW_PREFERENCES,
       preloadUrl: NodeURL.pathToFileURL(`${__dirname}/preview-pick-preload.cjs`).href,
     };
+  }),
+});
+
+const resolveTunnelAccess = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_TUNNEL_ACCESS_RESOLVE_CHANNEL,
+  payload: DesktopPreviewTunnelAccessResolutionInputSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.preview.resolveTunnelAccess")(function* (input) {
+    const tunnel = yield* LoopbackTunnel.LoopbackTunnel;
+    yield* tunnel.resolveAccess(input);
+  }),
+});
+
+const forwardPort = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PORT_FORWARD_START_CHANNEL,
+  payload: DesktopPortForwardInputSchema,
+  result: DesktopPortForwardSchema,
+  handler: Effect.fn("desktop.ipc.preview.forwardPort")(function* (input) {
+    const tunnel = yield* LoopbackTunnel.LoopbackTunnel;
+    return yield* tunnel.forward(input);
+  }),
+});
+
+const stopPortForward = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PORT_FORWARD_STOP_CHANNEL,
+  payload: DesktopPortForwardInputSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.preview.stopPortForward")(function* (input) {
+    const tunnel = yield* LoopbackTunnel.LoopbackTunnel;
+    yield* tunnel.stopForward(input);
+  }),
+});
+
+const listPortForwards = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PORT_FORWARD_LIST_CHANNEL,
+  payload: Schema.Void,
+  result: Schema.Array(DesktopPortForwardSchema),
+  handler: Effect.fn("desktop.ipc.preview.listPortForwards")(function* () {
+    const tunnel = yield* LoopbackTunnel.LoopbackTunnel;
+    return yield* tunnel.forwards;
+  }),
+});
+
+const sharesLoopback = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PORT_FORWARD_SHARES_LOOPBACK_CHANNEL,
+  payload: DesktopSharesLoopbackInputSchema,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.preview.sharesLoopback")(function* ({ environmentId }) {
+    const tunnel = yield* LoopbackTunnel.LoopbackTunnel;
+    return yield* tunnel.sharesLoopback(environmentId);
   }),
 });
 
@@ -475,86 +533,6 @@ const copyArtifactToClipboard = DesktopIpc.makeIpcMethod({
   }),
 });
 
-export const automationStatus = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_AUTOMATION_STATUS_CHANNEL,
-  payload: DesktopPreviewTabInputSchema,
-  result: DesktopPreviewAutomationStatusSchema,
-  handler: Effect.fn("desktop.ipc.preview.automationStatus")(function* ({ tabId }) {
-    const manager = yield* PreviewManager.PreviewManager;
-    return yield* manager.automationStatus(tabId);
-  }),
-});
-
-export const automationSnapshot = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_AUTOMATION_SNAPSHOT_CHANNEL,
-  payload: DesktopPreviewTabInputSchema,
-  result: PreviewAutomationSnapshot,
-  handler: Effect.fn("desktop.ipc.preview.automationSnapshot")(function* ({ tabId }) {
-    const manager = yield* PreviewManager.PreviewManager;
-    return yield* manager.automationSnapshot(tabId);
-  }),
-});
-
-export const automationClick = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_AUTOMATION_CLICK_CHANNEL,
-  payload: DesktopPreviewAutomationClickInputSchema,
-  result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.automationClick")(function* ({ tabId, input }) {
-    const manager = yield* PreviewManager.PreviewManager;
-    yield* manager.automationClick(tabId, input);
-  }),
-});
-
-export const automationType = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_AUTOMATION_TYPE_CHANNEL,
-  payload: DesktopPreviewAutomationTypeInputSchema,
-  result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.automationType")(function* ({ tabId, input }) {
-    const manager = yield* PreviewManager.PreviewManager;
-    yield* manager.automationType(tabId, input);
-  }),
-});
-
-export const automationPress = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_AUTOMATION_PRESS_CHANNEL,
-  payload: DesktopPreviewAutomationPressInputSchema,
-  result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.automationPress")(function* ({ tabId, input }) {
-    const manager = yield* PreviewManager.PreviewManager;
-    yield* manager.automationPress(tabId, input);
-  }),
-});
-
-export const automationScroll = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_AUTOMATION_SCROLL_CHANNEL,
-  payload: DesktopPreviewAutomationScrollInputSchema,
-  result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.automationScroll")(function* ({ tabId, input }) {
-    const manager = yield* PreviewManager.PreviewManager;
-    yield* manager.automationScroll(tabId, input);
-  }),
-});
-
-export const automationEvaluate = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_AUTOMATION_EVALUATE_CHANNEL,
-  payload: DesktopPreviewAutomationEvaluateInputSchema,
-  result: Schema.Unknown,
-  handler: Effect.fn("desktop.ipc.preview.automationEvaluate")(function* ({ tabId, input }) {
-    const manager = yield* PreviewManager.PreviewManager;
-    return yield* manager.automationEvaluate(tabId, input);
-  }),
-});
-
-export const automationWaitFor = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_AUTOMATION_WAIT_FOR_CHANNEL,
-  payload: DesktopPreviewAutomationWaitForInputSchema,
-  result: Schema.Void,
-  handler: Effect.fn("desktop.ipc.preview.automationWaitFor")(function* ({ tabId, input }) {
-    const manager = yield* PreviewManager.PreviewManager;
-    yield* manager.automationWaitFor(tabId, input);
-  }),
-});
-
 export const saveRecording = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_RECORDING_SAVE_CHANNEL,
   payload: DesktopPreviewRecordingSaveInputSchema,
@@ -591,6 +569,11 @@ export const methods = [
   clearCookies,
   clearCache,
   getPreviewConfig,
+  resolveTunnelAccess,
+  forwardPort,
+  stopPortForward,
+  listPortForwards,
+  sharesLoopback,
   setAnnotationTheme,
   setAnnotationSendEnabled,
   pickElement,
@@ -600,14 +583,6 @@ export const methods = [
   copyArtifactToClipboard,
   openPictureInPicture,
   closePictureInPicture,
-  automationStatus,
-  automationSnapshot,
-  automationClick,
-  automationType,
-  automationPress,
-  automationScroll,
-  automationEvaluate,
-  automationWaitFor,
   startRecording,
   stopRecording,
   saveRecording,

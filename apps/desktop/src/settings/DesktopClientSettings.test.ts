@@ -27,6 +27,7 @@ const clientSettings: ClientSettings = {
   browserDefaultAppearance: "dark",
   browserRecordingFrameRate: 60,
   browserLinkTarget: "app",
+  sideThreadOpenTarget: "main",
   browserAutoShowFloatingPreview: false,
   enablePromptSuggestion: false,
   promptSuggestionInstructions: "",

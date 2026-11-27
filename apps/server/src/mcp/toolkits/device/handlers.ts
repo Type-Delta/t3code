@@ -9,12 +9,15 @@ import {
   DeviceToolUnavailableError,
   LOCAL_DEVICE_HOST_ID,
 } from "@t3tools/contracts";
+import { splitsSurrogatePair } from "@t3tools/shared/assistantCitations";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as DeviceService from "../../../device/DeviceService.ts";
 import { threadWorkspaceRoot } from "../../../project/threadWorkspaceRoot.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import { assertFullAccessNamingLink, assertNotLinked } from "../../linkOrigin.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { loadCaller } from "../../threadAccess.ts";
 import { DeviceScreenshotToolkit, DeviceStandardToolkit, DeviceToolkit } from "./tools.ts";
 
 function agentDeviceTargetArgs(device: DeviceSummary): ReadonlyArray<string> {
@@ -94,6 +97,9 @@ const requireDeviceAccess = McpInvocationContext.requireThreadMcpCapability("dev
   ),
 );
 
+const slicePrefix = (text: string, max: number) =>
+  text.slice(0, splitsSurrogatePair(text, max) ? max - 1 : max);
+
 export const resolveHostId = Effect.fn("handlers.resolveHostId")(function* (
   hosts: ReadonlyArray<DeviceHostSummary>,
   hostId: string | undefined,
@@ -105,10 +111,10 @@ export const resolveHostId = Effect.fn("handlers.resolveHostId")(function* (
   if (labelMatches.length === 1) return labelMatches[0]!.id;
   const candidates = labelMatches.length > 1 ? labelMatches : hosts;
   const listed = [
-    ...candidates.slice(0, 10).map((host) => `${host.label.slice(0, 64)} (${host.id})`),
+    ...candidates.slice(0, 10).map((host) => `${slicePrefix(host.label, 64)} (${host.id})`),
     ...(candidates.length > 10 ? [`${candidates.length - 10} more`] : []),
   ].join(", ");
-  const selector = hostId.slice(0, 128);
+  const selector = slicePrefix(hostId, 128);
   return yield* new DeviceToolUnavailableError({
     reason:
       labelMatches.length > 1
@@ -213,6 +219,20 @@ const pickDevice = Effect.fn("handlers.pickDevice")(function* (
 
 const toolError = (error: DeviceError | DeviceToolUnavailableError) => error;
 
+// A linked host runs apps as the other machine's user, through this environment's full-access
+// link, so neither a narrower thread nor work a narrower link started may reach it.
+const requireLinkedHostCaller = loadCaller().pipe(
+  Effect.tap((caller) => assertNotLinked(caller, "use a linked environment's devices")),
+  Effect.flatMap((caller) =>
+    assertFullAccessNamingLink(
+      caller,
+      "Devices on a linked environment run as that machine's user, so only a full-access thread outside plan mode can open or power them off. Ask the user to switch this thread to full access and leave plan mode, or use a device on this machine instead.",
+      "use a linked environment's devices",
+    ),
+  ),
+  Effect.mapError((failure) => new DeviceToolUnavailableError({ reason: failure.message })),
+);
+
 const handlers = {
   device_list: McpToolAccess.readsAsCaller((input) =>
     Effect.gen(function* () {
@@ -227,7 +247,11 @@ const handlers = {
       }
       const hostId = yield* resolveHostId(state.hosts, input?.hostId);
       const open = state.sessions
-        .filter((session) => session.threadId === scope.thread.threadId)
+        .filter(
+          (session) =>
+            session.threadId === scope.thread.threadId &&
+            (hostId === undefined || session.hostId === hostId),
+        )
         .map((session) => ({ hostId: session.hostId, deviceId: session.deviceId }));
       return {
         hostStatuses: Object.fromEntries(
@@ -254,6 +278,9 @@ const handlers = {
       }
       const hostId = yield* resolveHostId(state.hosts, input.hostId);
       const target = yield* pickDevice(state, { ...input, hostId });
+      if (state.hosts.find((host) => host.id === target.hostId)?.kind === "linked") {
+        yield* requireLinkedHostCaller;
+      }
       // Resolve consent and agent connectivity before booting or registering a session.
       if (!(yield* devices.agentReadinessIfSupported(target.hostId))) {
         return yield* new DeviceToolUnavailableError({
@@ -371,6 +398,41 @@ const handlers = {
               .locateSession({ threadId: scope.thread.threadId, deviceId, hostId: inputHostId })
               .pipe(mapLocateErrors);
       const hostId = Option.isSome(open) ? open.value.hostId : inputHostId;
+      if (input.shutdown === true) {
+        const mayUseLinked = yield* requireLinkedHostCaller.pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false),
+        );
+        if (!mayUseLinked) {
+          const hosts = (yield* devices.state).hosts;
+          const closing = Option.isSome(open)
+            ? [open.value]
+            : deviceId === undefined
+              ? (yield* devices.sessionsForThread(scope.thread.threadId)).filter(
+                  (session) => hostId === undefined || session.hostId === hostId,
+                )
+              : [];
+          if (
+            closing.some(
+              (session) => hosts.find((host) => host.id === session.hostId)?.kind === "linked",
+            )
+          )
+            yield* requireLinkedHostCaller;
+          // Exact targets, so a linked device opened meanwhile is not powered off too.
+          yield* Effect.forEach(
+            closing,
+            (session) =>
+              devices.close({
+                threadId: scope.thread.threadId,
+                hostId: session.hostId,
+                deviceId: session.deviceId,
+                shutdown: true,
+              }),
+            { discard: true },
+          );
+          return {};
+        }
+      }
       yield* devices.close({
         threadId: scope.thread.threadId,
         ...(hostId === undefined ? {} : { hostId }),

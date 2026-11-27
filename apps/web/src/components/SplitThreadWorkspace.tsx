@@ -1,4 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
+import { T, useGT } from "gt-react";
 import {
   scopedThreadKey,
   scopeProjectRef,
@@ -50,6 +51,7 @@ import {
   useThreadProjection,
   useThreadRefs,
   useThreadShell,
+  useThreadError,
   useThreadStatus,
 } from "../state/entities";
 import ChatView from "./ChatView";
@@ -234,14 +236,17 @@ function SplitThreadPane(props: {
     rightPanelSlot,
     threadRef,
   } = props;
+  const gt = useGT();
   const navigate = useNavigate();
   const serverThread = useThreadProjection(threadRef);
   const serverThreadShell = useThreadShell(threadRef);
   const serverThreadStatus = useThreadStatus(threadRef);
+  const serverThreadError = useThreadError(threadRef);
   const threadSyncPhase = resolveThreadSyncPhase({
     detailExists: serverThread !== null,
     shellExists: serverThreadShell !== null,
     status: serverThreadStatus,
+    hasError: serverThreadError !== null,
   });
   const projectId = serverThreadShell?.projectId ?? draftPane?.projectId;
   const projectRef = projectId ? scopeProjectRef(threadRef.environmentId, projectId) : null;
@@ -363,7 +368,7 @@ function SplitThreadPane(props: {
           <TooltipTrigger
             render={
               <Button
-                aria-label={`Detach ${threadTitle} from split view`}
+                aria-label={gt("Detach {threadTitle} from split view", { threadTitle })}
                 className="shrink-0"
                 draggable={false}
                 size="icon-xs"
@@ -378,7 +383,9 @@ function SplitThreadPane(props: {
           >
             <PanelLeftCloseIcon className="size-3.5" />
           </TooltipTrigger>
-          <TooltipPopup side="bottom">Detach from split view</TooltipPopup>
+          <TooltipPopup side="bottom">
+            <T>Detach from split view</T>
+          </TooltipPopup>
         </Tooltip>
       </div>
       <div className="flex min-h-0 min-w-0 flex-1">

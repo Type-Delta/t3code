@@ -42,7 +42,9 @@ describe("buildRemoteOpenUrl", () => {
         absolutePath: "/home/dev/project",
       });
 
-      expect(url).toBe(`vscode://vscode-remote/ssh-remote+${authority}/home/dev/project`);
+      expect(url).toBe(
+        `vscode://vscode-remote/ssh-remote+${authority}/home/dev/project?windowId=_blank`,
+      );
       expect(new URL(url ?? "").username).toBe("");
     },
   );

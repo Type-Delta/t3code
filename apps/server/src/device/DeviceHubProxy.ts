@@ -5,7 +5,9 @@ import { AuthOrchestrationReadScope, AuthOrchestrationOperateScope } from "@t3to
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import {
+  FetchHttpClient,
   HttpClient,
   HttpClientRequest,
   HttpMethod,
@@ -14,9 +16,12 @@ import {
   HttpServerResponse,
 } from "effect/http";
 import * as Socket from "effect/socket/Socket";
+import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 
-import { authenticateMediaRequest } from "../auth/http.ts";
+import { authenticateMediaRequest, failEnvironmentInternal } from "../auth/http.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
+import { LINK_EXPIRES_AT_HEADER } from "../mcp/McpInvocationContext.ts";
 import * as DeviceService from "./DeviceService.ts";
 import { repeatStillFrame } from "./mjpegStillFrame.ts";
 
@@ -101,6 +106,7 @@ const proxyWebSocket = Effect.fn("DeviceHubProxy.proxyWebSocket")(function* (
   protocols: ReadonlyArray<string> = [],
   headers: Readonly<Record<string, string>> = {},
 ) {
+  const transport = NodeHttpServerRequest.toIncomingMessage(request).socket;
   const client = yield* request.upgrade;
   const upstream = yield* Socket.makeWebSocket(upstreamUrl, {
     openTimeout: "10 seconds",
@@ -116,7 +122,10 @@ const proxyWebSocket = Effect.fn("DeviceHubProxy.proxyWebSocket")(function* (
         pumpFrames(client, writeToUpstream),
       );
     }),
-  ).pipe(Effect.ignoreCause);
+  ).pipe(
+    Effect.onInterrupt(() => Effect.sync(() => transport.destroy())),
+    Effect.ignoreCause,
+  );
   return HttpServerResponse.empty();
 });
 
@@ -132,9 +141,18 @@ const pumpFrames =
 const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   request: HttpServerRequest.HttpServerRequest,
   upstreamUrl: string,
+  invalidated: Effect.Effect<void>,
   extraHeaders: Readonly<Record<string, string>> = {},
+  refuseRedirects = false,
 ) {
-  const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
+  const http = yield* HttpClient.HttpClient;
+  const httpClient = HttpClient.withScope(
+    refuseRedirects
+      ? HttpClient.transform(http, (response) =>
+          Effect.provideService(response, FetchHttpClient.RequestInit, { redirect: "manual" }),
+        )
+      : http,
+  );
   const method = request.method;
   if (!HttpMethod.isHttpMethod(method)) {
     return HttpServerResponse.text("Method Not Allowed", { status: 405 });
@@ -152,15 +170,27 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
           contentType: request.headers["content-type"],
         }),
   );
-  const response = yield* httpClient.execute(upstreamRequest);
+  const response = yield* Effect.raceFirst(
+    httpClient.execute(upstreamRequest),
+    invalidated.pipe(Effect.as(null)),
+  );
+  if (response === null)
+    return HttpServerResponse.text("Device host is no longer available.", { status: 503 });
+  if (refuseRedirects && response.status >= 300 && response.status < 400) {
+    return HttpServerResponse.text(`Device hub answered HTTP ${response.status}.`, { status: 502 });
+  }
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(response.headers)) {
     // A cookie from an upstream such as an Expo Simulators session's preview host would land on T3's origin.
+    // Clear-Site-Data likewise applies to the origin that serves it. A linked environment's
+    // link expiry is for this server, not its browsers.
     if (
       name === "content-encoding" ||
       name === "transfer-encoding" ||
       name === "connection" ||
-      name === "set-cookie"
+      name === "set-cookie" ||
+      name === "clear-site-data" ||
+      name === LINK_EXPIRES_AT_HEADER
     ) {
       continue;
     }
@@ -168,23 +198,24 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   }
   // Long-lived MJPEG and AVCC responses must not be buffered by compression.
   headers["cache-control"] = "no-store, no-transform";
+  // Hub responses are data and streams; none renders as a page on this origin.
+  headers["x-content-type-options"] = "nosniff";
+  headers["content-security-policy"] = "default-src 'none'; sandbox";
   const body = headers["content-type"]?.startsWith("multipart/x-mixed-replace")
     ? repeatStillFrame(response.stream)
     : response.stream;
-  return HttpServerResponse.stream(body, {
+  return HttpServerResponse.stream(body.pipe(Stream.interruptWhen(invalidated)), {
     status: response.status,
     headers,
     ...(headers["content-type"] ? { contentType: headers["content-type"] } : {}),
   });
 });
 
-const handler = Effect.gen(function* () {
-  const request = yield* HttpServerRequest.HttpServerRequest;
-  const url = requestUrl(request);
-  if (Option.isNone(url)) {
-    return HttpServerResponse.text("Bad Request", { status: 400 });
-  }
-  const hubPath = url.value.pathname.slice(DeviceService.DEVICE_HUB_ROUTE_PREFIX.length) || "/";
+/**
+ * The scope a hub request needs, or the response refusing a path or method the hub must not
+ * be asked for. Streams take read scope; input and stream tuning take operate scope.
+ */
+export const hubRequestScope = (request: HttpServerRequest.HttpServerRequest, hubPath: string) => {
   const upgrade = isWebSocketUpgrade(request);
   const matches = (paths: ReadonlyArray<RegExp>) => paths.some((pattern) => pattern.test(hubPath));
   const allowed = upgrade
@@ -200,16 +231,23 @@ const handler = Effect.gen(function* () {
   const controlsDevice =
     (upgrade && hubPath !== "/api/devices/ws") ||
     (!readOnly && /\/api\/(stream-(mode|settings)|fold)$/.test(hubPath));
-  yield* authenticateMediaRequest(
-    controlsDevice ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope,
-  );
+  return controlsDevice ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope;
+};
+
+/**
+ * Sends an authenticated, allowed hub request to `ready`'s hub until `invalidated` or the routed
+ * upstream's `ended` completes.
+ */
+export const forwardHubRequest = Effect.fn("DeviceHubProxy.forwardHubRequest")(function* (
+  request: HttpServerRequest.HttpServerRequest,
+  url: URL,
+  hubPath: string,
+  ready: DeviceService.DeviceReadiness,
+  invalidated: Effect.Effect<void>,
+) {
   const devices = yield* DeviceService.DeviceService;
-  const ready = yield* devices.currentReadiness(url.value.searchParams.get("hostId") ?? undefined);
-  if (!ready) {
-    return HttpServerResponse.text("Device hub is not running", { status: 503 });
-  }
   // Consume the auth ticket here; never forward it to the hub.
-  const upstreamSearch = new URLSearchParams(url.value.search);
+  const upstreamSearch = new URLSearchParams(url.search);
   upstreamSearch.delete("wsTicket");
   upstreamSearch.delete("hostId");
   const search = upstreamSearch.size > 0 ? `?${upstreamSearch.toString()}` : "";
@@ -230,15 +268,48 @@ const handler = Effect.gen(function* () {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
   const upstreamUrl = routed?.url ?? `${ready.hub.origin}${hubPath}${search}`;
-  if (upgrade) {
-    return yield* proxyWebSocket(
-      request,
-      upstreamUrl.replace(/^http/, "ws"),
-      routed?.protocols,
-      routed?.headers,
+  const upstreamHeaders =
+    routed?.headers ??
+    (ready.hub.token === undefined ? undefined : { authorization: `Bearer ${ready.hub.token}` });
+  const ended =
+    routed?.ended === undefined ? invalidated : Effect.raceFirst(invalidated, routed.ended);
+  if (isWebSocketUpgrade(request)) {
+    return yield* Effect.raceFirst(
+      proxyWebSocket(
+        request,
+        upstreamUrl.replace(/^http/, "ws"),
+        routed?.protocols,
+        upstreamHeaders,
+      ),
+      ended.pipe(Effect.as(HttpServerResponse.empty())),
     );
   }
-  return yield* proxyHttp(request, upstreamUrl, routed?.headers);
+  return yield* proxyHttp(request, upstreamUrl, ended, upstreamHeaders, routed?.refuseRedirects);
+});
+
+const handler = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const url = requestUrl(request);
+  if (Option.isNone(url)) {
+    return HttpServerResponse.text("Bad Request", { status: 400 });
+  }
+  const hubPath = url.value.pathname.slice(DeviceService.DEVICE_HUB_ROUTE_PREFIX.length) || "/";
+  const scope = hubRequestScope(request, hubPath);
+  if (HttpServerResponse.isHttpServerResponse(scope)) return scope;
+  const session = yield* authenticateMediaRequest(scope);
+  const sessions = yield* SessionStore.SessionStore;
+  const invalidated = sessions.awaitInvalidation(session.sessionId).pipe(
+    Effect.catchTags({
+      SessionCredentialVerificationError: (error) =>
+        failEnvironmentInternal("internal_error", error).pipe(Effect.ignore),
+    }),
+  );
+  const devices = yield* DeviceService.DeviceService;
+  const ready = yield* devices.currentReadiness(url.value.searchParams.get("hostId") ?? undefined);
+  if (!ready) {
+    return HttpServerResponse.text("Device hub is not running", { status: 503 });
+  }
+  return yield* forwardHubRequest(request, url.value, hubPath, ready, invalidated);
 });
 
 export const layer = HttpRouter.add("*", `${DeviceService.DEVICE_HUB_ROUTE_PREFIX}/*`, handler);

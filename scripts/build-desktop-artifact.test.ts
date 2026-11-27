@@ -596,7 +596,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
-  it.effect("declares Calendar access for hosted commands in macOS builds", () =>
+  it.effect("declares Calendar and Apple Events access for hosted commands in macOS builds", () =>
     Effect.gen(function* () {
       for (const version of ["0.1.0", "0.1.1-nightly.20261019.1"]) {
         for (const signed of [false, true]) {
@@ -614,6 +614,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             "NSCalendarsUsageDescription",
             "NSCalendarsFullAccessUsageDescription",
             "NSCalendarsWriteOnlyAccessUsageDescription",
+            "NSAppleEventsUsageDescription",
           ]) {
             assert.isString(mac.extendInfo[key], `${version}, signed=${signed}: ${key}`);
             assert.isNotEmpty(mac.extendInfo[key]);
@@ -1463,6 +1464,33 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
+  it.effect("leaves the prepared server compile cache out of the file-count budget", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* makeWindowsPayloadFixture({ copyUnpackedNatives: true });
+        const validate = (fileLimit?: number) =>
+          validateWindowsPackagedPayload({
+            stageDistDir: fixture.stageDistDir,
+            appExecutableName: fixture.appExecutableName,
+            targetArch: "x64",
+            appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+            ...(fileLimit === undefined ? {} : { fileLimit }),
+          });
+        const { fileCount } = yield* validate();
+        const cacheDir = path.join(fixture.packagedAppDir, "resources/server-compile-cache");
+        yield* fs.makeDirectory(cacheDir, { recursive: true });
+        for (const name of ["manifest.json", "0.cache", "1.cache"]) {
+          yield* fs.writeFileString(path.join(cacheDir, name), name);
+        }
+
+        const result = yield* validate(fileCount);
+        assert.equal(result.fileCount, fileCount);
+      }),
+    ),
+  );
+
   it.effect("rejects a sidecar whose extracted server bundle cannot resolve", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1667,6 +1695,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
+    assert.match(
+      entitlements,
+      /<key>com\.apple\.security\.automation\.apple-events<\/key>\s*<true\/>/u,
+    );
     assert.match(entitlements, /<key>com\.apple\.security\.device\.camera<\/key>\s*<true\/>/u);
     assert.match(entitlements, /<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\/>/u);
     assert.notInclude(entitlements, "keychain-access-groups");

@@ -1,5 +1,8 @@
 import type { StorageUsage, StorageUsageCategoryId } from "@t3tools/contracts";
 
+import { msg } from "gt-react";
+
+import { m, type MessageResolver } from "../../i18n/messages";
 import { formatBytes } from "../../lib/formatBytes";
 
 /** Share of the bar, in percent, that a tiny non-zero part still gets so it stays visible. */
@@ -12,38 +15,38 @@ export const STORAGE_USAGE_CATEGORIES: Record<
   { readonly label: string; readonly hint: string; readonly swatchClassName: string }
 > = {
   database: {
-    label: "Database",
-    hint: "Threads, messages, and history",
+    label: msg("Database"),
+    hint: msg("Threads, messages, and history"),
     swatchClassName: "bg-blue-500",
   },
   worktrees: {
-    label: "Worktrees",
-    hint: "Checkouts T3 Code created",
+    label: msg("Worktrees"),
+    hint: msg("Checkouts T3 Code created"),
     swatchClassName: "bg-violet-500",
   },
   checkpoints: {
-    label: "Git snapshots",
-    hint: "Turn checkpoints for diffs and undo",
+    label: msg("Git snapshots"),
+    hint: msg("Turn checkpoints for diffs and undo"),
     swatchClassName: "bg-amber-500",
   },
   logs: {
-    label: "Logs",
-    hint: "Server, provider, and terminal logs",
+    label: msg("Logs"),
+    hint: msg("Server, provider, and terminal logs"),
     swatchClassName: "bg-teal-500",
   },
   attachments: {
-    label: "Attachments",
-    hint: "Images and files you attached",
+    label: msg("Attachments"),
+    hint: msg("Images and files you attached"),
     swatchClassName: "bg-rose-500",
   },
   other: {
-    label: "Other",
-    hint: "Caches, browser captures, and settings",
+    label: msg("Other"),
+    hint: msg("Caches, browser captures, and settings"),
     swatchClassName: "bg-lime-500",
   },
   elsewhere: {
-    label: "Everything else",
-    hint: "System files and other apps on this disk",
+    label: msg("Everything else"),
+    hint: msg("System files and other apps on this disk"),
     swatchClassName: "bg-zinc-400 dark:bg-zinc-500",
   },
 };
@@ -70,13 +73,22 @@ export function storageUsageSegments(usage: StorageUsage) {
   return filled.map((part, index) => ({ id: part.id, percent: (percents[index] ?? 0) * scale }));
 }
 
-export function storageUsageSummary(usage: StorageUsage): string {
+export function storageUsageSummary(usage: StorageUsage, resolve: MessageResolver = m): string {
+  const total = formatBytes(usage.totalBytes);
   const parts = usage.categories
     .filter((category) => category.bytes > 0)
     .map(
-      (category) => `${STORAGE_USAGE_CATEGORIES[category.id].label} ${formatBytes(category.bytes)}`,
-    );
-  const free =
-    usage.diskFreeBytes === null ? "" : `. ${formatBytes(usage.diskFreeBytes)} free on disk`;
-  return `T3 Code uses ${formatBytes(usage.totalBytes)}${parts.length > 0 ? `: ${parts.join(", ")}` : ""}${free}`;
+      (category) =>
+        `${resolve(STORAGE_USAGE_CATEGORIES[category.id].label)} ${formatBytes(category.bytes)}`,
+    )
+    .join(", ");
+  if (usage.diskFreeBytes === null) {
+    return parts
+      ? resolve(msg("T3 Code uses {total}: {parts}", { total, parts }))
+      : resolve(msg("T3 Code uses {total}", { total }));
+  }
+  const free = formatBytes(usage.diskFreeBytes);
+  return parts
+    ? resolve(msg("T3 Code uses {total}: {parts}. {free} free on disk", { total, parts, free }))
+    : resolve(msg("T3 Code uses {total}. {free} free on disk", { total, free }));
 }

@@ -15,6 +15,8 @@ import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as CheckpointCapture from "./CheckpointCaptureService.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
+const REPOSITORY_REFRESH_CONCURRENCY = 4;
+
 export class RunFinalizationError extends Schema.TaggedError<RunFinalizationError>()(
   "RunFinalizationError",
   {
@@ -40,8 +42,17 @@ export class RunFinalizationObserver extends Context.Reference<{
     readonly runId?: RunId;
     readonly vcs?: boolean;
   }) => Effect.Effect<void, RunFinalizationRefreshError>;
+  /** Local status of the tracked repositories a run checkpointed. Returns before it finishes. */
+  readonly refreshRepositories: (input: {
+    readonly threadId: ThreadId;
+    readonly cwds: ReadonlyArray<string>;
+  }) => Effect.Effect<void>;
 }>("t3/orchestration-v2/RunFinalizationObserver", {
-  defaultValue: () => ({ refresh: () => Effect.void, refreshAfterTurn: () => Effect.void }),
+  defaultValue: () => ({
+    refresh: () => Effect.void,
+    refreshAfterTurn: () => Effect.void,
+    refreshRepositories: () => Effect.void,
+  }),
 }) {}
 
 export class RunFinalizationService extends Context.Service<
@@ -114,6 +125,17 @@ const make = Effect.gen(function* () {
           FiberSet.run(refreshes),
         );
     }
+    const repositoryScopeIds = new Set(
+      projection.checkpoints.flatMap((checkpoint) =>
+        checkpoint.runId === input.runId ? [checkpoint.scopeId] : [],
+      ),
+    );
+    const cwds = projection.checkpointScopes.flatMap((scope) =>
+      typeof scope.repositoryPath === "string" && repositoryScopeIds.has(scope.id)
+        ? [scope.cwd]
+        : [],
+    );
+    if (cwds.length > 0) yield* observer.refreshRepositories({ threadId: input.threadId, cwds });
   });
   const abandonCapture: RunFinalizationService["Service"]["abandonCapture"] = (input) =>
     checkpointCapture
@@ -138,6 +160,7 @@ export const layerObserver = Layer.effect(
     const projects = yield* ProjectService.ProjectService;
     const enrichment = yield* ProjectEnrichment.ProjectEnrichmentService;
     const pullRequestLookups = yield* FiberMap.make<string>();
+    const repositoryRefreshes = yield* FiberMap.make<ThreadId>();
     const identityRefreshes = yield* FiberMap.make<ProjectId>();
     // A turn can add the first remote (`git remote add`, `gh repo create --push`), which the
     // enrichment and resolver caches would otherwise keep reporting as missing for a minute.
@@ -163,6 +186,27 @@ export const layerObserver = Layer.effect(
     );
     return {
       refreshAfterTurn: pullRequests.refreshAfterTurn,
+      // A project can track dozens of repositories, so the next turn must not wait for them all.
+      // A newer turn's refresh replaces a running one.
+      refreshRepositories: Effect.fn("RunFinalizationService.refreshRepositories")(function* ({
+        threadId,
+        cwds,
+      }) {
+        yield* Effect.forEach(
+          cwds,
+          (cwd) =>
+            vcsStatus.refreshLocalStatus(cwd).pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("failed to refresh repository status after run completion", {
+                  threadId,
+                  cwd,
+                  detail: error.message,
+                }),
+              ),
+            ),
+          { concurrency: REPOSITORY_REFRESH_CONCURRENCY, discard: true },
+        ).pipe(FiberMap.run(repositoryRefreshes, threadId));
+      }),
       refresh: Effect.fn("RunFinalizationService.refresh")(
         function* ({ cwd, threadId, runId, vcs = true }) {
           if (!vcs) return yield* workspaceEntries.refresh(cwd);

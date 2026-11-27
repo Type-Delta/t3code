@@ -2,6 +2,7 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import {
   CheckpointId,
   CheckpointScopeId,
+  type CommandId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2AppThread,
@@ -24,10 +25,14 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import type * as ServerConfig from "../config.ts";
 import type * as ServerSettings from "../serverSettings.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
+import * as TaskFolders from "../workspace/TaskFolders.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   assessCheckpointRestore,
-  checkpointRestoreCheckoutRoot,
+  checkpointRestoreCheckoutRoots,
+  repositoryCheckpointsForRestore,
+  repositoryRestoreTargets,
+  resolveCheckpointRestorePath,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointRestoreError, CheckpointServiceV2 } from "./CheckpointService.ts";
 import { EventSinkV2 } from "./EventSink.ts";
@@ -135,6 +140,8 @@ export interface CheckpointRollbackServiceV2Shape {
     readonly checkpointId: CheckpointId;
     readonly scopeId: CheckpointScopeId;
     readonly restoreFiles?: boolean;
+    /** The rewind command: names the request when repositories are reported as left unrestored. */
+    readonly requestId?: CommandId;
   }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
 }
 
@@ -159,6 +166,7 @@ export const layer: Layer.Layer<
   | ProjectStore.ProjectStoreV2
   | ServerConfig.ServerConfig
   | ServerSettings.ServerSettingsService
+  | TaskFolders.TaskFolders
   | ThreadCommandExecutor.ThreadCommandExecutor
   | TurnItemPositionStoreV2
 > = Layer.effect(
@@ -176,9 +184,24 @@ export const layer: Layer.Layer<
     const fileSystem = yield* FileSystem.FileSystem;
     const projects = yield* ProjectStore.ProjectStoreV2;
     const path = yield* Path.Path;
+    const taskFolders = yield* TaskFolders.TaskFolders;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const positions = yield* TurnItemPositionStoreV2;
-    const restoreDependencies = { fileSystem, projections, projects, path, vcs };
+    const restoreDependencies = {
+      fileSystem,
+      projections,
+      projects,
+      path,
+      vcs,
+      otherWorkspacePaths: (thread: Pick<OrchestrationV2AppThread, "worktreePath">) =>
+        thread.worktreePath === null
+          ? Effect.succeed([])
+          : taskFolders
+              .find(thread.worktreePath)
+              .pipe(
+                Effect.map((folder) => folder?.repositories.map((repo) => repo.worktreePath) ?? []),
+              ),
+    };
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
     const restoreDependenciesFor = Effect.fn("orchestrationV2.restoreDependenciesFor")(function* (
       thread: Pick<OrchestrationV2AppThread, "worktreePath" | "branch">,
@@ -193,34 +216,43 @@ export const layer: Layer.Layer<
     });
 
     const execute = Effect.fn("orchestrationV2.checkpointRollback.execute")(function* (
-      input: {
-        readonly threadId: ThreadId;
-        readonly providerThreadId: ProviderThreadId;
-        readonly checkpointId: CheckpointId;
-        readonly scopeId: CheckpointScopeId;
-        readonly restoreFiles?: boolean;
-      },
+      input: Parameters<CheckpointRollbackServiceV2Shape["execute"]>[0],
       restoration: { filesRestored: boolean },
+      leasedPaths: ReadonlyArray<string>,
     ) {
       const context = yield* projections.getCheckpointRollbackContext(input.threadId, input);
-      // Forward checkpoints stay ready after a rollback so the user can redo back to them.
+      if (context.thread.deletedAt != null) return;
       const { providerThread, checkpoint, scope, targetAttempt, runsToRollback } = context;
-      if (
-        providerThread === undefined ||
-        providerThread.providerSessionId === null ||
-        checkpoint === undefined ||
-        scope === undefined ||
-        checkpoint.scopeId !== scope.id ||
-        // Missing snapshots support conversation rewind only.
-        (checkpoint.status !== "ready" &&
-          !(input.restoreFiles === false && checkpoint.status === "missing"))
-      ) {
-        return yield* new CheckpointRollbackExecutionError({
+      const restoreFiles = input.restoreFiles !== false;
+      const { worktreePath, branch } = context.thread;
+      const taskFolder = worktreePath === null ? null : yield* taskFolders.find(worktreePath);
+      // A linked project folder is not a repository: it has no snapshot, by design.
+      const linkedProjectFolder = taskFolder !== null && !taskFolder.projectIsWorktree;
+      const invalidTarget = () =>
+        new CheckpointRollbackExecutionError({
           reason: "rollback-target-invalid",
           threadId: input.threadId,
           providerThreadId: input.providerThreadId,
           checkpointId: input.checkpointId,
         });
+      if (
+        providerThread === undefined ||
+        providerThread.providerSessionId === null ||
+        checkpoint === undefined ||
+        scope === undefined ||
+        // A repository's checkpoints follow the thread's; they are not a place to rewind to.
+        typeof scope.repositoryPath === "string" ||
+        checkpoint.scopeId !== scope.id ||
+        // Missing or failed snapshots support conversation rewind; missing ones also restoring a
+        // task folder's repositories.
+        (checkpoint.status !== "ready" &&
+          !(checkpoint.status === "error" && !restoreFiles) &&
+          !(
+            checkpoint.status === "missing" &&
+            (!restoreFiles || linkedProjectFolder || worktreePath === null)
+          ))
+      ) {
+        return yield* invalidTarget();
       }
       if (
         providerThread.id !== context.thread.activeProviderThreadId ||
@@ -232,6 +264,15 @@ export const layer: Layer.Layer<
           providerThreadId: input.providerThreadId,
           checkpointId: input.checkpointId,
         });
+      }
+
+      if (
+        restoreFiles &&
+        checkpoint.status === "missing" &&
+        !linkedProjectFolder &&
+        (yield* vcs.detect({ cwd: scope.cwd, requestedKind: "git" })) !== null
+      ) {
+        return yield* invalidTarget();
       }
 
       const targetOrdinal = checkpoint.appRunOrdinal ?? 0;
@@ -276,27 +317,56 @@ export const layer: Layer.Layer<
               };
             });
 
-      const restoreFiles = input.restoreFiles !== false;
-      const safety = restoreFiles
-        ? yield* assessCheckpointRestore(
-            context.thread,
-            scope,
-            yield* restoreDependenciesFor(context.thread),
-          )
-        : { blockedMessage: null, noticeThreadIds: [] };
-      if (safety.blockedMessage !== null) {
-        return yield* new CheckpointRollbackExecutionError({
+      const sharedWorkspace = (detail?: string) =>
+        new CheckpointRollbackExecutionError({
           reason: "shared-workspace",
           threadId: input.threadId,
           providerThreadId: input.providerThreadId,
           checkpointId: input.checkpointId,
-          detail: safety.blockedMessage,
+          ...(detail === undefined ? {} : { detail }),
         });
+      const dependencies = yield* restoreDependenciesFor(context.thread);
+      if (
+        restoreFiles &&
+        worktreePath !== null &&
+        !leasedPaths.includes(
+          (yield* resolveCheckpointRestorePath(worktreePath, dependencies)).canonical,
+        )
+      ) {
+        return yield* sharedWorkspace();
+      }
+      if (
+        restoreFiles &&
+        worktreePath !== null &&
+        !(yield* fileSystem.exists(path.join(worktreePath, ".git")))
+      ) {
+        const safety = yield* assessCheckpointRestore(context.thread, scope, {
+          ...dependencies,
+          repositoryPaths:
+            taskFolder?.repositories.map((repository) => repository.worktreePath) ?? [],
+        });
+        if (safety.blockedMessage !== null) return yield* sharedWorkspace(safety.blockedMessage);
       }
 
-      const { worktreePath, branch } = context.thread;
-      // Recreated only where the server would have made it, as turn start does.
-      if (worktreePath != null && branch != null) {
+      if (taskFolder !== null && branch != null) {
+        // Cleanup can remove any of the folder's checkouts; the linked project folder has none.
+        yield* taskFolders.restore({
+          taskFolder,
+          branch,
+          projectCommands: TaskFolders.projectCommandsForLink(context.thread.linkOrigin),
+          recreate: (checkout) =>
+            gitWorkflow.pruneWorktrees({ cwd: checkout.repositoryPath }).pipe(
+              Effect.andThen(
+                gitWorkflow.createWorktree({
+                  cwd: checkout.repositoryPath,
+                  refName: branch,
+                  path: checkout.worktreePath,
+                }),
+              ),
+            ),
+        });
+      } else if (worktreePath != null && branch != null) {
+        // Recreated only where the server would have made it, as turn start does.
         // A failed removal can leave the folder without its checkout; only a file restore replaces it.
         const leftover =
           restoreFiles &&
@@ -361,12 +431,99 @@ export const layer: Layer.Layer<
         }
       }
 
-      // Evicted file versions are downloaded before the provider conversation
-      // changes, so a failed download leaves the thread as it was. They stay
-      // pinned until this rollback's scope closes.
-      if (restoreFiles) {
-        yield* checkpoints.prepareRestore({ scope, checkpoint });
+      // Before the provider conversation changes: a rewind with nothing to restore is refused.
+      const readable = restoreFiles
+        ? yield* checkpoints.repositoryScopesIfReadable({
+            rootScope: scope,
+            projectId: context.thread.projectId,
+            worktreePath,
+          })
+        : [];
+      // Unknown repositories are not "none": the rewind would leave their changes unmentioned.
+      if (readable === null) {
+        return yield* new CheckpointRollbackExecutionError({
+          reason: "unexpected-failure",
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+          cause: new Error("The thread's repositories could not be read."),
+        });
       }
+      const repositories = readable;
+      const history =
+        repositories.length === 0
+          ? undefined
+          : yield* projections.getCheckpointContext(input.threadId);
+      const rolledBackRunIds =
+        history?.runs.filter((run) => run.status === "rolled_back").map((run) => run.id) ?? [];
+      const rolledBackRuns =
+        rolledBackRunIds.length === 0
+          ? []
+          : (yield* projections.getThreadRecords(input.threadId, ["runs"], {
+              runIds: rolledBackRunIds,
+            })).runs;
+      const recorded = repositoryCheckpointsForRestore(history?.checkpoints ?? [], rolledBackRuns);
+      const currentOrdinal = providerThread.lastRunOrdinal ?? 0;
+      const repositoryTargets = repositoryRestoreTargets(
+        repositories,
+        recorded,
+        targetOrdinal,
+        currentOrdinal,
+      );
+      // Changed by a discarded run, with no snapshot of how it was before: left as it is.
+      const unrestorable = repositories.filter(
+        (repository) =>
+          !repositoryTargets.some((target) => target.scope.id === repository.id) &&
+          recorded.some(
+            (candidate) =>
+              candidate.scopeId === repository.id &&
+              candidate.ordinalWithinScope > targetOrdinal &&
+              (candidate.status === "ready" || candidate.runId !== null),
+          ),
+      );
+      if (unrestorable.length > 0) {
+        yield* Effect.logWarning("Edit from here cannot restore repositories without a snapshot", {
+          threadId: input.threadId,
+          repositories: unrestorable.map((repository) => repository.cwd),
+        });
+      }
+      const restoreTargets = [
+        ...(checkpoint.status === "ready" ? [{ scope, checkpoint }] : []),
+        ...repositoryTargets,
+      ];
+      if (restoreFiles && restoreTargets.length === 0) return yield* invalidTarget();
+      const restoreInput = { targets: restoreTargets, scopes: [scope, ...repositories] };
+      const safety = restoreFiles
+        ? yield* Effect.gen(function* () {
+            const restoreDependencies = {
+              ...dependencies,
+              repositoryPaths: repositoryTargets.map((target) => target.scope.cwd),
+            };
+            const roots = yield* checkpointRestoreCheckoutRoots(
+              context.thread,
+              restoreDependencies,
+            );
+            if (
+              roots.some(
+                (root) =>
+                  !leasedPaths.some((cwd) => {
+                    const relative = path.relative(cwd, root);
+                    return (
+                      relative === "" ||
+                      (!path.isAbsolute(relative) &&
+                        relative !== ".." &&
+                        !relative.startsWith(`..${path.sep}`))
+                    );
+                  }),
+              )
+            )
+              return yield* sharedWorkspace();
+            return yield* assessCheckpointRestore(context.thread, scope, restoreDependencies);
+          })
+        : { blockedMessage: null, noticeThreadIds: [] };
+      if (safety.blockedMessage !== null) return yield* sharedWorkspace(safety.blockedMessage);
+      // Each target stays hydrated until rollback releases its scope.
+      if (restoreFiles) yield* checkpoints.prepareRestore(restoreInput);
 
       const modelSelection = context.thread.modelSelection;
       const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
@@ -405,7 +562,6 @@ export const layer: Layer.Layer<
             turn.runAttemptId === null ||
             !rolledBackAttemptIds.has(turn.runAttemptId)),
       );
-      const currentOrdinal = providerThread.lastRunOrdinal ?? 0;
       const nativeSource = checkpoint.nativeThreadRef ?? providerThread.nativeThreadRef;
       const nativeBaselineRef =
         checkpoint.nativeBaselineRef !== undefined
@@ -527,6 +683,19 @@ export const layer: Layer.Layer<
       yield* threadCommands.withLock(
         input.threadId,
         Effect.gen(function* () {
+          const current = yield* projections.getThread(input.threadId);
+          if (current.deletedAt != null) return;
+          if (
+            current.activeProviderThreadId !== providerThread.id ||
+            current.modelSelection.instanceId !== providerThread.providerInstanceId
+          ) {
+            return yield* new CheckpointRollbackExecutionError({
+              reason: "active-provider-changed",
+              threadId: input.threadId,
+              providerThreadId: input.providerThreadId,
+              checkpointId: input.checkpointId,
+            });
+          }
           const now = yield* DateTime.now;
           const makeEvent = <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
             Effect.map(
@@ -548,6 +717,28 @@ export const layer: Layer.Layer<
                   ...historical,
                   nativeThreadRef: nativeSource,
                   ...(historical.ordinalWithinScope === 0 ? { nativeBaselineRef } : {}),
+                },
+              }),
+            );
+          }
+          // First, so a client that sees the runs rolled back already knows what was left.
+          if (input.requestId !== undefined && unrestorable.length > 0) {
+            const thread = current;
+            events.push(
+              yield* makeEvent({
+                type: "thread.metadata-updated",
+                threadId: input.threadId,
+                providerInstanceId: thread.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...thread,
+                  rollbackUnrestored: {
+                    requestId: input.requestId,
+                    repositories: unrestorable.map(
+                      (repository) => repository.label ?? path.basename(repository.cwd),
+                    ),
+                  },
+                  updatedAt: now,
                 },
               }),
             );
@@ -714,16 +905,27 @@ export const layer: Layer.Layer<
             });
           }
           if (input.restoreFiles !== false) {
-            yield* checkpoints.restore({ scope, checkpoint });
+            yield* checkpoints.restore(restoreInput);
             restoration.filesRestored = true;
-            yield* observer.refresh({ cwd: scope.cwd, threadId: input.threadId }).pipe(
-              Effect.catchTags({
-                RunFinalizationRefreshError: (cause) =>
-                  Effect.logWarning("Failed to refresh workspace after checkpoint restore", {
-                    ...input,
-                    cause,
-                  }),
-              }),
+            yield* Effect.forEach(
+              new Set([scope.cwd, ...restoreTargets.map((target) => target.scope.cwd)]),
+              (cwd) =>
+                observer
+                  .refresh({
+                    cwd,
+                    threadId: input.threadId,
+                    ...(cwd === scope.cwd && checkpoint.status !== "ready" ? { vcs: false } : {}),
+                  })
+                  .pipe(
+                    Effect.catchTags({
+                      RunFinalizationRefreshError: (cause) =>
+                        Effect.logWarning("Failed to refresh workspace after checkpoint restore", {
+                          ...input,
+                          cause,
+                        }),
+                    }),
+                  ),
+              { discard: true },
             );
           }
           yield* eventSink.write({ events });
@@ -738,25 +940,44 @@ export const layer: Layer.Layer<
           const restoration = { filesRestored: false };
           // Storage cleanup removes worktrees under the same lease. A file restore also excludes
           // turn starts and Git mutations anywhere in or above its checkout.
-          const thread = yield* projections.getThread(input.threadId);
-          const checkoutRoot =
-            input.restoreFiles === false
-              ? null
-              : ((yield* checkpointRestoreCheckoutRoot(
-                  thread,
-                  yield* restoreDependenciesFor(thread),
-                )) ?? thread.worktreePath);
-          const worktree = thread.worktreePath === null ? [] : [path.resolve(thread.worktreePath)];
+          const { thread, scope } = yield* projections.getCheckpointRollbackContext(
+            input.threadId,
+            input,
+          );
+          if (thread.deletedAt != null) return;
+          const worktree = thread.worktreePath == null ? [] : [path.resolve(thread.worktreePath)];
+          const restoreFiles = input.restoreFiles !== false;
+          const taskFolder =
+            worktree[0] === undefined ? null : yield* taskFolders.find(worktree[0]);
+          const repositories =
+            !restoreFiles || scope === undefined
+              ? []
+              : yield* checkpoints.repositoryScopesIfReadable({ rootScope: scope, ...thread });
+          const repositoryPaths = [
+            ...(repositories ?? []).map((repository) => repository.cwd),
+            ...(taskFolder?.repositories.map((repository) => repository.worktreePath) ?? []),
+          ];
+          const checkoutRoots = restoreFiles
+            ? yield* checkpointRestoreCheckoutRoots(thread, {
+                ...(yield* restoreDependenciesFor(thread)),
+                repositoryPaths,
+              })
+            : [];
+          const workspacePaths = yield* Effect.forEach(
+            [...new Set([...worktree, ...repositoryPaths])],
+            (cwd) => resolveCheckpointRestorePath(cwd, restoreDependencies),
+          );
+          const leased = [
+            ...new Set([...checkoutRoots, ...workspacePaths.map((entry) => entry.canonical)]),
+          ];
           yield* (
-            checkoutRoot !== null
-              ? withWorkspaceLease(
-                  [checkoutRoot, ...worktree],
-                  execute(input, restoration),
-                  "checkout",
+            leased.length === 0
+              ? execute(input, restoration, leased)
+              : withWorkspaceLease(
+                  leased,
+                  execute(input, restoration, leased),
+                  restoreFiles ? "checkout" : "exclusive",
                 )
-              : worktree.length > 0
-                ? withWorkspaceLease(worktree, execute(input, restoration))
-                : execute(input, restoration)
           ).pipe(
             Effect.catchCause((cause) =>
               restoration.filesRestored

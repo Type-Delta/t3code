@@ -1,5 +1,7 @@
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as WorkspaceFolders from "../workspace/WorkspaceFolders.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CheckpointScopeId,
@@ -10,8 +12,10 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2CheckpointScope,
+  type OrchestrationV2ContextHandoff,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
@@ -1475,6 +1479,7 @@ it.effect.each(["failure", "interruption", "stale-attempt", "start-guard"] as co
                 }),
             Layer.succeed(RunFinalizationService.RunFinalizationObserver, {
               refresh: () => Effect.void,
+              refreshRepositories: () => Effect.void,
               refreshAfterTurn: () => Ref.update(refreshes, (count) => count + 1),
             }),
           ),
@@ -2396,15 +2401,17 @@ it.effect("keeps ingesting a failed root's background item when its work continu
   }),
 );
 
-it.effect("does not pin ingestion on background items when the root turn is interrupted", () =>
-  Effect.gen(function* () {
-    const observed = yield* runBackgroundItemScenario("bg-interrupted", (ids) => [
-      backgroundTurnItemEvent(ids, "command_execution", "running", 1),
-      rootTerminalEvent(ids, "interrupted"),
-      backgroundTurnItemEvent(ids, "command_execution", "completed", 2),
-    ]);
-    assert.deepEqual(observed, ["turn_item:running", "root-finalized"]);
-  }),
+it.effect.each(["interrupted", "failed"] as const)(
+  "does not pin ingestion on background items when the root turn is %s",
+  (status) =>
+    Effect.gen(function* () {
+      const observed = yield* runBackgroundItemScenario(`bg-${status}`, (ids) => [
+        backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+        rootTerminalEvent(ids, status),
+        backgroundTurnItemEvent(ids, "command_execution", "completed", 2),
+      ]);
+      assert.deepEqual(observed, ["turn_item:running", "root-finalized"]);
+    }),
 );
 
 it.effect("seeds inherited background items before their next update", () =>
@@ -3048,7 +3055,7 @@ it.effect("settles native subagents when a workspace handoff completes the root 
     assert.deepEqual(statusOf("turn-item.updated", runningTurnItem.id), ["interrupted"]);
     assert.deepEqual(statusOf("node.updated", runningNode.id), ["interrupted"]);
     assert.deepEqual(statusOf("node.updated", runningChildNode.id), ["interrupted"]);
-    assert.deepEqual(statusOf("run.updated", ids.runId), ["waiting"]);
+    assert.deepEqual(statusOf("run.updated", ids.runId), ["completed"]);
     assert.deepEqual(statusOf("run-attempt.updated", ids.attemptId), ["completed"]);
     assert.isFalse(
       events.some(
@@ -3184,6 +3191,21 @@ it.effect.each([
         ["checkpoint.capture"],
       );
     }),
+);
+
+it.effect("keeps a provider's stop reason on a completed run", () =>
+  Effect.gen(function* () {
+    const reason = "sessionStart hook (user): Plugin guard blocked this session.";
+    const { written } = yield* captureRootRunTermination({
+      key: "completed-stop-reason",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make({ ...rootTerminalEvent(ids, "completed"), reason }),
+    });
+    assert.deepEqual(
+      written.map((item) => (item.type === "system_notice" ? item.message : item.type)),
+      [reason],
+    );
+  }),
 );
 
 it.effect("records a finished run as failed when its ownership check cannot be read", () =>
@@ -3579,6 +3601,48 @@ it.effect("ends a running root command when the provider stream fails mid-turn",
   }),
 );
 
+it.effect("fails the run when a released session's interrupt exits interrupted", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const key = "released-session-interrupted-interrupt";
+    const { observed, finalEvents } = yield* captureRootRunTermination({
+      key,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) =>
+        Stream.make({
+          type: "provider_turn.updated" as const,
+          driver,
+          providerTurn: {
+            id: ids.rootProviderTurnId,
+            providerThreadId: ids.providerThreadId,
+            nodeId: ids.rootNodeId,
+            runAttemptId: ids.attemptId,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running" as const,
+            startedAt: now,
+            completedAt: null,
+          },
+        }).pipe(
+          Stream.concat(
+            Stream.fail(
+              new ProviderAdapter.ProviderAdapterEventStreamError({
+                driver,
+                providerSessionId: ProviderSessionId.make(`session:${key}`),
+                raisedByT3: true,
+                cause: "Provider sign-in changed.",
+              }),
+            ),
+          ),
+        ),
+      // An ACP session whose scope is already closing interrupts the join.
+      interruptTurn: () => Effect.interrupt,
+    });
+    assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
+    assert.isTrue(finalEvents.some((event) => event.type === "run.updated"));
+  }),
+);
+
 it.effect("keeps a running root command open when a write fails under a live provider", () =>
   Effect.gen(function* () {
     const key = "write-error-running-command";
@@ -3679,11 +3743,56 @@ it.effect.each([
             ? [`${event.type}:${event.payload.status}`]
             : [],
         ),
+        // The root terminal arrives while the subagent is open. Capture owns the run's final
+        // transition, and the later stream failure settles the subagent independently.
         ended
           ? ["run.updated:waiting", "subagent.updated:failed", "turn-item.updated:failed"]
           : ["run.updated:waiting"],
       );
     }),
+);
+
+it.effect("restores dropped inline handoffs when ingestion fails before the terminal", () =>
+  Effect.gen(function* () {
+    const key = "dropped-turn-ingest-error";
+    const ids = backgroundScenarioIds(key);
+    const handoff = { id: `handoff:${key}` } as unknown as OrchestrationV2ContextHandoff;
+    const { finalEvents } = yield* captureRootRunTermination({
+      key,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      loadDroppedInlineHandoffs: () => Effect.succeed([handoff]),
+      events: () =>
+        Stream.make({
+          type: "provider_turn.updated" as const,
+          driver,
+          threadId: ids.threadId,
+          providerTurn: {
+            id: ids.rootProviderTurnId,
+            providerThreadId: ids.providerThreadId,
+            runAttemptId: ids.attemptId,
+            ordinal: 1,
+            status: "failed",
+            promptDropped: true,
+          } as OrchestrationV2ProviderTurn,
+        }),
+      ingestNormalized: ({ event }) =>
+        event.type === "provider_turn.updated"
+          ? Effect.fail(
+              new ProviderEventIngestor.ProviderEventPublishError({
+                providerSessionId: ProviderSessionId.make(`session:${key}`),
+                eventCount: 1,
+                cause: new Error("SQLITE_FULL: database or disk is full"),
+              }),
+            )
+          : Effect.succeed([]),
+    });
+    assert.deepEqual(
+      finalEvents.flatMap((event) =>
+        event.type === "context-handoff.updated" ? [event.payload.id] : [],
+      ),
+      [handoff.id],
+    );
+  }),
 );
 
 it.effect("does not interrupt a provider when ingestion fails before the root turn is known", () =>
@@ -3915,6 +4024,57 @@ it.effect("keeps completed runs completed when pull request refresh fails", () =
   }),
 );
 
+it.effect.each(["completed", "failed"] as const)(
+  "persists a background-task roster clear that arrives after a %s turn",
+  (status) =>
+    Effect.gen(function* () {
+      const pending = yield* Ref.make(true);
+      const ingested = yield* Ref.make<Array<ProviderAdapter.ProviderAdapterV2Event>>([]);
+      yield* captureRootRunTermination({
+        key: `roster-clear-${status}`,
+        shouldFinalizeRun: () => Effect.succeed(true),
+        hasPendingBackgroundWorkForThread: () => Ref.get(pending),
+        events: (ids) => {
+          const runningBuild: OrchestrationV2PendingBackgroundTask = {
+            taskId: "running-build",
+            kind: "command",
+          };
+          const roster = (hasTask: boolean): ProviderAdapter.ProviderAdapterV2Event => {
+            const pendingBackgroundTasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask> =
+              hasTask ? [runningBuild] : [];
+            return {
+              type: "provider_thread.updated",
+              driver,
+              providerThread: {
+                id: ids.providerThreadId,
+                driver,
+                appThreadId: ids.threadId,
+                pendingBackgroundTasks,
+              } as OrchestrationV2ProviderThread,
+            };
+          };
+          return Stream.fromIterable([roster(true), rootTerminalEvent(ids, status), roster(false)]);
+        },
+        // The adapter clears its live roster before ingestion reaches the queued clear.
+        beforeTerminalWrite: () => Ref.set(pending, false).pipe(Effect.as(true)),
+        ingestNormalized: (input) =>
+          Ref.update(ingested, (all) => [...all, input.event]).pipe(
+            Effect.as(
+              input.event.type === "provider_thread.updated"
+                ? [{} as OrchestrationV2StoredEvent]
+                : [],
+            ),
+          ),
+      });
+      const rosters = (yield* Ref.get(ingested)).flatMap((event) =>
+        event.type === "provider_thread.updated"
+          ? [event.providerThread.pendingBackgroundTasks]
+          : [],
+      );
+      assert.deepEqual(rosters.at(-1), [], "an ended task must leave the persisted roster");
+    }),
+);
+
 function captureRootRunTermination(input: {
   readonly key: string;
   readonly shouldFinalizeRun: () => Effect.Effect<boolean, ProjectionStore.ProjectionStoreV2Error>;
@@ -3922,6 +4082,7 @@ function captureRootRunTermination(input: {
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly hasWorkspaceMoved?: () => Effect.Effect<boolean, never>;
   readonly loadRunInterruptReason?: () => Effect.Effect<string | undefined, never>;
+  readonly loadDroppedInlineHandoffs?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["loadDroppedInlineHandoffs"];
   readonly hasPendingBackgroundWorkForThread?: ProviderAdapter.ProviderAdapterV2SessionRuntime["hasPendingBackgroundWorkForThread"];
   readonly seedOpenSubagent?: boolean;
   readonly events?: (
@@ -4071,6 +4232,7 @@ function captureRootRunTermination(input: {
           ServerSettings.layerTest(),
           Layer.succeed(RunFinalizationService.RunFinalizationObserver, {
             refresh: () => Effect.void,
+            refreshRepositories: () => Effect.void,
             refreshAfterTurn: () =>
               Ref.update(observed, (current) => [...current, "pull-requests-refreshed"]).pipe(
                 Effect.andThen(input.refreshAfterTurn ?? Effect.void),
@@ -4167,6 +4329,9 @@ function captureRootRunTermination(input: {
         ...(input.hasWorkspaceMoved === undefined
           ? {}
           : { hasWorkspaceMoved: input.hasWorkspaceMoved }),
+        ...(input.loadDroppedInlineHandoffs === undefined
+          ? {}
+          : { loadDroppedInlineHandoffs: input.loadDroppedInlineHandoffs }),
         message: {
           messageId: MessageId.make(`message:${input.key}`),
           text: input.messageText ?? "interrupt projection",
@@ -4983,7 +5148,14 @@ it.effect("starts the next run while the previous run's capture still writes its
           layerTurnItemPositionsTest,
           CheckpointService.layer.pipe(
             Layer.provide(IdAllocator.layer),
+            Layer.provide(NodeServices.layer),
             Layer.provide(NodeCrypto.layer),
+            Layer.provide(
+              Layer.mock(WorkspaceFolders.WorkspaceFolders)({
+                forThread: () => Effect.succeed({ folders: [], extraRoots: [] }),
+                submodules: () => Effect.succeed([]),
+              }),
+            ),
             Layer.provide(
               Layer.mock(CheckpointStore.CheckpointStore)({
                 isGitRepository: () => Effect.succeed(true),

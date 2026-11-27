@@ -1,4 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
+import { T, useGT, useMessages, Var } from "gt-react";
 import { RefreshCwIcon } from "lucide-react";
 
 import { formatBytes } from "../../lib/formatBytes";
@@ -21,9 +22,10 @@ export function StorageUsageSection({
 }: {
   environments: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly label: string }>;
 }) {
+  const gt = useGT();
   if (environments.length === 0) return null;
   return (
-    <SettingsSection id="storage-usage" title="Storage usage">
+    <SettingsSection id="storage-usage" title={gt("Storage usage")}>
       {environments.map((environment) => (
         <EnvironmentStorageUsage
           key={environment.environmentId}
@@ -42,15 +44,22 @@ function EnvironmentStorageUsage({
   readonly environmentId: EnvironmentId;
   readonly label: string | null;
 }) {
+  const gt = useGT();
+  const messages = useMessages();
   const query = useEnvironmentQuery(serverEnvironment.storageUsage({ environmentId, input: {} }));
   const usage = query.data;
-  const where = label === null ? "" : ` on ${label}`;
   const title =
     usage !== null
-      ? `T3 Code is using ${formatBytes(usage.totalBytes)}${where}`
+      ? label === null
+        ? gt("T3 Code is using {size}", { size: formatBytes(usage.totalBytes) })
+        : gt("T3 Code is using {size} on {label}", { size: formatBytes(usage.totalBytes), label })
       : query.error !== null
-        ? `Couldn't measure storage${where}`
-        : `Measuring storage${where}…`;
+        ? label === null
+          ? gt("Couldn't measure storage")
+          : gt("Couldn't measure storage on {label}", { label })
+        : label === null
+          ? gt("Measuring storage…")
+          : gt("Measuring storage on {label}…", { label });
   const segments = usage === null ? [] : storageUsageSegments(usage);
   const freePercent = 100 - segments.reduce((sum, segment) => sum + segment.percent, 0);
 
@@ -61,17 +70,23 @@ function EnvironmentStorageUsage({
           <h3 className="text-sm font-medium text-foreground">{title}</h3>
           {usage?.diskFreeBytes != null ? (
             <span className="text-xs text-muted-foreground tabular-nums">
-              {formatBytes(usage.diskFreeBytes)} free
-              {usage.diskTotalBytes === null
-                ? " on disk"
-                : ` of ${formatBytes(usage.diskTotalBytes)}`}
+              {usage.diskTotalBytes === null ? (
+                <T>
+                  <Var>{formatBytes(usage.diskFreeBytes)}</Var> free on disk
+                </T>
+              ) : (
+                <T>
+                  <Var>{formatBytes(usage.diskFreeBytes)}</Var> free of{" "}
+                  <Var>{formatBytes(usage.diskTotalBytes)}</Var>
+                </T>
+              )}
             </span>
           ) : null}
         </div>
         <Button
           variant="ghost-muted"
           size="icon-xs"
-          aria-label="Measure storage again"
+          aria-label={gt("Measure storage again")}
           disabled={query.isPending}
           onClick={query.refresh}
         >
@@ -80,7 +95,7 @@ function EnvironmentStorageUsage({
       </div>
       <div
         role="img"
-        aria-label={usage === null ? title : storageUsageSummary(usage)}
+        aria-label={usage === null ? title : storageUsageSummary(usage, messages)}
         className="flex h-2.5 gap-0.5 overflow-hidden rounded-full bg-foreground/8"
       >
         {segments.map((segment) => (
@@ -112,13 +127,13 @@ function EnvironmentStorageUsage({
                       aria-hidden
                       className={cn("size-2 shrink-0 rounded-full", meta.swatchClassName)}
                     />
-                    {meta.label}
+                    {messages(meta.label)}
                   </PopoverTrigger>
-                  <PopoverPopup tooltipStyle side="bottom" aria-label={meta.label}>
+                  <PopoverPopup tooltipStyle side="bottom" aria-label={messages(meta.label)}>
                     <p className="font-medium tabular-nums">
-                      {meta.label} · {formatBytes(category.bytes)}
+                      {messages(meta.label)} · {formatBytes(category.bytes)}
                     </p>
-                    <p className="text-muted-foreground">{meta.hint}</p>
+                    <p className="text-muted-foreground">{messages(meta.hint)}</p>
                   </PopoverPopup>
                 </Popover>
               </li>
@@ -130,7 +145,7 @@ function EnvironmentStorageUsage({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="min-w-0 text-xs text-muted-foreground">{query.error}</p>
           <Button variant="outline" size="xs" disabled={query.isPending} onClick={query.refresh}>
-            Retry
+            <T>Retry</T>
           </Button>
         </div>
       ) : null}

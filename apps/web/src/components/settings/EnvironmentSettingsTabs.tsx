@@ -1,6 +1,9 @@
 import { connectionStatusTitle } from "@t3tools/client-runtime/connection";
 import { resolveEnvironmentMachineKind, type EnvironmentId } from "@t3tools/contracts";
+import { msg, useGT, useMessages } from "gt-react";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
+
+import { m, type MessageResolver } from "../../i18n/messages";
 
 import type { EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
@@ -13,12 +16,16 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-function environmentDetail(environment: EnvironmentPresentation): string {
-  if (environment.entry.target._tag === "PrimaryConnectionTarget") return "Primary device";
+function environmentDetail(
+  environment: EnvironmentPresentation,
+  resolve: MessageResolver = m,
+): string {
+  if (environment.entry.target._tag === "PrimaryConnectionTarget")
+    return resolve(msg("Primary device"));
   if (environment.relayManaged) return "T3 Connect";
   if (environment.entry.target._tag === "SshConnectionTarget") return "SSH";
-  if (isDesktopLocalConnectionTarget(environment.entry.target)) return "Local device";
-  return environment.displayUrl ?? "Remote device";
+  if (isDesktopLocalConnectionTarget(environment.entry.target)) return resolve(msg("Local device"));
+  return environment.displayUrl ?? resolve(msg("Remote device"));
 }
 
 export function EnvironmentSettingsTabs({
@@ -32,6 +39,8 @@ export function EnvironmentSettingsTabs({
   readonly onSelect: (environmentId: EnvironmentId) => void;
   readonly disabled?: boolean;
 }) {
+  const gt = useGT();
+  const messages = useMessages();
   const onlyPrimaryDevice =
     environments.length === 1 && environments[0]?.entry.target._tag === "PrimaryConnectionTarget";
   if (onlyPrimaryDevice || environments.length === 0) return null;
@@ -44,7 +53,7 @@ export function EnvironmentSettingsTabs({
       className="mx-3 h-11 min-w-0 flex-1 sm:mx-4"
     >
       <ToggleGroup
-        aria-label="Devices"
+        aria-label={gt("Devices")}
         variant="segmented"
         className="my-2"
         value={selectedEnvironmentId ? [selectedEnvironmentId] : []}
@@ -55,7 +64,7 @@ export function EnvironmentSettingsTabs({
         }}
       >
         {environments.map((environment) => {
-          const detail = environmentDetail(environment);
+          const detail = environmentDetail(environment, messages);
           const statusText = connectionStatusTitle(environment.connection);
           return (
             <Tooltip key={environment.environmentId}>

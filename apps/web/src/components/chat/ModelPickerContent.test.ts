@@ -23,7 +23,7 @@ const models: ReadonlyArray<ModelPickerItem> = [
     continuationGroupKey: "two",
   },
   {
-    slug: "other",
+    slug: "gpt-other-preview",
     name: "Other",
     instanceId: first,
     driverKind: ProviderDriverKind.make("codex"),
@@ -52,6 +52,13 @@ describe("model picker group search", () => {
         (model) => model.instanceId,
       ),
     ).toEqual([second]);
+  });
+  it("matches a model ID within the selected instance", () => {
+    expect(
+      filterModelPickerModels({ ...base, selection: first, searchQuery: "other-preview" }).map(
+        (model) => model.slug,
+      ),
+    ).toEqual(["gpt-other-preview"]);
   });
   it("searches matching names across instances only in All", () => {
     expect(

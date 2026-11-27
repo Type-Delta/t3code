@@ -15,7 +15,7 @@ vi.mock(import("../../state/entities"), () => ({
 }));
 vi.mock(import("../../state/queries"), () => ({
   useDebouncedValue: <T,>(value: T) => value,
-  useThreadSearch: () => ({ matches: [], query: "", isPending: false }),
+  useThreadSearch: () => ({ matches: [], query: "", isPending: false, failed: false }),
   useComposerPathSearch: (target) => ({
     entries: [],
     searchedTarget: { ...target, kind: undefined, imageOnly: undefined },
@@ -34,6 +34,7 @@ vi.mock(import("../../state/pullRequests"), () => ({
     isPending: false,
     observations: [],
     refresh: () => {},
+    retry: () => {},
   }),
 }));
 vi.mock(import("../../state/query"), () => ({

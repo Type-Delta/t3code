@@ -1,3 +1,4 @@
+import { T, useGT } from "gt-react";
 import { FolderGitIcon, FolderIcon } from "lucide-react";
 import { memo } from "react";
 
@@ -41,6 +42,7 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
   onWorktreeChange,
   onOpen,
 }: BranchToolbarWorktreeSelectorProps) {
+  const gt = useGT();
   const composerFloatingLayerProps = useComposerMenuProps();
   const selectedWorktree = model?.options.find((worktree) => worktree.path === model.value);
 
@@ -50,7 +52,7 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
     return (
       <span
         className="inline-flex h-7 min-w-0 items-center gap-1 border border-transparent px-1.75 font-normal text-muted-foreground/70 text-xs sm:h-6"
-        aria-label={`Worktree: ${display.label}`}
+        aria-label={gt("Worktree: {label}", { label: display.label })}
         data-composer-context-control
       >
         <WorktreeIcon isPrimary={display.isPrimary} />
@@ -77,7 +79,7 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
       <ComposerSelectControl
         size="xs"
         className="min-w-0 shrink"
-        aria-label="Worktree"
+        aria-label={gt("Worktree")}
         data-composer-context-control
       >
         <WorktreeIcon isPrimary={selectedWorktree?.isPrimary} />
@@ -87,7 +89,9 @@ export const BranchToolbarWorktreeSelector = memo(function BranchToolbarWorktree
       </ComposerSelectControl>
       <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
         <SelectGroup>
-          <SelectGroupLabel>Worktree</SelectGroupLabel>
+          <SelectGroupLabel>
+            <T>Worktree</T>
+          </SelectGroupLabel>
           {model.options.map((worktree) => (
             <SelectItem key={worktree.path} value={worktree.path}>
               <span className="inline-flex min-w-0 items-center gap-1.5">

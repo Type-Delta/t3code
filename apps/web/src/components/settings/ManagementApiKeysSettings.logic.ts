@@ -1,5 +1,8 @@
 import { type ManagementApiKeyScope as ContractManagementApiKeyScope } from "@t3tools/contracts";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { msg } from "gt-react";
+
+import { m, type MessageResolver } from "~/i18n/messages";
 
 export const MANAGEMENT_API_KEY_SCOPES = [
   "models:read",
@@ -70,38 +73,38 @@ export const MANAGEMENT_API_KEY_SCOPE_DETAILS: ReadonlyArray<{
 }> = [
   {
     scope: "models:read",
-    label: "List models",
-    description: "Discover models available in this environment.",
+    label: msg("List models"),
+    description: msg("Discover models available in this environment."),
   },
   {
     scope: "threads:list",
-    label: "List threads",
-    description: "See the environment's active threads.",
+    label: msg("List threads"),
+    description: msg("See the environment's active threads."),
   },
   {
     scope: "threads:read",
-    label: "Read threads",
-    description: "Read thread messages and activity.",
+    label: msg("Read threads"),
+    description: msg("Read thread messages and activity."),
   },
   {
     scope: "threads:create",
-    label: "Create threads",
-    description: "Start a thread in an explicitly selected project.",
+    label: msg("Create threads"),
+    description: msg("Start a thread in an explicitly selected project."),
   },
   {
     scope: "threads:message",
-    label: "Send messages",
-    description: "Send messages to existing environment threads.",
+    label: msg("Send messages"),
+    description: msg("Send messages to existing environment threads."),
   },
   {
     scope: "threads:wait",
-    label: "Wait for threads",
-    description: "Wait for target threads to finish or need attention.",
+    label: msg("Wait for threads"),
+    description: msg("Wait for target threads to finish or need attention."),
   },
   {
     scope: "pullRequests:review",
-    label: "Review pull requests",
-    description: "Write and read pull request review guides.",
+    label: msg("Review pull requests"),
+    description: msg("Write and read pull request review guides."),
   },
 ];
 
@@ -112,18 +115,18 @@ export const MANAGEMENT_API_KEY_PRESETS: ReadonlyArray<{
 }> = [
   {
     value: "read-only",
-    label: "Read only",
-    description: "List models and inspect threads without changing them.",
+    label: msg("Read only"),
+    description: msg("List models and inspect threads without changing them."),
   },
   {
     value: "thread-orchestration",
-    label: "Thread orchestration",
-    description: "Use all six supported thread-management tools.",
+    label: msg("Thread orchestration"),
+    description: msg("Use all six supported thread-management tools."),
   },
   {
     value: "custom",
-    label: "Custom",
-    description: "Choose exactly which tools this key can use, including pull request review.",
+    label: msg("Custom"),
+    description: msg("Choose exactly which tools this key can use, including pull request review."),
   },
 ];
 
@@ -178,12 +181,17 @@ export function resolveManagementApiKeyExpiration(
   return expiresAt.toISOString();
 }
 
-export function managementApiKeyScopeSummary(scopes: ReadonlyArray<string>): string {
+export function managementApiKeyScopeSummary(
+  scopes: ReadonlyArray<string>,
+  resolve: MessageResolver = m,
+): string {
   const preset = managementApiKeyPresetForScopes(scopes);
-  if (preset === "read-only") return "Read only";
-  if (preset === "thread-orchestration") return "Thread orchestration";
+  if (preset === "read-only") return resolve(msg("Read only"));
+  if (preset === "thread-orchestration") return resolve(msg("Thread orchestration"));
   const count = orderedManagementApiKeyScopes(scopes).length;
-  return `${count} custom ${count === 1 ? "scope" : "scopes"}`;
+  return resolve(
+    msg("{count, plural, one {{count} custom scope} other {{count} custom scopes}}", { count }),
+  );
 }
 
 export function canRotateManagementApiKey(expiresAt: string | null, nowMs = Date.now()): boolean {

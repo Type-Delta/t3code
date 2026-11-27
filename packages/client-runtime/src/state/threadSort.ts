@@ -1,6 +1,10 @@
 import type { ProjectId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
-import { generateSpreadPinOrderKeys, pinOrderKeyBetween } from "@t3tools/shared/pinOrderKey";
+import {
+  generateSpreadPinOrderKeys,
+  LEADING_ORDER_TIER,
+  pinOrderKeyBetween,
+} from "@t3tools/shared/pinOrderKey";
 import type { EnvironmentThreadShell } from "./models.ts";
 
 export { generateSpreadPinOrderKeys, pinOrderKeyBetween } from "@t3tools/shared/pinOrderKey";
@@ -251,42 +255,58 @@ export function sortPinnedThreadsByOrderKey<
   return [...keyed, ...keyless];
 }
 
+const IMPLIED_KEY_WIDTH = 10;
+const IMPLIED_KEY_MAX_MS = 26 ** IMPLIED_KEY_WIDTH - 1;
+
+/**
+ * Sort key for the Active section. A thread nobody arranged takes an implied key from its
+ * latest human input or lifecycle anchor, newest first, ahead of arranged keys. A move only writes
+ * the moved thread, even beside threads whose server is offline.
+ */
+export function activeThreadSortKey(thread: {
+  readonly createdAt: string;
+  readonly unsettledAt?: string | null | undefined;
+  readonly activeOrderKey?: string | null | undefined;
+  readonly latestUserAuthoredMessageAt?: string | null | undefined;
+  readonly latestUserMessageAt?: string | null | undefined;
+}): string {
+  if (thread.activeOrderKey != null) return thread.activeOrderKey;
+  const latestInput =
+    thread.latestUserAuthoredMessageAt === undefined
+      ? thread.latestUserMessageAt
+      : thread.latestUserAuthoredMessageAt;
+  const timestamp = Math.max(
+    activeThreadAnchorTimestampMs(thread),
+    toSortableTimestamp(latestInput ?? undefined) ?? 0,
+  );
+  let value = IMPLIED_KEY_MAX_MS - Math.min(timestamp, IMPLIED_KEY_MAX_MS);
+  let digits = "";
+  for (let index = 0; index < IMPLIED_KEY_WIDTH; index += 1) {
+    digits = String.fromCharCode(97 + (value % 26)) + digits;
+    value = Math.floor(value / 26);
+  }
+  // A trailing "a" leaves no room to place a thread directly above this one.
+  return `${LEADING_ORDER_TIER}${digits}n`;
+}
+
 export function sortActiveThreadsByOrderKey<
   T extends {
     readonly id: string;
     readonly createdAt: string;
     readonly unsettledAt?: string | null | undefined;
+    readonly latestUserAuthoredMessageAt?: string | null | undefined;
     readonly latestUserMessageAt?: string | null | undefined;
     readonly activeOrderKey?: string | null | undefined;
     readonly environmentId?: string | undefined;
   },
 >(threads: readonly T[]): T[] {
   if (threads.length < 2) return [...threads];
-  const timestamps = new Map<T, number>();
-  for (const thread of threads) {
-    if (thread.activeOrderKey == null) {
-      timestamps.set(
-        thread,
-        Math.max(
-          activeThreadAnchorTimestampMs(thread),
-          toSortableTimestamp(thread.latestUserMessageAt ?? undefined) ?? 0,
-        ),
-      );
-    }
-  }
+  const keys = new Map(threads.map((thread) => [thread, activeThreadSortKey(thread)]));
   return [...threads].sort((left, right) => {
-    const leftKey = left.activeOrderKey;
-    const rightKey = right.activeOrderKey;
-    if (leftKey == null && rightKey != null) return -1;
-    if (leftKey != null && rightKey == null) return 1;
-    let order = 0;
-    if (leftKey != null && rightKey != null) {
-      order = leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
-    } else {
-      order = timestamps.get(right)! - timestamps.get(left)!;
-    }
+    const leftKey = keys.get(left)!;
+    const rightKey = keys.get(right)!;
     return (
-      order ||
+      (leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0) ||
       left.id.localeCompare(right.id) ||
       (left.environmentId ?? "").localeCompare(right.environmentId ?? "")
     );

@@ -10,7 +10,7 @@ import { desktopSharedRuntimeAtom } from "../state/desktopSharedRuntime";
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { useManagedPolicy } from "../state/managedPolicy";
 import { useEnvironmentQuery } from "../state/query";
-import { useEnvironmentScope } from "../state/session";
+import { useEnvironmentCanConfigureRelay, useEnvironmentScope } from "../state/session";
 import { useCloudLinkState } from "./cloudLinkState";
 import { hasCloudPublicConfig } from "./publicConfig";
 import { resolveT3ConnectTurnOn } from "./t3ConnectState";
@@ -19,6 +19,7 @@ import { resolveT3ConnectTurnOn } from "./t3ConnectState";
 export function useT3ConnectTurnOn(environmentId: EnvironmentId | null) {
   const canReadRelay = useEnvironmentScope(environmentId, AuthRelayReadScope);
   const canWriteRelay = useEnvironmentScope(environmentId, AuthRelayWriteScope);
+  const canConfigureRelay = useEnvironmentCanConfigureRelay(environmentId);
   const connectDenial = managedCapabilityDenial(useManagedPolicy(environmentId), "connect");
   const linkState = useCloudLinkState(environmentId).data;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -28,7 +29,6 @@ export function useT3ConnectTurnOn(environmentId: EnvironmentId | null) {
       : null,
   ).data;
   return resolveT3ConnectTurnOn({
-    desktopApp: isElectron,
     environmentId,
     // The bridge reports an actual attachment, which installs the shared backend as primary.
     attachedGatewayEnvironmentId: sharedRuntime?.attached === true ? primaryEnvironmentId : null,
@@ -36,7 +36,7 @@ export function useT3ConnectTurnOn(environmentId: EnvironmentId | null) {
     linkableHere: linkState?.linkableHere ?? true,
     cloudConfigured: hasCloudPublicConfig(),
     canReadRelay,
-    canWriteRelay,
+    canWriteRelay: canWriteRelay && canConfigureRelay,
     connectDenial,
   });
 }

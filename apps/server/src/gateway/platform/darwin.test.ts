@@ -559,7 +559,7 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
       }),
     );
 
-    it.effect("reactivating unchanged definitions only restarts the jobs", () =>
+    it.effect("reactivating unchanged definitions restarts the jobs and reloads the helper", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const { activate, calls, plist } = yield* fixture();
@@ -570,6 +570,9 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
         assert.deepEqual(
           calls.filter((call) => !/ print |\/ps |netstat/.test(call)),
           [
+            `/bin/launchctl bootout system/${HELPER_LABEL}`,
+            `/bin/launchctl enable system/${HELPER_LABEL}`,
+            `/bin/launchctl bootstrap system ${plist(HELPER_LABEL)}`,
             `/bin/launchctl kickstart -k system/${GATEWAY_LABEL}`,
             `/bin/launchctl kickstart -k system/${backendLabel("alice")}`,
           ],
@@ -638,7 +641,10 @@ describe.skipIf(!posixOwnership)("on a POSIX host", () => {
           assert.include(error.message, "See ");
           assert.equal(yield* fs.readFileString(plist(GATEWAY_LABEL)), previous);
           assert.equal(yield* fs.readFileString(plist(backendLabel("alice"))), previousBackend);
-          assert.include(calls, "restore runtime");
+          assert.include(
+            calls.slice(calls.indexOf("restore runtime")),
+            `/bin/launchctl bootstrap system ${plist(HELPER_LABEL)}`,
+          );
           assert.isFalse(
             calls.some((call) => call.includes(`kickstart -k system/${backendLabel("alice")}`)),
           );

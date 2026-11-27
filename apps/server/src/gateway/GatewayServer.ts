@@ -11,6 +11,7 @@ import { PAIRING_CODE_ALPHABET, PAIRING_CODE_LENGTH } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient } from "effect/http";
@@ -89,7 +90,7 @@ const CODE_EXCHANGES: Record<string, { contentType: string; code: (body: string)
 };
 const MAX_CODE_EXCHANGE_BODY_BYTES = 16 * 1024;
 const TOKEN_ISSUE_PATH = "/oauth/token";
-const MAX_TOKEN_RESPONSE_BYTES = 64 * 1024;
+const MAX_JSON_RESPONSE_BYTES = 64 * 1024;
 // Matches PAIRING_TOKEN_PATTERN in auth/PairingGrantStore.ts.
 const PAIRING_TOKEN_PATTERN = new RegExp(
   `^[${PAIRING_CODE_ALPHABET}]{${PAIRING_CODE_LENGTH}}$`,
@@ -246,6 +247,26 @@ const readBody = (request: NodeHttp.IncomingMessage, limit: number) =>
     request.once("end", () => resolve(Buffer.concat(chunks)));
     request.once("close", () => resolve(undefined));
   });
+
+// DPoP proofs bind the token. The gateway can route cookie-less requests only after tagging a Bearer token.
+const disableGatewayAccessTokenRenewal = (body: string) => {
+  try {
+    const descriptor: unknown = JSON.parse(body);
+    if (
+      Predicate.isObject(descriptor) &&
+      Predicate.isObject(descriptor.capabilities) &&
+      descriptor.capabilities.accessTokenRenewal === true
+    ) {
+      return JSON.stringify({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, accessTokenRenewal: false },
+      });
+    }
+  } catch {
+    // Startup and errors may return something other than the descriptor.
+  }
+  return undefined;
+};
 
 const serveStatic = async (
   staticRoot: string,
@@ -590,8 +611,12 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
       headers["content-length"] = String(body.length);
     }
     const issuesTokens = request.method === "POST" && url.pathname === TOKEN_ISSUE_PATH;
-    // The issued token must be readable to be tagged.
-    if (issuesTokens) delete headers["accept-encoding"];
+    const servesDescriptor = request.method === "GET" && url.pathname === PENDING_DISCOVERY_PATH;
+    if (issuesTokens || servesDescriptor) delete headers["accept-encoding"];
+    if (servesDescriptor) {
+      delete headers["if-none-match"];
+      delete headers["if-modified-since"];
+    }
     const upstream = NodeHttp.request(
       {
         host: "127.0.0.1",
@@ -620,23 +645,30 @@ export const serveGateway = Effect.fn("Gateway.serve")(function* (options: Gatew
             isDocument || paired,
           );
           if (
-            issuesTokens &&
+            (issuesTokens || servesDescriptor) &&
             status >= 200 &&
             status < 300 &&
             upstreamResponse.headers["content-encoding"] === undefined
           ) {
-            void readBody(upstreamResponse, MAX_TOKEN_RESPONSE_BYTES).then((issued) => {
+            void readBody(upstreamResponse, MAX_JSON_RESPONSE_BYTES).then((issued) => {
               if (response.destroyed) return;
               if (issued === undefined) {
                 upstreamResponse.destroy();
-                warn(`Gateway token response from ${backend.user} was incomplete or too large.`);
+                warn(`Gateway JSON response from ${backend.user} was incomplete or too large.`);
                 if (!response.headersSent) {
                   response.writeHead(502, { "content-type": "text/plain" }).end("Bad Gateway\n");
                 }
                 return;
               }
-              const tagged = tagIssuedBearerToken(issued.toString("utf8"), backend.user);
-              const answer = tagged === undefined ? issued : Buffer.from(tagged);
+              const body = issued.toString("utf8");
+              const rewritten = issuesTokens
+                ? tagIssuedBearerToken(body, backend.user)
+                : disableGatewayAccessTokenRenewal(body);
+              const answer = rewritten === undefined ? issued : Buffer.from(rewritten);
+              if (rewritten !== undefined) {
+                delete headers.etag;
+                delete headers["content-digest"];
+              }
               delete headers["transfer-encoding"];
               headers["content-length"] = String(answer.length);
               response.writeHead(status, upstreamResponse.statusMessage, headers).end(answer);

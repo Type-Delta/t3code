@@ -62,6 +62,8 @@ export type DesktopLocalEnvironmentAuthError = typeof DesktopLocalEnvironmentAut
 const BEARER_TOKEN_REFRESH_SKEW_MS = 5_000;
 
 interface CachedBearerToken {
+  readonly instance: DesktopBackendPool.DesktopBackendInstance;
+  readonly activePid: number | null;
   readonly httpBaseUrl: string;
   /** The launch secret, or the fixed launch token for backends without one. */
   readonly launchCredential: string;
@@ -100,98 +102,108 @@ export const make = Effect.gen(function* () {
   ) {
     const backendId = environmentId ?? PRIMARY_LOCAL_ENVIRONMENT_ID;
     const mutex = getMutex(backendId);
-    return yield* mutex.withPermits(1)(
-      Effect.gen(function* () {
-        const instances = yield* pool.list;
-        const instance = instances.find((candidate) => candidate.id === backendId);
-        if (instance === undefined) {
-          return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
-        }
+    const readyInstance = Effect.gen(function* () {
+      const instances = yield* pool.list;
+      const instance = instances.find((candidate) => candidate.id === backendId);
+      if (instance === undefined || !(yield* instance.waitForReady(Duration.infinity))) {
+        return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
+      }
+      return instance;
+    });
 
-        if (!(yield* instance.waitForReady(Duration.infinity))) {
-          return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
-        }
-        const configOption = yield* instance.currentConfig;
-        if (Option.isNone(configOption)) {
-          return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
-        }
-        const config = configOption.value;
-        const now = yield* Clock.currentTimeMillis;
-        // A backend launched with the desktop secret accepts the current
-        // window's token, not the one frozen into its launch config; this
-        // exchange can run long after launch (e.g. after a suspend).
-        const secret = config.bootstrap.desktopBootstrapSecret;
-        const launchCredential = secret ?? config.bootstrap.desktopBootstrapToken;
-        if (!launchCredential && instance.mintCredential === undefined) {
-          return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
-        }
+    const exchange = Effect.gen(function* () {
+      const instance = yield* readyInstance;
+      const configOption = yield* instance.currentConfig;
+      if (Option.isNone(configOption)) {
+        return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
+      }
+      const config = configOption.value;
+      const { activePid } = yield* instance.snapshot;
+      const pid = Option.getOrNull(activePid);
+      const httpBaseUrl = config.httpBaseUrl.href;
+      const runningDistro = config.runningDistro ?? null;
+      const secret = config.bootstrap.desktopBootstrapSecret;
+      const launchCredential = secret ?? config.bootstrap.desktopBootstrapToken;
+      if (!launchCredential && instance.mintCredential === undefined) {
+        return yield* new DesktopLocalEnvironmentAuthBackendNotConfiguredError();
+      }
 
-        const httpBaseUrl = config.httpBaseUrl.href;
-        const cached = (yield* Ref.get(tokenRef)).get(instance.id);
-        if (
-          cached !== undefined &&
-          cached.httpBaseUrl === httpBaseUrl &&
-          cached.launchCredential === launchCredential &&
-          cached.runningDistro === (config.runningDistro ?? null) &&
-          cached.expiresAtEpochMs > now + BEARER_TOKEN_REFRESH_SKEW_MS
-        ) {
-          return cached.token;
-        }
+      const now = yield* Clock.currentTimeMillis;
+      const cached = (yield* Ref.get(tokenRef)).get(backendId);
+      if (
+        cached !== undefined &&
+        cached.instance === instance &&
+        cached.activePid === pid &&
+        cached.httpBaseUrl === httpBaseUrl &&
+        cached.launchCredential === launchCredential &&
+        cached.runningDistro === runningDistro &&
+        cached.expiresAtEpochMs > now + BEARER_TOKEN_REFRESH_SKEW_MS
+      ) {
+        return cached.token;
+      }
 
-        // Fork-only: a shared gateway backend takes a fresh one-time token per session.
-        const credential =
-          instance.mintCredential !== undefined
-            ? yield* instance.mintCredential.pipe(
-                Effect.mapError(
-                  (cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
-                ),
-              )
-            : secret === undefined
-              ? launchCredential
-              : yield* currentDesktopBootstrapToken(secret, now).pipe(
-                  Effect.provideService(Mac.Mac, mac),
-                );
+      // A gateway token can be consumed even when the exchange response is lost.
+      const credential =
+        instance.mintCredential !== undefined
+          ? yield* instance.mintCredential.pipe(
+              Effect.mapError(
+                (cause) => new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
+              ),
+            )
+          : secret === undefined
+            ? launchCredential
+            : yield* currentDesktopBootstrapToken(secret, now).pipe(
+                Effect.provideService(Mac.Mac, mac),
+              );
 
-        // Timestamp before the exchange so network latency shortens the
-        // usable cache lifetime instead of extending the server's expiry.
-        const issuedAtEpochMs = now;
-        const session = yield* bootstrapRemoteBearerSession({
+      const issuedAtEpochMs = yield* Clock.currentTimeMillis;
+      const session = yield* bootstrapRemoteBearerSession({
+        httpBaseUrl,
+        credential,
+        clientMetadata: {
+          label: "T3 Code Desktop",
+          deviceType: "desktop",
+        },
+      }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
+
+      const expiresInMs = Number.isFinite(session.expires_in)
+        ? Math.max(0, session.expires_in * 1_000)
+        : 0;
+      yield* Ref.update(tokenRef, (current) =>
+        new Map(current).set(backendId, {
+          instance,
+          activePid: pid,
           httpBaseUrl,
-          credential,
-          clientMetadata: {
-            label: "T3 Code Desktop",
-            deviceType: "desktop",
-          },
-        }).pipe(
-          Effect.provideService(HttpClient.HttpClient, httpClient),
-          Effect.retry({
-            while: isTransientBearerBootstrapError,
-            schedule: Schedule.spaced(BOOTSTRAP_TRANSIENT_RETRY_INTERVAL),
-          }),
-          Effect.timeout(BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT),
-          Effect.mapError(
-            (cause) =>
-              new DesktopLocalEnvironmentAuthSessionBootstrapError({
-                cause,
-              }),
+          launchCredential,
+          runningDistro,
+          token: session.access_token,
+          expiresAtEpochMs: issuedAtEpochMs + expiresInMs,
+        }),
+      );
+      return session.access_token;
+    });
+
+    return yield* mutex.withPermits(1)(
+      readyInstance.pipe(
+        Effect.andThen(
+          exchange.pipe(
+            Effect.retry({
+              while: (error) =>
+                error._tag !== "DesktopLocalEnvironmentAuthBackendNotConfiguredError" &&
+                error._tag !== "DesktopLocalEnvironmentAuthSessionBootstrapError" &&
+                isTransientBearerBootstrapError(error),
+              schedule: Schedule.spaced(BOOTSTRAP_TRANSIENT_RETRY_INTERVAL),
+            }),
+            Effect.timeout(BOOTSTRAP_TRANSIENT_RETRY_TIMEOUT),
+            Effect.mapError((cause) =>
+              cause._tag === "DesktopLocalEnvironmentAuthBackendNotConfiguredError" ||
+              cause._tag === "DesktopLocalEnvironmentAuthSessionBootstrapError"
+                ? cause
+                : new DesktopLocalEnvironmentAuthSessionBootstrapError({ cause }),
+            ),
           ),
-        );
-        const expiresInMs = Number.isFinite(session.expires_in)
-          ? Math.max(0, session.expires_in * 1_000)
-          : 0;
-        yield* Ref.update(tokenRef, (current) => {
-          const next = new Map(current);
-          next.set(instance.id, {
-            httpBaseUrl,
-            launchCredential,
-            runningDistro: config.runningDistro ?? null,
-            token: session.access_token,
-            expiresAtEpochMs: issuedAtEpochMs + expiresInMs,
-          });
-          return next;
-        });
-        return session.access_token;
-      }),
+        ),
+      ),
     );
   });
 

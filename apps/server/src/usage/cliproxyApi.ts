@@ -72,6 +72,9 @@ const AuthFile = Schema.Struct({
   ),
 });
 const AuthFiles = Schema.Struct({ files: ForwardCompatibleArray(AuthFile) });
+const AuthFileModels = Schema.Struct({
+  models: Schema.Array(Schema.Struct({ id: Schema.String })),
+});
 const ApiResponse = Schema.Struct({ status_code: Schema.Number, body: Schema.String });
 const CodexWindow = Schema.Struct({
   used_percent: UsageNumber,
@@ -132,6 +135,7 @@ const CreditList = Schema.Struct({
 });
 
 const decodeAuthFiles = Schema.decodeUnknownEffect(AuthFiles);
+const decodeAuthFileModels = Schema.decodeUnknownEffect(AuthFileModels);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeApiResponse = Schema.decodeUnknownEffect(ApiResponse);
 const decodeCreditList = Schema.decodeUnknownEffect(Schema.fromJsonString(CreditList));
@@ -422,6 +426,7 @@ const HUB_PROVIDERS = new Map<string, HubProvider>([
 export const makeCliproxyApi = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
   const managementLocks = new Map<string, Semaphore.Semaphore>();
+  const routingLocks = new Map<string, Semaphore.Semaphore>();
   const denied = new Map<string, { key: string; error: UsageLimitSourceError }>();
   const digest = yield* Digest.Digest;
   const platform = yield* HostProcess.Platform;
@@ -431,7 +436,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
     function* (config: CliproxyHub, path: string, body?: unknown) {
       const previous = denied.get(config.url);
       if (previous?.key === config.managementKey) return yield* previous.error;
-      denied.delete(config.url);
+      if (previous !== undefined) denied.delete(config.url);
       const url = yield* Effect.try({
         try: () => {
           const base = new URL(config.url);
@@ -475,10 +480,11 @@ export const makeCliproxyApi = Effect.gen(function* () {
         );
       return response;
     },
-    (effect, config) => {
-      // One request per hub prevents queued account probes from accumulating auth failures.
-      const lock = managementLocks.get(config.url) ?? Semaphore.makeUnsafe(1);
-      managementLocks.set(config.url, lock);
+    (effect, config, path, _body?: unknown) => {
+      // Keep a slow optional routing request off the quota queue while sharing the denial cache.
+      const locks = path.startsWith("auth-files/models?") ? routingLocks : managementLocks;
+      const lock = locks.get(config.url) ?? Semaphore.makeUnsafe(1);
+      locks.set(config.url, lock);
       return lock.withPermits(1)(effect);
     },
   );
@@ -486,6 +492,20 @@ export const makeCliproxyApi = Effect.gen(function* () {
   const authFiles = Effect.fn("CliproxyApi.authFiles")(function* (hub: CliproxyHub) {
     const response = yield* management(hub, "auth-files");
     return (yield* decodeAuthFiles(response)).files;
+  });
+
+  // Older hubs lack this endpoint; the account then counts for every model of its driver.
+  const routedModels = Effect.fn("CliproxyApi.routedModels")(function* (
+    hub: CliproxyHub,
+    account: AuthFile,
+  ) {
+    const response = yield* management(
+      hub,
+      `auth-files/models?name=${encodeURIComponent(account.id)}`,
+    );
+    return (yield* decodeAuthFileModels(response)).models.flatMap(({ id }) =>
+      id.trim() ? [id.trim()] : [],
+    );
   });
 
   const apiCall = Effect.fn("CliproxyApi.apiCall")(function* (
@@ -535,14 +555,19 @@ export const makeCliproxyApi = Effect.gen(function* () {
               },
             },
       ),
-      Effect.orElseSucceed(() => ({
-        ...listedIdentity(account),
-        usageLimits: makeUnavailableUsageLimits({
-          checkedAt,
-          reason: "probeFailed",
-          message: "The hub could not read this account's usage.",
+      Effect.catch((error) =>
+        Effect.succeed({
+          ...listedIdentity(account),
+          usageLimits: makeUnavailableUsageLimits({
+            checkedAt,
+            reason: "probeFailed",
+            // Source-error details are already credential-free (status codes only).
+            message: isUsageLimitSourceError(error)
+              ? error.detail
+              : "The hub could not read this account's usage.",
+          }),
         }),
-      })),
+      ),
     );
     return { id: account.id, driver: provider.driver, ...reading };
   });
@@ -557,17 +582,35 @@ export const makeCliproxyApi = Effect.gen(function* () {
           : new UsageLimitSourceError({ detail: "The hub could not list accounts." }),
       ),
     );
-    const result = yield* Effect.forEach(
-      accounts.flatMap((account) => {
-        const provider = HUB_PROVIDERS.get(account.provider);
-        return provider && !account.disabled ? [{ account, provider }] : [];
-      }),
-      ({ account, provider }) => readAccount(hub, account, provider),
-      { concurrency: 4 },
+    const readable = accounts.flatMap((account) => {
+      const provider = HUB_PROVIDERS.get(account.provider);
+      return provider && !account.disabled ? [{ account, provider }] : [];
+    });
+    // Model lists are optional, so their lookups run apart from the quota reads and stop at one
+    // short deadline; a slow lookup must not push a refresh past its budget.
+    const [readings, models] = yield* Effect.all(
+      [
+        Effect.forEach(readable, ({ account, provider }) => readAccount(hub, account, provider), {
+          concurrency: 4,
+        }),
+        Effect.forEach(
+          readable,
+          ({ account }) =>
+            routedModels(hub, account).pipe(
+              Effect.timeoutOption("2 seconds"),
+              Effect.orElseSucceed(() => Option.none()),
+            ),
+          { concurrency: "unbounded" },
+        ),
+      ],
+      { concurrency: 2 },
     );
     const failure = denied.get(hub.url);
     if (failure?.key === hub.managementKey) return yield* failure.error;
-    return result;
+    return readings.map((reading, index) => {
+      const listed = models[index];
+      return listed && Option.isSome(listed) ? { ...reading, models: listed.value } : reading;
+    });
   });
 
   const consume = Effect.fn("CliproxyApi.consume")(function* (

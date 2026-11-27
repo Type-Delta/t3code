@@ -2,6 +2,9 @@ import {
   checkpointNavigationConfirmationMessage,
   resolveCheckpointNavigationDisabledReason,
 } from "../../composer-logic";
+import { msg, useMessages } from "gt-react";
+import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { m } from "~/i18n/messages";
 import type { EnvironmentThreadShell, ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import type { ComposerThreadTarget } from "../../composerDraftStore";
 import type { ComposerHandleRef } from "../../composerHandleContext";
@@ -83,6 +86,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     composerDraftTarget,
     setThreadError,
   } = input;
+  const messages = useMessages();
   const navigate = useNavigate();
   const createAttachmentAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
@@ -101,17 +105,20 @@ export function useTimelineRewind(input: TimelineRewindInput) {
   });
 
   const checkpointNavigationDisabledReason = (command: "undo" | "redo" | "jump"): string | null =>
-    resolveCheckpointNavigationDisabledReason({
-      command,
-      threadCreated: input.isServerThread && activeThread !== undefined,
-      reconnectLabel:
-        activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel
-          ? activeEnvironmentUnavailableLabel
-          : null,
-      busy: phase === "running" || isSendBusy || phase === "connecting",
-      locallyNavigating: isRevertingCheckpoint,
-      navigation: serverProjection?.checkpointNavigation,
-    });
+    resolveCheckpointNavigationDisabledReason(
+      {
+        command,
+        threadCreated: input.isServerThread && activeThread !== undefined,
+        reconnectLabel:
+          activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel
+            ? activeEnvironmentUnavailableLabel
+            : null,
+        busy: phase === "running" || isSendBusy || phase === "connecting",
+        locallyNavigating: isRevertingCheckpoint,
+        navigation: serverProjection?.checkpointNavigation,
+      },
+      messages,
+    );
 
   const onCheckpointNavigation = async (
     command: "undo" | "redo" | "jump",
@@ -124,12 +131,19 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
       setThreadError(
         activeThread.id,
-        `Reconnect ${activeEnvironmentUnavailableLabel} before navigating checkpoints.`,
+        m(
+          msg("Reconnect {environment} before navigating checkpoints.", {
+            environment: activeEnvironmentUnavailableLabel,
+          }),
+        ),
       );
       return;
     }
     if (phase === "running" || isSendBusy || phase === "connecting") {
-      setThreadError(activeThread.id, "Interrupt the current turn before navigating checkpoints.");
+      setThreadError(
+        activeThread.id,
+        m(msg("Interrupt the current turn before navigating checkpoints.")),
+      );
       return;
     }
 
@@ -143,7 +157,10 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     }
     const navigationCapability = serverProjection?.checkpointNavigation?.capability;
     if (!navigationCapability) {
-      setThreadError(activeThread.id, "Checkpoint navigation availability has not loaded yet.");
+      setThreadError(
+        activeThread.id,
+        m(msg("Checkpoint navigation availability has not loaded yet.")),
+      );
       return;
     }
     const confirmationMessage = checkpointNavigationConfirmationMessage({
@@ -190,7 +207,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
       const error = squashAtomCommandFailure(result);
       setThreadError(
         activeThread.id,
-        error instanceof Error ? error.message : "Failed to navigate thread checkpoints.",
+        thrownErrorMessage(error, m) ?? m(msg("Failed to navigate thread checkpoints.")),
       );
     } else if (result._tag === "Success") {
       // The command is accepted before the provider rollback runs; that failure arrives on the projection.
@@ -217,19 +234,30 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     if (!supportsConversationRollback) {
       setThreadError(
         activeThread.id,
-        "This provider does not support reverting conversation history. Start a new thread instead.",
+        m(
+          msg(
+            "This provider does not support reverting conversation history. Start a new thread instead.",
+          ),
+        ),
       );
       return;
     }
     if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
       setThreadError(
         activeThread.id,
-        `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
+        m(
+          msg("Reconnect {environment} before reverting checkpoints.", {
+            environment: activeEnvironmentUnavailableLabel,
+          }),
+        ),
       );
       return;
     }
     if (phase === "running" || isSendBusy) {
-      setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
+      setThreadError(
+        activeThread.id,
+        m(msg("Interrupt the current turn before reverting checkpoints.")),
+      );
       return;
     }
     if (restoreFiles === undefined) {
@@ -249,7 +277,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
       turnCount,
       restoreFiles,
       // Keep the live checkpoint identity when command context refetches a bounded window.
-      checkpoint: findRevertCheckpoint(serverProjection?.checkpoints ?? [], turnCount),
+      checkpoint: findRevertCheckpoint(serverProjection, turnCount),
       draftTarget: composerDraftTarget,
       composerHasPendingAttachments: composerRef.current?.hasPendingAttachments() === true,
       createAssetUrl: createAttachmentAssetUrl,
@@ -300,7 +328,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
         const error = squashAtomCommandFailure(result);
         setThreadError(
           activeThread.id,
-          error instanceof Error ? error.message : "Failed to fork this response.",
+          thrownErrorMessage(error, m) ?? m(msg("Failed to fork this response.")),
         );
       }
       return;
@@ -309,7 +337,11 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     if (!targetThreadReady) {
       setThreadError(
         activeThread.id,
-        "The fork was created, but its thread data did not reach this client. Reconnect and try opening it from the sidebar.",
+        m(
+          msg(
+            "The fork was created, but its thread data did not reach this client. Reconnect and try opening it from the sidebar.",
+          ),
+        ),
       );
       return;
     }

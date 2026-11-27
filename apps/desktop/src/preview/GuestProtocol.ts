@@ -11,7 +11,6 @@ export const POINTER_DOWN_HOST_CHANNEL = "preview:pointer-down";
 export const PAGE_UNHANDLED_SHORTCUT_CHANNEL = "preview:page-unhandled-shortcut";
 export const RECORDING_CURSOR_CHANNEL = "preview:recording-cursor";
 export const RECORDING_POINTER_CHANNEL = "preview:recording-pointer";
-export const RECORDING_KEY_CHANNEL = "preview:recording-key";
 export const RECORDING_INPUT_CHANNEL = "preview:recording-input";
 export const RECORDING_CONTROLLER_CHANNEL = "preview:recording-controller";
 export const THUMB_PRESS_CHANNEL = "preview:thumb-press";

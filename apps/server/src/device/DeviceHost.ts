@@ -67,6 +67,8 @@ export class AgentDeviceStartError extends Schema.TaggedError<AgentDeviceStartEr
 
 export interface DeviceHubEndpoint {
   readonly origin: string;
+  /** The hub's session token, which the hub requires on every request. */
+  readonly token?: string;
 }
 
 export interface AgentDeviceEndpoint {
@@ -100,6 +102,9 @@ export interface HubUpstream {
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly protocols: ReadonlyArray<string>;
+  readonly refuseRedirects?: boolean;
+  /** Completes when the upstream is withdrawn; streams opened through it end then. */
+  readonly ended?: Effect.Effect<void>;
 }
 
 /** Discovery and lifecycle for the devices a ready host can run. */

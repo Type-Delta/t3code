@@ -65,6 +65,7 @@ import {
 } from "@t3tools/provider-core/server/snapshotSettings";
 import {
   codexContinuationIdentity,
+  codexHomeLaunchArgs,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
@@ -222,6 +223,7 @@ export const CodexDriver: ProviderDriver<
     const resetCreditCoordinator = yield* ResetCreditCoordinator.ResetCreditCoordinator;
     const fileSystem = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
+    const host = yield* ProviderHost.ProviderHost;
     const httpClient = yield* HttpClient.HttpClient;
     const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
     const installation = yield* CodexInstallation.CodexInstallation;
@@ -244,15 +246,24 @@ export const CodexDriver: ProviderDriver<
         ? { ...config, homePath: environmentHome }
         : config;
     const gatewayCatalog = yield* gatewayModelCatalog.current;
+    const homeLayout = yield* resolveCodexHomeLayout(homeConfig);
     const baseLaunchArgs = resolveCodexLaunchArgs(config.launchArgs, processEnv);
     const effectiveProcessEnv: NodeJS.ProcessEnv = { ...processEnv };
-    const effectiveLaunchArgs = syncCodexGatewayLaunchArgs({
-      environment: effectiveProcessEnv,
-      baseLaunchArgs,
-      apiGateway: config.apiGateway,
-      catalog: gatewayCatalog,
-    });
-    const homeLayout = yield* resolveCodexHomeLayout(homeConfig);
+    const refreshGatewayLaunchArgs = (catalog: GatewayCatalogSnapshot) => {
+      const launchArgs = syncCodexGatewayLaunchArgs({
+        environment: effectiveProcessEnv,
+        baseLaunchArgs,
+        apiGateway: config.apiGateway,
+        catalog,
+      });
+      effectiveProcessEnv[T3CODE_CODEX_LAUNCH_ARGS_ENV] = codexHomeLaunchArgs(
+        pathService,
+        homeLayout,
+        launchArgs,
+      );
+      return launchArgs;
+    };
+    const effectiveLaunchArgs = refreshGatewayLaunchArgs(gatewayCatalog);
     const continuationIdentity = codexContinuationIdentity(homeLayout);
     const stampIdentity = withInstanceIdentity({
       instanceId,
@@ -277,7 +288,7 @@ export const CodexDriver: ProviderDriver<
       enabled,
       binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
       homePath: homeLayout.effectiveHomePath ?? "",
-      launchArgs: effectiveLaunchArgs,
+      launchArgs: effectiveProcessEnv[T3CODE_CODEX_LAUNCH_ARGS_ENV] ?? effectiveLaunchArgs,
     } satisfies CodexSettings;
     const resolveModelContextWindows = (
       catalog: GatewayCatalogSnapshot,
@@ -300,6 +311,7 @@ export const CodexDriver: ProviderDriver<
         {
           binaryPath: effectiveConfig.binaryPath,
           env: processEnv,
+          npmCacheDir: pathService.join(host.paths.providerStatusCacheDir, "npm"),
         },
       ).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -346,12 +358,7 @@ export const CodexDriver: ProviderDriver<
     const checkProvider = gatewayModelCatalog.refresh.pipe(
       Effect.tap((catalog) =>
         Effect.sync(() => {
-          syncCodexGatewayLaunchArgs({
-            environment: effectiveProcessEnv,
-            baseLaunchArgs,
-            apiGateway: config.apiGateway,
-            catalog,
-          });
+          refreshGatewayLaunchArgs(catalog);
           modelContextWindows = resolveModelContextWindows(catalog);
         }),
       ),

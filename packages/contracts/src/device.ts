@@ -2,7 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
-import { ThreadId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import { EnvironmentId, ThreadId, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 import { SettingsSecretValue } from "./settingsSecretValue.ts";
 
 export const DevicePlatform = Schema.Literals(["ios", "android"]);
@@ -97,7 +97,23 @@ export const SimlockDeviceHostConfig = Schema.Struct({
 });
 export type SimlockDeviceHostConfig = typeof SimlockDeviceHostConfig.Type;
 
-export type DeviceHostConfig = SshDeviceHostConfig | EasDeviceHostConfig | SimlockDeviceHostConfig;
+/**
+ * Simulators and emulators of another environment this one links to, reached over that full-access
+ * peer link: the link's own session is the only credential, so unlinking ends the host.
+ */
+export const LinkedDeviceHostConfig = Schema.Struct({
+  kind: Schema.Literal("linked"),
+  id: ConfiguredDeviceHostId,
+  label: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+});
+export type LinkedDeviceHostConfig = typeof LinkedDeviceHostConfig.Type;
+
+export type DeviceHostConfig =
+  | SshDeviceHostConfig
+  | EasDeviceHostConfig
+  | SimlockDeviceHostConfig
+  | LinkedDeviceHostConfig;
 
 const uniqueHostIds = Schema.makeFilter(
   (hosts: ReadonlyArray<{ readonly id: string }>) =>
@@ -116,6 +132,9 @@ export const EasDeviceHostConfigs = Schema.Array(EasDeviceHostConfig).check(uniq
 
 /** Kept apart from the other host lists for the same reason as Expo hosts. */
 export const SimlockDeviceHostConfigs = Schema.Array(SimlockDeviceHostConfig).check(uniqueHostIds);
+
+/** Kept apart from the other host lists for the same reason as Expo hosts. */
+export const LinkedDeviceHostConfigs = Schema.Array(LinkedDeviceHostConfig).check(uniqueHostIds);
 
 export const DeviceEasAccountInput = Schema.Struct({
   /** A saved Expo host whose stored token is checked when no new token is given. */
@@ -224,10 +243,15 @@ const SimlockDeviceHostSummary = Schema.Struct({
   ...deviceHostSummaryFields,
   kind: Schema.Literal("simlock"),
 });
+const LinkedDeviceHostSummary = Schema.Struct({
+  ...deviceHostSummaryFields,
+  kind: Schema.Literal("linked"),
+});
 export const DeviceHostSummary = Schema.Union([
   MachineDeviceHostSummary,
   EasDeviceHostSummary,
   SimlockDeviceHostSummary,
+  LinkedDeviceHostSummary,
 ]);
 export type DeviceHostSummary = typeof DeviceHostSummary.Type;
 
@@ -268,6 +292,8 @@ const deviceServiceStateFields = {
   supportsEasHosts: Schema.optional(Schema.Boolean),
   /** Servers from before Simlock hosts ignore `simlockDeviceHosts`. */
   supportsSimlockHosts: Schema.optional(Schema.Boolean),
+  /** Servers from before linked environment hosts ignore `linkedDeviceHosts`. */
+  supportsLinkedHosts: Schema.optional(Schema.Boolean),
   hostStatus: DeviceHostStatus,
   hostStatusDetail: Schema.optional(Schema.String),
   hostStatuses: DeviceHostStatuses,
@@ -292,6 +318,7 @@ const DeviceServiceStateWire = Schema.Struct({
   hosts: Schema.Array(MachineDeviceHostSummary),
   easHosts: Schema.optional(Schema.Array(EasDeviceHostSummary)),
   simlockHosts: Schema.optional(Schema.Array(SimlockDeviceHostSummary)),
+  linkedHosts: Schema.optional(Schema.Array(LinkedDeviceHostSummary)),
 });
 const DeviceServiceStateDecoded = Schema.Struct({
   ...deviceServiceStateFields,
@@ -305,9 +332,14 @@ export const DeviceServiceState = DeviceServiceStateWire.pipe(
       typeof DeviceServiceStateDecoded.Type,
       typeof DeviceServiceStateWire.Type
     >({
-      decode: ({ easHosts, simlockHosts, ...state }) => ({
+      decode: ({ easHosts, simlockHosts, linkedHosts, ...state }) => ({
         ...state,
-        hosts: [...state.hosts, ...(easHosts ?? []), ...(simlockHosts ?? [])],
+        hosts: [
+          ...state.hosts,
+          ...(easHosts ?? []),
+          ...(simlockHosts ?? []),
+          ...(linkedHosts ?? []),
+        ],
       }),
       encode: (state) => ({
         ...state,
@@ -320,6 +352,9 @@ export const DeviceServiceState = DeviceServiceStateWire.pipe(
         ),
         simlockHosts: state.hosts.filter(
           (host): host is typeof SimlockDeviceHostSummary.Type => host.kind === "simlock",
+        ),
+        linkedHosts: state.hosts.filter(
+          (host): host is typeof LinkedDeviceHostSummary.Type => host.kind === "linked",
         ),
       }),
     }),
@@ -737,3 +772,51 @@ export function deviceToolInstallMessage(name: string, tool: DeviceToolVersion |
     ? `Updating ${name} from ${previous} to ${tool.requiredVersion}…`
     : `Installing ${name} ${tool.requiredVersion}…`;
 }
+
+/**
+ * Where an environment serves its own simulators and emulators to a full-access peer link, signed
+ * in with the link's session as on `/mcp`. `hub/…` is that machine's device hub, `daemon/…` its
+ * agent-device daemon; the rest are the device operations below.
+ */
+export const PEER_LINK_DEVICES_ROUTE_PREFIX = "/api/links/devices";
+
+/** A device as the linked environment's own machine lists it. */
+export const PeerLinkDevice = Schema.Struct({
+  id: DeviceId,
+  platform: DevicePlatform,
+  name: TrimmedNonEmptyString,
+  version: Schema.String,
+  booted: Schema.Boolean,
+  physical: Schema.Boolean,
+});
+export type PeerLinkDevice = typeof PeerLinkDevice.Type;
+
+export const PeerLinkDeviceList = Schema.Struct({
+  platforms: Schema.Array(DevicePlatformAvailability),
+  devices: Schema.Array(PeerLinkDevice),
+  detail: Schema.optional(Schema.String),
+  androidDiscoveryIncomplete: Schema.optional(Schema.Boolean),
+  incompletePlatforms: Schema.optional(Schema.Array(DevicePlatform)),
+});
+export type PeerLinkDeviceList = typeof PeerLinkDeviceList.Type;
+
+export const PeerLinkDevicePlatforms = Schema.Struct({
+  platforms: Schema.Array(DevicePlatformAvailability),
+});
+export type PeerLinkDevicePlatforms = typeof PeerLinkDevicePlatforms.Type;
+
+export const PeerLinkDeviceRequest = Schema.Struct({ device: PeerLinkDevice });
+export type PeerLinkDeviceRequest = typeof PeerLinkDeviceRequest.Type;
+
+export const PeerLinkDeviceShutdownRequest = Schema.Struct({
+  device: Schema.Struct({ id: DeviceId, platform: DevicePlatform }),
+});
+
+export const PeerLinkDeviceBooted = Schema.Struct({ id: DeviceId });
+
+/** Why the linked environment refused or failed a device request, short enough to show as is. */
+export const PeerLinkDeviceFailure = Schema.Struct({
+  error: Schema.String,
+  message: Schema.String,
+});
+export type PeerLinkDeviceFailure = typeof PeerLinkDeviceFailure.Type;

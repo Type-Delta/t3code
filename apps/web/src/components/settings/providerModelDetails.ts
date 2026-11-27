@@ -1,9 +1,11 @@
+import { msg } from "gt-react";
 import type {
   ModelMetadataOverride,
   ProviderOptionDescriptor,
   ServerProviderModel,
 } from "@t3tools/contracts";
 
+import { m, type MessageResolver } from "../../i18n/messages";
 import { formatContextWindowTokens } from "../../lib/contextWindow";
 
 export interface ProviderModelDetailRow {
@@ -22,23 +24,28 @@ function reasoningDescriptor(
   );
 }
 
-export function formatModelTokenCount(value: number): string {
-  return `${value.toLocaleString("en-US")} tokens (${formatContextWindowTokens(value)})`;
+export function formatModelTokenCount(value: number, resolve: MessageResolver = m): string {
+  return resolve(
+    msg("{value} tokens ({formatted})", {
+      value: value.toLocaleString("en-US"),
+      formatted: formatContextWindowTokens(value),
+    }),
+  );
 }
 
-function formatMetadataSource(source: string): string {
+function formatMetadataSource(source: string, resolve: MessageResolver = m): string {
   switch (source.trim().toLowerCase()) {
     case "manual":
     case "override":
-      return "Manual override";
+      return resolve(msg("Manual override"));
     case "gateway":
     case "api-gateway":
-      return "Gateway catalog";
+      return resolve(msg("Gateway catalog"));
     case "harness":
-      return "Provider harness";
+      return resolve(msg("Provider harness"));
     case "built-in":
     case "builtin":
-      return "Built in";
+      return resolve(msg("Built in"));
     default:
       return source;
   }
@@ -47,20 +54,24 @@ function formatMetadataSource(source: string): string {
 function formatMergedMetadataSource(
   override: ModelMetadataOverride | undefined,
   detectedSource: string | undefined,
+  resolve: MessageResolver = m,
 ): string | undefined {
-  if (!override) return detectedSource ? formatMetadataSource(detectedSource) : undefined;
-  if (!detectedSource) return "Manual override";
-  const formattedSource = formatMetadataSource(detectedSource);
-  return formattedSource === "Manual override"
-    ? "Manual override"
-    : `Manual override + ${formattedSource}`;
+  if (!override) return detectedSource ? formatMetadataSource(detectedSource, resolve) : undefined;
+  if (!detectedSource) return resolve(msg("Manual override"));
+  const formattedSource = formatMetadataSource(detectedSource, resolve);
+  return formattedSource === resolve(msg("Manual override"))
+    ? resolve(msg("Manual override"))
+    : resolve(msg("Manual override + {source}", { source: formattedSource }));
 }
 
-export function deriveProviderModelDetails(input: {
-  readonly model: ServerProviderModel;
-  readonly override?: ModelMetadataOverride | undefined;
-  readonly capabilityLabels: ReadonlyArray<string>;
-}): ReadonlyArray<ProviderModelDetailRow> {
+export function deriveProviderModelDetails(
+  input: {
+    readonly model: ServerProviderModel;
+    readonly override?: ModelMetadataOverride | undefined;
+    readonly capabilityLabels: ReadonlyArray<string>;
+  },
+  resolve: MessageResolver = m,
+): ReadonlyArray<ProviderModelDetailRow> {
   const { model, override } = input;
   const descriptor = reasoningDescriptor(model);
   const reasoningEfforts =
@@ -73,30 +84,47 @@ export function deriveProviderModelDetails(input: {
   const maxContextWindowTokens =
     override?.maxContextWindowTokens ?? model.metadata?.maxContextWindowTokens;
   const maxOutputTokens = override?.maxOutputTokens ?? model.metadata?.maxOutputTokens;
-  const source = formatMergedMetadataSource(override, model.metadata?.source);
+  const source = formatMergedMetadataSource(override, model.metadata?.source, resolve);
 
   return [
-    { label: "Model ID", value: model.slug },
-    ...(model.description ? [{ label: "Description", value: model.description }] : []),
-    ...(model.subProvider ? [{ label: "Provider", value: model.subProvider }] : []),
-    ...(source ? [{ label: "Source", value: source }] : []),
+    { label: resolve(msg("Model ID")), value: model.slug },
+    ...(model.description
+      ? [{ label: resolve(msg("Description")), value: model.description }]
+      : []),
+    ...(model.subProvider ? [{ label: resolve(msg("Provider")), value: model.subProvider }] : []),
+    ...(source ? [{ label: resolve(msg("Source")), value: source }] : []),
     ...(contextWindowTokens !== undefined
-      ? [{ label: "Usable context", value: formatModelTokenCount(contextWindowTokens) }]
+      ? [
+          {
+            label: resolve(msg("Usable context")),
+            value: formatModelTokenCount(contextWindowTokens, resolve),
+          },
+        ]
       : []),
     ...(maxContextWindowTokens !== undefined
-      ? [{ label: "Maximum context", value: formatModelTokenCount(maxContextWindowTokens) }]
+      ? [
+          {
+            label: resolve(msg("Maximum context")),
+            value: formatModelTokenCount(maxContextWindowTokens, resolve),
+          },
+        ]
       : []),
     ...(maxOutputTokens !== undefined
-      ? [{ label: "Maximum output", value: formatModelTokenCount(maxOutputTokens) }]
+      ? [
+          {
+            label: resolve(msg("Maximum output")),
+            value: formatModelTokenCount(maxOutputTokens, resolve),
+          },
+        ]
       : []),
     ...(reasoningEfforts.length > 0
-      ? [{ label: "Reasoning levels", value: reasoningEfforts.join(", ") }]
+      ? [{ label: resolve(msg("Reasoning levels")), value: reasoningEfforts.join(", ") }]
       : []),
     ...(defaultReasoningEffort
-      ? [{ label: "Default reasoning", value: defaultReasoningEffort }]
+      ? [{ label: resolve(msg("Default reasoning")), value: defaultReasoningEffort }]
       : []),
     ...(input.capabilityLabels.length > 0
-      ? [{ label: "Capabilities", value: input.capabilityLabels.join(", ") }]
+      ? [{ label: resolve(msg("Capabilities")), value: input.capabilityLabels.join(", ") }]
       : []),
   ];
 }

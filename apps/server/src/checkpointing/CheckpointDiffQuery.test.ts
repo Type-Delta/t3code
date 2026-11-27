@@ -2,7 +2,13 @@ import { CheckpointThreadNotFoundError } from "./Errors.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
-import { CheckpointRef, CheckpointScopeId, RunId, ThreadId } from "@t3tools/contracts";
+import {
+  CheckpointId,
+  CheckpointRef,
+  CheckpointScopeId,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -44,6 +50,7 @@ function makeProjection(): ProjectionCheckpointContext {
     ],
     checkpoints: [
       {
+        id: CheckpointId.make("checkpoint:checkpoint-diff-v2:2"),
         scopeId: secondScopeId,
         runId: secondRunId,
         ordinalWithinScope: 1,
@@ -74,7 +81,7 @@ function layerFor(input: {
         }),
       ),
     ),
-    Layer.provideMerge(NodeCrypto.layer),
+    Layer.provideMerge(Layer.merge(NodeCrypto.layer, NodeServices.layer)),
   );
 }
 
@@ -211,6 +218,7 @@ it.effect("excludes ready checkpoints from rolled-back runs", () => {
       checkpoints: [
         {
           ...projection.checkpoints[0]!,
+          id: CheckpointId.make("checkpoint:checkpoint-diff-v2:1"),
           scopeId: firstScopeId,
           runId: firstRunId,
           appRunOrdinal: 1,
@@ -244,6 +252,7 @@ function makeProjectionAfterStoppedRun(stoppedRunCheckpoint: boolean) {
     ordinalWithinScope: number,
     runId: RunId | null,
   ): ProjectionCheckpointContext["checkpoints"][number] => ({
+    id: CheckpointId.make(`checkpoint:checkpoint-diff-v2:${ordinalWithinScope}`),
     scopeId: firstScopeId,
     runId,
     ordinalWithinScope,
@@ -302,10 +311,7 @@ it.effect.each([false, true])(
           { from: "refs/t3/test/ordinal/2", to: "refs/t3/test/ordinal/3" },
           { from: "refs/t3/test/ordinal/1", to: "refs/t3/test/ordinal/3" },
           {
-            from: yield* checkpointRefForScopeOrdinal({
-              scopeId: firstScopeId,
-              ordinalWithinScope: 0,
-            }),
+            from: "refs/t3/test/ordinal/0",
             to: "refs/t3/test/ordinal/3",
           },
         ],
@@ -400,6 +406,7 @@ it.effect("shares the turn and full-thread diff budget across real Git batches",
               checkpointScopes: [{ id: scopeId, runId, kind: "root_run", cwd }],
               checkpoints: [
                 {
+                  id: CheckpointId.make(`checkpoint:${scopeId}`),
                   scopeId,
                   runId,
                   ordinalWithinScope: 1,
@@ -459,6 +466,8 @@ it.effect("truncates a storage-cut UTF-8 character without replacement text", ()
     const result = yield* query.getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 2 });
     assert.isAtMost(Buffer.byteLength(result.diff), 10_000_000);
     assert.isTrue(result.diff === `${prefix}\n\n[truncated]`);
+    // A thread without tracked repositories keeps the payload it always had.
+    assert.notProperty(result, "repositories");
   }).pipe(Effect.provide(layer));
 });
 
@@ -481,5 +490,94 @@ it.effect("preserves an exact-fit filtered patch across batches without a marker
     const result = yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 });
     assert.isTrue(result.diff === patches.join(""));
     assert.strictEqual(patchReads, 2);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("adds a patch for each tracked repository that changed in the range", () => {
+  const projection = makeProjection();
+  const repository = (name: string, cwd: string, ordinals: ReadonlyArray<number>) => {
+    const id = CheckpointScopeId.make(`scope:checkpoint-diff-v2:${name}`);
+    return {
+      scope: {
+        id,
+        runId: firstRunId,
+        kind: "manual" as const,
+        cwd,
+        label: name,
+        repositoryPath: cwd,
+      },
+      checkpoints: ordinals.map((ordinalWithinScope) => ({
+        id: CheckpointId.make(`checkpoint:${id}:${ordinalWithinScope}`),
+        scopeId: id,
+        runId: ordinalWithinScope === 2 ? secondRunId : null,
+        ordinalWithinScope,
+        appRunOrdinal: null,
+        status: "ready" as const,
+        ref: CheckpointRef.make(`refs/t3/test/${name}/${ordinalWithinScope}`),
+      })),
+    };
+  };
+  const sibling = repository("shared", "/work/shared", [1, 2]);
+  // Nothing before the range's end, so there is no patch to make.
+  const nested = repository("ui", "/work/app/packages/ui", [2]);
+  // Became a repository after the range, so the thread's own patch still covers its folder.
+  const later = repository("later", "/work/app/packages/later", [3]);
+  const diffCheckpoints = vi.fn((input: CheckpointStore.DiffCheckpointsInput) =>
+    Effect.succeed(input.format === "numstat" ? "1\t0\tfile.ts\0" : `patch of ${input.cwd}`),
+  );
+  const layer = layerFor({
+    projection: Effect.succeed({
+      ...projection,
+      checkpointScopes: [
+        ...projection.checkpointScopes.map((scope) => ({ ...scope, cwd: "/work/app" })),
+        sibling.scope,
+        nested.scope,
+        later.scope,
+      ],
+      checkpoints: [
+        ...projection.checkpoints,
+        ...sibling.checkpoints,
+        ...nested.checkpoints,
+        ...later.checkpoints,
+      ],
+    }),
+    diffCheckpoints,
+  });
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const result = yield* query.getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 2 });
+    assert.deepEqual(result.repositories, [
+      {
+        name: "shared",
+        repositoryPath: "/work/shared",
+        relativePath: "../shared",
+        diff: "patch of /work/shared",
+      },
+    ]);
+    // The thread's own patch leaves the folder of the repository inside it alone.
+    assert.strictEqual(result.diff, "patch of /work/app");
+    assert.deepEqual(
+      diffCheckpoints.mock.calls.find(([input]) => input.cwd === "/work/app")?.[0].excludePaths,
+      ["packages/ui"],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("answers a turn in a folder that is not a repository with an empty patch", () => {
+  const projection = makeProjection();
+  const layer = layerFor({
+    projection: Effect.succeed({
+      ...projection,
+      checkpoints: projection.checkpoints.map((checkpoint) => ({
+        ...checkpoint,
+        status: "missing" as const,
+      })),
+    }),
+  });
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const result = yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 });
+    assert.strictEqual(result.diff, "");
+    assert.isUndefined(result.repositories);
   }).pipe(Effect.provide(layer));
 });

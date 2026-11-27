@@ -78,6 +78,9 @@ function makeRelayHarness(reply: (requestNumber: number) => Response | Promise<R
     renewDpopBeforeExpiry: () => Effect.die("HTTP requests must not renew a socket token."),
     authorizeBearer: () => Effect.die("Unexpected bearer authorization."),
     authorizeDpop: () => Effect.die("HTTP requests must not prepare a WebSocket connection."),
+    authorizeDirectDpop: () =>
+      Effect.die("Relay HTTP requests must not authorize a direct WebSocket connection."),
+    authorizeDirectDpopHttp: () => Effect.die("Relay HTTP requests must not use direct DPoP."),
     rememberCheckedDescriptor: () => Effect.void,
     authorizeDpopHttp: (input) =>
       Effect.sync(() => {

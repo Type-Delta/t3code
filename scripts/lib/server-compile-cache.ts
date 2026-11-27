@@ -141,7 +141,10 @@ export function enablePreparedServerCache(entry: string, cacheRoot: string): boo
   }
 }
 
-export async function generatePreparedServerCache(resourcesInput: string): Promise<void> {
+export async function generatePreparedServerCache(
+  resourcesInput: string,
+  reportProgress?: (stage: string) => void,
+): Promise<void> {
   const resources = NodeFS.realpathSync(resourcesInput);
   const prepared = NodePath.join(resources, "server-compile-cache");
   const archive = NodeFS.existsSync(NodePath.join(resources, "server.asar"))
@@ -159,9 +162,12 @@ export async function generatePreparedServerCache(resourcesInput: string): Promi
   if (servers.length > 1) throw new Error("Ambiguous bundled server entry");
   const server = servers[0];
   if (!server) throw new Error("Missing bundled server entry");
+  reportProgress?.("Importing server CLI");
   await import(NodeURL.pathToFileURL(NodePath.join(dist, cli)).href);
   // The CLI loads the server dynamically; importing its declarative layers does not launch them.
+  reportProgress?.("Importing server entry");
   await import(NodeURL.pathToFileURL(NodePath.join(dist, server)).href);
+  reportProgress?.("Writing cache");
   NodeModule.flushCompileCache();
   const active = NodeModule.getCompileCacheDir()!;
   const entries = files
@@ -179,4 +185,5 @@ export async function generatePreparedServerCache(resourcesInput: string): Promi
     JSON.stringify({ format: 1, runtime: runtimeIdentity(), entries }),
   );
   NodeFS.rmSync(active, { recursive: true });
+  reportProgress?.("Cache written");
 }

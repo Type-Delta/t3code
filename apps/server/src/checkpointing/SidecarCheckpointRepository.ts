@@ -52,6 +52,9 @@ export interface SidecarCaptureInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
   readonly previousCheckpointRef?: CheckpointRef;
+  readonly excludePaths?: ReadonlyArray<string>;
+  readonly head?: string;
+  readonly seenAt?: number;
 }
 
 export interface SidecarCaptureMetadata {
@@ -75,6 +78,7 @@ export interface SidecarDiffInput {
   readonly maxOutputBytes?: number;
   /** Limits the diff to these repository-relative paths. An empty list yields an empty diff. */
   readonly filePaths?: ReadonlyArray<string>;
+  readonly excludePaths?: ReadonlyArray<string>;
   /**
    * False never downloads evicted versions: numstat then lists changed paths
    * with unknown line counts, and a patch fails.
@@ -317,6 +321,14 @@ const relativePathIsSafe = (relativePath: string) =>
   !relativePath.includes("\\") &&
   !relativePath.startsWith("/") &&
   !relativePath.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
+
+const includesSnapshotPath = (relativePath: string, excluded: ReadonlyArray<string>) =>
+  !excluded.some(
+    (folder) =>
+      relativePath === folder ||
+      relativePath.startsWith(`${folder}/`) ||
+      folder.startsWith(`${relativePath}/`),
+  );
 
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
@@ -954,12 +966,22 @@ export const make = Effect.gen(function* () {
     readonly relativePath: string;
   }
 
-  const snapshotEntries = (cwd: string, gitDir: string, worktree: string, commit: string) =>
+  const snapshotEntries = (
+    cwd: string,
+    gitDir: string,
+    worktree: string,
+    commit: string,
+    env?: NodeJS.ProcessEnv,
+  ) =>
     git(
       "SidecarCheckpointRepository.snapshotEntries",
       cwd,
       sidecarGitArgs(gitDir, worktree, ["ls-tree", "-rz", commit]),
-      { maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES },
+      {
+        ...(env === undefined ? {} : { env }),
+        maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES,
+        outputMode: "error",
+      },
     ).pipe(
       Effect.flatMap((result) => {
         const entries: Array<SnapshotEntry> = [];
@@ -994,9 +1016,14 @@ export const make = Effect.gen(function* () {
       "SidecarCheckpointRepository.workspacePaths",
       cwd,
       ["-C", worktree, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-      { maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES },
+      { maxOutputBytes: CHECKPOINT_PATHS_MAX_BYTES, outputMode: "error" },
     ).pipe(
-      Effect.map((result) => result.stdout.split("\0").filter(Boolean)),
+      Effect.map((result) =>
+        result.stdout
+          .split("\0")
+          .filter(Boolean)
+          .map((entry) => (entry.endsWith("/") ? entry.slice(0, -1) : entry)),
+      ),
       Effect.filterOrFail(
         (paths) => paths.every(relativePathIsSafe),
         () =>
@@ -1676,6 +1703,16 @@ export const make = Effect.gen(function* () {
     return result.exitCode === 0 && source === from ? start : from;
   });
 
+  const excludedFromWorktree = Effect.fn("SidecarCheckpointRepository.excludedFromWorktree")(
+    function* (cwd: string, root: string, exclusions: ReadonlyArray<string> = []) {
+      if (exclusions.length === 0) return [];
+      const canonicalCwd = yield* fileSystem.realPath(cwd);
+      return exclusions.map((folder) =>
+        path.relative(root, path.resolve(canonicalCwd, folder)).split(path.sep).join("/"),
+      );
+    },
+  );
+
   const capture: SidecarCheckpointRepository["Service"]["capture"] = Effect.fn(
     "SidecarCheckpointRepository.capture",
   )(function* (input) {
@@ -1691,45 +1728,53 @@ export const make = Effect.gen(function* () {
         );
         const gitDir = yield* ensureRepository(input.cwd, identity);
         if (yield* resolveCommit(input.cwd, gitDir, identity.worktreeRoot, locator)) return;
+        const excluded = yield* excludedFromWorktree(
+          input.cwd,
+          identity.worktreeRoot,
+          input.excludePaths,
+        );
+        const included = (relativePath: string) => includesSnapshotPath(relativePath, excluded);
         // Captures cover the whole worktree without ignored paths, so an ignored
         // workspace with no capturable files would publish snapshots that miss its
         // edits. Negated rules can still re-include files below an ignored folder.
-        const ignored = yield* git(
-          "SidecarCheckpointRepository.capture.ignoredWorkspace",
-          input.cwd,
-          ["-C", input.cwd, "check-ignore", "--no-index", "-q", "."],
-          { allowNonZeroExit: true },
-        );
-        if (ignored.exitCode !== 0 && ignored.exitCode !== 1) {
-          return yield* checkpointError(
+        if (input.head === undefined) {
+          const ignored = yield* git(
             "SidecarCheckpointRepository.capture.ignoredWorkspace",
             input.cwd,
-            ignored.stderr.trim() || "git check-ignore failed",
+            ["-C", input.cwd, "check-ignore", "--no-index", "-q", "."],
+            { allowNonZeroExit: true },
           );
-        }
-        if (ignored.exitCode === 0) {
-          const capturable = yield* git(
-            "SidecarCheckpointRepository.capture.ignoredWorkspace",
-            input.cwd,
-            [
-              "-C",
+          if (ignored.exitCode !== 0 && ignored.exitCode !== 1) {
+            return yield* checkpointError(
+              "SidecarCheckpointRepository.capture.ignoredWorkspace",
               input.cwd,
-              "ls-files",
-              "--cached",
-              "--others",
-              "--exclude-standard",
-              "-z",
-              "--",
-              ".",
-            ],
-            { maxOutputBytes: 1 },
-          );
-          if (capturable.stdout.length === 0) {
-            return yield* new VcsUnsupportedOperationError({
-              operation: "SidecarCheckpointRepository.capture",
-              kind: "git",
-              detail: "The workspace directory is ignored by its Git repository.",
-            });
+              ignored.stderr.trim() || "git check-ignore failed",
+            );
+          }
+          if (ignored.exitCode === 0) {
+            const capturable = yield* git(
+              "SidecarCheckpointRepository.capture.ignoredWorkspace",
+              input.cwd,
+              [
+                "-C",
+                input.cwd,
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                ".",
+              ],
+              { maxOutputBytes: 1 },
+            );
+            if (capturable.stdout.length === 0) {
+              return yield* new VcsUnsupportedOperationError({
+                operation: "SidecarCheckpointRepository.capture",
+                kind: "git",
+                detail: "The workspace directory is ignored by its Git repository.",
+              });
+            }
           }
         }
 
@@ -1774,17 +1819,18 @@ export const make = Effect.gen(function* () {
           },
         );
         yield* Effect.gen(function* () {
-          yield* fileSystem
-            .makeDirectory(indexDirectory, { recursive: true, mode: 0o700 })
-            .pipe(
-              Effect.mapError(() =>
-                checkpointError(
-                  "SidecarCheckpointRepository.capture",
-                  input.cwd,
-                  "Unable to create the sidecar capture index directory.",
+          if (input.head === undefined)
+            yield* fileSystem
+              .makeDirectory(indexDirectory, { recursive: true, mode: 0o700 })
+              .pipe(
+                Effect.mapError(() =>
+                  checkpointError(
+                    "SidecarCheckpointRepository.capture",
+                    input.cwd,
+                    "Unable to create the sidecar capture index directory.",
+                  ),
                 ),
-              ),
-            );
+              );
           const buildTree = Effect.fn("SidecarCheckpointRepository.capture.buildTree")(
             function* (operationSuffix: string) {
               const [workspace, changed] = yield* Effect.all([
@@ -1847,7 +1893,7 @@ export const make = Effect.gen(function* () {
                   const tab = entry.indexOf("\t");
                   const oid = entry.slice(7, entry.indexOf(" ", 7));
                   const relativePath = entry.slice(tab + 1);
-                  if (removedPaths.has(relativePath)) return Effect.void;
+                  if (!included(relativePath) || removedPaths.has(relativePath)) return Effect.void;
                   const absolutePath = path.join(identity.worktreeRoot, relativePath);
                   return Effect.tryPromise({
                     // Only a real folder qualifies: a file or symlink in its place is
@@ -1878,7 +1924,9 @@ export const make = Effect.gen(function* () {
                 },
                 { concurrency: 16, discard: true },
               );
-              const paths = workspace.filter((relativePath) => !removedPaths.has(relativePath));
+              const paths = workspace.filter(
+                (relativePath) => included(relativePath) && !removedPaths.has(relativePath),
+              );
               const addedPaths = paths.filter(
                 (relativePath) => !uninitializedGitlinks.has(relativePath),
               );
@@ -1979,36 +2027,97 @@ export const make = Effect.gen(function* () {
           );
           // The project HEAD at capture lets authoredPaths tell the turn's own
           // commits from ones a pull or rebase brought in.
-          const head = yield* git(
-            "SidecarCheckpointRepository.capture.head",
-            input.cwd,
-            ["-C", identity.worktreeRoot, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-            { allowNonZeroExit: true, maxOutputBytes: 4_096 },
-          );
-          const headOid = head.exitCode === 0 ? head.stdout.trim() : "";
+          const headOid =
+            input.head ??
+            (yield* git(
+              "SidecarCheckpointRepository.capture.head",
+              input.cwd,
+              ["-C", identity.worktreeRoot, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+              { allowNonZeroExit: true, maxOutputBytes: 4_096 },
+            )).stdout.trim();
           const headMoves = yield* readHeadMoves(identity.worktreeRoot);
-          const lastMove = headMoves.at(0);
+          const seenAt = input.seenAt;
+          const observedMoves =
+            seenAt === undefined
+              ? headMoves
+              : headMoves.filter((move) => Number(move.at) <= seenAt);
+          const lastMove = observedMoves.at(0);
           const headMark =
             lastMove !== undefined && lastMove.to === headOid
-              ? `${lastMove.at} ${headMoves.filter((move) => move.at === lastMove.at).length}`
+              ? `${lastMove.at} ${observedMoves.filter((move) => move.at === lastMove.at).length}`
               : undefined;
-          const treeOid = yield* buildTree("initial");
-          if (!treeOid)
-            return yield* checkpointError(
-              "SidecarCheckpointRepository.capture",
-              input.cwd,
-              "Sidecar write-tree returned no object id.",
-            );
-          // A second pass over the same index rehashes any file whose stat
-          // changed since the first, so a concurrent edit changes the tree.
-          const verificationTreeOid = yield* buildTree("verification");
-          if (!verificationTreeOid || verificationTreeOid !== treeOid) {
-            return yield* checkpointError(
-              "SidecarCheckpointRepository.capture",
-              input.cwd,
-              "Checkpoint workspace changed during capture verification.",
-            );
-          }
+          const treeOid =
+            input.head === undefined
+              ? yield* Effect.gen(function* () {
+                  const first = yield* buildTree("initial");
+                  // A second pass detects concurrent edits while reusing the index's stat data.
+                  if (!first || (yield* buildTree("verification")) !== first) {
+                    return yield* checkpointError(
+                      "SidecarCheckpointRepository.capture",
+                      input.cwd,
+                      "Checkpoint workspace changed during capture verification.",
+                    );
+                  }
+                  return first;
+                })
+              : yield* Effect.gen(function* () {
+                  const entries = (yield* snapshotEntries(
+                    input.cwd,
+                    gitDir,
+                    identity.worktreeRoot,
+                    headOid,
+                    projectObjectsEnvironment(identity),
+                  )).filter((entry) => included(entry.relativePath));
+                  const missing = yield* missingObjects(
+                    input.cwd,
+                    gitDir,
+                    entries.filter((entry) => entry.type === "blob").map((entry) => entry.oid),
+                  );
+                  if (missing.length > 0) {
+                    // Copy only blobs the snapshot needs; its tree is built inside the sidecar.
+                    yield* git(
+                      "SidecarCheckpointRepository.captureHead.copyBlobs",
+                      input.cwd,
+                      sidecarGitArgs(gitDir, identity.worktreeRoot, [
+                        "pack-objects",
+                        "-q",
+                        path.join(gitDir, "objects", "pack", "pack"),
+                      ]),
+                      {
+                        env: projectObjectsEnvironment(identity),
+                        stdin: `${missing.join("\n")}\n`,
+                      },
+                    );
+                  }
+                  const scratch = yield* fileSystem.makeTempDirectoryScoped({
+                    directory: gitDir,
+                    prefix: "clean-head-",
+                  });
+                  const env = { ...baseEnvironment, GIT_INDEX_FILE: path.join(scratch, "index") };
+                  if (entries.length > 0) {
+                    yield* git(
+                      "SidecarCheckpointRepository.captureHead.index",
+                      input.cwd,
+                      sidecarGitArgs(gitDir, identity.worktreeRoot, [
+                        "update-index",
+                        "-z",
+                        "--index-info",
+                      ]),
+                      {
+                        env,
+                        stdin: entries
+                          .map((entry) => `${entry.mode} ${entry.oid}\t${entry.relativePath}\0`)
+                          .join(""),
+                      },
+                    );
+                  }
+                  return (yield* git(
+                    "SidecarCheckpointRepository.captureHead.tree",
+                    input.cwd,
+                    sidecarGitArgs(gitDir, identity.worktreeRoot, ["write-tree", "--missing-ok"]),
+                    { env },
+                  )).stdout.trim();
+                }).pipe(Effect.scoped);
           const turnStart =
             input.previousCheckpointRef === undefined || headMark === undefined
               ? null
@@ -2069,6 +2178,8 @@ export const make = Effect.gen(function* () {
                     .split(" ");
                   const previousHead =
                     /(?:^| )head=([0-9a-f]+)(?: |$)/m.exec(metadata.stdout)?.[1] ?? legacyHead;
+                  const observedAt =
+                    /(?:^| )observed=([0-9]+)(?: |$)/m.exec(metadata.stdout)?.[1] ?? capturedAt;
                   const [, markedAt, markedCount] =
                     /^T3-Head-Moved-At: (\d+) (\d+)$/m.exec(metadata.stdout) ?? [];
                   const oldestMarked = headMoves.findLastIndex((move) => move.at === markedAt);
@@ -2104,30 +2215,25 @@ export const make = Effect.gen(function* () {
                   yield* write(["read-tree", tree]);
                   const destinationBlobs = new Set<string>();
                   for (const { from, to } of switches) {
-                    const changes = yield* run([
-                      "-c",
-                      "core.quotePath=true",
-                      "diff-tree",
-                      "-r",
-                      "--no-renames",
-                      from,
-                      to,
-                    ]);
-                    const entries = changes.stdout
-                      .split("\n")
-                      .filter((line) => line !== "" && !/^:(?:160000 |[0-7]{6} 160000 )/.test(line))
-                      .map((line) =>
-                        line.replace(
-                          /^:[0-7]{6} ([0-7]{6}) [0-9a-f]+ ([0-9a-f]+) [A-Z]\t/,
-                          "$1 $2\t",
-                        ),
-                      );
-                    for (const entry of entries) {
-                      const [mode, oid] = entry.split(/[ \t]/);
-                      if (mode !== "000000" && oid) destinationBlobs.add(oid);
+                    const changes = yield* run(["diff-tree", "-r", "--no-renames", "-z", from, to]);
+                    const records = changes.stdout.split("\0");
+                    const updates: string[] = [];
+                    for (let index = 0; index + 1 < records.length; index += 2) {
+                      const relativePath = records[index + 1]!;
+                      const [fromMode, mode, , oid] = records[index]!.slice(1).split(" ");
+                      if (
+                        !mode ||
+                        !oid ||
+                        fromMode === "160000" ||
+                        mode === "160000" ||
+                        !included(relativePath)
+                      )
+                        continue;
+                      if (mode !== "000000") destinationBlobs.add(oid);
+                      updates.push(`${mode} ${oid}\t${relativePath}\0`);
                     }
-                    if (entries.length > 0)
-                      yield* write(["update-index", "--index-info"], `${entries.join("\n")}\n`);
+                    if (updates.length > 0)
+                      yield* write(["update-index", "-z", "--index-info"], updates.join(""));
                   }
                   if (!isSidecarCheckpointRef(previousRef)) {
                     const legacyBlobs = yield* write(["ls-files", "--stage", "-z"]);
@@ -2160,7 +2266,7 @@ export const make = Effect.gen(function* () {
                       `t3 checkpoint turn start head=${landedOn} from=${commit}`,
                     ]),
                     {
-                      env: { ...readEnv, GIT_COMMITTER_DATE: `${capturedAt} +0000` },
+                      env: { ...readEnv, GIT_COMMITTER_DATE: `@${observedAt} +0000` },
                       maxOutputBytes: 4096,
                     },
                   );
@@ -2183,7 +2289,7 @@ export const make = Effect.gen(function* () {
               "-m",
               `t3 checkpoint schema=v1 snapshot=${locator.snapshotId} worktree=${identity.worktreeKey}${
                 headOid === "" ? "" : ` head=${headOid}`
-              }${headMark === undefined ? "" : `\n\nT3-Head-Moved-At: ${headMark}`}`,
+              }${input.seenAt === undefined ? "" : ` observed=${input.seenAt}`}${headMark === undefined ? "" : `\n\nT3-Head-Moved-At: ${headMark}`}`,
             ]),
             { env: baseEnvironment, maxOutputBytes: 4_096 },
           );
@@ -2311,14 +2417,23 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const commit = yield* resolveCommit(input.cwd, gitDir, identity.worktreeRoot, locator);
         if (!commit) return false;
-        const [entries, currentPaths] = yield* Effect.all([
+        const excluded = yield* excludedFromWorktree(
+          input.cwd,
+          identity.worktreeRoot,
+          input.excludePaths,
+        );
+        const included = (relativePath: string) => includesSnapshotPath(relativePath, excluded);
+        const [allEntries, currentPaths] = yield* Effect.all([
           snapshotEntries(input.cwd, gitDir, identity.worktreeRoot, commit),
           workspacePaths(input.cwd, identity.worktreeRoot),
         ]);
+        const entries = allEntries.filter((entry) => included(entry.relativePath));
         yield* ensureSnapshotObjects({ cwd: input.cwd, identity, gitDir, entries });
         const targetPaths = entries.map((entry) => entry.relativePath);
         const targetPathSet = new Set(targetPaths);
-        const stalePaths = currentPaths.filter((relativePath) => !targetPathSet.has(relativePath));
+        const stalePaths = currentPaths.filter(
+          (relativePath) => included(relativePath) && !targetPathSet.has(relativePath),
+        );
         const temporaryDir = path.join(config.checkpointsDir, "tmp", NodeCrypto.randomUUID());
         const indexPath = path.join(temporaryDir, "index");
         const preparedRoot = path.join(temporaryDir, "prepared");
@@ -2347,17 +2462,19 @@ export const make = Effect.gen(function* () {
           );
           // Fully materialize the candidate away from the workspace. Nothing is
           // deleted until Git has proven every blob/symlink can be checked out.
-          yield* git(
-            "SidecarCheckpointRepository.restore.prepare",
-            input.cwd,
-            sidecarGitArgs(gitDir, identity.worktreeRoot, [
-              "checkout-index",
-              "--all",
-              "--force",
-              `--prefix=${preparedRoot}${path.sep}`,
-            ]),
-            { env: environment },
-          );
+          if (entries.length > 0)
+            yield* git(
+              "SidecarCheckpointRepository.restore.prepare",
+              input.cwd,
+              sidecarGitArgs(gitDir, identity.worktreeRoot, [
+                "checkout-index",
+                "--force",
+                `--prefix=${preparedRoot}${path.sep}`,
+                "-z",
+                "--stdin",
+              ]),
+              { env: environment, stdin: `${targetPaths.join("\0")}\0` },
+            );
           yield* validatePreparedEntries(input.cwd, preparedRoot, entries);
           yield* validateExistingAncestors(input.cwd, identity.worktreeRoot, [
             ...targetPaths,
@@ -2474,13 +2591,23 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const commit = yield* resolveCommit(input.cwd, gitDir, identity.worktreeRoot, locator);
         if (!commit) return yield* unavailable;
-        const entries = yield* snapshotEntries(input.cwd, gitDir, identity.worktreeRoot, commit);
+        const excluded = yield* excludedFromWorktree(
+          input.cwd,
+          identity.worktreeRoot,
+          input.excludePaths,
+        );
+        const entries = (yield* snapshotEntries(
+          input.cwd,
+          gitDir,
+          identity.worktreeRoot,
+          commit,
+        )).filter((entry) => includesSnapshotPath(entry.relativePath, excluded));
         yield* ensureSnapshotObjects({ cwd: input.cwd, identity, gitDir, entries });
         // Pinned under the lock, so no swap can run between the download and the pin.
-        yield* pinObjects(
-          identity.repositoryKey,
-          entries.filter((entry) => entry.type === "blob").map((entry) => entry.oid),
-        );
+        yield* pinObjects(identity.repositoryKey, [
+          commit,
+          ...entries.filter((entry) => entry.type === "blob").map((entry) => entry.oid),
+        ]);
       }),
     );
   });
@@ -2560,13 +2687,17 @@ export const make = Effect.gen(function* () {
           resolveRevision(input.toCheckpointRef, false),
         ]);
         if (!fromCommit || !toCommit) {
-          if (!isSidecarCheckpointRef(fromCommit ? input.toCheckpointRef : input.fromCheckpointRef))
-            return yield* checkpointError(
-              "SidecarCheckpointRepository.diff",
-              input.cwd,
-              "Checkpoint revision is unavailable.",
-            );
-          return yield* new CheckpointSnapshotUnavailableError();
+          if (
+            (!toCommit && isSidecarCheckpointRef(input.toCheckpointRef)) ||
+            (!fromCommit && isSidecarCheckpointRef(input.fromCheckpointRef))
+          ) {
+            return yield* new CheckpointSnapshotUnavailableError();
+          }
+          return yield* checkpointError(
+            "SidecarCheckpointRepository.diff",
+            input.cwd,
+            "Checkpoint revision is unavailable.",
+          );
         }
         fromCommit = yield* adjustedTurnStart(
           input.cwd,
@@ -2575,9 +2706,18 @@ export const make = Effect.gen(function* () {
           fromCommit,
           toCommit,
         );
-        const pathspec = input.filePaths
-          ? ["--", ...input.filePaths.map((file) => `:(top,literal)${file}`)]
-          : [];
+        const excluded = yield* excludedFromWorktree(
+          input.cwd,
+          identity.worktreeRoot,
+          input.excludePaths,
+        );
+        const candidates = input.filePaths?.filter((file) => includesSnapshotPath(file, excluded));
+        if (candidates?.length === 0) return "";
+        const pathspec = [
+          ...(candidates ?? []).map((file) => `:(top,literal)${file}`),
+          ...excluded.map((folder) => `:(top,exclude,literal)${folder}`),
+        ];
+        if (pathspec.length > 0) pathspec.unshift("--");
         // Only changed paths have their blobs read. Records read
         // `:<mode> <mode> <oid> <oid> <status>`, each followed by its paths.
         const changed = yield* git(
@@ -2857,7 +2997,8 @@ export const make = Effect.gen(function* () {
       );
       const [time = "", ...subject] = result.stdout.trim().split(" ");
       const head = /(?:^| )head=([0-9a-f]+)(?: |$)/.exec(subject.join(" "))?.[1] ?? "";
-      return { commit, head, time };
+      const observed = /(?:^| )observed=([0-9]+)(?: |$)/.exec(subject.join(" "))?.[1];
+      return { commit, head, time: observed ?? time };
     });
     let [from, to] = yield* Effect.all([
       boundary(input.fromCheckpointRef),
@@ -2935,48 +3076,54 @@ export const make = Effect.gen(function* () {
         outputMode: "error",
       }).pipe(Effect.map((result) => result.stdout.split("\0")));
 
-    // A commit is an import when a fetch delivered it since the previous checkpoint and no
-    // reflog in any worktree shows this repository creating it. --all covers every worktree's
-    // HEAD, and with --walk-reflogs --since compares each entry's own time.
-    const listImportedCommits = Effect.gen(function* () {
-      const entries = (yield* listLines([
+    const walkReflogs = (revisions: ReadonlyArray<string>) =>
+      listLines([
         "log",
         "--walk-reflogs",
-        "--all",
-        `--since=@${capturedAt}`,
+        ...revisions,
+        `--max-age=${capturedAt}`,
         "--format=%H %gD %gs",
-      ])).map((line) => {
-        const [commit = "", selector = "", ...subject] = line.split(" ");
-        return {
-          commit,
-          fetched: selector.startsWith("refs/remotes/"),
-          subject: subject.join(" "),
-        };
-      });
-      // A push records commits this repository already had.
-      const fetchedTips = new Set(
-        entries
-          .filter((entry) => entry.fetched && entry.subject !== "update by push")
-          .map((entry) => entry.commit),
+      ]).pipe(
+        Effect.map((lines) =>
+          lines.map((line) => {
+            const [commit = "", selector = "", ...subject] = line.split(" ");
+            return { commit, selector, subject: subject.join(" ") };
+          }),
+        ),
       );
-      if (fetchedTips.size === 0) return fetchedTips;
-      // Fetching another branch can deliver a commit that was made here and pushed.
-      const createdHere = new Set(
-        entries
-          .filter((entry) => !entry.fetched && !REF_MOVE_REFLOG_SUBJECT.test(entry.subject))
-          .map((entry) => entry.commit),
-      );
-      const fetched = yield* listLines(
-        ["rev-list", `--since=@${capturedAt}`, "--stdin"],
-        `${[...fetchedTips, `^${startHead}`].join("\n")}\n`,
-      );
-      return new Set(fetched.filter((commit) => !createdHere.has(commit)));
-    });
+
+    const listImportedCommits = Effect.fn("SidecarCheckpointRepository.listImportedCommits")(
+      function* (recent: ReadonlyArray<string>) {
+        const candidates = new Set(recent);
+        // A push records commits this repository already had.
+        const fetchedTips = new Set(
+          (yield* walkReflogs(["--remotes"]))
+            .filter(
+              (entry) =>
+                entry.selector.startsWith("refs/remotes/") && entry.subject !== "update by push",
+            )
+            .map((entry) => entry.commit),
+        );
+        if (fetchedTips.size === 0) return fetchedTips;
+        const fetched = (yield* listLines(
+          ["rev-list", `--max-age=${capturedAt}`, "--stdin"],
+          `${[...fetchedTips, `^${startHead}`].join("\n")}\n`,
+        )).filter((commit) => candidates.has(commit));
+        if (fetched.length === 0) return new Set<string>();
+        // Include every worktree's HEAD, including detached HEADs that since moved.
+        const createdHere = new Set(
+          (yield* walkReflogs(["--exclude=refs/remotes/*", "--all"]))
+            .filter((entry) => !REF_MOVE_REFLOG_SUBJECT.test(entry.subject))
+            .map((entry) => entry.commit),
+        );
+        return new Set(fetched.filter((commit) => !createdHere.has(commit)));
+      },
+    );
 
     // Remerge diffs retain merge conflict fixes while excluding clean upstream changes.
     const [recentCommits, ...pathLists] = yield* Effect.all(
       [
-        listLines(["rev-list", `--since=@${capturedAt}`, `${startHead}..${endHead}`]),
+        listLines(["rev-list", `--max-age=${capturedAt}`, `${startHead}..${endHead}`]),
         listPaths(["diff", startHead, `${turnStart}^{commit}`]),
         listPaths(["diff", endHead, to.commit]),
         listPaths(["log", "--format=", "--diff-merges=remerge", `${endHead}..${startHead}`]),
@@ -2987,7 +3134,9 @@ export const make = Effect.gen(function* () {
     const importedCommits =
       recentCommits.length === 0
         ? new Set<string>()
-        : yield* listImportedCommits.pipe(Effect.orElseSucceed(() => new Set<string>()));
+        : yield* listImportedCommits(recentCommits).pipe(
+            Effect.orElseSucceed(() => new Set<string>()),
+          );
     const ownCommits = recentCommits.filter((commit) => !importedCommits.has(commit));
     const ownCommitPaths =
       ownCommits.length === 0
@@ -3173,7 +3322,10 @@ export const make = Effect.gen(function* () {
           });
         return {
           count: refs.length,
-          stale: refs.filter((ref) => !live.has(ref.ref) && old(ref.capturedAtMs)),
+          stale: refs.filter(
+            (ref) =>
+              !live.has(ref.ref) && !pins.get(repositoryKey)?.has(ref.oid) && old(ref.capturedAtMs),
+          ),
         };
       }),
     );

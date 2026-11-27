@@ -1,7 +1,10 @@
 "use client";
 
+import { msg, T, useGT, useMessages, Var } from "gt-react";
 import { useState } from "react";
 import type { ModelMetadataOverride } from "@t3tools/contracts";
+
+import { m, type MessageResolver } from "../../i18n/messages";
 
 import { Button } from "../ui/button";
 import {
@@ -45,12 +48,16 @@ function draftFromOverride(value: ModelMetadataOverride | undefined): CustomMode
   };
 }
 
-function parsePositiveInteger(value: string, label: string): number | undefined {
+function parsePositiveInteger(
+  value: string,
+  label: string,
+  resolve: MessageResolver,
+): number | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
   const parsed = Number(trimmed);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error(`${label} must be a positive whole number.`);
+    throw new Error(resolve(msg("{label} must be a positive whole number.", { label })));
   }
   return parsed;
 }
@@ -66,17 +73,26 @@ function parseEfforts(value: string): ReadonlyArray<string> {
   ];
 }
 
-export function buildModelMetadataOverride(draft: CustomModelMetadataDraft): ModelMetadataOverride {
+export function buildModelMetadataOverride(
+  draft: CustomModelMetadataDraft,
+  resolve: MessageResolver = m,
+): ModelMetadataOverride {
   const displayName = draft.displayName.trim();
   const contextWindowTokens = parsePositiveInteger(
     draft.contextWindowTokens,
-    "Usable context window",
+    resolve(msg("Usable context window")),
+    resolve,
   );
   const maxContextWindowTokens = parsePositiveInteger(
     draft.maxContextWindowTokens,
-    "Maximum context window",
+    resolve(msg("Maximum context window")),
+    resolve,
   );
-  const maxOutputTokens = parsePositiveInteger(draft.maxOutputTokens, "Maximum output");
+  const maxOutputTokens = parsePositiveInteger(
+    draft.maxOutputTokens,
+    resolve(msg("Maximum output")),
+    resolve,
+  );
   const reasoningEfforts = parseEfforts(draft.reasoningEfforts);
   const defaultReasoningEffort = draft.defaultReasoningEffort.trim();
 
@@ -85,10 +101,14 @@ export function buildModelMetadataOverride(draft: CustomModelMetadataDraft): Mod
     maxContextWindowTokens !== undefined &&
     maxContextWindowTokens < contextWindowTokens
   ) {
-    throw new Error("Maximum context window cannot be smaller than usable context window.");
+    throw new Error(
+      resolve(msg("Maximum context window cannot be smaller than usable context window.")),
+    );
   }
   if (defaultReasoningEffort && !reasoningEfforts.includes(defaultReasoningEffort)) {
-    throw new Error("Default reasoning effort must appear in the supported effort list.");
+    throw new Error(
+      resolve(msg("Default reasoning effort must appear in the supported effort list.")),
+    );
   }
 
   return {
@@ -149,6 +169,8 @@ export function CustomModelMetadataDialog({
   onOpenChange,
   onSave,
 }: CustomModelMetadataDialogProps) {
+  const gt = useGT();
+  const resolve = useMessages();
   const [draft, setDraft] = useState<CustomModelMetadataDraft>(() =>
     draftFromOverride(initialValue),
   );
@@ -175,10 +197,10 @@ export function CustomModelMetadataDialog({
 
   const handleSave = () => {
     try {
-      onSave(buildModelMetadataOverride(draft));
+      onSave(buildModelMetadataOverride(draft, resolve));
       onOpenChange(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Check the model metadata values.");
+      setError(cause instanceof Error ? cause.message : gt("Check the model metadata values."));
     }
   };
 
@@ -186,17 +208,23 @@ export function CustomModelMetadataDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>{mode === "add" ? "Add custom model" : "Edit model metadata"}</DialogTitle>
+          <DialogTitle>
+            {mode === "add" ? <T>Add custom model</T> : <T>Edit model metadata</T>}
+          </DialogTitle>
           <DialogDescription>
-            <code className="text-foreground">{slug}</code>. Leave unknown values empty instead of
-            estimating them.
+            <T>
+              <code className="text-foreground">
+                <Var>{slug}</Var>
+              </code>
+              . Leave unknown values empty instead of estimating them.
+            </T>
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <div className="grid gap-4">
             <MetadataTextField
               id="custom-model-display-name"
-              label="Display name"
+              label={gt("Display name")}
               value={draft.displayName}
               placeholder={slug}
               onChange={(displayName) => update({ displayName })}
@@ -204,8 +232,8 @@ export function CustomModelMetadataDialog({
             <div className="grid gap-4 sm:grid-cols-2">
               <MetadataTextField
                 id="custom-model-context-window"
-                label="Usable context window"
-                description="Tokens this provider account can actually accept."
+                label={gt("Usable context window")}
+                description={gt("Tokens this provider account can actually accept.")}
                 type="number"
                 value={draft.contextWindowTokens}
                 placeholder="200000"
@@ -213,8 +241,8 @@ export function CustomModelMetadataDialog({
               />
               <MetadataTextField
                 id="custom-model-max-context-window"
-                label="Maximum context window"
-                description="Optional theoretical model maximum."
+                label={gt("Maximum context window")}
+                description={gt("Optional theoretical model maximum.")}
                 type="number"
                 value={draft.maxContextWindowTokens}
                 placeholder="1000000"
@@ -223,8 +251,8 @@ export function CustomModelMetadataDialog({
             </div>
             <MetadataTextField
               id="custom-model-max-output"
-              label="Maximum output"
-              description="Maximum output tokens reported by the gateway or provider."
+              label={gt("Maximum output")}
+              description={gt("Maximum output tokens reported by the gateway or provider.")}
               type="number"
               value={draft.maxOutputTokens}
               placeholder="32768"
@@ -232,16 +260,18 @@ export function CustomModelMetadataDialog({
             />
             <MetadataTextField
               id="custom-model-reasoning-efforts"
-              label="Supported reasoning efforts"
-              description="Comma-separated IDs passed to the provider, such as low, medium, high."
+              label={gt("Supported reasoning efforts")}
+              description={gt("Comma-separated IDs passed to the provider, such as {efforts}.", {
+                efforts: "low, medium, high",
+              })}
               value={draft.reasoningEfforts}
-              placeholder="low, medium, high"
+              placeholder={gt("{efforts}", { efforts: "low, medium, high" })}
               onChange={(reasoningEfforts) => update({ reasoningEfforts })}
             />
             <MetadataTextField
               id="custom-model-default-reasoning-effort"
-              label="Default reasoning effort"
-              description="Must match one of the supported effort IDs above."
+              label={gt("Default reasoning effort")}
+              description={gt("Must match one of the supported effort IDs above.")}
               value={draft.defaultReasoningEffort}
               placeholder="medium"
               onChange={(defaultReasoningEffort) => update({ defaultReasoningEffort })}
@@ -255,10 +285,10 @@ export function CustomModelMetadataDialog({
         </DialogPanel>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            <T>Cancel</T>
           </Button>
           <Button type="button" onClick={handleSave}>
-            {mode === "add" ? "Add model" : "Save changes"}
+            {mode === "add" ? <T>Add model</T> : <T>Save changes</T>}
           </Button>
         </DialogFooter>
       </DialogPopup>

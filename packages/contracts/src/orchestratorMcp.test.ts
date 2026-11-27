@@ -81,6 +81,10 @@ describe("orchestrator MCP contracts", () => {
     expect(decodeThreadWaitResult(item)).toEqual({ ...item, results: [item] });
     const batch = { results: [item, { ...item, threadId: "thread-child-2" }], timedOut: true };
     expect(decodeThreadWaitResult(batch)).toEqual(batch);
+    const completed = { ...item, status: "completed", timedOut: false, output: { count: 3 } };
+    expect(decodeThreadWaitResult(completed)).toEqual({ ...completed, results: [completed] });
+    const completedBatch = { ...completed, results: [completed] };
+    expect(decodeThreadWaitResult(completedBatch)).toEqual(completedBatch);
     expect(() => decodeThreadWaitResult({ timedOut: true, next })).toThrow();
   });
 });

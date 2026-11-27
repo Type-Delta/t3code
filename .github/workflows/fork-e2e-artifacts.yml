@@ -134,7 +134,7 @@ jobs:
   macos:
     name: macOS arm64 desktop and CLI
     needs: preflight
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - name: Checkout dispatched commit

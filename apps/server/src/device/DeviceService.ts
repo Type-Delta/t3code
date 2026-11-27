@@ -25,6 +25,7 @@ import {
   type DeviceSimlockIdentityInput,
   type DeviceHostConfig,
   type EasDeviceHostConfig,
+  type LinkedDeviceHostConfig,
   type SimlockDeviceHostConfig,
   type SshDeviceHostConfig,
   type DeviceHostSummary,
@@ -80,6 +81,7 @@ import * as DeviceHost from "./DeviceHost.ts";
 import * as SshDeviceHost from "./SshDeviceHost.ts";
 import * as EasDeviceHost from "./EasDeviceHost.ts";
 import * as SimlockDeviceHost from "./SimlockDeviceHost.ts";
+import * as LinkedDeviceHost from "./LinkedDeviceHost.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { makeExpoApi } from "./ExpoApi.ts";
 import * as Exit from "effect/Exit";
@@ -116,8 +118,18 @@ const sshProbeFailureMessage = (error: DeviceHost.DeviceHostError): string => {
 
 const isToolchainInstallError = Schema.is(DeviceToolchainInstallError);
 
+/** What a host's failed listing shows; a linked environment's own words say more than ours. */
+const failureDetail = (error: DeviceError) =>
+  error._tag === "DeviceHostUnavailableError"
+    ? error.reason
+    : error._tag === "DeviceOperationError" &&
+        LinkedDeviceHost.isLinkedDeviceHostFailure(error.cause)
+      ? error.cause.message
+      : error.message;
+
 const actionableHostFailure = (error: DeviceHost.DeviceHostError): string | undefined => {
   if (error.step === "probe") return sshProbeFailureMessage(error);
+  if (LinkedDeviceHost.isLinkedDeviceHostFailure(error.cause)) return error.cause.message;
   if (isToolchainInstallError(error.cause) && error.cause.reason === "npm_not_found")
     return error.cause.message;
   return undefined;
@@ -136,6 +148,37 @@ export interface DeviceAgentReadiness extends DeviceReadiness {
   /** Null when each device has its own daemon; see `DeviceOperations.agentEndpoint`. */
   readonly agentDevice: DeviceHost.AgentDeviceEndpoint | null;
 }
+
+/** Fails unless the host's ffmpeg can encode Android emulator video the way its hub needs. */
+export const checkEmulatorVideo = Effect.fn("DeviceService.checkEmulatorVideo")(function* (
+  ready: DeviceReadiness,
+) {
+  // Resolve the override on the device host the way its hub does.
+  const encoders = yield* ready.run(ready.nodePath, [
+    "-e",
+    `const { spawnSync } = require("node:child_process");
+const result = spawnSync(process.env.SERVE_EMU_FFMPEG?.trim() || "ffmpeg", ["-hide_banner", "-encoders"], {
+  stdio: "inherit", timeout: 10000, killSignal: "SIGKILL",
+});
+process.exitCode = result.error ? 1 : (result.status ?? 1);`,
+  ]);
+  if (encoders.code !== 0) {
+    return yield* new DevicePlatformUnavailableError({
+      hostId: ready.hostId,
+      platform: "android",
+      reason:
+        "Android emulator video needs working ffmpeg with the libx264 encoder. Install it on the device host's PATH or set SERVE_EMU_FFMPEG there, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
+    });
+  }
+  if (!/^\s*V\S*[ \t]+libx264(?:[ \t]|$)/m.test(`${encoders.stdout}\n${encoders.stderr}`)) {
+    return yield* new DevicePlatformUnavailableError({
+      hostId: ready.hostId,
+      platform: "android",
+      reason:
+        "Android emulator video needs the libx264 encoder. Install an ffmpeg build that includes libx264 on the device host, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
+    });
+  }
+});
 
 const DeviceHostName = Schema.Struct({ id: DeviceHostId, label: Schema.optional(Schema.String) });
 const hostName = (host: typeof DeviceHostName.Type) => host.label ?? `host ${host.id}`;
@@ -318,6 +361,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       supportsToolInspection: true,
       supportsEasHosts: true,
       supportsSimlockHosts: true,
+      supportsLinkedHosts: true,
       hosts: initialHosts,
       hostStatus: initialSettings.enabled ? "idle" : "disabled",
       hostStatuses: {},
@@ -636,7 +680,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           Effect.catch((error) =>
             setHostStatus(host.id, {
               status: "failed",
-              detail: error._tag === "DeviceHostUnavailableError" ? error.reason : error.message,
+              detail: failureDetail(error),
             }),
           ),
         ),
@@ -689,7 +733,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         Effect.catch((error) =>
           setHostStatus(hostId, {
             status: "failed",
-            detail: error._tag === "DeviceHostUnavailableError" ? error.reason : error.message,
+            detail: failureDetail(error),
           }),
         ),
       );
@@ -724,11 +768,15 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
                   }),
               ),
             );
-          if (!nextEnabled) {
+          // A linked host's daemon outlives its stop here, so its agent claims are released first.
+          if (!nextEnabled || input.agentAccessEnabled === false)
+            yield* releaseAgentSessionsQuietly(
+              (yield* SynchronizedRef.get(stateRef)).state.sessions,
+            );
+          if (!nextEnabled)
             yield* Effect.forEach(hosts.values(), (host) => host.stop, { discard: true });
-          } else if (input.agentAccessEnabled === false) {
+          else if (input.agentAccessEnabled === false)
             yield* Effect.forEach(hosts.values(), (host) => host.stopAgent, { discard: true });
-          }
           yield* publish((state) => ({
             ...state,
             hostStatus: nextEnabled ? "idle" : "disabled",
@@ -781,33 +829,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         return yield* new DeviceNotFoundError({ hostId: host.id, deviceId: input.deviceId });
       }
       // Hosts that route their own streams never encode emulator video with serve-emu's ffmpeg.
-      if (device.platform === "android" && !device.physical && !ready.upstream) {
-        // Resolve the override on the device host the way its hub does.
-        const encoders = yield* ready.run(ready.nodePath, [
-          "-e",
-          `const { spawnSync } = require("node:child_process");
-  const result = spawnSync(process.env.SERVE_EMU_FFMPEG?.trim() || "ffmpeg", ["-hide_banner", "-encoders"], {
-    stdio: "inherit", timeout: 10000, killSignal: "SIGKILL",
-  });
-  process.exitCode = result.error ? 1 : (result.status ?? 1);`,
-        ]);
-        if (encoders.code !== 0) {
-          return yield* new DevicePlatformUnavailableError({
-            hostId: host.id,
-            platform: "android",
-            reason:
-              "Android emulator video needs working ffmpeg with the libx264 encoder. Install it on the device host's PATH or set SERVE_EMU_FFMPEG there, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
-          });
-        }
-        if (!/^\s*V\S*[ \t]+libx264(?:[ \t]|$)/m.test(`${encoders.stdout}\n${encoders.stderr}`)) {
-          return yield* new DevicePlatformUnavailableError({
-            hostId: host.id,
-            platform: "android",
-            reason:
-              "Android emulator video needs the libx264 encoder. Install an ffmpeg build that includes libx264 on the device host, then retry opening the emulator. After changing PATH or SERVE_EMU_FFMPEG, turn device support off and on for SSH hosts, or restart the local environment server.",
-          });
-        }
-      }
+      if (device.platform === "android" && !device.physical && !ready.upstream)
+        yield* checkEmulatorVideo(ready);
       if (!device.booted && input.boot !== false) {
         const booting = { ...device, threadId: input.threadId };
         yield* publish((current) => ({
@@ -905,6 +928,49 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     }));
   });
 
+  /** Ends retiring sessions' agent-device sessions on their hosts, which a launcher cannot once agent tools stop. */
+  const releaseAgentSession = Effect.fn("DeviceService.releaseAgentSession")(function* (
+    host: DeviceHost.DeviceHost["Service"],
+    session: DeviceSession,
+  ) {
+    const ready = yield* host.current;
+    if (!ready?.releaseAgentSession) return;
+    const name = yield* agentDeviceSession(session.threadId, session.hostId, session.deviceId).pipe(
+      Effect.provideService(Digest.Digest, digest),
+    );
+    yield* ready.releaseAgentSession(name, session.deviceId);
+  });
+  /** All at once, so a power-off's releases hold the lock for one timeout, not one per thread. */
+  const releaseAgentSessions = (sessions: ReadonlyArray<DeviceSession>) =>
+    Effect.forEach(
+      sessions,
+      (session) =>
+        resolveHost(session.hostId).pipe(
+          Effect.flatMap((host) => releaseAgentSession(host, session)),
+        ),
+      { concurrency: "unbounded", discard: true },
+    );
+  /** Each session on its own, so one unreachable host neither stops nor serializes the rest. */
+  const releaseAgentSessionsQuietly = (
+    sessions: ReadonlyArray<DeviceSession>,
+    hostOf: (id: DeviceHostId) => DeviceHost.DeviceHost["Service"] | undefined = (id) =>
+      hosts.get(id),
+  ) =>
+    Effect.forEach(
+      sessions,
+      (session) => {
+        const host = hostOf(session.hostId);
+        return host === undefined
+          ? Effect.void
+          : releaseAgentSession(host, session).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not release an agent-device session", { cause }),
+              ),
+            );
+      },
+      { concurrency: "unbounded", discard: true },
+    );
+
   const close: DeviceService["Service"]["close"] = Effect.fn("DeviceService.close")(
     function* (input) {
       // Open publishes under the same lock; an old close must not release a reopened claim.
@@ -927,23 +993,15 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             : closing;
           for (const session of ending) {
             const host = yield* resolveHost(session.hostId);
-            const ready = yield* host.current;
             // A lost SSH tunnel does not establish that the remote daemon stopped.
-            if (!ready && (yield* host.summary).kind === "ssh")
+            if (!(yield* host.current) && (yield* host.summary).kind === "ssh")
               return yield* new DeviceHostUnavailableError({
                 hostId: session.hostId,
                 hostLabel: host.label,
                 reason: "Device host is reconnecting. Retry close after it reconnects.",
               });
-            if (ready?.releaseAgentSession) {
-              const name = yield* agentDeviceSession(
-                session.threadId,
-                session.hostId,
-                session.deviceId,
-              ).pipe(Effect.provideService(Digest.Digest, digest));
-              yield* ready.releaseAgentSession(name, session.deviceId);
-            }
           }
+          yield* releaseAgentSessions(ending);
           if (input.shutdown) yield* releaseLaunchers(ending);
           if (input.shutdown) {
             for (const session of closing) {
@@ -980,11 +1038,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   const shutdown: DeviceService["Service"]["shutdown"] = Effect.fn("DeviceService.shutdown")(
     function* (input) {
       const host = yield* resolveHost(input.hostId);
+      const onDevice = (session: DeviceSession) =>
+        session.hostId === host.id && session.deviceId === input.deviceId;
+      const { state } = yield* SynchronizedRef.get(stateRef);
+      yield* releaseAgentSessionsQuietly(state.sessions.filter(onDevice));
       yield* publish((current) => ({
         ...current,
-        sessions: current.sessions.filter(
-          (session) => !(session.hostId === host.id && session.deviceId === input.deviceId),
-        ),
+        sessions: current.sessions.filter((session) => !onDevice(session)),
       }));
       const ready = yield* readiness(host.id);
       yield* shutdownDevice(ready, input.deviceId, input.platform);
@@ -1247,10 +1307,14 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     }),
     setHostStatus,
     withLifecycleLock: lifecycleLock.withPermit,
+    /** Returns the release of the dropped hosts' agent sessions, to run outside the lock before their scopes close. */
     refreshHosts: Effect.gen(function* () {
       const summaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
-      const unchanged = (id: DeviceHostId) =>
-        hosts.has(id) && hosts.get(id) === publishedHosts.get(id);
+      const previous = publishedHosts;
+      const unchanged = (id: DeviceHostId) => hosts.has(id) && hosts.get(id) === previous.get(id);
+      const dropped = (yield* SynchronizedRef.get(stateRef)).state.sessions.filter(
+        (session) => !unchanged(session.hostId),
+      );
       yield* publish((state) => ({
         ...state,
         hosts: summaries,
@@ -1261,6 +1325,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         sessions: state.sessions.filter((session) => unchanged(session.hostId)),
       }));
       publishedHosts = new Map(hosts);
+      // A linked host's machine keeps its daemon running, so its claims outlive the scope.
+      return releaseAgentSessionsQuietly(dropped, (id) => previous.get(id));
     }),
   };
 });
@@ -1450,6 +1516,8 @@ export const make = Effect.gen(function* () {
     yield* Effect.context<Effect.Services<ReturnType<typeof EasDeviceHost.make>>>();
   const simlockContext =
     yield* Effect.context<Effect.Services<ReturnType<typeof SimlockDeviceHost.make>>>();
+  const linkedContext =
+    yield* Effect.context<Effect.Services<ReturnType<typeof LinkedDeviceHost.make>>>();
   const simlockAgentCli = Effect.fn("DeviceService.simlockAgentCli")(
     function* (hostId: string) {
       const nodePath = yield* resolveNodeExecutable("Device automation");
@@ -1466,6 +1534,18 @@ export const make = Effect.gen(function* () {
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
   );
   const configured = new Map<string, { config: DeviceHostConfig; scope: Scope.Closeable }>();
+  const askPlatforms = Effect.fn("DeviceService.askPlatforms")(function* (
+    host: DeviceHost.DeviceHost["Service"],
+    hostScope: Scope.Scope,
+  ) {
+    if (!(yield* settings.getSettings).enableDeviceSupport) return;
+    yield* host
+      .platformAvailability("ios")
+      .pipe(
+        Effect.andThen(Effect.flatten(service.withLifecycleLock(service.refreshHosts))),
+        Effect.forkIn(hostScope),
+      );
+  });
   const unchanged = (current: DeviceHostConfig, previous: DeviceHostConfig) =>
     current.kind === "ssh" && previous.kind === "ssh"
       ? current.label === previous.label &&
@@ -1479,7 +1559,7 @@ export const make = Effect.gen(function* () {
     const next = yield* remoteSshDeviceHosts(configuredHosts).pipe(
       Effect.provide(localTargetContext),
     );
-    const removed = yield* service.withLifecycleLock(
+    const { removed, release } = yield* service.withLifecycleLock(
       Effect.gen(function* () {
         const removed: Array<{ id: string; scope: Scope.Closeable }> = [];
         for (const [id, previous] of configured) {
@@ -1488,10 +1568,10 @@ export const make = Effect.gen(function* () {
           configured.delete(id);
           removed.push({ id, scope: previous.scope });
         }
-        if (removed.length > 0) yield* service.refreshHosts;
-        return removed;
+        return { removed, release: removed.length > 0 ? yield* service.refreshHosts : Effect.void };
       }),
     );
+    yield* release;
     // Stop old writers before deleting config files or publishing replacements, without blocking healthy hosts.
     yield* Effect.forEach(
       removed,
@@ -1502,7 +1582,7 @@ export const make = Effect.gen(function* () {
         }),
       { concurrency: 4, discard: true },
     );
-    yield* service.withLifecycleLock(
+    const releaseReplaced = yield* service.withLifecycleLock(
       Effect.gen(function* () {
         let added = false;
         for (const host of next) {
@@ -1518,13 +1598,18 @@ export const make = Effect.gen(function* () {
             hosts.set(host.id, instance);
             configured.set(host.id, { config: host, scope: hostScope });
             // Ask the gateway now, so a refused token shows in Settings before anyone opens a device.
-            if ((yield* settings.getSettings).enableDeviceSupport)
-              yield* instance
-                .platformAvailability("ios")
-                .pipe(
-                  Effect.andThen(service.withLifecycleLock(service.refreshHosts)),
-                  Effect.forkIn(hostScope),
-                );
+            yield* askPlatforms(instance, hostScope);
+            continue;
+          }
+          if (host.kind === "linked") {
+            const instance = yield* LinkedDeviceHost.make(host).pipe(
+              Effect.provideService(Scope.Scope, hostScope),
+              Effect.provide(linkedContext),
+            );
+            hosts.set(host.id, instance);
+            configured.set(host.id, { config: host, scope: hostScope });
+            // Ask now, so Settings shows its platforms before anyone opens a device.
+            yield* askPlatforms(instance, hostScope);
             continue;
           }
           if (host.kind === "eas") {
@@ -1563,9 +1648,10 @@ export const make = Effect.gen(function* () {
           configured.set(host.id, { config: host, scope: hostScope });
         }
         // Refresh again after removed scopes closed so a late status write from an old host cannot linger.
-        if (added || removed.length > 0) yield* service.refreshHosts;
+        return added || removed.length > 0 ? yield* service.refreshHosts : Effect.void;
       }),
     );
+    yield* releaseReplaced;
   });
   const changes = yield* settings.subscribeChanges;
   // Each kind has its own settings list; an id two lists share stays the first one's.
@@ -1574,10 +1660,13 @@ export const make = Effect.gen(function* () {
     readonly easDeviceHosts: ReadonlyArray<EasDeviceHostConfig>;
     readonly simlockDeviceHosts: ReadonlyArray<SimlockDeviceHostConfig>;
     readonly simlockDeviceHostsEnabled: boolean;
+    readonly linkedDeviceHosts: ReadonlyArray<LinkedDeviceHostConfig>;
+    readonly linkedEnvironmentsEnabled: boolean;
   }): ReadonlyArray<DeviceHostConfig> => {
     const hosts: Array<DeviceHostConfig> = [...value.deviceHosts];
     for (const host of [
       ...value.easDeviceHosts,
+      ...(value.linkedEnvironmentsEnabled ? value.linkedDeviceHosts : []),
       ...(value.simlockDeviceHostsEnabled ? value.simlockDeviceHosts : []),
     ]) {
       if (!hosts.some((existing) => existing.id === host.id)) hosts.push(host);

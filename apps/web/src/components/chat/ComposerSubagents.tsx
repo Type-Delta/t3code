@@ -1,4 +1,7 @@
+import { msg, T, useMessages } from "gt-react";
 import { BotIcon, ChevronDownIcon } from "lucide-react";
+
+import { m, type MessageResolver } from "../../i18n/messages";
 
 import type { SubagentRunSummary } from "../../session-logic";
 import { resolveSubagentAggregateStatus } from "../BranchToolbar.logic";
@@ -7,18 +10,20 @@ import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuPopup, MenuTrigger } fro
 import { useComposerMenuProps } from "./composerEventScope";
 import { composerSubagentLabel } from "./composerSubagentUtils";
 import { useComposerMenuState } from "./useComposerMenuState";
+import { useSideThreadTrigger } from "../../hooks/useSideThreadTrigger";
+import type { SideThreadOpenIntent } from "@t3tools/client-runtime/side-thread";
 
 interface ComposerSubagentsProps {
   runs: ReadonlyArray<SubagentRunSummary>;
-  onOpen: (runIds: ReadonlyArray<string>) => void;
+  onOpen: (runIds: ReadonlyArray<string>, intent: SideThreadOpenIntent) => void;
   visible: boolean;
 }
 
 const statusLabel = {
-  inProgress: "Working",
-  completed: "Completed",
-  failed: "Failed",
-  stopped: "Stopped",
+  inProgress: msg("Working"),
+  completed: msg("Completed"),
+  failed: msg("Failed"),
+  stopped: msg("Stopped"),
 } as const satisfies Record<SubagentRunSummary["status"], string>;
 
 const iconClass = {
@@ -38,20 +43,22 @@ const triggerClass = {
   error: "text-red-600 hover:text-red-500 dark:text-red-400 dark:hover:text-red-300",
 } as const;
 
-function runLabel(run: SubagentRunSummary): string {
+function runLabel(run: SubagentRunSummary, resolve: MessageResolver = m): string {
   if (run.title !== run.model) return run.title;
-  return run.prompt.trim().split(/\r?\n/u, 1)[0] || "Subagent";
+  return run.prompt.trim().split(/\r?\n/u, 1)[0] || resolve(msg("Subagent"));
 }
 
-function runMetadata(run: SubagentRunSummary): string {
+function runMetadata(run: SubagentRunSummary, resolve: MessageResolver = m): string {
   const values = [run.model, run.reasoningEffort ? `${run.reasoningEffort} effort` : null].filter(
     (value): value is string => Boolean(value),
   );
-  return values.length > 0 ? values.join(" · ") : "Model and effort unavailable";
+  return values.length > 0 ? values.join(" · ") : resolve(msg("Model and effort unavailable"));
 }
 
 export function ComposerSubagents({ runs, onOpen, visible }: ComposerSubagentsProps) {
+  const messages = useMessages();
   const menuProps = useComposerMenuProps();
+  const trigger = useSideThreadTrigger();
   const [open, setOpen] = useComposerMenuState(!visible);
   if (runs.length === 0) return null;
 
@@ -94,19 +101,26 @@ export function ComposerSubagents({ runs, onOpen, visible }: ComposerSubagentsPr
       </MenuTrigger>
       <MenuPopup align="center" side="top" className="w-80 max-w-[calc(100vw-2rem)]" {...menuProps}>
         <MenuGroup>
-          <MenuGroupLabel>Subagents</MenuGroupLabel>
+          <MenuGroupLabel>
+            <T>Subagents</T>
+          </MenuGroupLabel>
           {runs.map((run) => (
             <MenuItem
               key={run.id}
               density="comfortable"
               className="h-auto min-w-0"
-              onClick={() => onOpen([run.id])}
+              onClick={() => onOpen([run.id], "primary")}
+              {...trigger((intent) => onOpen([run.id], intent))}
             >
               <BotIcon className={`size-3.5 shrink-0 ${iconClass[run.status]}`} aria-hidden />
-              <span className="sr-only">{statusLabel[run.status]}</span>
+              <span className="sr-only">{messages(statusLabel[run.status])}</span>
               <span className="grid min-w-0 flex-1 gap-0.5">
-                <span className="truncate font-medium text-foreground">{runLabel(run)}</span>
-                <span className="truncate text-xs text-muted-foreground">{runMetadata(run)}</span>
+                <span className="truncate font-medium text-foreground">
+                  {runLabel(run, messages)}
+                </span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {runMetadata(run, messages)}
+                </span>
               </span>
             </MenuItem>
           ))}

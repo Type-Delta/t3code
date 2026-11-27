@@ -926,7 +926,7 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
     const restorePreviousRuntime = activation.restorePreviousRuntime;
     let rollbackStatus = "";
     yield* Effect.gen(function* () {
-      // The gateway's owner checks need the helper. It does not depend on the runtime, so
+      // The gateway's owner checks need the sockets helper. It does not depend on the runtime, so
       // rollback leaves it as is.
       const sockets = yield* definePlist(
         SOCKETS_LABEL,
@@ -941,7 +941,9 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
       yield* fs.writeFileString(`${paths.logDir}/helper.log`, "", { flag: "a" });
       yield* fs.chown(`${paths.logDir}/helper.log`, 0, 0);
       yield* fs.chmod(`${paths.logDir}/helper.log`, 0o600);
-      yield* loadService(HELPER_LABEL, helper.file, helper.changed);
+      // launchd keeps the code identity it loaded the helper with, so AMFI kills every launch of
+      // a replaced `current/t3` until the job is reloaded, even when its definition is unchanged.
+      yield* loadService(HELPER_LABEL, helper.file, true);
       if (helper.changed) changed.push({ file: helperPlist, previous: helper.previous });
       gateway = yield* defineJob(gatewaySpec(activation.executable), gatewayUid);
       if (gateway.changed) changed.push({ file: gatewayPlist, previous: gateway.previous });
@@ -961,6 +963,8 @@ export const makeDarwinGatewayPlatform = (paths: DarwinGatewayPaths): GatewayPla
           const rollback = yield* Effect.gen(function* () {
             yield* restorePreviousRuntime;
             for (const { file, previous } of changed) yield* restorePlist(file, previous);
+            if (yield* fs.exists(helperPlist)) yield* loadService(HELPER_LABEL, helperPlist, true);
+            else yield* stopService(HELPER_LABEL);
             if (gateway !== undefined && gateway.previous === undefined) {
               yield* stopService(GATEWAY_LABEL);
               return yield* fail(`There was no previous ${gatewayPlist} to restore.`);

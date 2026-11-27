@@ -18,6 +18,23 @@ export function isManagedTunnelActive(
   );
 }
 
+/**
+ * Whether reaching `desired` links or relinks the environment, which needs `relay:configure`.
+ * Unlinking and preference changes on the current link only need `relay:write`.
+ */
+export function cloudChangeReplacesLink(
+  linkState: EnvironmentCloudLinkStateResult,
+  relayProviderKind: RelayManagedEndpointProviderKind | undefined,
+  desired: { readonly managedTunnel: boolean; readonly publish: boolean },
+) {
+  return (
+    (desired.managedTunnel || desired.publish) &&
+    (!linkState.linked ||
+      linkState.linkRevoked === true ||
+      isManagedTunnelActive(linkState, relayProviderKind) !== desired.managedTunnel)
+  );
+}
+
 // The URL ends up in commands people paste into a shell, so only plain DNS names pass.
 const TUNNEL_HOSTNAME = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i;
 
@@ -47,10 +64,13 @@ export type T3ConnectTurnOn =
   | { readonly kind: "policy"; readonly reason: string }
   | { readonly kind: "on-host" };
 
-/** Settings and the MCP wizard share the same Turn on eligibility. */
+/**
+ * Settings and the MCP wizard share this, so a Turn on control shows only where linking works.
+ * `linkableHere` is the environment's own answer for this session (its link state).
+ */
 export function resolveT3ConnectTurnOn(input: {
-  readonly desktopApp: boolean;
   readonly environmentId: EnvironmentId | null;
+  /** The desktop's attached multi-user gateway backend, whose `t3 pair` session reports false. */
   readonly attachedGatewayEnvironmentId: EnvironmentId | null;
   readonly linkableHere: boolean;
   readonly cloudConfigured: boolean;
@@ -61,8 +81,7 @@ export function resolveT3ConnectTurnOn(input: {
   if (input.connectDenial !== undefined) return { kind: "policy", reason: input.connectDenial };
   const isAttachedGatewayBackend =
     input.environmentId !== null && input.environmentId === input.attachedGatewayEnvironmentId;
-  return input.desktopApp &&
-    (input.linkableHere || isAttachedGatewayBackend) &&
+  return (input.linkableHere || isAttachedGatewayBackend) &&
     input.cloudConfigured &&
     input.canReadRelay &&
     input.canWriteRelay

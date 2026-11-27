@@ -53,6 +53,8 @@ module.exports = async ({ appOutDir, electronPlatformName, arch, packager }) => 
   }
   const state = fs.mkdtempSync(path.join(os.tmpdir(), "t3-release-cache-"));
   env.T3CODE_HOME = state;
+  const timeout = runsWithRosetta ? 180_000 : 120_000;
+  const timingPrefix = "[server-compile-cache] +";
   let result;
   try {
     // Run a script file, not -e: -e defines a global __filename of "[eval]", which
@@ -60,11 +62,33 @@ module.exports = async ({ appOutDir, electronPlatformName, arch, packager }) => 
     const runner = path.join(state, "prepare-server-compile-cache-runner.cjs");
     fs.writeFileSync(
       runner,
-      `require(${JSON.stringify(helper)}).generatePreparedServerCache(${JSON.stringify(resources)}).then(()=>process.exit(0),e=>{console.error(e);process.exit(1)})`,
+      `
+const { writeSync } = require("node:fs");
+const reportProgress = (stage) => {
+  writeSync(1, ${JSON.stringify(timingPrefix)} + (Date.now() - ${Date.now()}) + "ms " + stage + "\\n");
+};
+reportProgress("Electron started");
+require(${JSON.stringify(helper)})
+  .generatePreparedServerCache(${JSON.stringify(resources)}, reportProgress)
+  .then(() => process.exit(0), error => { console.error(error); process.exit(1); });
+`,
     );
-    result = spawnSync(executable, [runner], { env, encoding: "utf8", timeout: 120000 });
+    console.log(
+      `[server-compile-cache] Launching packaged Electron with a ${timeout / 1000}s timeout`,
+    );
+    result = spawnSync(executable, [runner], { env, encoding: "utf8", timeout });
   } finally {
     fs.rmSync(state, { recursive: true, force: true });
+  }
+  for (const line of result.stdout?.split(/\r?\n/) ?? []) {
+    if (line.startsWith(timingPrefix)) console.log(line);
+  }
+  if (runsWithRosetta && result.error?.code === "ETIMEDOUT") {
+    fs.rmSync(path.join(resources, "server-compile-cache"), { recursive: true, force: true });
+    console.warn(
+      "[server-compile-cache] Generation timed out under Rosetta. The app will compile on startup.",
+    );
+    return;
   }
   if (result.status !== 0)
     throw new Error(`Server compile cache generation failed: ${result.error || result.stderr}`);

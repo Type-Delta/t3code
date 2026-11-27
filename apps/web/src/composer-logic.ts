@@ -1,4 +1,7 @@
 import type { ClientSettings } from "@t3tools/contracts/settings";
+import { msg } from "gt-react";
+
+import { m, type MessageResolver } from "./i18n/messages";
 import type {
   AssistantCitation,
   EnvironmentId,
@@ -10,7 +13,11 @@ import {
   serializeAssistantCitation,
   withAssistantCitationComment,
 } from "@t3tools/shared/assistantCitations";
-import { isCurrencyAmountQuery, isPathWord } from "@t3tools/shared/composerTrigger";
+import {
+  detectComposerPullRequestTrigger,
+  isCurrencyAmountQuery,
+  isPathWord,
+} from "@t3tools/shared/composerTrigger";
 import {
   splitPromptIntoComposerSegments,
   type ComposerPromptSegment,
@@ -52,33 +59,42 @@ export function checkpointNavigationConfirmationMessage(input: {
   return null;
 }
 
-export function resolveCheckpointNavigationDisabledReason(input: {
-  command: CheckpointNavigationCommand;
-  threadCreated: boolean;
-  reconnectLabel: string | null;
-  busy: boolean;
-  locallyNavigating: boolean;
-  navigation: OrchestrationV2CheckpointNavigationState | undefined;
-}): string | null {
+export function resolveCheckpointNavigationDisabledReason(
+  input: {
+    command: CheckpointNavigationCommand;
+    threadCreated: boolean;
+    reconnectLabel: string | null;
+    busy: boolean;
+    locallyNavigating: boolean;
+    navigation: OrchestrationV2CheckpointNavigationState | undefined;
+  },
+  resolve: MessageResolver = m,
+): string | null {
+  const { command } = input;
   if (!input.threadCreated)
-    return "Checkpoint navigation is available after the thread is created.";
+    return resolve(msg("Checkpoint navigation is available after the thread is created."));
   if (input.reconnectLabel !== null)
-    return `Reconnect ${input.reconnectLabel} before using /${input.command}.`;
+    return resolve(
+      msg("Reconnect {label} before using /{command}.", { label: input.reconnectLabel, command }),
+    );
   if (input.navigation?.isNavigating || input.locallyNavigating)
-    return "Checkpoint navigation is already in progress.";
-  if (input.busy) return "Interrupt the current turn before navigating checkpoints.";
-  if (!input.navigation) return "Checkpoint navigation availability has not loaded yet.";
+    return resolve(msg("Checkpoint navigation is already in progress."));
+  if (input.busy) return resolve(msg("Interrupt the current turn before navigating checkpoints."));
+  if (!input.navigation)
+    return resolve(msg("Checkpoint navigation availability has not loaded yet."));
   if (input.navigation.latestCheckpointBlockingStatus === "pending")
-    return "The latest checkpoint is still pending.";
+    return resolve(msg("The latest checkpoint is still pending."));
   if (input.navigation.latestCheckpointBlockingStatus === "contended")
-    return "The latest checkpoint could not be captured because the workspace changed.";
-  if (input.command === "redo" && input.navigation.capability !== "branching")
-    return "This provider cannot preserve conversation branches for redo.";
+    return resolve(
+      msg("The latest checkpoint could not be captured because the workspace changed."),
+    );
+  if (command === "redo" && input.navigation.capability !== "branching")
+    return resolve(msg("This provider cannot preserve conversation branches for redo."));
   if (
-    input.command !== "jump" &&
-    !(input.command === "undo" ? input.navigation.canUndo : input.navigation.canRedo)
+    command !== "jump" &&
+    !(command === "undo" ? input.navigation.canUndo : input.navigation.canRedo)
   )
-    return `No ready checkpoint is available to ${input.command}.`;
+    return resolve(msg("No ready checkpoint is available to {command}.", { command }));
   return null;
 }
 export type ComposerSubmissionIntent = "foreground" | "background" | "alternate";
@@ -326,15 +342,8 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
       rangeEnd: cursor,
     };
   }
-  const pullRequestMatch = /^#([\p{L}\p{N}][\p{L}\p{N}_-]*)?$/u.exec(token);
-  if (pullRequestMatch) {
-    return {
-      kind: "pull-request",
-      query: pullRequestMatch[1] ?? "",
-      rangeStart: tokenStart,
-      rangeEnd: cursor,
-    };
-  }
+  const pullRequestTrigger = detectComposerPullRequestTrigger(token, cursor);
+  if (pullRequestTrigger) return pullRequestTrigger;
   const skillPrefix = /^\p{Sc}/u.exec(token);
   if (skillPrefix) {
     if (isCurrencyAmountQuery(token.slice(skillPrefix[0].length))) return null;

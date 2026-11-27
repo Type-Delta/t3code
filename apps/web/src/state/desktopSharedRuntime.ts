@@ -1,6 +1,9 @@
 import type { DesktopSharedRuntimeState } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { Atom } from "effect/reactivity";
+import { msg } from "gt-react";
+
+import { m } from "~/i18n/messages";
 
 // Fork-only (gateway self-service): read once per page; join and leave relaunch the app.
 export const desktopSharedRuntimeAtom = Atom.make(
@@ -15,6 +18,6 @@ export function sharedRuntimeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
   return (
     message.replace(/^Error invoking remote method '[^']+':\s*(?:\w+Error:\s*)?/u, "").trim() ||
-    "Shared T3 Code did not answer."
+    m(msg("Shared T3 Code did not answer."))
   );
 }
