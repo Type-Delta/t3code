@@ -1,4 +1,5 @@
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { offersLinkedEnvironments } from "@t3tools/client-runtime/link-request";
 import { useAtomValue } from "@effect/atom-react";
 import { Fragment, useState, type ReactNode } from "react";
 import { msg, T, useGT, useMessages } from "gt-react";
@@ -13,6 +14,7 @@ import {
   type DeviceServiceState,
   type EasDeviceHostConfig,
   type EnvironmentId,
+  type LinkedDeviceHostConfig,
   type ServerSettingsPatch,
   type SimlockDeviceHostConfig,
   type SshDeviceHostConfig,
@@ -47,6 +49,7 @@ import {
 import { useSettingsScope } from "./SettingsScopeContext";
 import { SettingsSection } from "./settingsLayout";
 import { settingsScopeEnvironmentLabel } from "./settingsScopeAxis";
+import { LinkedDeviceHostEditor } from "./LinkedDeviceHostEditor";
 import { SimlockDeviceHostEditor } from "./SimlockDeviceHostEditor";
 import {
   newSimlockDeviceHost,
@@ -115,7 +118,8 @@ type Editing =
       /** Where the editor checks the Expo account: an environment that holds the host. */
       readonly environmentId: EnvironmentId;
     }
-  | { readonly kind: "simlock"; readonly host: SimlockDeviceHostConfig; readonly isNew: boolean };
+  | { readonly kind: "simlock"; readonly host: SimlockDeviceHostConfig; readonly isNew: boolean }
+  | { readonly kind: "linked" };
 
 /** What a configured host is doing on one environment, when it is not simply working. */
 function hostStatus(
@@ -186,6 +190,7 @@ export function DeviceSourcesSettings(props: {
       environmentId: environment.environmentId,
       label: label(environment),
       settings: environment.serverConfig?.settings,
+      offersLinks: offersLinkedEnvironments(environment.serverConfig),
       state: result ? Option.getOrUndefined(AsyncResult.value(result)) : undefined,
     };
   });
@@ -323,6 +328,29 @@ export function DeviceSourcesSettings(props: {
         })),
       gt("Simlock host not removed everywhere"),
     );
+
+  // A link is one environment's own, so each linked host is saved only where its link is.
+  const linkHolders = members
+    .filter((member) => member.offersLinks && member.state?.supportsLinkedHosts === true)
+    .map((member) => ({
+      environmentId: member.environmentId,
+      label: member.label,
+      hosts: member.settings?.linkedDeviceHosts ?? [],
+    }));
+  const saveLinked = async (
+    environmentId: EnvironmentId,
+    host: LinkedDeviceHostConfig,
+    remove: boolean,
+  ) => {
+    const hosts = members.find((member) => member.environmentId === environmentId)?.settings
+      ?.linkedDeviceHosts;
+    const others = (hosts ?? []).filter((candidate) => candidate.id !== host.id);
+    const saved = await write(
+      [{ environmentId, patch: { linkedDeviceHosts: remove ? others : [...others, host] } }],
+      remove ? gt("Linked environment not removed") : gt("Linked environment not added"),
+    );
+    if (saved) setEditing(null);
+  };
 
   const [testingHosts, setTestingHosts] = useState<ReadonlySet<string>>(new Set());
   const testSsh = async ({ host, members }: DeviceHostGroup) => {
@@ -564,6 +592,50 @@ export function DeviceSourcesSettings(props: {
     }
   }
 
+  // Listed even with Linked environments off, so a source added before can still be removed.
+  for (const holder of members) {
+    for (const host of holder.settings?.linkedDeviceHosts ?? []) {
+      rows.push({
+        key: `linked:${holder.environmentId}:${host.id}`,
+        shared: false,
+        title: host.label,
+        kind: gt("Linked", { $context: "device source kind, a linked environment" }),
+        description:
+          members.length > 1
+            ? gt("Over {environment}'s link", { environment: holder.label })
+            : gt("Over this environment's link"),
+        environments: active.map((member) => {
+          if (member.environmentId !== holder.environmentId)
+            return { environmentId: member.environmentId, label: member.label, added: false };
+          const status = hostStatus(member.state, host.id, m);
+          return {
+            environmentId: member.environmentId,
+            label: member.label,
+            added: true,
+            platforms: hostPlatforms(member.state, host.id),
+            status:
+              status?.tone === "error" && member.state?.supportsHostRetry
+                ? {
+                    ...status,
+                    action: { label: gt("Retry"), run: () => retry(member.environmentId, host.id) },
+                  }
+                : status,
+          };
+        }),
+        actions: (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={disabled}
+            onClick={() => void saveLinked(holder.environmentId, host, true)}
+          >
+            {gt("Remove", { $context: "verb, removes a device source" })}
+          </Button>
+        ),
+      });
+    }
+  }
+
   const addMenu = (
     <Menu>
       <MenuTrigger
@@ -608,6 +680,11 @@ export function DeviceSourcesSettings(props: {
             <T>Simlock pool (alpha)</T>
           </MenuItem>
         ) : null}
+        {linkHolders.length > 0 ? (
+          <MenuItem onClick={() => setEditing({ kind: "linked" })}>
+            <T>Linked environment</T>
+          </MenuItem>
+        ) : null}
       </MenuPopup>
     </Menu>
   );
@@ -645,6 +722,13 @@ export function DeviceSourcesSettings(props: {
           environments={simlockEnvironments}
           busy={busy}
           onSave={(host, tokens) => void saveSimlock(host, tokens)}
+          onClose={() => setEditing(null)}
+        />
+      ) : editing?.kind === "linked" ? (
+        <LinkedDeviceHostEditor
+          holders={linkHolders}
+          busy={busy}
+          onSave={(environmentId, host) => void saveLinked(environmentId, host, false)}
           onClose={() => setEditing(null)}
         />
       ) : null}

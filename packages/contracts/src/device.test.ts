@@ -66,6 +66,7 @@ describe("device state for clients from before Expo hosts", () => {
       { ...summary, id: "local", kind: "local" as const },
       { ...summary, id: "eas", kind: "eas" as const },
       { ...summary, id: "pool", kind: "simlock" as const },
+      { ...summary, id: "mac", kind: "linked" as const },
     ],
     hostStatus: "ready" as const,
     hostStatuses: {},
@@ -77,7 +78,7 @@ describe("device state for clients from before Expo hosts", () => {
     revision: 1,
   };
 
-  it("sends Expo and Simlock hosts where an older client does not look, and reads them back", () => {
+  it("sends Expo, Simlock and linked hosts where an older client does not look, and reads them back", () => {
     const wire = encodeState(state);
     expect(decodeOlderState(wire).hosts.map((host) => host.id)).toEqual(["local"]);
     expect(decodeState(wire).hosts).toEqual(state.hosts);

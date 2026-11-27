@@ -52,7 +52,7 @@ model.
   PKCE OAuth ([McpOAuth](../../apps/server/src/auth/McpOAuth.ts)), with stateless client
   registration so unauthenticated callers cannot grow server state. Users grant read-only access or
   a runtime-mode ceiling rather than raw scopes. Every non-`/mcp` HTTP and WebSocket route rejects
-  `mcp-client` sessions (except the read-only thread relay and client-pairing routes restricted to
+  `mcp-client` sessions (except the read-only thread relay, client-pairing, and device-lending routes restricted to
   [peer links](./05_remote.md#peer-links)). Every MCP tool must statically declare its access level in
   [`McpToolAccess.ts`](../../apps/server/src/mcp/McpToolAccess.ts), and thread-only tools must still
   refuse outside callers in handlers—hiding from tool listings is only discovery. A workflow run

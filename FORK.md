@@ -991,6 +991,23 @@ Antigravity provider instances can route Gemini API-key sessions through a confi
 
 **Last updated:** 2026-11-24
 
+### DL070 — Devices lent over a full-access peer link
+
+An environment can add a linked environment as a device source (`linkedDeviceHosts`), so its agents and Device panel list, boot, stream, tap and drive the linked machine's own simulators and emulators. Upstream peer links only reach `/mcp`, the thread relay and client pairing; the fork adds `/api/links/devices` on the linked side for device operations, its device hub and its agent-device daemon.
+
+- **Full access only.** Installing apps there runs code as that machine's user, so the route admits only a full-access link session within its managed ceiling, and only an unfenced full-access thread may open or power off a linked device. Only the linked machine's local devices are lent, never its SSH, Expo or Simlock hosts.
+- **The link token stays on the server.** Clients reach hub streams through this server's `/api/device-hub`, so they are unchanged on every connection mode. Agents get a loopback agent-device forwarder with its own token. Both hops rewrite upload tickets, which carry the daemon's address and token, and calls over the link never follow redirects.
+- **Access ending stops traffic.** Revoking or unlinking, relinking below full access, removing the source, or turning device or agent access off on either side ends open streams, in-flight calls and transfers. Agent claims on the linked machine are released over the link whenever a session closes, its source goes away, or agent access is turned off.
+- **No cross-lending deadlock.** The linking side never lists the other machine's devices under its lifecycle lock, and calls that do run under it are bounded.
+- **Platforms show before the panel opens.** When a linked source is added or the server starts, the linking side asks for the other machine's platforms, as it does for Simlock, so Settings shows their icons. That machine answers from its device state, without starting its hub.
+- **Wire compatibility.** Linked host summaries travel in their own `linkedHosts` field, so older clients keep decoding device state. Linked sources run only while Linked environments is on, and the T3 Connect relay needs no change because links already reach a tunnel address directly.
+
+**Implementation evidence:** `apps/server/src/peer/linkDevicesHttp.ts`, `apps/server/src/device/{LinkedDeviceHost,agentDaemonProxy,DeviceHubProxy,DeviceService}.ts`, `apps/server/src/mcp/toolkits/device/handlers.ts`, `packages/contracts/src/{device,settings,environment}.ts`, `apps/web/src/components/settings/{DeviceSourcesSettings,LinkedDeviceHostEditor}.tsx`, `docs/user/devices.md`.
+
+**Recorded validation:** `linkDevicesHttp.test.ts` links two in-process environments and covers the lending side, including reading platforms without starting the hub; `LinkedDeviceHost.test.ts`, `DeviceHubProxy.test.ts`, `DeviceMultiHost.test.ts` and `DeviceService.test.ts` the linking side; `McpDeviceToolkit.test.ts` the thread access rules; and `device.test.ts` the wire split. A two-machine run linked a Linux server to an isolated server of this branch on a Mac: the web Device panel listed, booted, streamed and tapped the Mac's iPhone simulator, an agent drove it through agent-device, and unlinking then relinking showed the failure and recovery. A second local server confirmed the linked source's platform icons appear in Settings after a restart and after adding it, before the Device panel opens.
+
+**Last updated:** 2026-11-27
+
 ## Sync Checklist
 
 Project-specific checks every upstream sync runs, in addition to the full test suite, lint, typecheck, builds, and a smoke test of upstream and fork features.

@@ -127,6 +127,29 @@ installation, and connectivity to development servers such as Metro separately.
 A simulator on another machine cannot reach Metro through your environment's
 localhost without forwarding or another reachable address.
 
+## Linked environments
+
+An environment can use the simulators and emulators of another environment it
+links to, such as a Linux server using a Mac's iOS Simulators. In Settings →
+Devices, choose **Add source → Linked environment** and pick the link. Agents
+and the Device panel then list, boot, watch, and drive those devices as they do
+local ones, over the link's own address, including T3 Connect.
+
+- The link needs **Full access**. Apps installed on a simulator run as the
+  linked machine's user, which only a full-access link can already do. Link
+  again with full access if the link is narrower. For the same reason, only
+  agents in threads running with full access can open these devices.
+- The linked machine decides what it lends: its device support must be on, and
+  its agent device access too for agents to drive devices. Only that machine's
+  own devices are lent, including phones attached to it, not its other device
+  sources.
+- Turning off the **Linked environments** beta in Labs stops these sources
+  until you turn it back on.
+- The stream reaches you through both environments, so it is slower than
+  connecting a client to the linked environment and opening its Device panel.
+- Unlinking, or revoking the link on the linked machine, ends the access at
+  once. The device source then says the link is gone; remove it in Settings.
+
 ## Simlock hosts (alpha)
 
 [Simlock](https://incubator.callstack.com/simlock/) pools iOS simulators and

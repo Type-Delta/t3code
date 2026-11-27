@@ -27,6 +27,7 @@ const fixture = (
   upstream?: DeviceHost.DeviceHostReady["upstream"],
   stream?: ReadableStream<Uint8Array>,
   invalidated?: Promise<void>,
+  withholdHeaders = false,
 ) => {
   let finalized = 0;
   const requests: string[] = [];
@@ -42,12 +43,14 @@ const fixture = (
         finalized++;
       });
       if (fail) return yield* Effect.die(new Error("upstream failed"));
+      if (withholdHeaders) return yield* Effect.never;
       return HttpClientResponse.fromWeb(
         request,
         new Response(stream ?? "frame", {
           headers: {
             "set-cookie": "upstream=1",
             "clear-site-data": '"*"',
+            "t3-link-expires-at": "2026-12-01T00:00:00.000Z",
             "content-type": "text/html",
             "content-security-policy": "script-src *",
           },
@@ -131,6 +134,7 @@ describe("device hub proxy", () => {
     expect(await response.text()).toBe("frame");
     expect(response.headers.get("set-cookie")).toBeNull();
     expect(response.headers.get("clear-site-data")).toBeNull();
+    expect(response.headers.get("t3-link-expires-at")).toBeNull();
     // Opened as a page, a hub response gets an opaque origin and no script.
     expect(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
@@ -159,6 +163,23 @@ describe("device hub proxy", () => {
     expect(await reader.read()).toEqual({ done: false, value: new Uint8Array([1]) });
     invalidated.resolve();
     expect((await reader.read()).done).toBe(true);
+    expect(finalized()).toBe(1);
+  });
+
+  it("gives up on an upstream that has not answered when the session is invalidated", async () => {
+    const invalidated = Promise.withResolvers<void>();
+    const { handler, finalized } = fixture(
+      [AuthOrchestrationReadScope],
+      false,
+      undefined,
+      undefined,
+      undefined,
+      invalidated.promise,
+      true,
+    );
+    const pending = handler(new Request("http://t3.test/api/device-hub/api/devices"));
+    invalidated.resolve();
+    expect((await pending).status).toBe(503);
     expect(finalized()).toBe(1);
   });
 
