@@ -291,6 +291,22 @@ it.effect("a full-access link lists, boots and streams the linked machine's devi
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("settings learns the linked machine's platforms without starting its hub", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { peer, readinessCalls } = yield* serveMac();
+      const laptopSide = yield* makeLaptop;
+      yield* linkTo(laptopSide.links, peer, "full-access");
+
+      expect(yield* laptopSide.host.platformAvailability("ios")).toMatchObject({ available: true });
+      expect((yield* laptopSide.host.summary).platforms).toEqual([
+        { platform: "ios", available: true },
+      ]);
+      expect(yield* Ref.get(readinessCalls)).toBe(0);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("an emulator is refused when the linked machine's ffmpeg cannot encode its video", () =>
   Effect.scoped(
     Effect.gen(function* () {

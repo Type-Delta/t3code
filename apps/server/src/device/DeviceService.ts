@@ -1534,6 +1534,18 @@ export const make = Effect.gen(function* () {
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
   );
   const configured = new Map<string, { config: DeviceHostConfig; scope: Scope.Closeable }>();
+  const askPlatforms = Effect.fn("DeviceService.askPlatforms")(function* (
+    host: DeviceHost.DeviceHost["Service"],
+    hostScope: Scope.Scope,
+  ) {
+    if (!(yield* settings.getSettings).enableDeviceSupport) return;
+    yield* host
+      .platformAvailability("ios")
+      .pipe(
+        Effect.andThen(Effect.flatten(service.withLifecycleLock(service.refreshHosts))),
+        Effect.forkIn(hostScope),
+      );
+  });
   const unchanged = (current: DeviceHostConfig, previous: DeviceHostConfig) =>
     current.kind === "ssh" && previous.kind === "ssh"
       ? current.label === previous.label &&
@@ -1586,13 +1598,7 @@ export const make = Effect.gen(function* () {
             hosts.set(host.id, instance);
             configured.set(host.id, { config: host, scope: hostScope });
             // Ask the gateway now, so a refused token shows in Settings before anyone opens a device.
-            if ((yield* settings.getSettings).enableDeviceSupport)
-              yield* instance
-                .platformAvailability("ios")
-                .pipe(
-                  Effect.andThen(Effect.flatten(service.withLifecycleLock(service.refreshHosts))),
-                  Effect.forkIn(hostScope),
-                );
+            yield* askPlatforms(instance, hostScope);
             continue;
           }
           if (host.kind === "linked") {
@@ -1602,6 +1608,8 @@ export const make = Effect.gen(function* () {
             );
             hosts.set(host.id, instance);
             configured.set(host.id, { config: host, scope: hostScope });
+            // Ask now, so Settings shows its platforms before anyone opens a device.
+            yield* askPlatforms(instance, hostScope);
             continue;
           }
           if (host.kind === "eas") {

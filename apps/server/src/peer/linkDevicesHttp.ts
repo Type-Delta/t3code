@@ -185,14 +185,23 @@ const make = Effect.gen(function* () {
     path: string,
     request: HttpServerRequest.HttpServerRequest,
   ) {
-    if (path === "") {
+    if (path === "" || path === "/platforms") {
       if (request.method !== "GET") return refusal(405, "method_not_allowed", "Use GET.");
+      const localPlatforms = devices.state.pipe(
+        Effect.map(
+          (state) => state.hosts.find((host) => host.id === LOCAL_DEVICE_HOST_ID)?.platforms ?? [],
+        ),
+      );
+      // Settings asks for platforms alone, which must not start this machine's hub.
+      if (path === "/platforms")
+        return HttpServerResponse.jsonUnsafe(
+          { platforms: yield* localPlatforms },
+          { headers: NO_STORE },
+        );
       const ready = yield* devices.readiness(LOCAL_DEVICE_HOST_ID);
       const listed = yield* ready.devices.list;
-      const state = yield* devices.state;
-      const platforms = state.hosts.find((host) => host.id === LOCAL_DEVICE_HOST_ID)?.platforms;
       return HttpServerResponse.jsonUnsafe(
-        { ...listed, platforms: platforms ?? [] },
+        { ...listed, platforms: yield* localPlatforms },
         { headers: NO_STORE },
       );
     }

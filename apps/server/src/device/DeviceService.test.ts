@@ -22,6 +22,7 @@ import * as NetService from "@t3tools/shared/Net";
 import { SshCommandError } from "@t3tools/ssh/errors";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
@@ -48,6 +49,7 @@ import { NodeRuntimeUnavailableError } from "@t3tools/shared/nodeRuntime";
 
 import * as DeviceService from "./DeviceService.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
+import { descriptorOf } from "../peer/PeerLinks.testkit.ts";
 import * as SshDeviceHost from "./SshDeviceHost.ts";
 import { agentDeviceSession, releaseAgentDeviceSession } from "./AgentDeviceTarget.ts";
 import { ensureDeviceHub } from "./DeviceToolchain.ts";
@@ -1976,6 +1978,102 @@ it.effect("reconciles SSH and linked host settings without publishing no-op chan
         NodeServices.layer,
         NodeCrypto.layer,
       ),
+    ),
+  ),
+);
+
+const linkedMac: LinkedDeviceHostConfig = {
+  kind: "linked",
+  id: "mac" as DeviceHostId,
+  label: "Mac",
+  environmentId: EnvironmentId.make("environment-mac"),
+};
+
+it.effect("asks a linked source for its platforms before anyone lists its devices", () =>
+  Effect.gen(function* () {
+    const linkedAt = yield* DateTime.now;
+    const link = {
+      environmentId: linkedMac.environmentId,
+      label: "Mac",
+      urls: ["http://mac.test"],
+      access: "full-access" as const,
+      linkedAt,
+      expiresAt: DateTime.add(linkedAt, { hours: 1 }),
+      lastReachedAt: null,
+      lastError: null,
+    };
+    const requests: string[] = [];
+    const service = yield* DeviceService.make.pipe(
+      Effect.provideService(DeviceHost.DeviceHost, {
+        id: LOCAL_DEVICE_HOST_ID,
+        label: "This machine",
+        summary: Effect.succeed({
+          id: LOCAL_DEVICE_HOST_ID,
+          kind: "local" as const,
+          label: "This machine",
+          platforms: [],
+          hubInstalled: false,
+          agentDeviceInstalled: false,
+        }),
+        platformAvailability: (platform) => Effect.succeed({ platform, available: false }),
+        ensureReady: () => Effect.die("Adding a source does not start the hub"),
+        ensureAgentReady: () => Effect.die("Adding a source does not start the agent"),
+        current: Effect.succeed(null),
+        stopAgent: Effect.void,
+        stop: Effect.void,
+      }),
+      Effect.provideService(ProcessRunner.ProcessRunner, {
+        run: () => Effect.die("Adding a source runs no commands"),
+      }),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.sync(() => {
+            requests.push(new URL(request.url).pathname);
+            return HttpClientResponse.fromWeb(
+              request,
+              Response.json({ platforms: [{ platform: "android", available: true }] }),
+            );
+          }),
+        ),
+      ),
+      Effect.provide(
+        Layer.mock(PeerLinks.PeerLinks)({
+          get: () => Effect.succeedSome(link),
+          resolve: () =>
+            Effect.succeed({
+              link,
+              url: "http://mac.test",
+              token: "token",
+              capabilities: descriptorOf("environment-mac", "Mac", { linkDevices: true })
+                .capabilities,
+            }),
+        }),
+      ),
+    );
+    const platformsOf = (state: DeviceServiceState) =>
+      state.hosts.find((host) => host.id === linkedMac.id)?.platforms ?? [];
+    const subscription = yield* service.subscribe;
+    let state = yield* service.state;
+    while (platformsOf(state).length === 0) state = yield* PubSub.take(subscription);
+
+    expect(platformsOf(state)).toEqual([{ platform: "android", available: true }]);
+    // Platforms alone: the linked machine lists nothing and starts no hub.
+    expect(requests).toEqual(["/api/links/devices/platforms"]);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      Layer.mergeAll(
+        ServerSettings.layerTest({
+          enableDeviceSupport: true,
+          linkedEnvironmentsEnabled: true,
+          linkedDeviceHosts: [linkedMac],
+        }),
+        layerSecretResolver,
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-device-linked-platforms-" }),
+        NodeCrypto.layer,
+        NetService.layer,
+      ).pipe(Layer.provideMerge(NodeServices.layer)),
     ),
   ),
 );

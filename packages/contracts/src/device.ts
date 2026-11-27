@@ -800,6 +800,11 @@ export const PeerLinkDeviceList = Schema.Struct({
 });
 export type PeerLinkDeviceList = typeof PeerLinkDeviceList.Type;
 
+export const PeerLinkDevicePlatforms = Schema.Struct({
+  platforms: Schema.Array(DevicePlatformAvailability),
+});
+export type PeerLinkDevicePlatforms = typeof PeerLinkDevicePlatforms.Type;
+
 export const PeerLinkDeviceRequest = Schema.Struct({ device: PeerLinkDevice });
 export type PeerLinkDeviceRequest = typeof PeerLinkDeviceRequest.Type;
 

@@ -11,6 +11,7 @@ import {
   PeerLinkDeviceBooted,
   PeerLinkDeviceFailure,
   PeerLinkDeviceList,
+  PeerLinkDevicePlatforms,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
@@ -66,6 +67,7 @@ const LINK_RECHECK = Duration.seconds(10);
 
 const decodeFailure = Schema.decodeUnknownEffect(PeerLinkDeviceFailure);
 const decodeList = HttpClientResponse.schemaBodyJson(PeerLinkDeviceList);
+const decodePlatforms = HttpClientResponse.schemaBodyJson(PeerLinkDevicePlatforms);
 const decodeBooted = HttpClientResponse.schemaBodyJson(PeerLinkDeviceBooted);
 
 /** Compares in time that depends only on the length, which is fixed for the tokens compared. */
@@ -580,9 +582,10 @@ export const make = Effect.fn("LinkedDeviceHost.make")(function* (config: Linked
     platform: DevicePlatformAvailability["platform"],
   ) {
     if (platforms === undefined) {
-      const listed = yield* listDevices.pipe(Effect.result);
-      if (listed._tag === "Failure")
-        return { platform, available: false, reason: listed.failure.message };
+      const asked = yield* call("/platforms", { read: decodePlatforms }).pipe(Effect.result);
+      if (asked._tag === "Failure")
+        return { platform, available: false, reason: asked.failure.message };
+      platforms = asked.success.platforms;
     }
     return (
       platforms?.find((candidate) => candidate.platform === platform) ?? {
